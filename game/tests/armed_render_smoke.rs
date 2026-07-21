@@ -45,6 +45,13 @@ fn armed_visual_crab_stays_finite_and_grounded() {
          through the world), so the smoke test would otherwise pass vacuously"
     );
 
+    // Drift is measured from the crab's OWN sim spawn: the run layout randomizes
+    // the spawn locale per seed (rl#305), so "near spawn" can no longer mean "near
+    // the world origin". Same seed ⇒ the same draw the probe's sim made.
+    let (spawn_x, spawn_z) = {
+        use net::sim::{PlayerId, Sim};
+        Sim::new(0x116, &[PlayerId(0)]).crabs()[0].pos().to_meters()
+    };
     for s in &samples {
         assert!(
             s.carapace_x.is_finite()
@@ -54,13 +61,13 @@ fn armed_visual_crab_stays_finite_and_grounded() {
             s.tick
         );
         assert!(
-            s.carapace_x.abs() < 20.0
-                && s.carapace_z.abs() < 20.0
+            (s.carapace_x - spawn_x).abs() < 20.0
+                && (s.carapace_z - spawn_z).abs() < 20.0
                 && s.carapace_above_ground > -2.0
                 && s.carapace_above_ground < 5.0,
-            "tick {}: carapace at ({}, {} above ground, {}) — a rest-pose crab \
-             teleporting away from spawn means something is writing rapier-driven \
-             Transforms (rl#116)",
+            "tick {}: carapace at ({}, {} above ground, {}) vs spawn ({spawn_x}, \
+             {spawn_z}) — a rest-pose crab teleporting away from spawn means \
+             something is writing rapier-driven Transforms (rl#116)",
             s.tick,
             s.carapace_x,
             s.carapace_above_ground,

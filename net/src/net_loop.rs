@@ -509,7 +509,9 @@ fn connect_and_form_inner(
         all_ids.len(),
         frozen.me
     );
-    // Every peer spawns the byte-identical foot-only round. Early inputs ride the driver to
+    // Every peer spawns a foot-only round from its own seed; since rl#305 the layout is
+    // seed-derived, so a non-host peer's round is a PLACEHOLDER the host's first snapshot
+    // (players, crabs, extraction) supersedes. Early inputs ride the driver to
     // seed the host's server (see [`Coordinator::for_round`]) — never replayed into the client
     // sim, which would bypass the server's input streams.
     let client = ClientSim::new(seed, &all_ids, frozen.me);

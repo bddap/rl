@@ -1258,13 +1258,17 @@ mod tests {
     /// builds on, rl#298 stage 4) with the crab stack armed, the wall-clock auto-pump
     /// parked from birth (like the windowed app), so physics advances only through
     /// the slot — no renderer anywhere. The flat grid keeps the motion assertions
-    /// attributable to the drive, not to sliding down the GCR origin slope.
+    /// attributable to the drive, not to sliding down a GCR slope — spanning the GCR
+    /// tile, so wherever the sim's random spawn frame (rl#305) lands the crab, she
+    /// lands ON the collider instead of falling off a 512 m test slab.
     fn headless_host_app(policy: Policy, crab_spawn: Pos) -> App {
         pin_single_thread_pools();
+        let gcr = crab_world::terrain::TerrainGrid::gcr();
+        let half = gcr.extent_x().max(gcr.extent_z()) / 2.0;
         let mut app = headless_server_world(
             1,
             WorldRole::Standalone,
-            std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(512.0)),
+            std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(half)),
         );
         app.add_plugins(NnCrabPlugin::new(vec![policy], vec![crab_spawn]));
         arm(app.world_mut());

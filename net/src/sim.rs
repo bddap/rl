@@ -231,6 +231,103 @@ pub const EXTRACT_RADIUS: i64 = player_heights(2.0 / 1.8);
 
 pub(crate) const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
 
+/// A fresh entropy seed for a real GCR launch (rl#305): the whole run layout
+/// derives deterministically from the match seed, so the game entrypoints draw this
+/// per launch (and log it — the seed alone reproduces the run's spawn), while the
+/// probes/screenshot tools keep passing their pinned seed for byte-stable A/Bs.
+pub fn random_match_seed() -> u64 {
+    rand::random()
+}
+
+/// Rotate the layout-local vector `(lx, lz)` by `rot` [`trig`] turns — the
+/// [`Sim::advance_player`] yaw convention: local +z maps to the facing of
+/// `yaw == rot`, so a frame's `rot` doubles as its spawn yaw.
+fn rotate(lx: i64, lz: i64, rot: i32) -> (i64, i64) {
+    let (sin, cos) = trig::sin_cos(rot);
+    (
+        (lx * cos + lz * sin) / trig::ONE as i64,
+        (lz * cos - lx * sin) / trig::ONE as i64,
+    )
+}
+
+/// One line per layout draw, on whichever sim drew it — the HOST's line is the
+/// authoritative record (a remote client's sim is a placeholder the snapshots
+/// supersede, and it never restarts, so `restart` lines are host-only by
+/// construction). `seed` + the restart count reproduce the run exactly (rl#305).
+fn log_spawn(seed: u64, frame: &SpawnFrame, extraction: ExtractionPoint, why: &str) {
+    let (ox, oz) = frame.origin.to_meters();
+    let (ex, ez) = extraction.pos.to_meters();
+    let deg = frame.rot as f32 / trig::TURN as f32 * 360.0;
+    tracing::info!(
+        "rl#305 {why} spawn: seed={seed:#x} origin=({ox:.1}, {oz:.1}) m \
+         heading={deg:.0}° extraction=({ex:.1}, {ez:.1}) m"
+    );
+}
+
+/// The run's spawn placement (rl#305): every layout point is authored in a local
+/// frame — spawn line along local x through the origin, objective up local +z — and
+/// mapped through one translate+rotate drawn per run from the match seed, so each
+/// run opens at a fresh locale and heading on the tile instead of the fixed origin
+/// Sally had memorized. Mid-round joiners place through the SAME frame
+/// ([`Sim::nearest_clear_join_slot`]), so the join line is the run's spawn line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpawnFrame {
+    origin: Pos,
+    /// Layout heading in [`trig`] turns — also every spawned player's yaw.
+    rot: i32,
+}
+
+/// Worst-case layout-local radius, before Sally's push-out: the objective's local z,
+/// plus [`MIN_CRAB_SPAWN_DISTANCE`] again for a crab pushed a full clearance beyond
+/// the widest spawn line a u8 roster can form. Everything the frame places stays
+/// within this of its origin — except a many-crab base stagger (~0.12 m per extra
+/// crab), which the sampling clamp's own 256 m edge margin absorbs for any plausible
+/// crab count.
+const LAYOUT_LOCAL_RADIUS: i64 = 2 * MIN_CRAB_SPAWN_DISTANCE
+    + player_heights(10.0)
+    + (u8::MAX as i64 / 2 + 1) * SPAWN_SLOT_PITCH;
+
+impl SpawnFrame {
+    /// Where a frame origin may land: the terrain sampling interior training draws
+    /// episode locales from ([`crab_world::training::targets::sample_clamp_half`] —
+    /// tile half-span less the band-fit edge margin), pulled in by
+    /// [`LAYOUT_LOCAL_RADIUS`], so the whole layout lands on ground the brain has
+    /// seen and every placed point clears the tile edge.
+    fn origin_bound() -> i64 {
+        let clamp_m = crab_world::training::targets::sample_clamp_half(
+            &crab_world::terrain::TerrainGrid::gcr(),
+        );
+        let bound = meters_to_grid(clamp_m) - LAYOUT_LOCAL_RADIUS;
+        assert!(
+            bound > 0,
+            "GCR tile interior ({clamp_m} m half-span) cannot fit the spawn layout \
+             (local radius {LAYOUT_LOCAL_RADIUS} grid units)"
+        );
+        bound
+    }
+
+    fn draw(rng: &mut ChaCha8Rng) -> Self {
+        use rand::Rng;
+        let bound = Self::origin_bound();
+        Self {
+            origin: Pos {
+                x: rng.gen_range(-bound..=bound),
+                z: rng.gen_range(-bound..=bound),
+            },
+            rot: rng.gen_range(0..trig::TURN),
+        }
+    }
+
+    /// Layout-local → world: rotate by `rot`, then translate to the origin.
+    fn place(&self, lx: i64, lz: i64) -> Pos {
+        let (x, z) = rotate(lx, lz, self.rot);
+        Pos {
+            x: self.origin.x + x,
+            z: self.origin.z + z,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerStatus {
     Alive,
@@ -450,6 +547,7 @@ pub struct Sim {
     rng: ChaCha8Rng,
     restart_held: bool,
     round_start: u64,
+    spawn_frame: SpawnFrame,
     config: RoundConfig,
 }
 
@@ -470,16 +568,19 @@ impl Sim {
             players: sorted,
             crabs: 1,
         };
-        let (players, crabs, extraction) = Self::spawn_state(&config);
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let (spawn_frame, players, crabs, extraction) = Self::spawn_state(&config, &mut rng);
+        log_spawn(seed, &spawn_frame, extraction, "round");
         Self {
             tick: 0,
             players,
             crabs,
             extraction,
             outcome: Outcome::Ongoing,
-            rng: ChaCha8Rng::seed_from_u64(seed),
+            rng,
             restart_held: false,
             round_start: 0,
+            spawn_frame,
             config,
         }
     }
@@ -491,7 +592,9 @@ impl Sim {
             "configure_crabs is round SETUP — the crab count is fixed once the round steps"
         );
         self.config.crabs = crabs;
-        let (players, crabs, extraction) = Self::spawn_state(&self.config);
+        let (frame, players, crabs, extraction) = Self::spawn_state(&self.config, &mut self.rng);
+        log_spawn(self.config.seed, &frame, extraction, "setup");
+        self.spawn_frame = frame;
         self.players = players;
         self.crabs = crabs;
         self.extraction = extraction;
@@ -513,13 +616,18 @@ impl Sim {
     }
 
     fn reset(&mut self) {
-        let (players, crabs, extraction) = Self::spawn_state(&self.config);
+        // The rng is deliberately NOT reseeded here: each restart draws the NEXT
+        // frame off the seed's stream (rl#305) — reseeding would replay the same
+        // layout every restart. Restarts stay deterministic in (seed, restart count),
+        // which the log line below captures for repro.
+        let (frame, players, crabs, extraction) = Self::spawn_state(&self.config, &mut self.rng);
+        log_spawn(self.config.seed, &frame, extraction, "restart");
         self.round_start = self.tick;
+        self.spawn_frame = frame;
         self.players = players;
         self.crabs = crabs;
         self.extraction = extraction;
         self.outcome = Outcome::Ongoing;
-        self.rng = ChaCha8Rng::seed_from_u64(self.config.seed);
     }
 
     pub fn spawn_joining_player(&mut self, pid: PlayerId) {
@@ -541,28 +649,27 @@ impl Sim {
             pid,
             Player {
                 pos: self.nearest_clear_join_slot(x),
-                yaw: 0,
+                yaw: self.spawn_frame.rot,
                 status: PlayerStatus::Alive,
             },
         );
     }
 
-    /// Nearest spawn-line slot to `x` clear of every crab by [`MIN_CRAB_SPAWN_DISTANCE`]
-    /// — the same clearance round-start [`Self::spawn_crab`] keeps toward players, so a
-    /// mid-round joiner gets the round-start guarantee and is never Downed before its
-    /// first input (rl#247). Walks slots outward, alternating east/west, staying on the
-    /// z=0 line (no per-join grace: that would need wire-format state, and re-arming
-    /// `round_start` would grace everyone mid-fight).
+    /// Nearest spawn-line slot to layout-local `x` clear of every crab by
+    /// [`MIN_CRAB_SPAWN_DISTANCE`] — the same clearance round-start
+    /// [`Self::spawn_crab`] keeps toward players, so a mid-round joiner gets the
+    /// round-start guarantee and is never Downed before its first input (rl#247).
+    /// Walks slots outward, alternating east/west, staying on the run's spawn line
+    /// (the frame's local z=0 line, rl#305; no per-join grace: that would need
+    /// wire-format state, and re-arming `round_start` would grace everyone
+    /// mid-fight).
     fn nearest_clear_join_slot(&self, x: i64) -> Pos {
         // A crab blocks a closed 2·MIN chord of the line: at most this many slots. The
         // scan offers 2·blocked·crabs + 1 candidates, so one is always clear.
         let blocked_per_crab = 2 * MIN_CRAB_SPAWN_DISTANCE / SPAWN_SLOT_PITCH + 1;
         (0..=blocked_per_crab * self.crabs.len() as i64)
             .flat_map(|d| [d, -d])
-            .map(|d| Pos {
-                x: x + d * SPAWN_SLOT_PITCH,
-                z: 0,
-            })
+            .map(|d| self.spawn_frame.place(x + d * SPAWN_SLOT_PITCH, 0))
             .find(|p| {
                 self.crabs
                     .iter()
@@ -580,7 +687,16 @@ impl Sim {
         self.config.players.retain(|p| *p != pid);
     }
 
-    fn spawn_state(cfg: &RoundConfig) -> (BTreeMap<PlayerId, Player>, Vec<Crab>, ExtractionPoint) {
+    fn spawn_state(
+        cfg: &RoundConfig,
+        rng: &mut ChaCha8Rng,
+    ) -> (
+        SpawnFrame,
+        BTreeMap<PlayerId, Player>,
+        Vec<Crab>,
+        ExtractionPoint,
+    ) {
+        let frame = SpawnFrame::draw(rng);
         let mut map = BTreeMap::new();
         let n = cfg.players.len() as i64;
         for (i, &id) in cfg.players.iter().enumerate() {
@@ -588,63 +704,95 @@ impl Sim {
             map.insert(
                 id,
                 Player {
-                    pos: Pos { x, z: 0 },
-                    yaw: 0,
+                    pos: frame.place(x, 0),
+                    // Facing local +z — the party opens looking at the objective,
+                    // whatever heading the frame drew.
+                    yaw: frame.rot,
                     status: PlayerStatus::Alive,
                 },
             );
         }
         // The objective sits BEYOND the crab's spawn ring by more than her ~0.48 m
-        // claw-contact shell ([`ClawPose`] reach off her corner-most pincer), preserving
-        // the layout invariant spawn line < crab < extraction whatever MIN becomes — with
+        // claw-contact shell ([`ClawPose`] reach off her corner-most pincer) — with
         // a margin barely past her ring the rl#257 clearance bump parked her ON the
-        // objective, its disc inside her claw shell at round start.
+        // objective, its disc inside her claw shell at round start. Sally's bearing
+        // jitter (rl#305) swings her at most a quarter turn off local +z, which only
+        // GROWS her distance to the objective, so the clearance survives the jitter.
         let extraction = ExtractionPoint {
-            pos: Pos {
-                x: 0,
-                z: MIN_CRAB_SPAWN_DISTANCE + player_heights(10.0),
-            },
+            pos: frame.place(0, MIN_CRAB_SPAWN_DISTANCE + player_heights(10.0)),
         };
-        let crabs = (0..cfg.crabs).map(|i| Self::spawn_crab(&map, i)).collect();
-        (map, crabs, extraction)
+        let crabs = (0..cfg.crabs)
+            .map(|i| Self::spawn_crab(&map, &frame, i, rng))
+            .collect();
+        (frame, map, crabs, extraction)
     }
 
-    fn spawn_crab(players: &BTreeMap<PlayerId, Player>, idx: usize) -> Crab {
+    fn spawn_crab(
+        players: &BTreeMap<PlayerId, Player>,
+        frame: &SpawnFrame,
+        idx: usize,
+        rng: &mut ChaCha8Rng,
+    ) -> Crab {
         // The base pos staggers crabs and seeds the push-out BEARING; the clearance
         // clamp below (binding whenever the base sits inside MIN — every near-field
         // crab since rl#257 grew MIN past this base) sets the actual distance, so
-        // round-start and joiner safety share the one constant.
-        let mut pos = Pos {
-            x: player_heights(6.0 / 1.8) + idx as i64 * player_heights(8.0 / 1.8),
-            z: player_heights(20.0 / 1.8),
-        };
-        if let Some(nearest) = players
-            .values()
-            .min_by_key(|p| dist2_i128(pos.x - p.pos.x, pos.z - p.pos.z))
-        {
+        // round-start and joiner safety share the one constant. The per-crab bearing
+        // jitter (rl#305, up to a quarter turn either side of local +z) keeps a run
+        // from always opening with Sally square between the party and the objective;
+        // at ±quarter-turn her ring stays clear of the extraction disc (the comment
+        // on [`Self::spawn_state`]'s extraction margin).
+        let jitter = rand::Rng::gen_range(rng, -trig::TURN / 4..=trig::TURN / 4);
+        let (bx, bz) = rotate(
+            player_heights(6.0 / 1.8) + idx as i64 * player_heights(8.0 / 1.8),
+            player_heights(20.0 / 1.8),
+            jitter,
+        );
+        let mut pos = frame.place(bx, bz);
+        // Iterated clamp: one push-out from the base-nearest player sufficed for the
+        // fixed pre-rl#305 bearing, but a jittered bearing can land the pushed pos
+        // inside MIN of a DIFFERENT player (the party line's far slot) — so re-clamp
+        // from the recomputed nearest until it is clear; clear-of-nearest ⇒ clear of
+        // everyone. Each pass corrects by at most the party's line span (≪ MIN), so
+        // a couple of passes settle it; the assert keeps a non-terminating geometry
+        // loud instead of shipping a spawn inside her charge ring.
+        let mut settled = false;
+        for _ in 0..16 {
+            let Some(nearest) = players
+                .values()
+                .min_by_key(|p| dist2_i128(pos.x - p.pos.x, pos.z - p.pos.z))
+            else {
+                settled = true;
+                break;
+            };
             let dx = pos.x - nearest.pos.x;
             let dz = pos.z - nearest.pos.z;
             let d2 = dist2_i128(dx, dz);
             let min = MIN_CRAB_SPAWN_DISTANCE as i128;
-            if d2 < min * min {
-                let dist = isqrt_i128(d2);
-                let (ux, uz, len) = if dist > 0 {
-                    (dx as i128, dz as i128, dist)
-                } else {
-                    (1, 0, 1)
-                };
-                // Round each component AWAY from zero: truncation can land a hair
-                // inside `min` (unseen while the clamp almost never bound; rl#257's
-                // larger MIN binds every round). `len` is itself floored, which only
-                // over-scales — so outward rounding guarantees distance ≥ min.
-                let scale = |c: i128| {
-                    let num = c * min;
-                    (num / len + (num % len).signum()) as i64
-                };
-                pos.x = nearest.pos.x + scale(ux);
-                pos.z = nearest.pos.z + scale(uz);
+            if d2 >= min * min {
+                settled = true;
+                break;
             }
+            let dist = isqrt_i128(d2);
+            let (ux, uz, len) = if dist > 0 {
+                (dx as i128, dz as i128, dist)
+            } else {
+                (1, 0, 1)
+            };
+            // Round each component AWAY from zero: truncation can land a hair
+            // inside `min` (unseen while the clamp almost never bound; rl#257's
+            // larger MIN binds every round). `len` is itself floored, which only
+            // over-scales — so outward rounding guarantees distance ≥ min.
+            let scale = |c: i128| {
+                let num = c * min;
+                (num / len + (num % len).signum()) as i64
+            };
+            pos.x = nearest.pos.x + scale(ux);
+            pos.z = nearest.pos.z + scale(uz);
         }
+        assert!(
+            settled,
+            "crab spawn clamp failed to clear every player within 16 passes (rl#305)"
+        );
         Crab { pos, yaw: 0 }
     }
 
@@ -808,9 +956,19 @@ impl Sim {
             rng,
             restart_held,
             round_start,
+            spawn_frame,
             config: _,
         } = self;
 
+        // The hash covers exactly the state a snapshot ships and a peer adopts
+        // ([`Self::core_snapshot`]/[`Self::apply_core_snapshot`]) — the SHARED world.
+        // Host-private machinery (rng stream, restart latch, grace anchor, spawn
+        // frame) is deliberately excluded: an adopt-only client never replicates it,
+        // and since rl#305 each peer draws its own seed, so hashing it would desync
+        // the cross-peer diff (`game net --hash-log`, #133) on every tick from 0.
+        // Divergence there still surfaces here one draw later, through the crabs/
+        // extraction/players it produces.
+        let _ = (rng, restart_held, round_start, spawn_frame);
         let mut h = Fnv::new();
         h.write(&tick.to_le_bytes());
         for (id, player) in players.iter() {
@@ -829,9 +987,6 @@ impl Sim {
         let ExtractionPoint { pos } = extraction;
         h.write(&pos_bytes(*pos));
         h.write(&[outcome.tag()]);
-        h.write(&[u8::from(*restart_held)]);
-        h.write(&round_start.to_le_bytes());
-        h.write(&rand::Rng::r#gen::<u64>(&mut rng.clone()).to_le_bytes());
         h.finish()
     }
 
@@ -868,17 +1023,22 @@ impl Sim {
             tick,
             players,
             crabs,
-            extraction: _,
+            extraction,
             outcome,
             rng: _,
             restart_held: _,
             round_start: _,
+            spawn_frame: _,
             config,
         } = self;
         CoreSnapshot {
             tick: *tick,
             players: players.clone(),
             crabs: crabs.clone(),
+            // Per-run state since rl#305 (the host draws the layout from its own
+            // seed), so it rides the snapshot like every other host-owned fact — a
+            // client's locally-derived extraction is a placeholder until this lands.
+            extraction: extraction.pos(),
             outcome: *outcome,
             roster: config.players.clone(),
             // Input watermarks are SERVER coordination metadata, not sim state — the sim holds
@@ -893,6 +1053,7 @@ impl Sim {
             tick,
             players,
             crabs,
+            extraction,
             outcome,
             roster,
             // Coordination metadata, not sim state — the client's `ClientSim` stashes it
@@ -903,6 +1064,7 @@ impl Sim {
         self.players = players;
         self.config.crabs = crabs.len();
         self.crabs = crabs;
+        self.extraction = ExtractionPoint { pos: extraction };
         self.outcome = outcome;
         self.config.players = roster;
     }
@@ -1033,6 +1195,54 @@ mod tests {
         );
     }
 
+    /// rl#305: the layout invariants that must survive EVERY frame draw — on-tile,
+    /// crab clearance, and the objective outside the crab's reach — swept across
+    /// seeds instead of proven at one origin.
+    #[test]
+    fn spawn_frame_randomizes_within_the_tile_interior() {
+        let clamp = meters_to_grid(crab_world::training::targets::sample_clamp_half(
+            &crab_world::terrain::TerrainGrid::gcr(),
+        ));
+        let on_tile = |p: Pos| p.x.abs() <= clamp && p.z.abs() <= clamp;
+        let mut origins = std::collections::BTreeSet::new();
+        for seed in 0..64u64 {
+            let sim = Sim::new(seed, &players(3));
+            origins.insert((sim.spawn_frame.origin.x, sim.spawn_frame.origin.z));
+            for (_, p) in sim.players() {
+                assert!(
+                    on_tile(p.pos()),
+                    "seed {seed}: player off-tile at {:?}",
+                    p.pos()
+                );
+            }
+            let ex = sim.extraction().pos();
+            assert!(on_tile(ex), "seed {seed}: extraction off-tile at {ex:?}");
+            for c in sim.crabs() {
+                assert!(
+                    on_tile(c.pos()),
+                    "seed {seed}: crab off-tile at {:?}",
+                    c.pos()
+                );
+                let min = MIN_CRAB_SPAWN_DISTANCE as i128;
+                for (_, p) in sim.players() {
+                    assert!(
+                        dist2_i128(c.pos().x - p.pos().x, c.pos().z - p.pos().z) >= min * min,
+                        "seed {seed}: spawn clearance broken"
+                    );
+                }
+                assert!(
+                    !within(ex.x, ex.z, c.pos().x, c.pos().z, 2 * EXTRACT_RADIUS),
+                    "seed {seed}: the bearing jitter parked the crab on the objective"
+                );
+            }
+        }
+        assert!(
+            origins.len() == 64,
+            "64 seeds must draw 64 distinct locales, got {}",
+            origins.len()
+        );
+    }
+
     #[test]
     fn spawn_is_deterministic_regardless_of_player_order() {
         let a = Sim::new(42, &[PlayerId(2), PlayerId(0), PlayerId(1)]);
@@ -1040,9 +1250,17 @@ mod tests {
         assert_eq!(a.state_hash(), b.state_hash());
     }
 
+    /// Zero the player's yaw so an axis-aligned movement assertion holds: spawns face
+    /// the run's random layout heading since rl#305, and these tests pin the MOVER's
+    /// geometry, not the spawn draw.
+    fn face_plus_z(sim: &mut Sim, id: PlayerId) {
+        sim.players.get_mut(&id).expect("rostered").yaw = 0;
+    }
+
     #[test]
     fn forward_input_moves_along_facing() {
         let mut sim = Sim::new(0, &players(1));
+        face_plus_z(&mut sim, PlayerId(0));
         let p0 = sim.player(PlayerId(0)).unwrap().pos();
         let mut inputs = BTreeMap::new();
         inputs.insert(PlayerId(0), Input::from_axes(0.0, 1.0));
@@ -1059,6 +1277,7 @@ mod tests {
     #[test]
     fn strafe_input_moves_sideways_along_x() {
         let mut sim = Sim::new(0, &players(1));
+        face_plus_z(&mut sim, PlayerId(0));
         let p0 = sim.player(PlayerId(0)).unwrap().pos();
         let mut right = BTreeMap::new();
         right.insert(PlayerId(0), Input::new(1.0, 0.0, 0.0, 0));
@@ -1071,6 +1290,7 @@ mod tests {
             "strafe-right step ≈ +PLAYER_SPEED in X, got {dx}"
         );
         let mut sim = Sim::new(0, &players(1));
+        face_plus_z(&mut sim, PlayerId(0));
         let mut left = BTreeMap::new();
         left.insert(PlayerId(0), Input::new(-1.0, 0.0, 0.0, 0));
         step_scenery(&mut sim, &left);
@@ -1109,6 +1329,7 @@ mod tests {
     #[test]
     fn look_then_move_turns_the_heading() {
         let mut sim = Sim::new(0, &players(1));
+        face_plus_z(&mut sim, PlayerId(0));
         let ticks = ((trig::TURN / 4) / MAX_YAW_TURNS_PER_TICK) as usize;
         for _ in 0..ticks {
             let mut inp = BTreeMap::new();
@@ -1252,9 +1473,10 @@ mod tests {
         for _ in 0..=STARTUP_GRACE_TICKS {
             step_scenery(&mut sim, &neutral);
         }
-        // Park the crab dead on the joiner's roster slot (x=0 for idx 1 of 2), claw at
-        // her carapace point — downs are claw contact only (rl#236).
-        let parked = Pos { x: 0, z: 0 };
+        // Park the crab dead on the joiner's roster slot (local x=0 for idx 1 of 2 —
+        // the frame's origin), claw at her carapace point — downs are claw contact
+        // only (rl#236).
+        let parked = sim.spawn_frame.place(0, 0);
         let poses = vec![CrabPose {
             pos: parked,
             yaw: 0,
@@ -1263,7 +1485,13 @@ mod tests {
         sim.adopt_crab_poses(&poses);
         sim.spawn_joining_player(PlayerId(1));
         let pos = sim.player(PlayerId(1)).unwrap().pos();
-        assert_eq!(pos.z, 0, "slot selection stays on the spawn line");
+        // Slot selection stays on the run's spawn line: the chosen pos must be one of
+        // the frame's line slots exactly (the scan only ever offers those).
+        let blocked = 2 * MIN_CRAB_SPAWN_DISTANCE / SPAWN_SLOT_PITCH + 1;
+        assert!(
+            (-blocked..=blocked).any(|d| sim.spawn_frame.place(d * SPAWN_SLOT_PITCH, 0) == pos),
+            "joiner slot {pos:?} is not a spawn-line slot of the run's frame"
+        );
         assert!(
             !within(pos.x, pos.z, parked.x, parked.z, MIN_CRAB_SPAWN_DISTANCE),
             "joiner slot {pos:?} sits within the crab's spawn-clearance disc"
@@ -1290,17 +1518,14 @@ mod tests {
         // count — a re-measured charge speed grows the ring and a fixed park could
         // land back inside it (it did: 100 m vs the rl#266 ring).
         sim.adopt_crab_poses(&[CrabPose {
-            pos: Pos {
-                x: 0,
-                z: 2 * MIN_CRAB_SPAWN_DISTANCE,
-            },
+            pos: sim.spawn_frame.place(0, 2 * MIN_CRAB_SPAWN_DISTANCE),
             yaw: 0,
             claws: Vec::new(),
         }]);
         sim.spawn_joining_player(PlayerId(1));
         assert_eq!(
             sim.player(PlayerId(1)).unwrap().pos(),
-            Pos { x: 0, z: 0 },
+            sim.spawn_frame.place(0, 0),
             "an unobstructed joiner takes its roster slot exactly"
         );
     }
@@ -1510,24 +1735,31 @@ mod tests {
             h0,
             "outcome must be hashed"
         );
-        assert_ne!(
+        // The other side of the contract: host-private machinery a peer never adopts
+        // must NOT move the hash — it would desync the cross-peer diff (see the
+        // comment in [`Sim::state_hash`]).
+        assert_eq!(
             hash_after(&|s| s.restart_held = !s.restart_held),
             h0,
-            "restart_held must be hashed"
+            "restart_held is host-private, deliberately unhashed"
         );
-        assert_ne!(
+        assert_eq!(
             hash_after(&|s| s.round_start += 1),
             h0,
-            "round_start must be hashed (it gates the post-restart grace)"
+            "round_start is host-private, deliberately unhashed"
         );
-        assert_ne!(
+        assert_eq!(
             hash_after(&|s| {
                 let _: u64 = rand::Rng::r#gen(s.rng());
             }),
             h0,
-            "rng stream position must be hashed"
+            "the rng stream is host-private, deliberately unhashed"
         );
-
+        assert_eq!(
+            hash_after(&|s| s.spawn_frame.rot ^= 1),
+            h0,
+            "the spawn frame is host-private, deliberately unhashed"
+        );
         assert_eq!(
             hash_after(&|s| s.config.seed ^= 0xdead_beef),
             h0,
@@ -1794,13 +2026,9 @@ mod tests {
     #[test]
     fn restart_resets_the_round_to_spawn() {
         let mut sim = Sim::new(0xBEEF, &players(2));
-        let fresh = Sim::new(0xBEEF, &players(2));
-        let mut fwd = BTreeMap::new();
-        fwd.insert(PlayerId(0), Input::new(0.3, 1.0, 0.5, 0));
-        fwd.insert(PlayerId(1), Input::new(-0.2, 1.0, 0.0, 0));
-        for _ in 0..50 {
-            step_scenery(&mut sim, &fwd);
-        }
+        // The determinism mirror: same seed, same input history ⇒ the same restart
+        // draw — the property that keeps every peer's picture of a restart identical.
+        let mut twin = Sim::new(0xBEEF, &players(2));
         let world = |s: &Sim| {
             (
                 s.players().collect::<Vec<_>>(),
@@ -1809,11 +2037,14 @@ mod tests {
                 s.outcome(),
             )
         };
-        assert_ne!(
-            world(&sim),
-            world(&fresh),
-            "the round should have diverged from spawn before restart"
-        );
+        let opening = world(&sim);
+        let mut fwd = BTreeMap::new();
+        fwd.insert(PlayerId(0), Input::new(0.3, 1.0, 0.5, 0));
+        fwd.insert(PlayerId(1), Input::new(-0.2, 1.0, 0.0, 0));
+        for _ in 0..50 {
+            step_scenery(&mut sim, &fwd);
+            step_scenery(&mut twin, &fwd);
+        }
         let mut restart = BTreeMap::new();
         restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
         restart.insert(PlayerId(1), Input::default());
@@ -1821,10 +2052,22 @@ mod tests {
         assert!(edge, "the press reports the restart edge");
         assert_eq!(sim.tick(), 51, "the tick stays monotone across a restart");
         assert_eq!(sim.outcome(), Outcome::Ongoing);
+        assert!(
+            sim.players()
+                .all(|(_, p)| p.status() == PlayerStatus::Alive),
+            "a restart revives everyone at spawn"
+        );
+        assert_ne!(
+            world(&sim),
+            opening,
+            "the restart draws a FRESH spawn layout off the seed's stream (rl#305), \
+             not a replay of the round-1 locale"
+        );
+        step_scenery(&mut twin, &restart);
         assert_eq!(
             world(&sim),
-            world(&fresh),
-            "a restarted round's world matches a fresh one"
+            world(&twin),
+            "a restarted round is deterministic in (seed, input history)"
         );
     }
 

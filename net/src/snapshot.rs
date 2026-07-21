@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::sim::{Crab, Outcome, Player, PlayerId, PlayerStatus};
+use crate::sim::{Crab, Outcome, Player, PlayerId, PlayerStatus, Pos};
 use crate::wire::{pos_bytes, pos_from_bytes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,6 +11,10 @@ pub struct CoreSnapshot {
     pub tick: u64,
     pub players: BTreeMap<PlayerId, Player>,
     pub crabs: Vec<Crab>,
+    /// The run's objective point — per-run state since rl#305 (the host draws the
+    /// spawn layout), so the host ships it like every other host-owned fact and a
+    /// client never trusts its own placeholder derivation.
+    pub extraction: Pos,
     pub outcome: Outcome,
     /// The participant set the server owns (sorted, deduped) — the server ships the roster;
     /// clients adopt it, never negotiate it. Not in
@@ -71,6 +75,8 @@ impl CoreSnapshot {
             out.extend_from_slice(&crab.yaw().to_le_bytes());
         }
 
+        out.extend_from_slice(&pos_bytes(self.extraction));
+
         out.push(self.outcome.tag());
 
         out.extend_from_slice(&(self.roster.len() as u32).to_le_bytes());
@@ -112,6 +118,8 @@ impl CoreSnapshot {
             crabs.push(Crab::from_parts(pos, yaw));
         }
 
+        let extraction = pos_from_bytes(r.take()?);
+
         let outcome = Outcome::from_tag(r.byte()?).ok_or(SnapshotDecodeError::BadTag)?;
 
         let n_roster = u32::from_le_bytes(r.take::<4>()?) as usize;
@@ -134,6 +142,7 @@ impl CoreSnapshot {
             tick,
             players,
             crabs,
+            extraction,
             outcome,
             roster,
             input_next,

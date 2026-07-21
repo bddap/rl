@@ -1433,7 +1433,7 @@ mod tests {
     #[test]
     fn restart_does_not_wedge_the_match() {
         let mut s = srv(42, &ids(2));
-        let fresh_players: Vec<_> = Sim::new(42, &ids(2)).players().collect();
+        let opening_extraction = s.sim().extraction().pos();
         const RESTART_AT: u64 = 10;
         const TOTAL: u64 = 25;
         let mut last_snap_tick = 0;
@@ -1466,11 +1466,13 @@ mod tests {
             if t == RESTART_AT {
                 assert_eq!(
                     snap.players.values().map(|p| p.pos()).collect::<Vec<_>>(),
-                    fresh_players
-                        .iter()
-                        .map(|(_, p)| p.pos())
-                        .collect::<Vec<_>>(),
-                    "the restart tick's snapshot carries the spawn-state world"
+                    s.sim().players().map(|(_, p)| p.pos()).collect::<Vec<_>>(),
+                    "the restart tick's snapshot carries the reset sim's spawn state"
+                );
+                assert_ne!(
+                    snap.extraction, opening_extraction,
+                    "the restart re-rolled the layout (rl#305): the snapshot ships the \
+                     NEW extraction, so clients never render the stale objective"
                 );
             }
         }
