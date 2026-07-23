@@ -10,16 +10,12 @@ const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:4318";
 
 #[must_use = "telemetry stops and unflushed data is lost when the guard is dropped"]
 pub struct OtelGuard {
-    tracer_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
     logger_provider: Option<opentelemetry_sdk::logs::SdkLoggerProvider>,
     meter_provider: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
 }
 
 impl Drop for OtelGuard {
     fn drop(&mut self) {
-        if let Some(p) = &self.tracer_provider {
-            let _ = p.shutdown();
-        }
         if let Some(p) = &self.logger_provider {
             let _ = p.shutdown();
         }
@@ -37,7 +33,7 @@ impl Drop for OtelGuard {
 /// contract with whatever launches the process.
 #[derive(clap::Args, Debug, Clone, Copy, Default)]
 pub struct OtelArgs {
-    /// Export traces/metrics/logs to the built-in OTLP endpoint. Setting
+    /// Export metrics/logs to the built-in OTLP endpoint. Setting
     /// `OTEL_EXPORTER_OTLP_ENDPOINT` enables export on its own, and wins.
     #[arg(long = "otel", env = "RL_OTEL", global = true,
           value_parser = clap::builder::FalseyValueParser::new())]
@@ -60,18 +56,16 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
             .with(fmt_layer)
             .init();
         return OtelGuard {
-            tracer_provider: None,
             logger_provider: None,
             meter_provider: None,
         };
     };
 
+    // No span export on purpose: bevy_render opens `info_span!`s per frame with no
+    // feature gate, so a span pipeline ships ~6k spans/s from a running game (3 GiB/h
+    // at the sink, tv 2026-07-21) — and nothing fleet-side reads traces, only logs.
     match build_providers(service_name, &endpoint) {
-        Ok((tracer_provider, logger_provider, meter_provider)) => {
-            let tracer = opentelemetry::trace::TracerProvider::tracer(&tracer_provider, "rl");
-            let trace_layer = tracing_opentelemetry::layer()
-                .with_tracer(tracer)
-                .with_filter(tracing_subscriber::filter::filter_fn(not_otel_internal));
+        Ok((logger_provider, meter_provider)) => {
             let log_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
                 &logger_provider,
             )
@@ -81,12 +75,10 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(fmt_layer)
-                .with(trace_layer)
                 .with(log_layer)
                 .init();
             tracing::info!(service_name, endpoint, "OTLP telemetry enabled");
             OtelGuard {
-                tracer_provider: Some(tracer_provider),
                 logger_provider: Some(logger_provider),
                 meter_provider: Some(meter_provider),
             }
@@ -98,7 +90,6 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
                 .init();
             tracing::warn!("OTLP telemetry setup failed, continuing with stderr only: {e:#}");
             OtelGuard {
-                tracer_provider: None,
                 logger_provider: None,
                 meter_provider: None,
             }
@@ -126,13 +117,12 @@ fn resolve_endpoint(otel: bool) -> Option<String> {
 }
 
 type Providers = (
-    opentelemetry_sdk::trace::SdkTracerProvider,
     opentelemetry_sdk::logs::SdkLoggerProvider,
     opentelemetry_sdk::metrics::SdkMeterProvider,
 );
 
 fn build_providers(service_name: &str, endpoint: &str) -> anyhow::Result<Providers> {
-    use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+    use opentelemetry_otlp::{LogExporter, MetricExporter, WithExportConfig};
 
     let service = env::var("OTEL_SERVICE_NAME")
         .ok()
@@ -145,15 +135,6 @@ fn build_providers(service_name: &str, endpoint: &str) -> anyhow::Result<Provide
         .build();
 
     let base = endpoint.strip_suffix('/').unwrap_or(endpoint);
-
-    let span_exporter = SpanExporter::builder()
-        .with_http()
-        .with_endpoint(format!("{base}/v1/traces"))
-        .build()?;
-    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-        .with_resource(resource.clone())
-        .with_batch_exporter(span_exporter)
-        .build();
 
     let log_exporter = LogExporter::builder()
         .with_http()
@@ -174,7 +155,7 @@ fn build_providers(service_name: &str, endpoint: &str) -> anyhow::Result<Provide
         .with_reader(reader)
         .build();
 
-    Ok((tracer_provider, logger_provider, meter_provider))
+    Ok((logger_provider, meter_provider))
 }
 
 fn env_resource_attributes() -> Vec<KeyValue> {

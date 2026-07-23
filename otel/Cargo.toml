@@ -9,16 +9,16 @@ name = "otel"
 path = "src/lib.rs"
 
 [dependencies]
-opentelemetry = { version = "0.28", features = ["trace", "metrics", "logs"] }
-opentelemetry_sdk = { version = "0.28", features = ["trace", "metrics", "logs"] }
+# No "trace" features and no tracing-opentelemetry: span export is deliberately absent
+# (bevy opens per-frame spans unconditionally — see the note in init()).
+opentelemetry = { version = "0.28", features = ["metrics", "logs"] }
+opentelemetry_sdk = { version = "0.28", features = ["metrics", "logs"] }
 opentelemetry-otlp = { version = "0.28", default-features = false, features = [
-    "trace",
     "metrics",
     "logs",
     "http-proto",
     "reqwest-blocking-client",
 ] }
-tracing-opentelemetry = "0.29"
 opentelemetry-appender-tracing = "0.28"
 tracing = { workspace = true }
 # tracing-subscriber's default `tracing-log` feature installs the `log`->tracing bridge
