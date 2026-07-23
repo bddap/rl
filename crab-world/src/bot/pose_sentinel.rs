@@ -12,6 +12,11 @@
 //! body part's `Transform` is rapier's own writeback, which mirrors the rigid
 //! body's pose. So immediately before `SyncBackend` would consume a change, a
 //! `Transform` that diverged from its rigid body's pose is a foreign write.
+//! Scale is the strict case: a rigid body pose has no scale at all, so a
+//! part `Transform.scale != ONE` is foreign with NO tolerance band — and extra
+//! harmful, since bevy_rapier's `apply_scale` rebuilds the collider from it
+//! (non-uniform → capsule degraded to a `ConvexPolyhedron`; the rl#314
+//! TV wireframe-gap incident).
 //! Failure tier mirrors `rescue_lost_crabs` (rl#137): debug panics naming
 //! the write; release logs the same message (rate-limited) and snaps the
 //! `Transform` back to the body's pose — a visible, loud self-heal that keeps a
@@ -115,6 +120,33 @@ pub fn assert_body_transforms_rapier_owned(
         let Some(body) = set.bodies.get(h.0) else {
             continue;
         };
+        // Scale first, and unconditionally: a rigid body pose has no scale, parts spawn
+        // at ONE, and no sanctioned lane (teleport, recenter, rescue) ever writes one —
+        // so ANY deviation is a foreign write. It is also the nastiest kind: bevy_rapier's
+        // `apply_scale` rebuilds the collider from `GlobalTransform` scale, and past its
+        // 1e-4 snap a non-uniform scale silently converts a capsule into a subdivided
+        // `ConvexPolyhedron` — different contacts, different cost, and (pre-tracer) an
+        // invisible cage part on the TV (the fleet-error this guard came from). Snapping
+        // back to ONE makes `apply_scale` rebuild the true shape on the same frame's sync.
+        if t.scale != Vec3::ONE {
+            let msg = format!(
+                "rl#116: a non-physics system wrote SCALE onto a rapier-driven Transform — \
+                 crab env {} scale {:?}. bevy_rapier would rebuild the collider at that \
+                 scale (a non-uniform one degrades a capsule into a ConvexPolyhedron). \
+                 Nothing may scale a CrabBodyPart.",
+                env.0, t.scale,
+            );
+            *snaps += 1;
+            if should_log(*snaps) {
+                error!(
+                    "{msg} Snapping scale back to ONE (VISIBLE self-heal, occurrence {}).",
+                    *snaps
+                );
+            }
+            t.scale = Vec3::ONE;
+            #[cfg(debug_assertions)]
+            panic!("{msg}");
+        }
         let iso = body.position();
         let body_pos: Vec3 = iso.translation;
         let body_rot: Quat = iso.rotation;
@@ -250,6 +282,33 @@ mod tests {
         assert!(
             msg.contains("rl#116"),
             "panic must name the invariant, got: {msg}"
+        );
+    }
+
+    // Debug-only for the same reason; release takes the snap-to-ONE self-heal.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn sentinel_panics_on_a_foreign_scale_write() {
+        let mut app = visual_app();
+        {
+            // The rl#314 incident in miniature: a non-uniform scale on a rapier-driven
+            // part, which `apply_scale` would bake into the collider shape.
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&mut Transform, With<CrabCarapace>>();
+            let mut t = q.single_mut(app.world_mut()).expect("carapace");
+            t.scale = Vec3::new(1.0, 1.2, 1.0);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.update()));
+        let payload = result.expect_err("the sentinel must panic on a foreign scale");
+        let msg = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert!(
+            msg.contains("SCALE"),
+            "panic must name the scale write, got: {msg}"
         );
     }
 }
