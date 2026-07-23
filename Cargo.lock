@@ -8436,7 +8436,6 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
 ]
 
@@ -11271,24 +11270,6 @@ dependencies = [
  "log",
  "once_cell",
  "tracing-core",
-]
-
-[[package]]
-name = "tracing-opentelemetry"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "721f2d2569dce9f3dfbbddee5906941e953bfcdf736a62da3377f5751650cc36"
-dependencies = [
- "js-sys",
- "once_cell",
- "opentelemetry",
- "opentelemetry_sdk",
- "smallvec",
- "tracing",
- "tracing-core",
- "tracing-log",
- "tracing-subscriber",
- "web-time",
 ]
 
 [[package]]
