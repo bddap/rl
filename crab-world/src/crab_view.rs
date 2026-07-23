@@ -292,6 +292,21 @@ pub fn draw_collider_wireframe(
                 draw_collider_wireframe(gizmos, sub, sub_world, color);
             }
         }
+        // No spawn path builds one of these — it is what bevy_rapier's `apply_scale`
+        // turns a curved shape (capsule/ball) into the moment a non-uniform scale
+        // reaches a collider (parry `scaled()`, the rl#314 TV incident). The pose
+        // sentinel heals such a scale at the source, but the cage is a physics debug
+        // surface: it must show where physics IS, whatever shape physics took —
+        // including the one frame something poisoned it.
+        ColliderView::ConvexPolyhedron(c) => {
+            let pts: Vec<Vec3> = c.points().collect();
+            for e in c.raw.edges() {
+                let [a, b] = e.vertices;
+                if let (Some(&a), Some(&b)) = (pts.get(a as usize), pts.get(b as usize)) {
+                    gizmos.line(world.transform_point3(a), world.transform_point3(b), color);
+                }
+            }
+        }
         // A shape this drawer can't trace would vanish from the collider view and read as
         // "colliders missing" (rl#225) — so say so instead of silently dropping it. ERROR,
         // not warn: only ERROR-level lines surface through the fleet telemetry, and an
@@ -390,5 +405,28 @@ mod tests {
             ]
         );
         assert_eq!(m.next(), RenderMode::Mesh, "the cycle must close");
+    }
+
+    /// rl#314: the shape bevy_rapier degrades a non-uniformly scaled capsule into must be
+    /// traceable, or a poisoned part vanishes from the cage exactly when physics is
+    /// weirdest. Pin the drawer's contract with parry: the conversion yields a
+    /// ConvexPolyhedron whose edge topology indexes its point list.
+    #[test]
+    fn scaled_capsule_degrades_to_a_traceable_convex_polyhedron() {
+        let mut c = Collider::capsule(Vec3::new(0.0, -0.1, 0.0), Vec3::new(0.0, 0.1, 0.0), 0.05);
+        c.set_scale(Vec3::new(1.0, 1.2, 1.0), 10);
+        let ColliderView::ConvexPolyhedron(view) = c.as_typed_shape() else {
+            panic!("a non-uniformly scaled capsule must become a ConvexPolyhedron");
+        };
+        let n = view.points().len();
+        let edges = view.raw.edges();
+        assert!(n > 0 && !edges.is_empty(), "conversion must carry topology");
+        for e in edges {
+            let [a, b] = e.vertices;
+            assert!(
+                (a as usize) < n && (b as usize) < n,
+                "edge ({a},{b}) must index the {n} points the tracer draws"
+            );
+        }
     }
 }
