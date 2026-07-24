@@ -26,9 +26,8 @@ use crate::training::targets::{
 /// flat-ground horizon traverse ([`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] ≈ 1.6 m/s ×
 /// [`DEFAULT_EVAL_TICKS`] ≈ 23 s ≈ 37 m), so arrival stays measurable for a competent
 /// brain even on relief, and mid-band for the obs. NOTE: the far sweep runs NO
-/// mid-episode recenter — matching the training regime, where `body.pos` runs out to
-/// the per-episode traverse un-regauged; only the pace probe wires the
-/// `pace_recenter` seam (the obs regime net's 9 m rebase produces). Re-pin from pace
+/// mid-episode recenter — matching the training regime; only the pace probe wires
+/// the `pace_recenter` seam (fixed-locale measurement, see its doc). Re-pin from pace
 /// evidence when the gait regime moves; numbers across a distance re-pin are
 /// incomparable by design.
 pub const DEFAULT_TARGET_DISTANCE_M: f32 = 24.0;
@@ -149,7 +148,7 @@ const PACE_WINDOW_MIN_S: f32 = 5.0;
 /// measured at exactly this distance, and moving it moves the saturation ceiling,
 /// so it re-pins only WITH a charge re-measure, never by riding a band change.
 /// The probe presents the ball through the [`band_lure`] clamp and the
-/// [`pace_recenter`] body.pos recenter, matching the obs regime GCR play happens in
+/// [`pace_recenter`] recenter, matching the re-gauge regime GCR play happens in
 /// (whose recenter shares the [`recenter_delta`] trigger and whose hunt poser shares
 /// the [`band_lure`] clamp, rl#301).
 pub const PACE_PROBE_DISTANCE_M: f32 = 18.0;
@@ -362,7 +361,7 @@ struct EvalConfig {
     bearing_rad: f32,
     settle_ticks: u64,
     /// Pace-probe mode (rl#280): the real ball sits past the training band edge, so
-    /// the obs target is posed through [`probe_lure`] and body.pos drift through
+    /// the obs target is posed through [`probe_lure`] and planar drift through
     /// [`pace_recenter`] — the production seams — while every measurement stays
     /// against the real ball.
     pace_probe: bool,
@@ -760,10 +759,10 @@ fn probe_lure(carapace: Vec3, real_target: Vec3, terrain: &crate::terrain::Terra
 /// The rl#240 recenter, probe-side: past [`recenter_delta`]'s band edge, shift every
 /// crab part back onto the spawn origin planar-wise — production's sanctioned
 /// multibody teleport (rl#116) — and carry the real ball AND the posed lure by the
-/// same delta, so both the remaining chase geometry (every distance eval_step
-/// measures) and the obs frame are invariant across the shift. Without this the
-/// probe's farther ball walks the spawn-relative body.pos obs channel out of the
-/// training band, and the pace measured would be an OOD artifact, not her gait. On
+/// same delta, so the remaining chase geometry (every distance eval_step measures)
+/// is invariant across the shift. Since rl#311 the obs carries no position channel,
+/// so the shift is invisible to the policy by construction; what the teleport buys
+/// is the fixed locale below. On
 /// the flat grids the shift is an exact ground symmetry; on a terrain plant the y
 /// carry is carapace-exact only — the re-landed feet meet differently-sloped ground
 /// and physics resolves the mismatch over the next ticks, an accepted approximation
@@ -973,8 +972,8 @@ mod tests {
             // rl#292/rl#293: the far ball is pace-pinned and in-band (in-distribution
             // obs) — NOT the band edge: an unreachable ball would make min-progress
             // measure the locale's worst obstruction instead of her chase. Past the
-            // drift radius only so the sweep covers body.pos states beyond net's 9 m
-            // rebase window (the far sweep itself runs no recenter, like training).
+            // drift radius so the sweep covers treks longer than one rebase window
+            // (the far sweep itself runs no recenter, like training).
             assert!(DEFAULT_TARGET_DISTANCE_M < BAND_MAX_M);
             assert!(DEFAULT_TARGET_DISTANCE_M > DRIFT_REBASE_M);
             assert!(TARGET_Y > TARGET_Y_MIN && TARGET_Y < TARGET_Y_MAX);

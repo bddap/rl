@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use super::CrabSpawns;
 use super::body::{CrabCarapace, CrabEnvId, CrabJoint, CrabJointId, joint_angle};
 
 #[derive(Clone, Copy, Default)]
@@ -16,9 +15,11 @@ impl JointObs {
     const LEN: usize = 2;
 }
 
+/// Deliberately position-free (rl#311): the policy must be position-invariant, so no
+/// world- or spawn-frame position ever enters the obs — targets are body-frame, the
+/// terrain scan is carapace-relative. `obs_has_no_position_channel` pins this.
 #[derive(Clone, Copy)]
 struct BodyObs {
-    pos: Vec3,
     rot: Quat,
     linvel: Vec3,
     angvel: Vec3,
@@ -27,7 +28,6 @@ struct BodyObs {
 impl Default for BodyObs {
     fn default() -> Self {
         Self {
-            pos: Vec3::ZERO,
             rot: Quat::from_xyzw(0.0, 0.0, 0.0, 0.0),
             linvel: Vec3::ZERO,
             angvel: Vec3::ZERO,
@@ -36,17 +36,12 @@ impl Default for BodyObs {
 }
 
 impl BodyObs {
-    const LEN: usize = 13;
+    const LEN: usize = 10;
 }
 
 const TARGET_LEN: usize = 3;
 
-/// First slot of the spawn-relative body.pos triple (x, y, z) — the channel that is
-/// bounded only by the training arena's walls; GCR's open-field drift guard (rl#240)
-/// watches it through [`ObsView::body_pos`].
-const BODY_POS_SLOT: usize = CrabJointId::COUNT * JointObs::LEN;
-
-const TARGET_SLOT: usize = BODY_POS_SLOT + BodyObs::LEN;
+const TARGET_SLOT: usize = CrabJointId::COUNT * JointObs::LEN + BodyObs::LEN;
 
 const TERRAIN_SLOT: usize = TARGET_SLOT + TARGET_LEN;
 
@@ -164,10 +159,9 @@ impl Observation {
             v[i + 1] = joint.rate;
             i += JointObs::LEN;
         }
-        v[i..i + 3].copy_from_slice(&self.body.pos.to_array());
-        v[i + 3..i + 7].copy_from_slice(&self.body.rot.to_array());
-        v[i + 7..i + 10].copy_from_slice(&self.body.linvel.to_array());
-        v[i + 10..i + 13].copy_from_slice(&self.body.angvel.to_array());
+        v[i..i + 4].copy_from_slice(&self.body.rot.to_array());
+        v[i + 4..i + 7].copy_from_slice(&self.body.linvel.to_array());
+        v[i + 7..i + 10].copy_from_slice(&self.body.angvel.to_array());
         i += BodyObs::LEN;
         v[i..i + TARGET_LEN].copy_from_slice(&self.target_local.to_array());
         i += TARGET_LEN;
@@ -187,8 +181,8 @@ pub(super) fn obs_channel_labels() -> Vec<String> {
         labels.push(format!("joint:{id:?}:rate"));
     }
     for c in [
-        "pos.x", "pos.y", "pos.z", "rot.x", "rot.y", "rot.z", "rot.w", "linvel.x", "linvel.y",
-        "linvel.z", "angvel.x", "angvel.y", "angvel.z",
+        "rot.x", "rot.y", "rot.z", "rot.w", "linvel.x", "linvel.y", "linvel.z", "angvel.x",
+        "angvel.y", "angvel.z",
     ] {
         labels.push(format!("body:{c}"));
     }
@@ -235,12 +229,6 @@ impl ObsView<'_> {
         Vec3::new(self.0[base], self.0[base + 1], self.0[base + 2])
     }
 
-    /// Spawn-relative carapace position — the channel the open-field drift guard
-    /// (rl#240) watches.
-    pub fn body_pos(&self) -> Vec3 {
-        self.vec3_at(BODY_POS_SLOT)
-    }
-
     /// The target position rotated into the body frame — the slots the policy steers by.
     pub fn target_local(&self) -> Vec3 {
         self.vec3_at(TARGET_SLOT)
@@ -277,7 +265,6 @@ impl CrabTargets {
 }
 
 pub fn build_observation(
-    spawns: Res<CrabSpawns>,
     targets: Res<CrabTargets>,
     terrain: Res<crate::terrain::Terrain>,
     mut obs: ResMut<CrabObservation>,
@@ -325,10 +312,6 @@ pub fn build_observation(
         let Some(o) = built.get_mut(env.0) else {
             continue;
         };
-        // A miss would feed ABSOLUTE world coords into a channel trained as
-        // spawn-relative — instantly OOD, never logged — so origin() panics (rl#242).
-        let origin = spawns.origin(env.0);
-        o.body.pos = transform.translation - origin;
         o.body.rot = transform.rotation;
         o.body.linvel = vel.linear;
         o.body.angvel = vel.angular;
@@ -385,7 +368,6 @@ mod tests {
             j.angle = idx as f32 + 0.5;
             j.rate = -(idx as f32) - 0.25;
         }
-        o.body.pos = Vec3::new(1.0, 2.0, 3.0);
         o.body.rot = Quat::from_xyzw(0.1, 0.2, 0.3, 0.4);
         o.body.linvel = Vec3::new(4.0, 5.0, 6.0);
         o.body.angvel = Vec3::new(7.0, 8.0, 9.0);
@@ -409,9 +391,6 @@ mod tests {
             want[slot(&format!("joint:{id:?}:rate"))] = -(idx as f32) - 0.25;
         }
         for (name, v) in [
-            ("body:pos.x", 1.0),
-            ("body:pos.y", 2.0),
-            ("body:pos.z", 3.0),
             ("body:rot.x", 0.1),
             ("body:rot.y", 0.2),
             ("body:rot.z", 0.3),
@@ -440,7 +419,21 @@ mod tests {
 
     #[test]
     fn obs_size_is_unchanged() {
-        assert_eq!(OBS_SIZE, CrabJointId::COUNT * 2 + 13 + 3 + TERRAIN_SAMPLES);
+        assert_eq!(OBS_SIZE, CrabJointId::COUNT * 2 + 10 + 3 + TERRAIN_SAMPLES);
+    }
+
+    /// rl#311: the policy is position-invariant BY CONSTRUCTION — no obs channel may
+    /// carry a world- or spawn-frame position. The labels are the digest's own
+    /// description of every slot, so a reintroduced position channel trips this by name.
+    #[test]
+    fn obs_has_no_position_channel() {
+        for label in obs_channel_labels() {
+            assert!(
+                !label.contains("pos"),
+                "obs channel {label:?} looks like a position channel — the policy must \
+                 stay position-invariant (rl#311)"
+            );
+        }
     }
 
     /// The layout-digest labels must describe every obs slot exactly once, or the digest
@@ -464,11 +457,11 @@ mod tests {
 
     use super::super::body::Side;
 
-    fn obs_world(spawns: Vec<Vec3>) -> World {
-        obs_world_on(spawns, crate::terrain::TerrainGrid::flat(64.0))
+    fn obs_world() -> World {
+        obs_world_on(crate::terrain::TerrainGrid::flat(64.0))
     }
 
-    fn obs_world_on(spawns: Vec<Vec3>, grid: crate::terrain::TerrainGrid) -> World {
+    fn obs_world_on(grid: crate::terrain::TerrainGrid) -> World {
         let mut world = World::new();
         let mut obs = CrabObservation::default();
         obs.resize(1);
@@ -476,7 +469,6 @@ mod tests {
         targets.resize(1);
         world.insert_resource(obs);
         world.insert_resource(targets);
-        world.insert_resource(CrabSpawns::from_origins(spawns));
         world.insert_resource(crate::terrain::Terrain::new(std::sync::Arc::new(grid)));
         world
     }
@@ -486,9 +478,8 @@ mod tests {
     /// healthy path shared by trainer and game.
     #[test]
     fn valid_inputs_build_bit_identical_obs() {
-        let origin = Vec3::new(10.0, 0.0, -20.0);
         let target = Vec3::new(4.0, 0.5, -2.0);
-        let mut world = obs_world(vec![origin]);
+        let mut world = obs_world();
         world.resource_mut::<CrabTargets>().envs[0] = Some(target);
 
         let body_rot = Quat::from_axis_angle(Vec3::Y, 0.7);
@@ -531,7 +522,6 @@ mod tests {
         want.joints[joint_id.index()].angle = joint_angle(axis, body_rot, joint_rot);
         want.joints[joint_id.index()].rate =
             (joint_vel.angular - body_vel.angular).dot(body_rot * axis);
-        want.body.pos = body_t.translation - origin;
         want.body.rot = body_rot;
         want.body.linvel = body_vel.linear;
         want.body.angvel = body_vel.angular;
@@ -562,7 +552,7 @@ mod tests {
     fn scan_at(rotation: Quat) -> [f32; TERRAIN_SAMPLES] {
         use bevy_rapier3d::prelude::Velocity;
 
-        let mut world = obs_world_on(vec![Vec3::ZERO], slope_x_grid());
+        let mut world = obs_world_on(slope_x_grid());
         world.spawn((
             CrabCarapace,
             CrabEnvId(0),
@@ -621,19 +611,37 @@ mod tests {
         }
     }
 
-    /// rl#242: a spawn-origin miss must be LOUD, never a silent Vec3::ZERO substitute
-    /// feeding absolute coords into the spawn-relative channel.
+    /// rl#311, behavioral half of [`obs_has_no_position_channel`]: translating the whole
+    /// scene (crab + target) anywhere on flat ground changes NO obs slot — there is no
+    /// channel left for world position to leak through.
     #[test]
-    #[should_panic(expected = "spawn wiring bug")]
-    fn missing_spawn_origin_panics_loud() {
-        let mut world = obs_world(vec![]);
-        world.spawn((
-            CrabCarapace,
-            CrabEnvId(0),
-            Transform::default(),
-            Velocity::default(),
-        ));
-        let _ = world.run_system_once(build_observation);
+    fn obs_is_invariant_under_world_translation() {
+        let obs_at = |shift: Vec3| {
+            let target = Vec3::new(4.0, 0.5, -2.0) + shift;
+            let mut world = obs_world();
+            world.resource_mut::<CrabTargets>().envs[0] = Some(target);
+            world.spawn((
+                CrabCarapace,
+                CrabEnvId(0),
+                Transform::from_translation(Vec3::new(11.5, 0.25, -19.0) + shift)
+                    .with_rotation(Quat::from_axis_angle(Vec3::Y, 0.7)),
+                Velocity {
+                    linear: Vec3::new(0.1, -0.2, 0.3),
+                    angular: Vec3::new(-0.4, 0.5, -0.6),
+                },
+            ));
+            world
+                .run_system_once(build_observation)
+                .expect("build observation");
+            world.resource::<CrabObservation>().envs[0]
+        };
+
+        let home = obs_at(Vec3::ZERO);
+        let afar = obs_at(Vec3::new(1000.0, 0.0, -500.0));
+        assert_eq!(
+            home, afar,
+            "a world translation reached the obs — a position channel leaked back in (rl#311)"
+        );
     }
 
     /// rl#242: a joint-parent motion miss must be LOUD, never a silent identity
@@ -641,7 +649,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "rig wiring bug")]
     fn missing_joint_parent_panics_loud() {
-        let mut world = obs_world(vec![Vec3::ZERO]);
+        let mut world = obs_world();
         let orphan_parent = world.spawn_empty().id();
         world.spawn((
             CrabJoint {

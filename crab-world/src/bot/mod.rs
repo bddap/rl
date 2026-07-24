@@ -112,7 +112,7 @@ impl CrabSpawns {
 
     /// Rebuild the spawn grid ON the terrain surface (rl#281): each origin's y is the
     /// ground height at its (x, z), so every consumer — initial spawn, episode respawn,
-    /// rescue, the spawn-relative obs channel — is surface-relative through this one seam.
+    /// rescue — is surface-relative through this one seam.
     fn rebuild(&mut self, n: usize, terrain: &crate::terrain::TerrainGrid) {
         self.0 = (0..n)
             .map(|env| {
@@ -170,8 +170,7 @@ impl CrabSpawns {
 
     /// The rl#240 recenter for a world that must stay glued to its terrain (net/GCR,
     /// rl#281 stage 6): move the ORIGIN to the crab instead of teleporting the crab to
-    /// the origin. The origin becomes the carapace's own ground point, so the
-    /// spawn-relative obs channel snaps back into the spawn distribution while every
+    /// the origin. The origin becomes the carapace's own ground point while every
     /// Transform — the crab's, the crafts', the terrain the player sees — stays
     /// untouched. (The trainer/eval teleport is fine mid-episode where nothing rendered
     /// is watching; under a rendered world it would swap the terrain locale beneath the
@@ -221,8 +220,7 @@ impl CrabSpawns {
     /// env index comes from `spawn_initial_crabs`, which rebuilds this resource and
     /// sizes obs/targets/actions from the same n. A miss is a wiring bug, and
     /// substituting a finite default here silently corrupts everything downstream —
-    /// the spawn-relative obs channel, respawn placement, reward drift (rl#242) — so
-    /// it panics instead.
+    /// respawn placement, reward drift (rl#242) — so it panics instead.
     pub fn origin(&self, env: usize) -> Vec3 {
         *self
             .0
@@ -548,18 +546,19 @@ pub fn rescue_lost_crabs(
     }
 }
 
-/// The rl#240 guard for the spawn-relative body.pos obs channel: training re-draws the
-/// origin every episode so the channel never leaves the `DRIFT_REBASE_M` support, but a
-/// long LIVE chase — a GCR round, the TV demo's endless hunt — walks it arbitrarily
-/// OOD. Past the shared trigger ([`recenter_delta`], the same formula the eval's pace
-/// probe recenters by, rl#280), rebase the env's spawn origin to the carapace's own
-/// ground point ([`CrabSpawns::rebase_origin_to`]): body.pos snaps back to the spawn
-/// distribution and NOTHING physical moves — no Transform, no craft, no netcode
-/// surface. Side benefit: the origin trails her ground point by ≤ the drift band,
-/// which bounds the rescue teleport above. ONE implementation for every live surface
-/// (rl#303: the demo shipped without it and walked a km OOD overnight); consumers
-/// register it `.after(rescue_lost_crabs).before(BotSet::Sense)` so a rescued env sees
-/// ~0 drift and the obs reads a rebased origin the same tick it moves.
+/// The rl#240 origin recenter. Since rl#311 removed the spawn-relative body.pos obs
+/// channel (no obs reads the origin at all), this is float-precision hygiene, not an
+/// OOD guard: a long LIVE chase — a GCR round, the TV demo's endless hunt — walks the
+/// carapace arbitrarily far from its spawn origin, and every origin-relative quantity
+/// (respawn placement, the rescue teleport, reward gauges) degrades as the offset
+/// grows. Past the shared trigger ([`recenter_delta`], the same formula the eval's
+/// pace probe recenters by, rl#280), rebase the env's spawn origin to the carapace's
+/// own ground point ([`CrabSpawns::rebase_origin_to`]): NOTHING physical moves — no
+/// Transform, no craft, no netcode surface. The origin trails her ground point by ≤
+/// the drift band, which bounds the rescue teleport above. ONE implementation for
+/// every live surface (rl#303 — the OOD half of that failure died with the obs
+/// channel, rl#302/rl#311); consumers register it
+/// `.after(rescue_lost_crabs).before(BotSet::Sense)` so a rescued env sees ~0 drift.
 ///
 /// [`recenter_delta`]: crate::training::targets::recenter_delta
 pub fn recenter_drifted_origins(
@@ -683,5 +682,5 @@ mod layout_digest_tests {
         assert_eq!(super::channel_layout_digest(), GOLDEN, "see doc comment");
     }
 
-    const GOLDEN: u64 = 0xba5b_bb62_cc3d_7657;
+    const GOLDEN: u64 = 0xf58b_d657_04a5_e084;
 }

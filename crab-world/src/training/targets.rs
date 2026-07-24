@@ -18,14 +18,14 @@ pub(crate) const TARGET_Y_MAX: f32 = 0.7;
 /// band).
 pub const BAND_MAX_M: f32 = 128.0;
 
-/// The spawn-relative `body.pos` obs-support radius — the recenter/rebase trigger
-/// ([`recenter_delta`]), SPLIT from the target band (rl#292/rl#293): the band is how
-/// far a ball may SPAWN, this is how far the obs channel may drift from the episode
-/// origin before consumers re-gauge, bounded by per-episode traverse (~35 m at the
-/// pinned pace over one horizon), NOT by the band. Kept at the historic 9 m the
-/// deployed brains trained under; re-pin from pace evidence, never by tying it back
-/// to [`BAND_MAX_M`] — at 128 m GCR would run `body.pos` ~4× past anything training
-/// ever saw (the exact OOD class the recenter seam closes).
+/// The recenter/rebase trigger radius ([`recenter_delta`]), SPLIT from the target band
+/// (rl#292/rl#293): the band is how far a ball may SPAWN, this is how far the carapace
+/// may drift from the episode origin before consumers re-gauge. Since rl#311 removed
+/// the spawn-relative obs channel this is float-precision hygiene, not obs support —
+/// no policy input reads the origin; the radius now only bounds how far the origin
+/// trails her ground point (and with it the rescue teleport). The exact value is
+/// uncritical post-rl#311; 9 m is kept because the eval's pace probe measures under
+/// it and a change would move that instrument.
 pub const DRIFT_REBASE_M: f32 = 9.0;
 
 /// Fraction of target draws seeded in the close disc [0, [`BAND_START_MIN`]) —
@@ -130,18 +130,16 @@ pub fn band_lure(carapace_xz: Vec2, planar_to_target: Vec2) -> Vec2 {
 }
 
 /// The rl#240 recenter's trigger and delta: once the carapace's planar drift from its
-/// spawn origin leaves the obs-support radius ([`DRIFT_REBASE_M`] — NOT the target
-/// band, rl#292), this is the exact shift back onto the origin; inside it, `None`. Consumers apply it two ways (rl#281 stage 6): the eval's
-/// `pace_recenter` TELEPORTS the crab by the delta (fixed-locale measurement — see its
-/// doc), while the shared `recenter_drifted_origins` (rl#303) uses only the trigger and
-/// REBASES the origin instead (`CrabSpawns::rebase_origin_to` — a rendered world must
-/// stay glued under her feet). The y component carries the terrain's surface-height difference
-/// across the teleport, so height-above-ground (and with it the spawn-relative
-/// body:pos.y obs channel, which walks with elevation on terrain — rl#283's stage-4
-/// audit item) is invariant; on the flat grids both heights are exactly 0 and the
-/// legacy y=0 delta falls out bit-identical. ONE copy for the same reason as
-/// [`band_lure`]: every consumer must agree on when the spawn-relative body.pos obs
-/// channel is out of distribution.
+/// spawn origin leaves [`DRIFT_REBASE_M`] (NOT the target band, rl#292), this is the
+/// exact shift back onto the origin; inside it, `None`. Consumers apply it two ways
+/// (rl#281 stage 6): the eval's `pace_recenter` TELEPORTS the crab by the delta
+/// (fixed-locale measurement — see its doc), while the shared
+/// `recenter_drifted_origins` (rl#303) uses only the trigger and REBASES the origin
+/// instead (`CrabSpawns::rebase_origin_to` — a rendered world must stay glued under
+/// her feet). The y component carries the terrain's surface-height difference across
+/// the teleport, so height-above-ground is invariant; on the flat grids both heights
+/// are exactly 0 and the legacy y=0 delta falls out bit-identical. ONE copy for the
+/// same reason as [`band_lure`]: every consumer must agree on when to re-gauge.
 pub fn recenter_delta(origin: Vec3, carapace: Vec3, terrain: &TerrainGrid) -> Option<Vec3> {
     let drift = Vec2::new(carapace.x - origin.x, carapace.z - origin.z);
     (drift.length() > DRIFT_REBASE_M).then(|| {
