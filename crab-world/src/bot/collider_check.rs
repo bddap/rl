@@ -8,6 +8,8 @@ use bevy_rapier3d::rapier::parry::query::contact;
 use super::body::{CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
 use super::headless::{headless_app, tick};
 use super::rig::PartId;
+#[cfg(test)]
+use super::rig::parts_adjacent;
 
 const SETTLE_TICKS: u32 = 576;
 
@@ -84,9 +86,32 @@ struct Finding {
     b: String,
     depth: f32,
     active: bool,
+    group_filtered: bool,
     quiet: bool,
     allowed: bool,
     joints_apart: Option<u32>,
+}
+
+/// One geometrically-overlapping crab collider pair at the current pose — THE
+/// raw measurement, scanned once here and judged by both consumers (one
+/// scanner, no parallel checker, rl#312): the rest-pose audit wraps it into
+/// [`Finding`]s, the actuator-load test judges it against [`designed_contact`].
+struct Overlap {
+    a_ent: Entity,
+    b_ent: Entity,
+    a: String,
+    b: String,
+    a_part: Option<PartId>,
+    b_part: Option<PartId>,
+    depth: f32,
+    /// The narrow phase holds an ACTIVE contact for the pair — the solver
+    /// sees and resolves it. Pairs Rapier suppresses (contacts-disabled joint
+    /// anchors, group-filtered nestings) overlap by design and read inactive.
+    active: bool,
+    /// The pair's live collision groups can never activate — BOTH directions
+    /// must name the other's membership (rl#235), so failing either direction
+    /// means the overlap is the filtered nesting the groups encode.
+    group_filtered: bool,
 }
 
 impl Finding {
@@ -216,18 +241,13 @@ fn collect_parts(app: &mut App) -> Vec<Part> {
         .collect()
 }
 
-fn intersecting_pairs(
-    app: &mut App,
-    parts: &[Part],
-    joints_apart: &HashMap<(Entity, Entity), u32>,
-    quiet: &HashMap<Entity, bool>,
-) -> Vec<Finding> {
+fn overlapping_pairs(app: &mut App, parts: &[Part]) -> Vec<Overlap> {
     let mut q = app
         .world_mut()
         .query::<(&RapierContextColliders, &RapierContextSimulation)>();
     let (cols, sim) = q.single(app.world()).expect("one rapier context");
 
-    let mut findings = Vec::new();
+    let mut overlaps = Vec::new();
     for (i, a) in parts.iter().enumerate() {
         let Some(ca) = cols.colliders.get(a.handle) else {
             continue;
@@ -244,28 +264,52 @@ fn intersecting_pairs(
             if depth <= TOUCH_EPS {
                 continue;
             }
-            let active = sim
-                .narrow_phase
-                .contact_pair(a.handle, b.handle)
-                .is_some_and(|p| p.has_any_active_contact());
-            findings.push(Finding {
+            let (ga, gb) = (ca.collision_groups(), cb.collision_groups());
+            overlaps.push(Overlap {
+                a_ent: a.entity,
+                b_ent: b.entity,
                 a: a.name.clone(),
                 b: b.name.clone(),
+                a_part: a.part,
+                b_part: b.part,
                 depth,
-                active,
-                quiet: quiet.get(&a.entity).copied().unwrap_or(false)
-                    && quiet.get(&b.entity).copied().unwrap_or(false),
-                allowed: allowed_rest_contact(a.part, b.part),
-                joints_apart: joints_apart.get(&(a.entity, b.entity)).copied(),
+                active: sim
+                    .narrow_phase
+                    .contact_pair(a.handle, b.handle)
+                    .is_some_and(|p| p.has_any_active_contact()),
+                group_filtered: !(ga.memberships.intersects(gb.filter)
+                    && gb.memberships.intersects(ga.filter)),
             });
         }
     }
-    findings.sort_by(|x, y| {
+    overlaps.sort_by(|x, y| {
         y.depth
             .partial_cmp(&x.depth)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    findings
+    overlaps
+}
+
+fn intersecting_pairs(
+    app: &mut App,
+    parts: &[Part],
+    joints_apart: &HashMap<(Entity, Entity), u32>,
+    quiet: &HashMap<Entity, bool>,
+) -> Vec<Finding> {
+    overlapping_pairs(app, parts)
+        .into_iter()
+        .map(|o| Finding {
+            a: o.a,
+            b: o.b,
+            depth: o.depth,
+            active: o.active,
+            group_filtered: o.group_filtered,
+            quiet: quiet.get(&o.a_ent).copied().unwrap_or(false)
+                && quiet.get(&o.b_ent).copied().unwrap_or(false),
+            allowed: allowed_rest_contact(o.a_part, o.b_part),
+            joints_apart: joints_apart.get(&(o.a_ent, o.b_ent)).copied(),
+        })
+        .collect()
 }
 
 fn report(n_colliders: usize, findings: &[Finding]) -> super::AuditVerdict {
@@ -323,11 +367,16 @@ fn report(n_colliders: usize, findings: &[Finding]) -> super::AuditVerdict {
         );
         for f in &expected {
             println!(
-                "  {:<26} <-> {:<26} {:>8.2} mm  ({})",
+                "  {:<26} <-> {:<26} {:>8.2} mm  ({}{})",
                 f.a,
                 f.b,
                 f.depth * 1000.0,
-                f.adjacency()
+                f.adjacency(),
+                if f.group_filtered {
+                    ", group-filtered"
+                } else {
+                    ""
+                }
             );
         }
     }
@@ -347,6 +396,7 @@ mod tests {
             b: "B".into(),
             depth,
             active,
+            group_filtered: false,
             quiet,
             allowed,
             joints_apart: Some(2),
@@ -442,5 +492,263 @@ mod tests {
         assert_eq!(with_dist(Some(1)).adjacency(), "jointed");
         assert_eq!(with_dist(Some(3)).adjacency(), "3 joints apart");
         assert_eq!(with_dist(None).adjacency(), "separate limbs");
+    }
+}
+
+/// The rl#312 designed-contact allowlist — DERIVED three ways, never a
+/// hand-copied pair list: the live collision groups (a pair they filter can
+/// never activate; its overlap is the nesting the groups encode, e.g. the
+/// coxae tucked under the shell), the rig's joint adjacency
+/// ([`parts_adjacent`], derived from the joint specs — the jointed pairs
+/// whose multibody joints carry `contacts_enabled(false)`), and the
+/// structural rest contacts [`allowed_rest_contact`] already encodes (the
+/// designed shell-on-thigh / folded-claw load paths, rl#109/rl#234).
+#[cfg(test)]
+fn designed_contact(o: &Overlap) -> bool {
+    let joint_adjacent = match (o.a_part, o.b_part) {
+        (Some(a), Some(b)) => parts_adjacent(a, b),
+        _ => false,
+    };
+    o.group_filtered || joint_adjacent || allowed_rest_contact(o.a_part, o.b_part)
+}
+
+#[cfg(test)]
+mod load_tests {
+    //! rl#312: Sally's body primitives never interpenetrate outside the
+    //! designed-contact allowlist — (a) at rest and (b) while every actuator
+    //! is driven through aggressive deterministic sequences (max torque both
+    //! directions, alternating, seeded-random). The rl#303 buried-carapace
+    //! trap was legs pinning the shell: self-collision integrity is
+    //! load-bearing, so a violation names the offending pair and tick.
+
+    use super::*;
+
+    use std::collections::BTreeMap;
+
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    use crate::bot::actuator::{ACTION_SIZE, CrabActions};
+
+    /// Sim time each drive phase runs — at 64 Hz, 240 ticks = 3.75 s, long
+    /// enough for a full-torque convulsion to fold limbs across the body.
+    const PHASE_TICKS: u32 = 240;
+
+    /// Ticks one alternating/random command holds before the flip/re-draw —
+    /// 8 ticks = 125 ms: fast enough to slam, slow enough to swing fully.
+    const COMMAND_HOLD_TICKS: u32 = 8;
+
+    /// Deterministic seed for the random phase — the test must reproduce.
+    const RANDOM_SEED: u64 = 0x5A11_0312;
+
+    struct Violation {
+        phase: &'static str,
+        tick: u32,
+        a: String,
+        b: String,
+        depth: f32,
+        /// The solver held an active contact for the pair while it
+        /// interpenetrated — fought, not a pass-through the narrow phase
+        /// never saw.
+        active: bool,
+    }
+
+    /// A disallowed pair interpenetrating deeper than [`FIGHT_MIN_DEPTH`] —
+    /// the same floor the audit uses to separate a real fight from a
+    /// sub-mm solver-softness graze, here for pairs with NO designed-contact
+    /// exemption at all.
+    fn scan(
+        app: &mut App,
+        parts: &[Part],
+        phase: &'static str,
+        tick: u32,
+        violations: &mut Vec<Violation>,
+    ) {
+        for o in overlapping_pairs(app, parts) {
+            if o.depth > FIGHT_MIN_DEPTH && !designed_contact(&o) {
+                violations.push(Violation {
+                    phase,
+                    tick,
+                    a: o.a,
+                    b: o.b,
+                    depth: o.depth,
+                    active: o.active,
+                });
+            }
+        }
+    }
+
+    fn run_phase(
+        app: &mut App,
+        parts: &mut Vec<Part>,
+        phase: &'static str,
+        first_tick: u32,
+        command: &mut dyn FnMut(u32) -> [f32; ACTION_SIZE],
+        violations: &mut Vec<Violation>,
+    ) {
+        for t in 0..PHASE_TICKS {
+            let row = command(t);
+            assert!(
+                app.world_mut()
+                    .resource_mut::<CrabActions>()
+                    .set_row(0, row)
+            );
+            tick(app, 1);
+            if parts
+                .iter()
+                .any(|p| app.world().get::<CrabBodyPart>(p.entity).is_none())
+            {
+                // A rescue (rl#283/#303) respawned her mid-phase: the old
+                // entities are dead, re-collect so the scan keeps measuring
+                // the live body rather than skipping stale handles.
+                *parts = collect_parts(app);
+            }
+            scan(app, parts, phase, first_tick + t, violations);
+        }
+    }
+
+    fn assert_no_violations(violations: &[Violation]) {
+        // One line per offending pair: worst depth, first sighting (phase +
+        // absolute tick), how many ticks it was seen and whether the solver
+        // ever fought it.
+        struct Worst {
+            phase: &'static str,
+            tick: u32,
+            depth: f32,
+            ticks: u32,
+            fought: bool,
+        }
+        let mut worst: BTreeMap<(String, String), Worst> = BTreeMap::new();
+        for v in violations {
+            worst
+                .entry((v.a.clone(), v.b.clone()))
+                .and_modify(|w| {
+                    w.depth = w.depth.max(v.depth);
+                    w.ticks += 1;
+                    w.fought |= v.active;
+                })
+                .or_insert(Worst {
+                    phase: v.phase,
+                    tick: v.tick,
+                    depth: v.depth,
+                    ticks: 1,
+                    fought: v.active,
+                });
+        }
+        assert!(
+            violations.is_empty(),
+            "rl#312: {} disallowed self-interpenetrating pair(s) under actuator load \
+             (pair, worst depth, first sighting, ticks seen):\n{}",
+            worst.len(),
+            worst
+                .iter()
+                .map(|((a, b), w)| format!(
+                    "  {a:<26} <-> {b:<26} {:>8.2} mm  first: {} tick {}  ({} ticks{})",
+                    w.depth * 1000.0,
+                    w.phase,
+                    w.tick,
+                    w.ticks,
+                    if w.fought { ", FOUGHT" } else { "" },
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// rl#312 (a): at rest, no disallowed pair interpenetrates. This half is
+    /// CLEAN on the current body and gates every build.
+    #[test]
+    fn body_primitives_do_not_interpenetrate_at_rest() {
+        let mut app = headless_app();
+        tick(&mut app, SETTLE_TICKS);
+        let parts = collect_parts(&mut app);
+        assert!(
+            parts.len() >= 10,
+            "only {} crab colliders after settle — crab failed to spawn (no model?)",
+            parts.len()
+        );
+        let mut violations = Vec::new();
+        scan(&mut app, &parts, "rest", 0, &mut violations);
+        assert_no_violations(&violations);
+    }
+
+    /// rl#312 (b): the same invariant while every actuator is driven through
+    /// aggressive deterministic sequences (max torque both directions,
+    /// alternating, seeded-random). Ignored on rl#315: this currently FINDS
+    /// 45 fought limb-crossing pairs (the claws scissor through each other at
+    /// ~120 mm under sustained max drive) — run with `--ignored` to reproduce
+    /// that table; un-ignore when the contact physics holds.
+    #[test]
+    #[ignore = "rl#315: limbs interpenetrate under sustained aggressive drive (45 fought pairs); reproduces the finding table"]
+    fn body_primitives_never_interpenetrate_under_actuator_load() {
+        let mut app = headless_app();
+        tick(&mut app, SETTLE_TICKS);
+        let mut parts = collect_parts(&mut app);
+        assert!(
+            parts.len() >= 10,
+            "only {} crab colliders after settle — crab failed to spawn (no model?)",
+            parts.len()
+        );
+
+        let mut violations = Vec::new();
+
+        // Pre-drive baseline: the rest invariant must hold before any drive,
+        // or a drive-phase violation is misattributed.
+        scan(&mut app, &parts, "rest", 0, &mut violations);
+
+        // Full-torque holds in both directions, then a per-channel square
+        // wave, then seeded-random rows re-drawn every hold window.
+        let mut elapsed = 0u32;
+        run_phase(
+            &mut app,
+            &mut parts,
+            "max+",
+            elapsed,
+            &mut |_| [1.0; ACTION_SIZE],
+            &mut violations,
+        );
+        elapsed += PHASE_TICKS;
+        run_phase(
+            &mut app,
+            &mut parts,
+            "max-",
+            elapsed,
+            &mut |_| [-1.0; ACTION_SIZE],
+            &mut violations,
+        );
+        elapsed += PHASE_TICKS;
+        run_phase(
+            &mut app,
+            &mut parts,
+            "alternating",
+            elapsed,
+            &mut |t| {
+                std::array::from_fn(|i| {
+                    if (t / COMMAND_HOLD_TICKS) as usize % 2 == i % 2 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                })
+            },
+            &mut violations,
+        );
+        elapsed += PHASE_TICKS;
+        let mut rng = StdRng::seed_from_u64(RANDOM_SEED);
+        let mut row = [0.0; ACTION_SIZE];
+        run_phase(
+            &mut app,
+            &mut parts,
+            "random",
+            elapsed,
+            &mut |t| {
+                if t % COMMAND_HOLD_TICKS == 0 {
+                    row = std::array::from_fn(|_| rng.gen_range(-1.0..=1.0));
+                }
+                row
+            },
+            &mut violations,
+        );
+
+        assert_no_violations(&violations);
     }
 }
