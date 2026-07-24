@@ -1,5 +1,7 @@
 use std::env;
 
+pub mod frametime;
+
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::Resource;
 use tracing_subscriber::layer::SubscriberExt;
@@ -131,6 +133,7 @@ fn build_providers(service_name: &str, endpoint: &str) -> anyhow::Result<Provide
     let resource = Resource::builder()
         .with_service_name(service)
         .with_attribute(KeyValue::new("host.name", host_name()))
+        .with_attribute(KeyValue::new("service.version", build_digest()))
         .with_attributes(env_resource_attributes())
         .build();
 
@@ -169,6 +172,16 @@ fn env_resource_attributes() -> Vec<KeyValue> {
             (!k.is_empty() && !v.is_empty()).then(|| KeyValue::new(k.to_string(), v.to_string()))
         })
         .collect()
+}
+
+/// The build the telemetry came from (rl#309). Launchers export `RL_BUILD_DIGEST`
+/// (the release's `rl_commit` — deck kits read manifest.json, the TV deploy stages a
+/// digest file); an ad-hoc run without one reports `dev`.
+fn build_digest() -> String {
+    env::var("RL_BUILD_DIGEST")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "dev".to_string())
 }
 
 fn host_name() -> String {

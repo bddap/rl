@@ -88,7 +88,8 @@ pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
                 primary_window: Some(window),
                 ..default()
             })
-            .add(UiScalePlugin),
+            .add(UiScalePlugin)
+            .add(crate::frame_telemetry::FrameTelemetryPlugin),
         None => plugins
             .set(WindowPlugin {
                 primary_window: None,

@@ -9,7 +9,7 @@ name = "crab_world"
 path = "src/lib.rs"
 
 [features]
-render = ["bevy/default", "bevy_rapier3d/default"]
+render = ["bevy/default", "bevy_rapier3d/default", "dep:otel"]
 
 # TerrainGrid::flat for OTHER crates' tests (plain #[cfg(test)] cannot cross crates);
 # production builds never enable it, so a flat world stays impossible to construct.
@@ -42,6 +42,8 @@ clap.workspace = true
 bincode.workspace = true
 libc.workspace = true
 tracing.workspace = true
+# Frame-time telemetry (frame_telemetry.rs) — rendered surfaces only.
+otel = { path = "../otel", optional = true }
 
 [dev-dependencies]
 test-watchdog = { path = "../test-watchdog" }

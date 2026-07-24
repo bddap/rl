@@ -3386,6 +3386,7 @@ dependencies = [
  "gltf",
  "libc",
  "naga 26.0.0",
+ "otel",
  "rand 0.8.5",
  "rapier3d",
  "serde",
@@ -8431,6 +8432,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossbeam-queue",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
