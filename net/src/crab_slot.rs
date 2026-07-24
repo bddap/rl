@@ -166,9 +166,8 @@ impl Plugin for NnCrabPlugin {
         app.add_systems(
             FixedUpdate,
             (
-                // After rescue: a rescued env respawns at its origin, so the guard sees
-                // ~0 drift there instead of racing the respawn. Before Sense: the obs
-                // reads a rebased origin the same tick it moves.
+                // After rescue: a rescued env respawns at its origin, so the recenter
+                // sees ~0 drift there instead of racing the respawn.
                 recenter_drifted_origins
                     .after(crab_world::bot::rescue_lost_crabs)
                     .before(BotSet::Sense),
@@ -870,8 +869,9 @@ mod one_world_tests {
     }
 
     /// rl#240, one-frame form: a past-the-band walk rebases the env's ORIGIN to her
-    /// ground point — body.pos obs snaps back into the spawn distribution and NOTHING
-    /// physical moves (no teleport; the crab stays where it walked).
+    /// ground point and NOTHING physical moves (no teleport; the crab stays where it
+    /// walked). Sim-state assertions only — since rl#311 the obs carries no position
+    /// channel for the rebase to show up in.
     #[test]
     fn recenter_rebases_origin_and_teleports_nothing() {
         let spawn = Pos::from_meters(0.0, 0.0);
@@ -890,15 +890,6 @@ mod one_world_tests {
         assert!(
             (Vec2::new(origin.x, origin.z) - carapace_xz(&mut app)).length() < 1.0,
             "the origin must have rebased to her ground point, got {origin:?}"
-        );
-        let obs = app
-            .world()
-            .resource::<crab_world::bot::sensor::CrabObservation>();
-        let body_pos = obs.env(0).expect("env 0 sized").body_pos();
-        let pos_xz = Vec2::new(body_pos.x, body_pos.z);
-        assert!(
-            pos_xz.length() < 1.0,
-            "body.pos obs channel must be back in distribution, got {pos_xz:?}"
         );
     }
 
@@ -1410,12 +1401,12 @@ mod tests {
 
     /// rl#298 stage 3, obs half — stage-5 (one-frame) form: the row the policy
     /// consumes IS the one world's same-tick state. A snapshot captured between Sense
-    /// and Think pins the body channel against the live carapace and the target
-    /// channel against the posed lure — and the lure re-derives from the SIM's own
-    /// prey DIRECTLY (world = sim frame; the bridge correspondence this test used to
-    /// thread through is deleted). The crab is kept in motion (the rl#224 flail) so
-    /// the body moves between passes: a row stale by even one step exceeds the body
-    /// tolerance, and a defaulted or wrong-frame row misses by meters.
+    /// and Think pins the target channel against the posed lure in the live body frame
+    /// — and the lure re-derives from the SIM's own prey DIRECTLY (world = sim frame;
+    /// the bridge correspondence this test used to thread through is deleted). The
+    /// crab is kept in motion (the rl#224 flail) so the body moves between passes:
+    /// `target_local` folds in the live carapace pose, so a row stale by even one step
+    /// exceeds its tolerance, and a defaulted or wrong-frame row misses by meters.
     #[test]
     fn obs_seam_reads_the_one_worlds_state_with_the_sims_prey_as_target() {
         #[derive(Resource, Default)]
@@ -1423,24 +1414,18 @@ mod tests {
             carapace: Option<(Vec3, Quat)>,
             prev_carapace: Option<Vec3>,
             target: Option<Vec3>,
-            origin: Vec3,
         }
         fn snap_sense(
             mut snap: ResMut<SenseSnap>,
-            spawns: Res<CrabSpawns>,
             targets: Res<CrabTargets>,
             carapace_q: Query<&Transform, With<CrabCarapace>>,
         ) {
-            if spawns.is_empty() {
-                return; // pre-spawn pass — origins not laid yet
-            }
             let Some(t) = carapace_q.iter().next() else {
                 return;
             };
             snap.prev_carapace = snap.carapace.map(|(p, _)| p);
             snap.carapace = Some((t.translation, t.rotation));
             snap.target = targets.get(0);
-            snap.origin = spawns.origin(0);
         }
         #[derive(Resource, Default)]
         struct Wave(f32);
@@ -1469,14 +1454,14 @@ mod tests {
             server_tick(&mut app, &mut server, t);
         }
 
-        let (pos, rot, prev, target, origin) = {
+        let (pos, rot, prev, target) = {
             let snap = app.world().resource::<SenseSnap>();
             let (pos, rot) = snap.carapace.expect("carapace snapshotted post-settle");
             let target = snap
                 .target
                 .expect("the sim's living player must have posed a hunt target");
             let prev = snap.prev_carapace.expect("two sensed passes ran");
-            (pos, rot, prev, target, snap.origin)
+            (pos, rot, prev, target)
         };
         // The flailing body really moves between passes — what gives the body pin
         // below its anti-staleness teeth (inter-pass motion ≫ its tolerance).
@@ -1488,14 +1473,6 @@ mod tests {
         );
         let obs = app.world().resource::<CrabObservation>();
         let view = obs.env(0).expect("env 0 sized");
-
-        let body = view.body_pos();
-        let expected_body = pos - origin;
-        assert!(
-            (body - expected_body).length() < 1e-5,
-            "obs body.pos {body:?} must be the live carapace spawn-relative \
-             ({expected_body:?})"
-        );
 
         let target_local = view.target_local();
         let expected_local = rot.inverse() * (target - pos);

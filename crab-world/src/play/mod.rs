@@ -107,12 +107,12 @@ impl Plugin for DemoPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    // Same ordering contract as GCR's registration (rl#303: the demo
-                    // shipped without the rl#240 recenter and its endless hunt walked
-                    // body.pos km-scale OOD): after rescue so a respawned env sees ~0
-                    // drift, before Sense so the obs reads the rebased origin the tick
-                    // it moves. Also what keeps the target ball re-seeding near HER
-                    // locale instead of the boot spawn.
+                    // Same ordering contract as GCR's registration (rl#303; since
+                    // rl#311 the recenter is float-precision hygiene, not an obs
+                    // guard): after rescue so a respawned env sees ~0 drift, before
+                    // Sense to match the shared registration. Also what keeps the
+                    // target ball re-seeding near HER locale instead of the boot
+                    // spawn.
                     crate::bot::recenter_drifted_origins
                         .after(crate::bot::rescue_lost_crabs)
                         .before(BotSet::Sense),
