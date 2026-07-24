@@ -212,6 +212,16 @@ impl BearingReport {
     pub fn j_per_m(&self) -> Option<f32> {
         (self.progress_m >= WORK_PER_M_MIN_PROGRESS_M).then(|| self.work_j / self.progress_m)
     }
+
+    /// SIGNED net chase progress (rl#310): initial minus FINAL distance, negative when
+    /// the episode ends farther from the ball than it started. Diagnostic only —
+    /// `progress_m` (best-approach over a running-min, zero-floored) stays the
+    /// headline and the keep-best bar, but it is ≥ 0 by construction, so a flat 0.0
+    /// can't distinguish a parked crab from one actively sliding away; this sign can.
+    /// Derived, not stored: one source of truth with the two distances it reports on.
+    pub fn net_progress_m(&self) -> f32 {
+        self.initial_distance_m - self.final_distance_m
+    }
 }
 
 /// One full compass of bearing episodes at one target distance — the distance travels
@@ -594,33 +604,42 @@ fn run_bearing(
         updates += 1;
     }
 
-    let state = app
-        .world()
+    app.world()
         .get_resource::<EvalState>()
-        .expect("eval state present");
-    let progress_m = (state.initial_dist - state.closest_dist).max(0.0);
-    let mean_torque_per_tick = if state.torque_ticks > 0 {
-        (state.torque_sum / state.torque_ticks as f64) as f32
-    } else {
-        0.0
-    };
-    // One binding feeds both fields, so `reached ⇔ tip_touch(closest_tip_distance_m)`
-    // holds structurally (`tip_touch(INFINITY)` = false covers the no-tip-seen case).
-    let closest_tip = state.closest_tip_dist.unwrap_or(f32::INFINITY);
-    BearingReport {
-        bearing_rad,
-        progress_m,
-        total_torque: state.torque_sum as f32,
-        mean_torque_per_tick,
-        saturation: mean_torque_per_tick / total_drive_torque_ceiling(),
-        work_j: state.work_sum as f32,
-        initial_distance_m: state.initial_dist,
-        closest_distance_m: state.closest_dist,
-        final_distance_m: state.last_dist,
-        closest_tip_distance_m: closest_tip,
-        reached: tip_touch(closest_tip),
-        active_ticks: state.torque_ticks,
-        sustained_pace_m_per_s: state.best_pace_m_per_s,
+        .expect("eval state present")
+        .bearing_report(bearing_rad)
+}
+
+impl EvalState {
+    /// Fold one finished episode into its report — pure, so the rl#310 sign pin can
+    /// exercise the same construction [`run_bearing`] ships: `progress_m` zero-floored
+    /// off the running-min `closest_dist`, [`BearingReport::net_progress_m`] signed
+    /// off `last_dist`.
+    fn bearing_report(&self, bearing_rad: f32) -> BearingReport {
+        let progress_m = (self.initial_dist - self.closest_dist).max(0.0);
+        let mean_torque_per_tick = if self.torque_ticks > 0 {
+            (self.torque_sum / self.torque_ticks as f64) as f32
+        } else {
+            0.0
+        };
+        // One binding feeds both fields, so `reached ⇔ tip_touch(closest_tip_distance_m)`
+        // holds structurally (`tip_touch(INFINITY)` = false covers the no-tip-seen case).
+        let closest_tip = self.closest_tip_dist.unwrap_or(f32::INFINITY);
+        BearingReport {
+            bearing_rad,
+            progress_m,
+            total_torque: self.torque_sum as f32,
+            mean_torque_per_tick,
+            saturation: mean_torque_per_tick / total_drive_torque_ceiling(),
+            work_j: self.work_sum as f32,
+            initial_distance_m: self.initial_dist,
+            closest_distance_m: self.closest_dist,
+            final_distance_m: self.last_dist,
+            closest_tip_distance_m: closest_tip,
+            reached: tip_touch(closest_tip),
+            active_ticks: self.torque_ticks,
+            sustained_pace_m_per_s: self.best_pace_m_per_s,
+        }
     }
 }
 
@@ -959,6 +978,23 @@ mod tests {
         let parked = paced_report(true, DEFAULT_TARGET_DISTANCE_M, 0.0);
         assert_eq!(parked.far[0].mean_j_per_m(), None);
         assert_eq!(parked.far[0].mean_saturation(), 0.0);
+    }
+
+    /// rl#310 pin: retreat is visible in the SIGNED net while the zero-floored
+    /// best-approach headline stays 0 — through the same construction `run_bearing`
+    /// ships, so a flat `progress_m` decomposes into parked (net ≈ 0) vs retreating
+    /// (net < 0).
+    #[test]
+    fn retreat_reports_negative_net_while_progress_stays_zero() {
+        let state = EvalState {
+            initial_dist: 5.0,
+            closest_dist: 5.0, // never got closer than the start…
+            last_dist: 7.0,    // …and ended 2 m farther out
+            ..Default::default()
+        };
+        let b = state.bearing_report(0.0);
+        assert_eq!(b.progress_m, 0.0);
+        assert_eq!(b.net_progress_m(), -2.0);
     }
 
     #[test]

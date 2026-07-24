@@ -10,17 +10,20 @@
 //! prefix set is CLOSED — a new metric is a new KEY on the right record, never a new
 //! prefix:
 //!
-//! - `EVAL_RESULT_BEARING deg= progress_m= closest_m= tip_m= final_m= total_torque=
-//!   saturation= work_j= reached= ticks= locale=` — one per far-compass bearing
-//!   (rl#239) per locale (rl#293: the far sweep repeats over `EVAL_LOCALES` terrain
-//!   locales), plus ` j_per_m=` when that bearing cleared the rl#279 progress floor.
+//! - `EVAL_RESULT_BEARING deg= progress_m= net_progress_m= closest_m= tip_m= final_m=
+//!   total_torque= saturation= work_j= reached= ticks= locale=` — one per far-compass
+//!   bearing (rl#239) per locale (rl#293: the far sweep repeats over `EVAL_LOCALES`
+//!   terrain locales), plus ` j_per_m=` when that bearing cleared the rl#279 progress
+//!   floor. `net_progress_m` (rl#310) is the SIGNED initial−final diagnostic —
+//!   negative when the episode ended farther than it started, which the zero-floored
+//!   `progress_m` structurally hides.
 //! - `EVAL_RESULT_CLOSE_BEARING …` — the same keys, one per close-probe bearing
 //!   (rl#252); diagnostic, no consumer parses them today.
 //! - `EVAL_RESULT_CLOSE progress_m= closest_m= tip_m= target_m= reached_count=
 //!   bearings= worst_deg=` — the close probe's worst-bearing summary.
-//! - `EVAL_RESULT progress_m= total_torque= mean_torque_per_tick= initial_m=
-//!   closest_m= tip_m= final_m= target_m= reached= ticks= policy_loaded= bearings=
-//!   worst_deg= saturation_mean= locales= locale_worst_m=` — the HEADLINE, last: its
+//! - `EVAL_RESULT progress_m= net_progress_m= total_torque= mean_torque_per_tick=
+//!   initial_m= closest_m= tip_m= final_m= target_m= reached= ticks= policy_loaded=
+//!   bearings= worst_deg= saturation_mean= locales= locale_worst_m=` — the HEADLINE, last: its
 //!   numbers describe the MEDIAN locale's WORST bearing (rl#293 — `progress_m` is
 //!   the median-over-locales of min-over-bearings); `locale_worst_m` lists every
 //!   locale's min-over-bearings progress comma-joined in locale order;
@@ -83,11 +86,13 @@ impl EvalReport {
         let worst = median.worst();
         write!(
             out,
-            "EVAL_RESULT progress_m={:.4} total_torque={:.2} mean_torque_per_tick={:.4} \
+            "EVAL_RESULT progress_m={:.4} net_progress_m={:.4} total_torque={:.2} \
+             mean_torque_per_tick={:.4} \
              initial_m={:.4} closest_m={:.4} tip_m={:.4} final_m={:.4} target_m={:.2} \
              reached={} ticks={} policy_loaded={} bearings={} worst_deg={:.0} \
              saturation_mean={:.4} locales={} locale_worst_m={}",
             worst.progress_m,
+            worst.net_progress_m(),
             worst.total_torque,
             worst.mean_torque_per_tick,
             worst.initial_distance_m,
@@ -138,10 +143,12 @@ fn bearing_lines(out: &mut String, prefix: &str, sweep: &CompassSweep, locale: O
     for b in &sweep.per_bearing {
         write!(
             out,
-            "{prefix} deg={:.0} progress_m={:.4} closest_m={:.4} tip_m={:.4} final_m={:.4} \
+            "{prefix} deg={:.0} progress_m={:.4} net_progress_m={:.4} closest_m={:.4} \
+             tip_m={:.4} final_m={:.4} \
              total_torque={:.2} saturation={:.4} work_j={:.2} reached={} ticks={}",
             b.bearing_rad.to_degrees(),
             b.progress_m,
+            b.net_progress_m(),
             b.closest_distance_m,
             b.closest_tip_distance_m,
             b.final_distance_m,
@@ -208,7 +215,8 @@ mod tests {
 
         assert_eq!(
             lines[0],
-            "EVAL_RESULT_BEARING deg=0 progress_m=1.0000 closest_m=8.0000 tip_m=inf \
+            "EVAL_RESULT_BEARING deg=0 progress_m=1.0000 net_progress_m=0.5000 \
+             closest_m=8.0000 tip_m=inf \
              final_m=8.5000 total_torque=10.00 saturation=0.2500 work_j=2.00 reached=false \
              ticks=200 locale=0 j_per_m=2.00"
         );
@@ -223,7 +231,8 @@ mod tests {
         );
         assert_eq!(
             lines[(EVAL_LOCALES + 1) * EVAL_BEARINGS + 1],
-            "EVAL_RESULT progress_m=1.0000 total_torque=10.00 mean_torque_per_tick=0.5000 \
+            "EVAL_RESULT progress_m=1.0000 net_progress_m=0.5000 total_torque=10.00 \
+             mean_torque_per_tick=0.5000 \
              initial_m=9.0000 closest_m=8.0000 tip_m=inf final_m=8.5000 target_m=24.00 \
              reached=false ticks=200 policy_loaded=true bearings=8 worst_deg=0 \
              saturation_mean=0.2500 locales=3 locale_worst_m=1.0000,1.0000,1.0000 \
@@ -248,6 +257,23 @@ mod tests {
         assert!(headline.contains(" saturation_mean=0.2500"));
         assert!(!wire.contains(" j_per_m="));
         assert!(!headline.contains(" j_per_m_mean="));
+    }
+
+    /// rl#310 on the wire: a retreating bearing prints a SIGNED negative
+    /// `net_progress_m=` token while the zero-floored `progress_m=` stays 0 — the
+    /// decomposition of a flat headline into parked vs retreating that by-name
+    /// consumers (rl-eval-monitor) record.
+    #[test]
+    fn net_progress_key_is_signed() {
+        let mut r = report(true, 0.0);
+        for b in r.far.iter_mut().flat_map(|s| s.per_bearing.iter_mut()) {
+            b.progress_m = 0.0;
+            b.final_distance_m = b.initial_distance_m + 2.0;
+        }
+        let wire = r.wire_report();
+        let headline = wire.lines().last().unwrap();
+        assert!(headline.contains(" progress_m=0.0000"));
+        assert!(headline.contains(" net_progress_m=-2.0000"));
     }
 
     /// The charge keys ride the headline only when the guard can measure (rl#266):
