@@ -42,9 +42,11 @@ const SHIP_AIM_TORQUE: f32 = 0.015;
 // terminal rates stay where they were (τ·rate ≈ the old feel, plus carry).
 // Linear drag is 3× the old float (coast from top speed halves in ~1 s) with thrust
 // raised to hold top speed ≈ 2.5 m/s, so "a bunch" reads as heavy stopping, not slow.
+// The vertical thruster is stronger than the strafe pair (rl#313): gravity_scale 0.12
+// weighs ~0.31 N, and 0.75 keeps the net climb force ≈ the rl#307 0.42 N.
 const SHIP: VehicleParams = VehicleParams {
     lever_thrust: 0.0,
-    direct_thrust: Vec3::new(0.55, 0.55, 0.75),
+    direct_thrust: Vec3::new(0.55, 0.75, 0.75),
     lift: 0.0,
     grip: 0.0,
     drag_lin: 0.15,
@@ -106,10 +108,15 @@ impl VehicleKind {
     fn gravity_scale(self) -> f32 {
         match self {
             VehicleKind::Plane => 1.0,
-            // "A bit" of gravity (rl#307): idle sink settles at ~0.7 m/s against the
-            // heavy drag, and hovering costs ~23% of the vertical thruster — present,
-            // never a brick.
-            VehicleKind::Ship => 0.05,
+            // "A bit" of gravity that FEELS like gravity (rl#313): the sink must be a
+            // perceptible acceleration, and against this drag the terminal sink speed
+            // is the only free outcome — at rl#307's 0.05 the whole ramp lived below
+            // ~0.7 m/s, too slow to see, so the descent read as a constant-velocity
+            // write. 0.12 puts release→terminal ≈ 2 s with the buildup visible
+            // (~0.5 m/s at 0.5 s → ~1.3 m/s terminal), still far gentler than the
+            // plane's free fall. Hovering costs ~41% of the vertical thruster, which
+            // is raised to keep the net climb authority at the rl#307 feel.
+            VehicleKind::Ship => 0.12,
         }
     }
 }
@@ -662,9 +669,9 @@ mod tests {
     /// and net's carapace-delta test pins that a carapace push folds 1:1 into her
     /// game pose. Flat fixture grid — a zero-action ragdoll never settles on the GCR
     /// origin slope, and aiming a ballistic ram needs a stationary target. No
-    /// `VehiclePlugin`, deliberately — a near-zero-g Ship (gravity scale 0.05,
-    /// rl#307) with no flight forces is ballistic over this sub-second ram, so the
-    /// only thing that can bleed its speed is her body.
+    /// `VehiclePlugin`, deliberately — a low-g Ship (gravity scale 0.12, rl#313)
+    /// with no flight forces is ballistic over this sub-second ram, so the only
+    /// thing that can bleed its speed is her body.
     #[test]
     fn ramming_craft_and_crab_exchange_momentum_both_ways() {
         use crate::bot::body::CrabCarapace;
@@ -1322,8 +1329,9 @@ mod tests {
         );
     }
 
-    /// rl#307: the ship is "a bit" affected by gravity — an idle ship sinks, but far
-    /// more gently than the plane falls (heavy drag caps the sink rate too).
+    /// rl#307/rl#313: the ship is "a bit" affected by gravity — an idle ship sinks
+    /// perceptibly, but far more gently than the plane falls (heavy drag caps the
+    /// sink rate too).
     #[test]
     fn ship_sinks_gently_but_plane_falls() {
         let fall = |kind: VehicleKind| {
@@ -1339,10 +1347,10 @@ mod tests {
             body(&app, e).1.linear.y
         };
         let ship = fall(VehicleKind::Ship);
-        assert!(ship < -0.02, "ship must feel gravity a bit, got Δvy={ship}");
+        assert!(ship < -0.3, "ship must feel gravity, got Δvy={ship}");
         assert!(
-            ship > -0.5,
-            "but only a bit — a gentle sink, not a brick, got Δvy={ship}"
+            ship > -0.8,
+            "but gently — drag caps the sink well below the plane's fall, got Δvy={ship}"
         );
         assert!(
             fall(VehicleKind::Plane) < -1.0,
@@ -1416,6 +1424,44 @@ mod tests {
         assert!(
             braked > coast,
             "match-velocity must brake harder than coasting drag: Δ coast={coast} braked={braked}"
+        );
+    }
+
+    /// rl#313 (owner): the idle sink must FEEL like gravity — an integrated force
+    /// with a perceptible buildup from release to terminal, never a constant-velocity
+    /// step. Pins the kinematic trace's SHAPE: still slow at a quarter second, most
+    /// of the ramp swept by 1 s, settled near terminal by 2.5 s. A velocity write
+    /// (or a terminal masked by near-instant drag) fails the first bound; losing the
+    /// ramp entirely (gravity tuned back to imperceptible) fails the terminal band.
+    #[test]
+    fn ship_idle_sink_ramps_like_gravity() {
+        let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::ZERO);
+        app.world_mut()
+            .entity_mut(e)
+            .get_mut::<Vehicle>()
+            .unwrap()
+            .throttle = 0.0;
+        let mut sink_at = std::collections::BTreeMap::new();
+        for i in 1..=160u32 {
+            app.update();
+            if [16, 64, 160].contains(&i) {
+                sink_at.insert(i, -body(&app, e).1.linear.y);
+            }
+        }
+        let (quarter_s, one_s, terminal) = (sink_at[&16], sink_at[&64], sink_at[&160]);
+        assert!(
+            (1.0..1.6).contains(&terminal),
+            "terminal sink must be fast enough to see, gentle enough to fly: {terminal} m/s"
+        );
+        assert!(
+            quarter_s < 0.35 * terminal,
+            "a quarter second in, the sink is still building — a step to terminal \
+             is a velocity write, not gravity: {quarter_s} of {terminal} m/s"
+        );
+        assert!(
+            (0.5..0.8).contains(&(one_s / terminal)),
+            "most of the ramp sweeps through the first second — visibly \
+             accelerating, not yet settled: {one_s} of {terminal} m/s"
         );
     }
 }
