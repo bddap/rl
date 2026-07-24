@@ -359,6 +359,12 @@ pub fn run_learner(
     // makes a learner restart the expected case, and without persistence each
     // restart would re-grant the full `--ticks` budget and over-simulate.
     let mut total_ticks = read_tick_watermark(&checkpoint_dir);
+    // Write it straight back so the watermark exists from boot: each iteration saves
+    // the checkpoint set at its START but bumps the odometer only at its END, so a
+    // fresh run's first (long, GPU-warmup) iteration otherwise exposes a set with no
+    // ticks.txt — which readers requiring the full member list (rl-release-build)
+    // rightly refuse. Present from here, every staged generation hardlink-carries it.
+    write_tick_watermark(&checkpoint_dir, total_ticks);
 
     // Anchor the exploration-σ anneal to THIS experiment's start (bddap/rl#161): the schedule
     // ramps from a wide floor down to the refine floor over `log_std_anneal_ticks`, measured
