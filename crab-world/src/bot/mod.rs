@@ -183,7 +183,17 @@ impl CrabSpawns {
         carapace: Vec3,
         terrain: &crate::terrain::TerrainGrid,
     ) -> Vec3 {
-        let origin = terrain.place(Vec2::new(carapace.x, carapace.z), 0.0);
+        // The origin is the respawn anchor: keep it inside the same interior every
+        // spawn/target draw obeys. Past it the sampler reports a flat sheet no
+        // collider backs (rl#281's world-bounds policy is still pending), and an
+        // origin parked out there respawns crabs into empty space — rl#302's
+        // hours-long rescue↔respawn loop.
+        let clamp = crate::training::targets::sample_clamp_half(terrain);
+        let xz = Vec2::new(
+            carapace.x.clamp(-clamp, clamp),
+            carapace.z.clamp(-clamp, clamp),
+        );
+        let origin = terrain.place(xz, 0.0);
         self.set_origin(env, origin);
         origin
     }
@@ -683,4 +693,31 @@ mod layout_digest_tests {
     }
 
     const GOLDEN: u64 = 0xf58b_d657_04a5_e084;
+}
+
+#[cfg(test)]
+mod rebase_tests {
+    use super::*;
+
+    /// rl#302: the origin is the respawn anchor — a rebase clamps it into the same
+    /// interior the spawn/target draws obey, so it can never park past the tile edge
+    /// (the sampler's flat clamp-extension there has no collider, and every respawn
+    /// onto such an origin falls straight back into the rescue, forever).
+    #[test]
+    fn rebase_origin_stays_inside_the_sampling_interior() {
+        let terrain = crate::terrain::TerrainGrid::gcr();
+        let mut spawns = CrabSpawns::from_origins(vec![terrain.place(Vec2::ZERO, 0.0)]);
+        let clamp = crate::training::targets::sample_clamp_half(&terrain);
+
+        // The live storm's parked spot — 157 km off a tile a fraction that size.
+        let far = Vec3::new(157_692.0, -2_087.0, 35_041.0);
+        let origin = spawns.rebase_origin_to(0, far, &terrain);
+        assert!(origin.x.abs() <= clamp && origin.z.abs() <= clamp);
+        assert_eq!(origin, spawns.origin(0));
+
+        // A legitimate on-tile walk rebases exactly to her ground point — no-op clamp.
+        let near_xz = Vec2::new(clamp * 0.5, -clamp * 0.5);
+        let origin = spawns.rebase_origin_to(0, terrain.place(near_xz, 0.4), &terrain);
+        assert_eq!(origin, terrain.place(near_xz, 0.0));
+    }
 }

@@ -28,6 +28,17 @@ pub const BAND_MAX_M: f32 = 128.0;
 /// it and a change would move that instrument.
 pub const DRIFT_REBASE_M: f32 = 9.0;
 
+/// A carapace only has a ground point while it is actually near the ground. A launched
+/// ballistic body must not re-gauge anything: rl#302's storm was single launch
+/// impulses carrying her 100+ km while the rebase chased her shadow tick by tick,
+/// parking the respawn origin past the tile edge — where the sampler's flat
+/// clamp-extension has no collider under it, so every rescue respawned her into empty
+/// space forever (a 0.8 Hz rescue↔respawn loop for hours). The band only has to clear
+/// legitimate locomotion (contact softness rests ~cm deep, hops stay well under a
+/// metre); it mirrors the rescue's own 2 m tunneling threshold, and under the sheet is
+/// equally not a ground point (the rescue owns her there).
+pub const GROUNDED_REBASE_M: f32 = 2.0;
+
 /// Fraction of target draws seeded in the close disc [0, [`BAND_START_MIN`]) —
 /// under-carapace included — so claw-reach stays in-distribution beside the chase
 /// (rl#250). A canonical constant since rl#292: ball-under is a standing directive,
@@ -138,9 +149,15 @@ pub fn band_lure(carapace_xz: Vec2, planar_to_target: Vec2) -> Vec2 {
 /// instead (`CrabSpawns::rebase_origin_to` — a rendered world must stay glued under
 /// her feet). The y component carries the terrain's surface-height difference across
 /// the teleport, so height-above-ground is invariant; on the flat grids both heights
-/// are exactly 0 and the legacy y=0 delta falls out bit-identical. ONE copy for the
-/// same reason as [`band_lure`]: every consumer must agree on when to re-gauge.
+/// are exactly 0 and the legacy y=0 delta falls out bit-identical. Grounded-only
+/// ([`GROUNDED_REBASE_M`], rl#302): a ballistic or buried carapace re-gauges nothing.
+/// ONE copy for the same reason as [`band_lure`]: every consumer must agree on when
+/// to re-gauge.
 pub fn recenter_delta(origin: Vec3, carapace: Vec3, terrain: &TerrainGrid) -> Option<Vec3> {
+    let height_above = carapace.y - terrain.height(carapace.x, carapace.z);
+    if height_above.abs() > GROUNDED_REBASE_M {
+        return None; // airborne or under the sheet — no ground point to re-gauge to
+    }
     let drift = Vec2::new(carapace.x - origin.x, carapace.z - origin.z);
     (drift.length() > DRIFT_REBASE_M).then(|| {
         Vec3::new(
@@ -465,6 +482,23 @@ mod tests {
         let back = out + delta;
         assert!((back.x - origin.x).abs() < 1e-5 && (back.z - origin.z).abs() < 1e-5);
         assert_eq!(back.y, out.y, "flat recenter never touches height");
+    }
+
+    /// rl#302: a launched (or under-sheet) carapace has no ground point — the rebase
+    /// chased a ballistic flight 100+ km and parked the respawn origin off-tile,
+    /// where the rescue↔respawn loop ran at 0.8 Hz for hours. Airborne or buried ⇒
+    /// no re-gauge, whatever the planar drift.
+    #[test]
+    fn recenter_delta_sits_out_unless_grounded() {
+        let origin = Vec3::new(2.0, 0.0, -3.0);
+        let drifted = origin + Vec3::new(DRIFT_REBASE_M * 3.0, 0.0, 0.0);
+        let hop = Vec3::Y * (GROUNDED_REBASE_M + 0.1);
+        assert_eq!(recenter_delta(origin, drifted + hop, &flat()), None);
+        assert_eq!(recenter_delta(origin, drifted - hop, &flat()), None);
+        assert!(
+            recenter_delta(origin, drifted + Vec3::Y * 0.5, &flat()).is_some(),
+            "a grounded walk past the band must still re-gauge"
+        );
     }
 
     /// On terrain the recenter carries the surface-height difference: after the
