@@ -42,11 +42,14 @@ const SHIP_AIM_TORQUE: f32 = 0.015;
 // terminal rates stay where they were (τ·rate ≈ the old feel, plus carry).
 // Linear drag is 3× the old float (coast from top speed halves in ~1 s) with thrust
 // raised to hold top speed ≈ 2.5 m/s, so "a bunch" reads as heavy stopping, not slow.
-// The vertical thruster is stronger than the strafe pair (rl#313): gravity_scale 0.12
-// weighs ~0.31 N, and 0.75 keeps the net climb force ≈ the rl#307 0.42 N.
+// The vertical thruster is the STRONGEST (rl#316): direct thrust is body-frame, so any
+// axis stronger than the weight lets an attitude cheat hold altitude (nose-up converts
+// forward thrust into lift) and gravity reads as idle-only. Weight 0.77 N > forward
+// 0.75 N > strafe 0.55 N makes sustained lift-by-attitude impossible at any pitch/roll;
+// 1.19 keeps the net climb force ≈ the rl#307 0.42 N.
 const SHIP: VehicleParams = VehicleParams {
     lever_thrust: 0.0,
-    direct_thrust: Vec3::new(0.55, 0.75, 0.75),
+    direct_thrust: Vec3::new(0.55, 1.19, 0.75),
     lift: 0.0,
     grip: 0.0,
     drag_lin: 0.15,
@@ -108,15 +111,16 @@ impl VehicleKind {
     fn gravity_scale(self) -> f32 {
         match self {
             VehicleKind::Plane => 1.0,
-            // "A bit" of gravity that FEELS like gravity (rl#313): the sink must be a
-            // perceptible acceleration, and against this drag the terminal sink speed
-            // is the only free outcome — at rl#307's 0.05 the whole ramp lived below
-            // ~0.7 m/s, too slow to see, so the descent read as a constant-velocity
-            // write. 0.12 puts release→terminal ≈ 2 s with the buildup visible
-            // (~0.5 m/s at 0.5 s → ~1.3 m/s terminal), still far gentler than the
-            // plane's free fall. Hovering costs ~41% of the vertical thruster, which
-            // is raised to keep the net climb authority at the rl#307 feel.
-            VehicleKind::Ship => 0.12,
+            // "A bit" of gravity that reads as gravity IN MOTION, not only at idle
+            // (rl#316, owner: "ship shouldn't only sink when holding still"). The
+            // weight must exceed every non-vertical thruster — 0.30 weighs ~0.77 N
+            // against the 0.75 N forward / 0.55 N strafe pair — or a pitched/rolled
+            // attitude converts body-frame thrust into lift and cruise never loses
+            // altitude. The idle side stays a perceptible ramp (rl#313): release→
+            // terminal ≈ 1 s building to ≈ 2.5 m/s, far gentler than the plane's
+            // free fall. Hovering costs ~65% of the vertical thruster, which is
+            // raised to keep the net climb authority at the rl#307 feel.
+            VehicleKind::Ship => 0.30,
         }
     }
 }
@@ -669,7 +673,7 @@ mod tests {
     /// and net's carapace-delta test pins that a carapace push folds 1:1 into her
     /// game pose. Flat fixture grid — a zero-action ragdoll never settles on the GCR
     /// origin slope, and aiming a ballistic ram needs a stationary target. No
-    /// `VehiclePlugin`, deliberately — a low-g Ship (gravity scale 0.12, rl#313)
+    /// `VehiclePlugin`, deliberately — a low-g Ship (gravity scale 0.30, rl#316)
     /// with no flight forces is ballistic over this sub-second ram, so the only
     /// thing that can bleed its speed is her body.
     #[test]
@@ -1329,7 +1333,7 @@ mod tests {
         );
     }
 
-    /// rl#307/rl#313: the ship is "a bit" affected by gravity — an idle ship sinks
+    /// rl#307/rl#316: the ship is "a bit" affected by gravity — an idle ship sinks
     /// perceptibly, but far more gently than the plane falls (heavy drag caps the
     /// sink rate too).
     #[test]
@@ -1347,9 +1351,9 @@ mod tests {
             body(&app, e).1.linear.y
         };
         let ship = fall(VehicleKind::Ship);
-        assert!(ship < -0.3, "ship must feel gravity, got Δvy={ship}");
+        assert!(ship < -0.9, "ship must feel gravity, got Δvy={ship}");
         assert!(
-            ship > -0.8,
+            ship > -1.4,
             "but gently — drag caps the sink well below the plane's fall, got Δvy={ship}"
         );
         assert!(
@@ -1394,9 +1398,13 @@ mod tests {
 
     /// rl#307: drag "a bunch" — a coasting ship sheds half its speed within a second
     /// (watercraft-heavy), where the old 0.05 float coasted for many seconds.
+    /// Gravity off (same isolation as `grip_swings_velocity_toward_nose_without_adding_speed`):
+    /// this pins the DRAG decay, and since rl#316 the weight would feed a ~1.9 m/s sink
+    /// into the speed magnitude over the same second.
     #[test]
     fn ship_coast_halves_speed_within_a_second() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::new(3.0, 0.0, 0.0));
+        app.world_mut().entity_mut(e).insert(GravityScale(0.0));
         let s0 = body(&app, e).1.linear.length();
         for _ in 0..64 {
             app.update();
@@ -1405,6 +1413,66 @@ mod tests {
         assert!(
             s1 < 0.5 * s0,
             "heavy drag must halve a 3 m/s coast within 1 s: {s0} -> {s1}"
+        );
+    }
+
+    /// rl#316 regression (owner: "ship shouldn't only sink when holding still — gravity
+    /// doesn't work that way"). Two pins:
+    ///
+    /// `ship_cruise_sink_matches_rest_sink` — the SYMPTOM. At zero vertical thrust and
+    /// level attitude, the settled sink at cruise must sit within ~25% of the settled
+    /// sink at rest: the isotropic quadratic drag scales the VERTICAL drag coefficient
+    /// with TOTAL speed, so a tuning whose rest sink is masked at cruise fails here.
+    ///
+    /// `ship_forward_thrust_cannot_lift_at_any_pitch` — the MECHANISM. Direct thrust is
+    /// body-frame, so a thruster stronger than the weight holds altitude by attitude
+    /// alone (nose-up converts forward thrust into lift). Weight 0.77 N > forward
+    /// 0.75 N makes that impossible: 60° nose-up at full forward burn must still sink
+    /// (the rl#313 tuning climbed at +1.4 m/s here).
+    #[test]
+    fn ship_cruise_sink_matches_rest_sink() {
+        let settled_vy = |thrust: Vec3| {
+            let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::ZERO);
+            app.world_mut()
+                .entity_mut(e)
+                .get_mut::<Vehicle>()
+                .unwrap()
+                .throttle = 0.0;
+            set_cmd(&mut app, |c| c.thrust = thrust);
+            for _ in 0..512 {
+                app.update();
+            }
+            body(&app, e).1.linear.y
+        };
+        let rest = -settled_vy(Vec3::ZERO);
+        let cruise = -settled_vy(Vec3::new(0.0, 0.0, 1.0));
+        let ratio = cruise / rest;
+        assert!(
+            (0.75..=1.25).contains(&ratio),
+            "cruise sink must track rest sink (gravity acts in motion): \
+             rest={rest:.2} m/s, cruise={cruise:.2} m/s (ratio {ratio:.2})"
+        );
+    }
+
+    #[test]
+    fn ship_forward_thrust_cannot_lift_at_any_pitch() {
+        let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::ZERO);
+        {
+            let mut ent = app.world_mut().entity_mut(e);
+            ent.get_mut::<Vehicle>().unwrap().throttle = 0.0;
+            // 60° nose-up: forward burn's vertical component is 0.65 N < 0.77 N weight.
+            ent.get_mut::<Transform>().unwrap().rotation =
+                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_3);
+        }
+        set_cmd(&mut app, |c| c.thrust = Vec3::new(0.0, 0.0, 1.0));
+        for _ in 0..512 {
+            app.update();
+        }
+        let vy = body(&app, e).1.linear.y;
+        assert!(
+            vy < -0.2,
+            "full forward burn at 60° nose-up must still sink (weight > forward thrust), \
+             got vy={vy:.2}"
         );
     }
 
@@ -1450,7 +1518,7 @@ mod tests {
         }
         let (quarter_s, one_s, terminal) = (sink_at[&16], sink_at[&64], sink_at[&160]);
         assert!(
-            (1.0..1.6).contains(&terminal),
+            (2.3..2.8).contains(&terminal),
             "terminal sink must be fast enough to see, gentle enough to fly: {terminal} m/s"
         );
         assert!(
