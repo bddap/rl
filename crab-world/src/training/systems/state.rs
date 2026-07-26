@@ -91,6 +91,9 @@ pub(crate) struct TrainingState {
     /// DIAGNOSTIC effort probe — `TrainConfig::log_effort`.
     pub(super) log_effort: bool,
 
+    /// Far edge of the target-band draw — `TrainConfig::band_max_m`.
+    pub(super) band_max_m: f32,
+
     pub(super) checkpoint_dir: PathBuf,
 
     /// `Some` iff the brain warm-started from the checkpoint dir at build time,
@@ -382,6 +385,7 @@ impl TrainingState {
             log_std_floor: crate::bot::arch::LOG_STD_MIN,
             effort_weight: config.effort_weight,
             log_effort: config.log_effort,
+            band_max_m: config.band_max_m,
             episode_count: 0,
             recent_rewards: Vec::new(),
             total_steps: 0,

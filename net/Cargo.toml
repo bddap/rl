@@ -45,5 +45,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 test-watchdog = { path = "../test-watchdog" }
-# test-grid: TerrainGrid::flat fixtures in this crate's tests (driver roundtrip, teleport)
-crab-world = { path = "../crab-world", features = ["test-grid"] }
+crab-world = { path = "../crab-world" }

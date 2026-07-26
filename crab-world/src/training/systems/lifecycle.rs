@@ -138,7 +138,7 @@ impl TrainingState {
             if pre_touched_target(&self.envs[e], min_tip_dists[e]) {
                 debug_assert_eq!(self.envs[e].steps, 0, "Recording with no pending ⇒ virgin");
                 self.envs[e].min_tip_dist = None;
-                seed_target(targets, spawns, e, &mut self.rng, terrain);
+                seed_target(targets, spawns, e, self.band_max_m, &mut self.rng, terrain);
                 continue;
             }
 
@@ -208,7 +208,7 @@ impl TrainingState {
                     crate::eval::bearing_bin((t.z - origin.z).atan2(t.x - origin.x))
                 });
 
-                seed_target(targets, spawns, e, &mut self.rng, terrain);
+                seed_target(targets, spawns, e, self.band_max_m, &mut self.rng, terrain);
 
                 self.reach_finished += 1;
                 if reached {
@@ -299,7 +299,14 @@ pub(crate) fn reset_crab(
             // banded the target around the PREVIOUS locale — re-seed from the new
             // origin or every post-first episode would chase a point up to a tile
             // away (its obs/reward kilometers out of the trained band).
-            seed_target(&mut targets, &spawns, e, &mut training.rng, &terrain);
+            seed_target(
+                &mut targets,
+                &spawns,
+                e,
+                training.band_max_m,
+                &mut training.rng,
+                &terrain,
+            );
             let init_rotation = random_spawn_rotation(&mut training.rng);
             respawn_crab_rotated(
                 &mut commands,

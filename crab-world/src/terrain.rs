@@ -39,7 +39,6 @@ const MAGIC: &[u8; 8] = b"RLTERR01";
 /// comparable to contact tolerances (and it measurably perturbed the rl#224 flail-walk).
 /// 256 m keeps near-origin triangle vertices small at 129² points for the largest
 /// fixtures, instead of megabytes of zeros per world.
-#[cfg(any(test, feature = "test-grid"))]
 const FLAT_CELL_MAX_M: f32 = 256.0;
 
 /// The `.terrain` metadata fields the runtime consumes; the rest of the header
@@ -127,14 +126,15 @@ impl TerrainGrid {
         })
     }
 
-    /// A constant y=0 TEST grid spanning ±`half_extent`, expressed through the one
+    /// A constant y=0 grid spanning ±`half_extent`, expressed through the one
     /// terrain path instead of a bespoke slab or halfspace — for tests whose expected
-    /// geometry is hand-computed on a plane. Test-gated since the rl#293 flat-arena
-    /// deletion (production ground is [`Self::gcr`], impossible to fork by
-    /// construction); net's tests reach it via the `test-grid` dev-dependency
-    /// feature. Grids that run band logic ([`crate::training::targets`]) must span
-    /// ≥ the edge margin + band — smaller grids fail the sampling clamp's assert.
-    #[cfg(any(test, feature = "test-grid"))]
+    /// geometry is hand-computed on a plane, and for the `--terrain flat` rollout
+    /// diagnostic ([`crate::TrainTerrain`]). Was test-gated after the rl#293
+    /// flat-arena deletion; the diagnostic seam re-opened it, and "production ground
+    /// is [`Self::gcr`]" is now held by [`crate::TrainTerrain`]'s default instead of
+    /// by construction. Grids that run band logic ([`crate::training::targets`])
+    /// must span ≥ the edge margin + band — smaller grids fail the sampling clamp's
+    /// assert.
     pub fn flat(half_extent: f32) -> Self {
         let cells = ((half_extent * 2.0) / FLAT_CELL_MAX_M).ceil().max(1.0) as usize;
         let n = cells + 1;

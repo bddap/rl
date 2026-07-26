@@ -263,7 +263,14 @@ pub(crate) fn brain_step(
 
     for e in 0..n {
         if targets.get(e).is_none() {
-            seed_target(&mut targets, &spawns, e, &mut training.rng, &terrain);
+            seed_target(
+                &mut targets,
+                &spawns,
+                e,
+                training.band_max_m,
+                &mut training.rng,
+                &terrain,
+            );
         }
     }
 
