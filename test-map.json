@@ -1,0 +1,34 @@
+{
+  "about": "Touched-path → test-suite map (bothouse#236), read by `botq test-map`. The acceptance gate derives every landed job's touched paths from its own diff and requires the commands mapped here green — independent of the job's brief. First matching rule wins: specific rules above broad ones. `tests: []` means CONSCIOUSLY untested and must carry its why. An unmapped path fails the resolver loud. Commands run from the repo root; lint completeness with `botq test-map --check`.",
+  "rules": [
+    {
+      "paths": ["test-map.json"],
+      "tests": ["botq test-map --check"],
+      "why": "editing the map re-lints its own completeness over every tracked file"
+    },
+    {
+      "paths": ["**/*.md", "**/.gitignore", "LICENSE-*", "NOTICE", "docs/**"],
+      "tests": [],
+      "why": "prose, licenses, and evidence artifacts (screenshots/logs recorded under docs/evidence)"
+    },
+    {
+      "paths": ["scripts/**", "otel/proof-rl-otel.sh"],
+      "tests": [],
+      "why": "operator tooling (profiling, terrain bake, asset fetch) and live proof scripts — exercised by use against a running system, no offline harness"
+    },
+    {
+      "paths": ["shell.nix"],
+      "tests": [],
+      "why": "the pinned dev environment — every mapped suite below runs inside it, so a break fails those commands loudly"
+    },
+    {
+      "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".cargo/config.toml", "**/*.wgsl", "crab-world/assets/**", "crab-world/tests/data/**"],
+      "tests": [
+        "nix-shell --run 'cargo fmt --check'",
+        "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
+        "nix-shell --run 'cargo test -q -- --test-threads=2'"
+      ],
+      "why": "AGENTS.md's pre-submission contract, workspace-wide: the crates interlock (net/game consume crab-world's sim seams), so per-crate scoping would miss cross-crate breakage; --test-threads=2 because the live trainer saturates the cores and the heavy physics tests hang at default parallelism; assets and golden data ride the same rule because the suite consumes them (terrain fixtures, golden-env data, controls-display images)"
+    }
+  ]
+}

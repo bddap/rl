@@ -794,8 +794,7 @@ mod claw_tip_capsule_tests {
         // Documents the failure mode: the scaled raw shape is no longer a capsule…
         assert!(claw_tip_capsule(col.as_typed_shape(), Mat4::IDENTITY).is_none());
         // …but the unscaled view — what the capture reads — still resolves.
-        let (ua, ub, ur) =
-            claw_tip_capsule(col.as_unscaled_typed_shape(), Mat4::IDENTITY).unwrap();
+        let (ua, ub, ur) = claw_tip_capsule(col.as_unscaled_typed_shape(), Mat4::IDENTITY).unwrap();
         assert!((ua - a).length() < 1e-6 && (ub - b).length() < 1e-6 && (ur - 0.02).abs() < 1e-6);
     }
 }
