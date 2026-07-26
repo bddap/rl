@@ -383,6 +383,15 @@ pub fn run_learner(
         "[learner] reward economy: effort_weight {} (--effort-weight)",
         config.effort_weight,
     );
+    // Loud so train.log proves the rollout ground + band — the plant sidecar does NOT
+    // track the diagnostic terrain override (see `crate::TrainTerrain`), so this line
+    // is a non-default run's only durable provenance.
+    eprintln!(
+        "[learner] rollout world: terrain {:?}, band {}..{} m (--terrain/--band-max-m)",
+        config.terrain,
+        crate::training::targets::BAND_START_MIN,
+        config.band_max_m,
+    );
     // Loud so train.log proves which PLANT it trained under (rl#268 damping run), and
     // recorded beside the checkpoint so evals adopt it — abort a mismatched relaunch
     // BEFORE the rollout threads spawn (a worker-thread panic wouldn't kill us).

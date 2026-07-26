@@ -171,9 +171,11 @@ pub(crate) fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usi
 }
 
 /// Build one rollout worker's env — the trainer trains in the headless server world
-/// (rl#298 stage 4): [`headless_server_world`] on the canonical ground (the plant's
-/// world half, rl#293 — recorded in the checkpoint sidecar beside the friction cap),
-/// driven by the training systems.
+/// (rl#298 stage 4): [`headless_server_world`] on [`TrainConfig::terrain`]'s ground —
+/// default the canonical tile (the plant's world half, rl#293 — recorded in the
+/// checkpoint sidecar beside the friction cap; the sidecar does NOT track the
+/// diagnostic `flat` override, see [`crate::TrainTerrain`]) — driven by the training
+/// systems.
 ///
 /// The ball target REPLACES the served world's hunt feed here, it does not ride its
 /// plumbing: the served world's hunt poser (`set_crab_walk_target` in net) poses prey at one
@@ -189,7 +191,7 @@ pub(crate) fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId) -
     let mut app = headless_server_world(
         config.num_envs(),
         WorldRole::RolloutWorker,
-        crate::terrain::TerrainGrid::gcr(),
+        config.terrain.grid(),
     );
     wire_rollout_training(&mut app, config, id, arch);
     force_serial_schedules(&mut app);

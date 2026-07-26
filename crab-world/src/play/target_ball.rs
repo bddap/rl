@@ -51,13 +51,25 @@ pub(super) fn target_ball(
 
     let mut target = match targets.get(0) {
         Some(t) => t,
-        None => pinned
-            .0
-            .unwrap_or_else(|| sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0, &terrain)),
+        None => pinned.0.unwrap_or_else(|| {
+            sample_target(
+                origin,
+                DEMO_CLOSE_FRAC,
+                crate::training::targets::BAND_MAX_M,
+                &mut rng.0,
+                &terrain,
+            )
+        }),
     };
 
     if closest_tip_dist(0, target, &claw_tips_q).is_some_and(tip_touch) {
-        target = sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0, &terrain);
+        target = sample_target(
+            origin,
+            DEMO_CLOSE_FRAC,
+            crate::training::targets::BAND_MAX_M,
+            &mut rng.0,
+            &terrain,
+        );
     }
 
     if let Some(slot) = targets.envs.first_mut() {

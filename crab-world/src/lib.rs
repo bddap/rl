@@ -155,6 +155,45 @@ pub struct TrainConfig {
     /// steps per iteration slows the per-checkpoint policy walk at the σ-floor.
     #[arg(long, env = "RL_PPO_STEPS_CAP")]
     pub ppo_steps_cap: Option<std::num::NonZeroU32>,
+
+    /// DIAGNOSTIC: the ROLLOUT worlds' ground. Default `gcr`, the canonical tile —
+    /// the only ground a deployable policy trains on (rl#293). `flat` isolates the
+    /// learning core from terrain (the 1807 flat-ground canary). The eval and the
+    /// plant sidecar/digest stay canonical-GCR either way: the chase eval remains the
+    /// one fixed instrument, and a non-gcr run's checkpoints are diagnostic artifacts,
+    /// never deploy or warm-start candidates.
+    #[arg(long, env = "RL_TERRAIN", value_enum, default_value_t = TrainTerrain::Gcr)]
+    pub terrain: TrainTerrain,
+
+    /// DIAGNOSTIC: far edge (m) of the target-band draw, in (BAND_START_MIN,
+    /// [`training::targets::BAND_MAX_M`]]. Default the canonical band edge; smaller
+    /// restricts rollouts to the near band (the 1807 canary trains 1.5–9 m) without
+    /// touching the band geometry constants every other consumer (eval pace probe,
+    /// GCR hunt poser, edge margins) is pinned to.
+    #[arg(long, env = "RL_BAND_MAX_M", value_parser = parse_band_max,
+          default_value_t = training::targets::BAND_MAX_M)]
+    pub band_max_m: f32,
+}
+
+/// [`TrainConfig::terrain`]'s values — the ONE production seam for non-canonical
+/// ground, so a diagnostic run forks a flag, never a code path.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrainTerrain {
+    #[default]
+    Gcr,
+    Flat,
+}
+
+impl TrainTerrain {
+    /// The rollout ground this choice builds. Flat spans ±512 m — the smallest
+    /// round size clearing [`training::targets::sample_clamp_half`]'s edge-margin
+    /// assert with the full canonical band, same as the band tests' fixture.
+    pub fn grid(self) -> std::sync::Arc<terrain::TerrainGrid> {
+        match self {
+            Self::Gcr => terrain::TerrainGrid::gcr(),
+            Self::Flat => std::sync::Arc::new(terrain::TerrainGrid::flat(512.0)),
+        }
+    }
 }
 
 impl TrainConfig {
@@ -182,6 +221,22 @@ impl TrainConfig {
             &seed.to_string(),
         ])
         .expect("parse scratch TrainConfig")
+    }
+}
+
+fn parse_band_max(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    // Below BAND_START_MIN the log-uniform draw's range inverts; above the canonical
+    // edge the sampling clamp's edge margin (sized from the CONST) no longer bounds it.
+    if v.is_finite() && v > training::targets::BAND_START_MIN && v <= training::targets::BAND_MAX_M
+    {
+        Ok(v)
+    } else {
+        Err(format!(
+            "{v} is not in ({}, {}]",
+            training::targets::BAND_START_MIN,
+            training::targets::BAND_MAX_M
+        ))
     }
 }
 

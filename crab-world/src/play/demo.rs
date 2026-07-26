@@ -61,7 +61,14 @@ fn demo_respawn(
     spawns.set_origin(0, origin);
     // The held target was banded around the OLD locale — re-seed from the new
     // origin (same argument as `reset_crab`'s re-seed).
-    seed_target(targets, spawns, 0, rng, terrain);
+    seed_target(
+        targets,
+        spawns,
+        0,
+        crate::training::targets::BAND_MAX_M,
+        rng,
+        terrain,
+    );
     let init_rotation = body::random_spawn_rotation(rng);
     respawn_crab_rotated(commands, assets, terrain, parts, origin, 0, init_rotation);
     settle.0 = RESET_GRACE_TICKS;

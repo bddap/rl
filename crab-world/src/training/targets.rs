@@ -174,20 +174,23 @@ pub fn recenter_delta(origin: Vec3, carapace: Vec3, terrain: &TerrainGrid) -> Op
 /// on purpose: the density concentrates where the new skill lives, and targets the
 /// rest pose already touches are re-seeded at episode start (`pre_touched_target`),
 /// which carves the true no-op boundary better than any hand-drawn annulus could.
-/// The band draw is LOG-UNIFORM over [BAND_START_MIN, BAND_MAX_M] (rl#292): equal
+/// The band draw is LOG-UNIFORM over [BAND_START_MIN, `band_max_m`] (rl#292): equal
 /// probability mass per distance octave, so ~40% of draws land inside the old 9 m
 /// regime (near-field skill keeps its gradient) while 100 m+ treks carry real mass —
-/// a uniform draw at this range would starve the near field to ~6%.
+/// a uniform draw at this range would starve the near field to ~6%. `band_max_m` is
+/// [`crate::TrainConfig::band_max_m`] — canonically [`BAND_MAX_M`], restrictable for
+/// a near-band diagnostic run.
 pub(crate) fn sample_target(
     origin: Vec3,
     close_frac: f32,
+    band_max_m: f32,
     rng: &mut impl rand::Rng,
     terrain: &TerrainGrid,
 ) -> Vec3 {
     let dist = if rng.gen_range(0.0..1.0) < close_frac {
         rng.gen_range(0.0..BAND_START_MIN)
     } else {
-        let (min, max) = (BAND_START_MIN, BAND_MAX_M);
+        let (min, max) = (BAND_START_MIN, band_max_m);
         let u: f32 = rng.gen_range(0.0..1.0);
         min * (max / min).powf(u)
     };
@@ -218,12 +221,13 @@ pub(crate) fn seed_target(
     targets: &mut CrabTargets,
     spawns: &CrabSpawns,
     e: usize,
+    band_max_m: f32,
     rng: &mut rand::rngs::StdRng,
     terrain: &TerrainGrid,
 ) {
     if let Some(slot) = targets.envs.get_mut(e) {
         let origin = spawns.origin(e);
-        *slot = Some(sample_target(origin, CLOSE_FRAC, rng, terrain));
+        *slot = Some(sample_target(origin, CLOSE_FRAC, band_max_m, rng, terrain));
     }
 }
 
@@ -301,7 +305,7 @@ mod tests {
             Vec3::new(80.0, 0.0, -80.0),
         ] {
             for _ in 0..2000 {
-                let t = sample_target(origin, 0.0, &mut rng, &flat());
+                let t = sample_target(origin, 0.0, BAND_MAX_M, &mut rng, &flat());
                 assert!(t.is_finite(), "a sampled target is always finite");
                 assert!(
                     t.x.abs() <= clamp && t.z.abs() <= clamp,
@@ -333,7 +337,10 @@ mod tests {
         let n = 20_000u32;
         let (mut near9, mut far32, mut far100) = (0u32, 0u32, 0u32);
         for _ in 0..n {
-            let d = planar_dist(sample_target(origin, 0.0, &mut rng, &flat()), origin);
+            let d = planar_dist(
+                sample_target(origin, 0.0, BAND_MAX_M, &mut rng, &flat()),
+                origin,
+            );
             if d < 9.0 {
                 near9 += 1;
             }
@@ -377,7 +384,7 @@ mod tests {
             for _ in 0..32 {
                 let origin = random_episode_origin(&mut rng, &g);
                 for _ in 0..64 {
-                    let t = sample_target(origin, close_frac, &mut rng, &g);
+                    let t = sample_target(origin, close_frac, BAND_MAX_M, &mut rng, &g);
                     let above = t.y - g.height(t.x, t.z);
                     assert!(
                         (TARGET_Y_MIN - 1e-3..=TARGET_Y_MAX + 1e-3).contains(&above),
@@ -396,7 +403,7 @@ mod tests {
         for origin in [Vec3::ZERO, Vec3::new(80.0, 0.0, -80.0)] {
             let mut under_body = 0u32;
             for _ in 0..5000 {
-                let t = sample_target(origin, 1.0, &mut rng, &flat());
+                let t = sample_target(origin, 1.0, BAND_MAX_M, &mut rng, &flat());
                 assert!(t.is_finite());
                 assert!(t.x.abs() <= flat_clamp() && t.z.abs() <= flat_clamp());
                 assert!(t.y >= TARGET_Y_MIN && t.y <= TARGET_Y_MAX);
@@ -423,7 +430,10 @@ mod tests {
         let n = 20_000u32;
         let close = (0..n)
             .filter(|_| {
-                planar_dist(sample_target(origin, 0.25, &mut rng, &flat()), origin) < BAND_START_MIN
+                planar_dist(
+                    sample_target(origin, 0.25, BAND_MAX_M, &mut rng, &flat()),
+                    origin,
+                ) < BAND_START_MIN
             })
             .count() as f32
             / n as f32;
@@ -432,7 +442,10 @@ mod tests {
             "close fraction {close} should track the requested 0.25"
         );
         for _ in 0..2000 {
-            let d = planar_dist(sample_target(origin, 0.0, &mut rng, &flat()), origin);
+            let d = planar_dist(
+                sample_target(origin, 0.0, BAND_MAX_M, &mut rng, &flat()),
+                origin,
+            );
             assert!(
                 d >= BAND_START_MIN - 1e-3,
                 "frac 0 must never sample close ({d})"
@@ -548,7 +561,7 @@ mod tests {
                 "episode origins sit on the surface"
             );
             for _ in 0..32 {
-                let t = sample_target(origin, 0.0, &mut rng, &g);
+                let t = sample_target(origin, 0.0, BAND_MAX_M, &mut rng, &g);
                 let d = planar_dist(t, origin);
                 assert!(
                     (BAND_START_MIN - 1e-3..=BAND_MAX_M + 1e-3).contains(&d),
