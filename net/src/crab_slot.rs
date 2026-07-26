@@ -353,7 +353,23 @@ pub(crate) fn collect_crab_poses(world: &mut World, fallback: &[CrabPose]) -> Ve
             if !read.contains_key(&env.0) {
                 continue;
             }
-            let Some((a, b, radius)) = claw_tip_capsule(col.as_typed_shape(), Mat4::IDENTITY)
+            if col.scale() != Vec3::ONE {
+                // The crab is never scaled by design, so a non-unit collider scale is
+                // numeric corruption: a physics blowup denormalizes the part's
+                // rotation enough that bevy_rapier's `apply_scale` decomposes a
+                // non-unit scale out of `GlobalTransform` and rebuilds the capsule as
+                // a convex hull (the 2026-07-25 tv firing of rl#288 — the same
+                // blowup later flung this pincer through the terrain into the rl#283
+                // rescue). Reading the UNSCALED shape below keeps the claw modeled;
+                // WARN (not ERROR) because it self-heals and needs no fleet dispatch.
+                warn_once!(
+                    "claw capture: claw-tip collider carries non-unit scale {:?} — \
+                     physics scale corruption; reading the unscaled capsule (rl#288)",
+                    col.scale()
+                );
+            }
+            let Some((a, b, radius)) =
+                claw_tip_capsule(col.as_unscaled_typed_shape(), Mat4::IDENTITY)
             else {
                 // A claw the sim can't model is a code defect, never a skippable
                 // row: this claw would stop touching players in MP with no other
@@ -590,7 +606,10 @@ pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
 /// or a one-shape compound resolving to one. `None` = anything else — a multi-shape
 /// compound is a shape our claw model can't honestly reduce, not a wrapper — and the
 /// caller screams: a bare `as_capsule` here silently dropped the claw from MP
-/// claw-touch (rl#288).
+/// claw-touch (rl#288). Callers must pass the UNSCALED view
+/// (`Collider::as_unscaled_typed_shape`): the scaled `raw` shape stops being a
+/// capsule the moment `apply_scale` sees corrupt non-unit transform scale, while the
+/// unscaled shape IS the modeled claw.
 fn claw_tip_capsule(view: ColliderView<'_>, local: Mat4) -> Option<(Vec3, Vec3, f32)> {
     match view {
         ColliderView::Capsule(c) => {
@@ -758,6 +777,26 @@ mod claw_tip_capsule_tests {
             (Vec3::X, Quat::IDENTITY, Collider::cuboid(0.1, 0.1, 0.1)),
         ]);
         assert!(claw_tip_capsule(multi.as_typed_shape(), Mat4::IDENTITY).is_none());
+    }
+
+    /// The 2026-07-25 tv firing of rl#288: a physics blowup denormalized the pincer's
+    /// rotation, `apply_scale` decomposed non-unit scale out of `GlobalTransform`, and
+    /// bevy_rapier rebuilt the scaled `raw` shape as a convex hull — no longer
+    /// capsule-readable, so the claw went invisible to MP claw-touch. The capture must
+    /// read the UNSCALED shape, which stays the modeled capsule through the corruption.
+    #[test]
+    fn scale_corruption_keeps_the_unscaled_capsule_readable() {
+        let a = Vec3::new(0.0, -0.05, 0.0);
+        let b = Vec3::new(0.0, 0.05, 0.0);
+        let mut col = Collider::capsule(a, b, 0.02);
+        col.set_scale(Vec3::new(1.0, 0.9, 1.0), 4);
+
+        // Documents the failure mode: the scaled raw shape is no longer a capsule…
+        assert!(claw_tip_capsule(col.as_typed_shape(), Mat4::IDENTITY).is_none());
+        // …but the unscaled view — what the capture reads — still resolves.
+        let (ua, ub, ur) =
+            claw_tip_capsule(col.as_unscaled_typed_shape(), Mat4::IDENTITY).unwrap();
+        assert!((ua - a).length() < 1e-6 && (ub - b).length() < 1e-6 && (ur - 0.02).abs() < 1e-6);
     }
 }
 
