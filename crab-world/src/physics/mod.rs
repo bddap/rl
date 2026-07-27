@@ -22,13 +22,19 @@ fn fixed_timestep() -> TimestepMode {
     }
 }
 
-/// Rapier's contact defaults (30 Hz / 5.0). Held explicit (with the PostStartup
-/// assert) so a bevy_rapier plumbing change can't silently swap the plant's contact
-/// stiffness. Was 5 Hz — a 36× softer spring that rested weight-bearing limbs
-/// 6–10 cm INSIDE the terrain (bddap/rl#299); at 30 Hz the same gait rests ≲1 cm.
+/// Effectively-rigid contacts, the same order rapier uses for joints
+/// (`SpringCoefficients::joint_defaults`); the erp formulation saturates stably, so
+/// this is "as stiff as one substep can express". History: 5 Hz rested
+/// weight-bearing limbs 6–10 cm INSIDE the terrain (bddap/rl#299); the 30 Hz rapier
+/// contact default fixed that but lost outright to sustained full joint torque —
+/// limbs FOUGHT active contacts and still crossed up to 120 mm (bddap/rl#315).
+/// Contacts must never lose a static fight against the strongest actuator, and a
+/// softer spring buys nothing we measure. Held explicit (with the PostStartup
+/// assert) so a bevy_rapier plumbing change can't silently swap the plant's
+/// contact stiffness.
 pub const CONTACT_SOFTNESS: SpringCoefficients<f32> = SpringCoefficients {
-    natural_frequency: 30.0,
-    damping_ratio: 5.0,
+    natural_frequency: 1.0e6,
+    damping_ratio: 1.0,
 };
 
 const LENGTH_UNIT: f32 = 1.0;
@@ -37,8 +43,17 @@ pub const PHYSICS_GRAVITY: Vect = Vect::new(0.0, -9.81, 0.0);
 
 fn rapier_context_init() -> RapierContextInitialization {
     RapierContextInitialization::InitializeDefaultRapierContext {
+        // The three non-default solver knobs are all load-bearing for the rl#315
+        // no-self-interpenetration invariant (each was bisected against the
+        // `--ignored` actuator-load test): 8 velocity iterations + 4 stabilization
+        // iterations converge the many-contact fight a full-torque drive sets up,
+        // and the 20 mm speculative-contact margin catches limbs whose closing
+        // speed is rotation-dominated (soft-CCD only widens by LINEAR velocity).
         integration_parameters: IntegrationParameters {
             contact_softness: CONTACT_SOFTNESS,
+            num_solver_iterations: 8,
+            num_internal_stabilization_iterations: 4,
+            normalized_prediction_distance: 0.02,
             ..IntegrationParameters::default()
         },
         rapier_configuration: RapierConfiguration {

@@ -673,12 +673,12 @@ mod load_tests {
 
     /// rl#312 (b): the same invariant while every actuator is driven through
     /// aggressive deterministic sequences (max torque both directions,
-    /// alternating, seeded-random). Ignored on rl#315: this currently FINDS
-    /// 45 fought limb-crossing pairs (the claws scissor through each other at
-    /// ~120 mm under sustained max drive) — run with `--ignored` to reproduce
-    /// that table; un-ignore when the contact physics holds.
+    /// alternating, seeded-random). Live since rl#315: the viscous joint damper
+    /// (terminal `free_rate`: 10 rad/s legs, 5 claws), rigid
+    /// contacts, soft-CCD on every part, and the bisected solver-iteration bump
+    /// together hold every disallowed pair under the 5 mm floor — this test is
+    /// the gate that keeps them honest.
     #[test]
-    #[ignore = "rl#315: limbs interpenetrate under sustained aggressive drive (45 fought pairs); reproduces the finding table"]
     fn body_primitives_never_interpenetrate_under_actuator_load() {
         let mut app = headless_app();
         tick(&mut app, SETTLE_TICKS);

@@ -13,10 +13,29 @@ const CLAW_SHOULDER_DOWN_STOP: f32 = 1.0;
 const LEG_FRICTION_CAP: f32 = 0.04;
 const CLAW_FRICTION_CAP: f32 = 0.04;
 
+/// Terminal hinge rates (rad/s): each joint carries a viscous damper sized so
+/// ceiling drive torque balances damping exactly here (bddap/rl#315). Without it
+/// flailing is unbounded — full ceiling torque on gram-scale distal links
+/// reaches, within ONE 64 Hz tick, tip speeds that cross a neighboring limb's
+/// whole volume inside one solver substep, and no contact stiffness can fight a
+/// pair it never detects. The damper lives in a joint MOTOR (not the
+/// tick-sampled actuator) because only the solver's implicit per-substep
+/// integration can bound within-tick acceleration of a light link. Legs: 10
+/// rad/s keeps headroom over a 2 Hz full-range carpus stride (~7 rad/s peak)
+/// while a coordinated whole-chain whip (joint rates COMPOSE at the tip) stays
+/// below what the contact solver can catch (15 measurably is not enough: one
+/// 58 mm carpus crossing). Claws: strong slow vises — the highest ceilings on
+/// the tiniest ranges (wrist ±0.24 rad) — whose cross-body slams were the last
+/// standing violations at 10; 5 rad/s still crosses a whole claw range in
+/// ≲0.15 s.
+const LEG_FREE_RATE: f32 = 10.0;
+const CLAW_FREE_RATE: f32 = 5.0;
+
 /// Joint-damping experiment knob (bddap/rl#268): overrides the friction-motor torque
 /// cap, in N·m, on EVERY crab joint. The 0.04 defaults give the plant ~1% of drive
-/// authority in damping — flailing is free, so torque-saturating bang-bang is the
-/// optimal policy; raising the cap toward drive authority prices oscillation.
+/// authority in stiction — it pins a resting pose against slow gravity creep (the
+/// rl#318 slope hold) while the rl#315 viscous damper prices fast flailing;
+/// raising the cap toward drive authority prices oscillation too.
 ///
 /// An env var rather than a clap flag (the rl#272 run-knob front door) because it is
 /// a PLANT property that must reach binaries with no CLI at all — game/rl-demo spawn
@@ -300,9 +319,10 @@ pub fn constructed_plant_digest() -> u64 {
     // identical worlds never refuse-to-arm across the transition.
     h.write(crate::physics::world::ARENA_TERRAIN_KEY.as_bytes());
     h.write(&crate::terrain::gcr_bake_digest().to_le_bytes());
-    let cap = friction_cap_override();
-    h.write(&cap.unwrap_or(LEG_FRICTION_CAP).to_bits().to_le_bytes());
-    h.write(&cap.unwrap_or(CLAW_FRICTION_CAP).to_bits().to_le_bytes());
+    for id in CrabJointId::all() {
+        h.write(&id.friction_cap().to_bits().to_le_bytes());
+        h.write(&id.drive_damping().to_bits().to_le_bytes());
+    }
     h.finish()
 }
 
@@ -316,11 +336,14 @@ pub fn plant_provenance() -> String {
             "joint friction cap leg {LEG_FRICTION_CAP} / claw {CLAW_FRICTION_CAP} N·m (default)"
         ),
     };
+    let damper = format!(
+        "rl#315 viscous joint damper, terminal {LEG_FREE_RATE} rad/s legs / {CLAW_FREE_RATE} claws"
+    );
     let arena = format!(
         "arena {} (canonical since rl#293)",
         crate::physics::world::ARENA_TERRAIN_KEY
     );
-    format!("{cap}; {arena}")
+    format!("{cap}; {damper}; {arena}")
 }
 
 fn parse_friction_cap(raw: &str) -> Result<f32, String> {
@@ -446,6 +469,30 @@ impl CrabJointId {
             | CrabJointId::ClawWrist(_)
             | CrabJointId::ClawPincer(_) => CLAW_FRICTION_CAP,
         }
+    }
+
+    /// The joint's terminal hinge rate under full drive ([`LEG_FREE_RATE`] /
+    /// [`CLAW_FREE_RATE`]).
+    pub fn free_rate(&self) -> f32 {
+        match self {
+            CrabJointId::LegCoxa(..)
+            | CrabJointId::LegBasis(..)
+            | CrabJointId::LegMerus(..)
+            | CrabJointId::LegCarpus(..) => LEG_FREE_RATE,
+            CrabJointId::ClawShoulder(_)
+            | CrabJointId::ClawWrist(_)
+            | CrabJointId::ClawPincer(_) => CLAW_FREE_RATE,
+        }
+    }
+
+    /// The rl#315 damper's viscous coefficient (N·m·s/rad): torque `-c·ω` capped
+    /// at the drive ceiling, sized so full drive torque balances damping at
+    /// [`Self::free_rate`]. Lives on its own motor (the damper impulse joint) —
+    /// the friction motor stays pure stiction, because one linear-clamp motor
+    /// line cannot express both the coulomb floor a resting pose needs and the
+    /// viscous slope that bounds flail speed.
+    pub fn drive_damping(&self) -> f32 {
+        self.drive_torque_ceiling() / self.free_rate()
     }
 
     pub fn limits(&self) -> [f32; 2] {
