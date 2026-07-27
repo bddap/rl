@@ -539,14 +539,7 @@ mod tests {
     /// datum-shifts by the center sample, raw index 3) — so scan values reveal WHERE
     /// each sample landed.
     fn slope_x_grid() -> crate::terrain::TerrainGrid {
-        let meta = br#"{"rows":2,"cols":2,"cell_size_m":100.0,"height_scale":1.0}"#;
-        let mut bytes = b"RLTERR01".to_vec();
-        bytes.extend((meta.len() as u32).to_le_bytes());
-        bytes.extend(meta);
-        for h in [0i16, 10, 0, 10] {
-            bytes.extend(h.to_le_bytes());
-        }
-        crate::terrain::TerrainGrid::parse(&bytes).expect("synthetic grid parses")
+        crate::terrain::TerrainGrid::test_grid(2, 2, 100.0, 1.0, &[0, 10, 0, 10])
     }
 
     fn scan_at(rotation: Quat) -> [f32; TERRAIN_SAMPLES] {

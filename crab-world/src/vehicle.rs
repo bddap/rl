@@ -7,6 +7,21 @@ const VEHICLE_HALF: Vec3 = Vec3::new(0.11, 0.035, 0.17);
 
 const VEHICLE_DENSITY: f32 = 50.0;
 
+/// Craft ground handling (thrust scales, ground roll, the rl#307 grounded-ship
+/// feel) was tuned while the terrain had no Friction component — a 0.5↔0.5 Average
+/// pair. The rl#318 grip fix raised the ground side
+/// (`physics::world::GROUND_FRICTION` 2.5), which would have silently tripled
+/// craft–ground friction (a plane's breakaway ~32%→~96% throttle); `Min` at the old
+/// default keeps the craft–ground pair at its tuned 0.5 — `Average` could not, the
+/// raised ground side dominates any craft coefficient. Side effect accepted: `Min`
+/// also caps craft↔foot pairs at 0.5 (was 1.0 avg with `FOOT_FRICTION` 1.5; other
+/// crab parts already paired at 0.5) — those contacts are ram/bump impulses, not
+/// grip. Raise deliberately, not by drift.
+pub(crate) const VEHICLE_FRICTION: Friction = Friction {
+    coefficient: 0.5,
+    combine_rule: CoefficientCombineRule::Min,
+};
+
 const THROTTLE_TRIM_RATE: f32 = 0.03;
 
 const MATCH_VEL_DAMP: f32 = 0.9;
@@ -276,6 +291,7 @@ fn vehicle_bundle(
         },
         RigidBody::Dynamic,
         vehicle_collider(),
+        VEHICLE_FRICTION,
         ColliderMassProperties::Density(VEHICLE_DENSITY),
         GravityScale(kind.gravity_scale()),
         VEHICLE_COLLISION,
