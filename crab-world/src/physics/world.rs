@@ -82,6 +82,19 @@ impl Plugin for ArenaVisualsPlugin {
     }
 }
 
+/// Ground friction (rl#318). GCR ground is steep as the NORM — cell slopes run p50
+/// 26.6° / p90 43.5° / p99 54.6° (`slope_hold_test::gcr_slope_census`) — and before
+/// this the collider had NO Friction component, i.e. rapier's default 0.5: averaged
+/// with the feet's 1.5 that paired to μ≈1.0, worth only ~35° after the solver's
+/// two-tangent cone approximation — Sally tobogganed down everything steeper
+/// (70 m/10 s on a 40° ramp, `slope_hold_test`). 2.5 pairs feet to 2.0 (claw tips
+/// dig in — interlock, not bare material friction) and the whole body to ≥1.5, and
+/// zero-input drift stays under a body length through 55°. The ground side is the
+/// right seam: a foot-side raise (μ or `Max` combine) also stiffens foot↔leg
+/// self-contacts and jams adjacent legs (`collider_check` catches it).
+const GROUND_FRICTION: bevy_rapier3d::prelude::Friction =
+    bevy_rapier3d::prelude::Friction::coefficient(2.5);
+
 /// Lay the ground collider — the one terrain heightfield. No meshes or lights (those
 /// are render-only — see [`setup_arena_visuals`]), so this is the one arena setup the
 /// headless trainer runs, touching no graphics types.
@@ -89,6 +102,7 @@ fn setup_ground(mut commands: Commands, terrain: Res<Terrain>) {
     commands.spawn((
         RigidBody::Fixed,
         terrain.collider(),
+        GROUND_FRICTION,
         ARENA_COLLISION,
         Transform::IDENTITY,
     ));
