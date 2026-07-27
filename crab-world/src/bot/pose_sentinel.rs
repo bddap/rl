@@ -49,14 +49,35 @@
 //! by-construction fix is to turn consumption off and delete the sentinel.
 
 use bevy::prelude::*;
+use bevy_rapier3d::geometry::ColliderView;
 use bevy_rapier3d::plugin::context::RapierRigidBodySet;
-use bevy_rapier3d::prelude::RapierRigidBodyHandle;
+use bevy_rapier3d::prelude::{Collider, RapierRigidBodyHandle};
 
 use super::RescueBody;
 use super::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint};
 
 pub fn visuals_on(v: Option<Res<crate::Visuals>>) -> bool {
     v.is_some_and(|v| v.0)
+}
+
+/// Read a crab collider through the corruption this module guards against. The crab
+/// is never scaled by design, so a non-unit collider scale means a physics blowup
+/// denormalized the part's rotation and bevy_rapier's `apply_scale` decomposed
+/// transient scale out of `GlobalTransform`, rebuilding the scaled `raw` shape as a
+/// convex hull (rl#288; the rl#314 TV cage gap). The UNSCALED view stays the modeled
+/// shape through the corruption — every consumer of "what shape IS this part" (the MP
+/// claw capture, the collider cage) reads it here, so the two can't drift. WARN, not
+/// ERROR: it self-heals when the transform renormalizes and needs no fleet dispatch;
+/// `surface` names the reader so the line places the hit.
+pub fn modeled_shape<'a>(collider: &'a Collider, surface: &'static str) -> ColliderView<'a> {
+    if collider.scale() != Vec3::ONE {
+        warn_once!(
+            "{surface}: collider carries non-unit scale {:?} — physics scale corruption \
+             (rl#288); reading the unscaled modeled shape",
+            collider.scale()
+        );
+    }
+    collider.as_unscaled_typed_shape()
 }
 
 /// Rapier's writeback round-trip is angle-wise float-noisy at worst (quat NORM

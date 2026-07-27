@@ -4,6 +4,7 @@ use bevy_rapier3d::geometry::ColliderView;
 use bevy_rapier3d::prelude::Collider;
 
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId};
+use crate::bot::pose_sentinel::modeled_shape;
 use crate::bot::skin::CrabRenderPose;
 
 pub const COLLIDER_WIREFRAME_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
@@ -264,10 +265,15 @@ fn draw_crab_collider_wireframe(
             || gt.compute_transform(),
             |s| s.rendered(entity, gt.compute_transform()),
         );
-        let world = part.to_matrix();
+        // Modeled shape at the unscaled pose: transient scale corruption (rl#288) both
+        // degrades the scaled raw shape to a convex hull AND leaks the same corrupt
+        // scale into `GlobalTransform`'s decomposition, so the cage strips both — a
+        // poisoned leg keeps drawing as the capsule it is (rl#314). Parts are unscaled
+        // by design, so outside the corruption this changes nothing.
+        let world = Mat4::from_rotation_translation(part.rotation, part.translation);
         draw_collider_wireframe(
             &mut gizmos,
-            collider.as_typed_shape(),
+            modeled_shape(collider, "collider cage"),
             world,
             COLLIDER_WIREFRAME_COLOR,
         );
@@ -294,10 +300,10 @@ pub fn draw_collider_wireframe(
         }
         // No spawn path builds one of these — it is what bevy_rapier's `apply_scale`
         // turns a curved shape (capsule/ball) into the moment a non-uniform scale
-        // reaches a collider (parry `scaled()`, the rl#314 TV incident). The pose
-        // sentinel heals such a scale at the source, but the cage is a physics debug
-        // surface: it must show where physics IS, whatever shape physics took —
-        // including the one frame something poisoned it.
+        // reaches a collider (parry `scaled()`, the rl#314 TV incident). The crab cage
+        // reads `modeled_shape` and so never hands one in; this arm keeps the drawer
+        // total for callers tracing LIVE scaled views (the vehicle pass), where the
+        // hull is where physics genuinely is.
         ColliderView::ConvexPolyhedron(c) => {
             let pts: Vec<Vec3> = c.points().collect();
             for e in c.raw.edges() {
@@ -428,5 +434,30 @@ mod tests {
                 "edge ({a},{b}) must index the {n} points the tracer draws"
             );
         }
+    }
+
+    /// rl#314 twin of net's `scale_corruption_keeps_the_unscaled_capsule_readable`
+    /// (rl#288): under transient scale corruption the cage must draw the MODELED
+    /// capsule, not the degraded hull — `modeled_shape` is the view the cage traces.
+    #[test]
+    fn scale_corruption_keeps_the_cage_on_the_modeled_capsule() {
+        let a = Vec3::new(0.0, -0.11, 0.0);
+        let b = Vec3::new(0.0, 0.11, 0.0);
+        let mut col = Collider::capsule(a, b, 0.05);
+        col.set_scale(Vec3::new(1.0, 0.9, 1.0), 10);
+
+        // Documents the failure mode: the scaled raw shape is no longer a capsule…
+        assert!(matches!(
+            col.as_typed_shape(),
+            ColliderView::ConvexPolyhedron(_)
+        ));
+        // …but the cage reads the modeled shape: the capsule, unchanged.
+        let ColliderView::Capsule(c) = modeled_shape(&col, "test cage") else {
+            panic!("modeled_shape must resolve the corrupted capsule");
+        };
+        let seg = c.segment();
+        assert!((seg.a() - a).length() < 1e-6);
+        assert!((seg.b() - b).length() < 1e-6);
+        assert!((c.radius() - 0.05).abs() < 1e-6);
     }
 }
