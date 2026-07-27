@@ -13,6 +13,8 @@ pub mod sensor;
 mod sim_truth_test;
 #[cfg(feature = "render")]
 pub mod skin;
+#[cfg(test)]
+mod slope_hold_test;
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;
