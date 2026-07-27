@@ -13,6 +13,14 @@ pub const SPAWN_HEIGHT: f32 = 0.05;
 
 const FRICTION_RAMP: f32 = 4.0;
 
+/// Foot (carpus tip) contact friction. Not free-standing: it Average-pairs with
+/// [`crate::physics::world::GROUND_FRICTION`] to the μ≈2.0 the rl#318 slope-hold
+/// acceptance is tuned against (`slope_hold_test`) — retune BOTH or the crab
+/// toboggans again. Deliberately NOT raised (nor `Max`-combined) to do the ground's
+/// job: feet also self-contact adjacent legs, and stiffer foot↔leg pairs jam them
+/// (`collider_check` catches it).
+const FOOT_FRICTION: Friction = Friction::coefficient(1.5);
+
 pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f32> =
     bevy_rapier3d::rapier::dynamics::SpringCoefficients {
         natural_frequency: 400.0,
@@ -190,7 +198,7 @@ pub fn spawn_crab(
             ec.insert(CrabClawTip);
         }
         if matches!(id, CrabJointId::LegCarpus(..)) {
-            ec.insert(Friction::coefficient(1.5));
+            ec.insert(FOOT_FRICTION);
         }
         ents.push(ec.id());
     }
@@ -223,18 +231,10 @@ mod tests {
 
     /// A 2×2 grid whose one cell ramps 5 m over 1 m toward +x — steep enough that a
     /// footprint-blind spawn at the origin sample buries the +x parts in the hill.
-    /// Built through the real artifact codec deliberately (the parse path IS the seam
-    /// spawns ride); note parse datum-shifts the declared heights to [-5, 0, -5, 0] —
-    /// same ramp, shifted down.
+    /// Note parse datum-shifts the declared heights to [-5, 0, -5, 0] — same ramp,
+    /// shifted down.
     fn steep_ramp() -> TerrainGrid {
-        let meta = br#"{"rows":2,"cols":2,"cell_size_m":1.0,"height_scale":1.0}"#;
-        let mut bytes = b"RLTERR01".to_vec();
-        bytes.extend((meta.len() as u32).to_le_bytes());
-        bytes.extend(meta);
-        for h in [0i16, 5, 0, 5] {
-            bytes.extend(h.to_le_bytes());
-        }
-        TerrainGrid::parse(&bytes).expect("test artifact parses")
+        TerrainGrid::test_grid(2, 2, 1.0, 1.0, &[0, 5, 0, 5])
     }
 
     /// rl#283: the spawn lift must clear the TERRAIN under the whole footprint, not just

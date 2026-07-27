@@ -126,6 +126,31 @@ impl TerrainGrid {
         })
     }
 
+    /// Build a grid from raw i16 heights THROUGH the real artifact codec — encode,
+    /// then [`Self::parse`] — because the parse path (datum shift included) IS the
+    /// seam every production grid rides; a field-struct fixture would skip it. The
+    /// one test-fixture constructor: hand-rolled `RLTERR01` framings in test modules
+    /// fold here (rl#318 review).
+    #[cfg(test)]
+    pub(crate) fn test_grid(
+        rows: usize,
+        cols: usize,
+        cell_size_m: f32,
+        height_scale: f32,
+        heights: &[i16],
+    ) -> Self {
+        let meta = format!(
+            r#"{{"rows":{rows},"cols":{cols},"cell_size_m":{cell_size_m},"height_scale":{height_scale}}}"#
+        );
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend((meta.len() as u32).to_le_bytes());
+        bytes.extend(meta.as_bytes());
+        for h in heights {
+            bytes.extend(h.to_le_bytes());
+        }
+        Self::parse(&bytes).expect("test grid artifact parses")
+    }
+
     /// A constant y=0 grid spanning ±`half_extent`, expressed through the one
     /// terrain path instead of a bespoke slab or halfspace — for tests whose expected
     /// geometry is hand-computed on a plane, and for the `--terrain flat` rollout
