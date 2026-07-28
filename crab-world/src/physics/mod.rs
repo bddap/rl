@@ -22,46 +22,25 @@ fn fixed_timestep() -> TimestepMode {
     }
 }
 
-/// Effectively-rigid contacts, the same order rapier uses for joints
-/// (`SpringCoefficients::joint_defaults`); the erp formulation saturates stably, so
-/// this is "as stiff as one substep can express". History: 5 Hz rested
-/// weight-bearing limbs 6–10 cm INSIDE the terrain (bddap/rl#299); the 30 Hz rapier
-/// contact default fixed that but lost outright to sustained full joint torque —
-/// limbs FOUGHT active contacts and still crossed up to 120 mm (bddap/rl#315).
-/// Contacts must never lose a static fight against the strongest actuator, and a
-/// softer spring buys nothing we measure. Held explicit (with the PostStartup
-/// assert) so a bevy_rapier plumbing change can't silently swap the plant's
-/// contact stiffness.
+/// Rapier's contact defaults (30 Hz / 5.0). Held explicit (with the PostStartup
+/// assert) so a bevy_rapier plumbing change can't silently swap the plant's contact
+/// stiffness. Was 5 Hz — a 36× softer spring that rested weight-bearing limbs
+/// 6–10 cm INSIDE the terrain (bddap/rl#299); at 30 Hz the same gait rests ≲1 cm.
 pub const CONTACT_SOFTNESS: SpringCoefficients<f32> = SpringCoefficients {
-    natural_frequency: 1.0e6,
-    damping_ratio: 1.0,
+    natural_frequency: 30.0,
+    damping_ratio: 5.0,
 };
 
 const LENGTH_UNIT: f32 = 1.0;
 
 pub const PHYSICS_GRAVITY: Vect = Vect::new(0.0, -9.81, 0.0);
 
-/// The one source for the plant's integration parameters — the init path AND the
-/// PostStartup backstop both read it, so a bevy_rapier plumbing change can't
-/// silently swap any of them. The non-default solver knobs are all load-bearing
-/// for the rl#315 no-self-interpenetration invariant (each was bisected against
-/// the actuator-load `collider_check` test): 8 velocity iterations + 4
-/// stabilization iterations converge the many-contact fight a full-torque drive
-/// sets up, and the 20 mm speculative-contact margin catches limbs whose closing
-/// speed is rotation-dominated (soft-CCD only widens by LINEAR velocity).
-fn integration_parameters() -> IntegrationParameters {
-    IntegrationParameters {
-        contact_softness: CONTACT_SOFTNESS,
-        num_solver_iterations: 8,
-        num_internal_stabilization_iterations: 4,
-        normalized_prediction_distance: 0.02,
-        ..IntegrationParameters::default()
-    }
-}
-
 fn rapier_context_init() -> RapierContextInitialization {
     RapierContextInitialization::InitializeDefaultRapierContext {
-        integration_parameters: integration_parameters(),
+        integration_parameters: IntegrationParameters {
+            contact_softness: CONTACT_SOFTNESS,
+            ..IntegrationParameters::default()
+        },
         rapier_configuration: RapierConfiguration {
             gravity: PHYSICS_GRAVITY,
             ..RapierConfiguration::new(LENGTH_UNIT)
@@ -80,36 +59,32 @@ impl bevy::app::Plugin for CrabPhysicsPlugin {
             .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
             .add_systems(
                 PostStartup,
-                (
-                    assert_integration_parameters_applied,
-                    assert_gravity_applied,
-                ),
+                (assert_contact_spring_applied, assert_gravity_applied),
             );
     }
 }
 
-/// Runtime backstop that the spawned context carries [`integration_parameters`]
-/// wholesale — contact spring, solver iterations, prediction distance, and any
-/// future knob, without listing them twice. `dt` is excluded: the stepper owns it
-/// (TimestepMode writes it every step).
-fn assert_integration_parameters_applied(
+/// Runtime backstop that the spawned context carries [`CONTACT_SOFTNESS`].
+fn assert_contact_spring_applied(
     ctx: bevy::ecs::system::Query<
         &bevy_rapier3d::plugin::context::RapierContextSimulation,
         bevy::ecs::query::With<bevy_rapier3d::plugin::context::DefaultRapierContext>,
     >,
 ) {
-    let expected = integration_parameters();
-    let mut live = ctx
+    let spring = ctx
         .single()
         .expect("CrabPhysicsPlugin: exactly one default Rapier context")
-        .integration_parameters;
-    live.dt = expected.dt;
+        .integration_parameters
+        .contact_softness;
     assert_eq!(
-        live, expected,
-        "CrabPhysicsPlugin: the spawned Rapier context lost the plant's integration \
-         parameters — its RapierContextInitialization was overridden after the plugin \
-         (last-write-wins). The solver setup is silently wrong; fix the init ordering \
-         at the call site."
+        (spring.natural_frequency, spring.damping_ratio),
+        (
+            CONTACT_SOFTNESS.natural_frequency,
+            CONTACT_SOFTNESS.damping_ratio
+        ),
+        "CrabPhysicsPlugin: the spawned Rapier context lost CONTACT_SOFTNESS — its \
+         RapierContextInitialization was overridden after the plugin (last-write-wins). \
+         The contact spring is silently wrong; fix the init ordering at the call site."
     );
 }
 
@@ -142,19 +117,21 @@ mod tests {
     use bevy_rapier3d::prelude::{DefaultRapierContext, RapierContextSimulation};
 
     #[test]
-    fn integration_parameters_are_applied() {
+    fn contact_spring_is_applied() {
         let mut app = headless_app();
         app.update();
         let mut q = app
             .world_mut()
             .query_filtered::<&RapierContextSimulation, With<DefaultRapierContext>>();
         let ctx = q.single(app.world()).expect("one default rapier context");
-        let expected = integration_parameters();
-        let mut live = ctx.integration_parameters;
-        live.dt = expected.dt;
+        let spring = ctx.integration_parameters.contact_softness;
         assert_eq!(
-            live, expected,
-            "active context integration parameters diverged — init ordering broke"
+            spring.natural_frequency, CONTACT_SOFTNESS.natural_frequency,
+            "contact spring natural_frequency lost — init ordering broke"
+        );
+        assert_eq!(
+            spring.damping_ratio, CONTACT_SOFTNESS.damping_ratio,
+            "contact spring damping_ratio lost — init ordering broke"
         );
     }
 
