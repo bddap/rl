@@ -80,7 +80,10 @@ impl bevy::app::Plugin for CrabPhysicsPlugin {
             .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
             .add_systems(
                 PostStartup,
-                (assert_contact_spring_applied, assert_gravity_applied),
+                (
+                    assert_integration_parameters_applied,
+                    assert_gravity_applied,
+                ),
             );
     }
 }
@@ -89,7 +92,7 @@ impl bevy::app::Plugin for CrabPhysicsPlugin {
 /// wholesale — contact spring, solver iterations, prediction distance, and any
 /// future knob, without listing them twice. `dt` is excluded: the stepper owns it
 /// (TimestepMode writes it every step).
-fn assert_contact_spring_applied(
+fn assert_integration_parameters_applied(
     ctx: bevy::ecs::system::Query<
         &bevy_rapier3d::plugin::context::RapierContextSimulation,
         bevy::ecs::query::With<bevy_rapier3d::plugin::context::DefaultRapierContext>,
