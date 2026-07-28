@@ -301,7 +301,8 @@ fn parse_plant(text: &str) -> Result<Plant, String> {
 /// The effective-plant digest the MP membership handshake advertises (rl#286),
 /// the world-identity sibling of [`crate::mesh_fallback::constructed_body_digest`]:
 /// arena tag, the terrain bake's byte digest when that arena stands on one, and the
-/// per-joint friction caps the solver will actually run. Peers whose digests differ
+/// per-joint friction caps and damper coefficients the solver will actually run.
+/// Peers whose digests differ
 /// would simulate/render DIFFERENT WORLDS under identical body digests — a flat
 /// client adopting terrain-height poses floats/buries every crab and craft — so the
 /// sync verdict refuses to arm the round instead.
