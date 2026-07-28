@@ -4,6 +4,38 @@
 // on-screen footprint (fwidth): the procedural analogue of mipmapping, so fine
 // detail exists on foot and at landing height (the rl#197 optic-flow duty the old
 // checker carried) but never shimmers from the plane.
+//
+// ─── THIS FILE IS THE SWAP UNIT ─────────────────────────────────────────────
+// Competing ground looks are written as replacements for this one file; the rest
+// of the system is fixed. The contract a replacement gets and must keep:
+//
+// Inputs (all set up by ground.rs's GroundMaterial =
+// ExtendedMaterial<StandardMaterial, GroundDetail>):
+// - `in: VertexOutput` (bevy_pbr forward/prepass io): `world_position` is true
+//   world space in METERS, y up, terrain spans ~±15.3 km in xz; `world_normal`
+//   is the smooth geometric normal. The mesh carries NO UVs — derive everything
+//   from world position. The per-vertex biome tint (hypsometric bands, see
+//   terrain.rs `biome`) arrives pre-multiplied into
+//   `pbr_input.material.base_color` via the mesh COLOR attribute.
+// - `strengths: vec4<f32>` at @group(#{MATERIAL_BIND_GROUP}) @binding(100) — the
+//   ONE extension uniform, the taste-iteration knob set (defaults + meaning in
+//   ground.rs `GroundDetail`). A replacement may reinterpret the lanes but must
+//   bind them at 100 (the Rust side is AsBindGroup on that binding).
+//
+// Rules (issue requirements, not style):
+// - entry point stays `fn fragment`. Only the FORWARD main pass loads this file
+//   (the extension overrides `fragment_shader` alone; prepass/deferred fall back
+//   to StandardMaterial's own shaders). The PREPASS_PIPELINE fork below is inert
+//   under that registration — it just keeps the file valid if prepass wiring is
+//   ever added.
+// - world-space procedural only: no sampled textures (tiling), and nothing that
+//   lies about geometry — normal perturbation is fine, parallax/displacement is
+//   NOT (the visual surface IS the collision heightfield).
+// - judge colors at rendered exposure (moon-sun + ambient are pre-exposed).
+//
+// Registration: ground.rs `embedded_asset!` + `GroundDetail::fragment_shader`;
+// the path is test-pinned there. To ADD a look instead of replacing: new file,
+// new `embedded_asset!`, point `fragment_shader()` at it.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -89,9 +121,19 @@ fn fragment(
     rgb *= 1.0 + 0.35 * strengths.y * meso_n;
 
     // Fine detail (meters and below): the on-foot / landing-height optic-flow cue.
-    let fine_n = vnoise(p / 2.6, 31u) * footprint_fade(2.6, fw)
+    var fine_n = vnoise(p / 2.6, 31u) * footprint_fade(2.6, fw)
         + vnoise(p / 0.9, 32u) * 0.8 * footprint_fade(0.9, fw)
         + vnoise(p / 0.31, 33u) * 0.6 * footprint_fade(0.31, fw);
+    // The two sub-30 cm octaves are the "higher-res up close" tier — soil grit
+    // that only resolves within a few meters. Branch-gated (screen-coherent,
+    // distance-driven) so the near-fullscreen far ground never pays for them.
+    // The 4.5 cm lattice is the first fine enough to feel the f32 floor: at the
+    // ±15 km map corners the ~1 mm ulp quantizes its interpolant slightly.
+    let grit_fade = vec2(footprint_fade(0.11, fw), footprint_fade(0.045, fw));
+    if grit_fade.x + grit_fade.y > 0.001 {
+        fine_n += vnoise(p / 0.11, 35u) * 0.45 * grit_fade.x
+            + vnoise(p / 0.045, 36u) * 0.3 * grit_fade.y;
+    }
     rgb *= 1.0 + 0.30 * strengths.z * fine_n;
 
     // Grass clumps: darker tufted patches where the ground is vegetated.
@@ -117,7 +159,17 @@ fn fragment(
         let h0 = vnoise(p / 0.45, 51u);
         let hx = vnoise((p + vec2(step, 0.0)) / 0.45, 51u);
         let hz = vnoise((p + vec2(0.0, step)) / 0.45, 51u);
-        let grad = vec2(hx - h0, hz - h0) / step * 0.06;
+        var grad = vec2(hx - h0, hz - h0) / step * 0.06;
+        // Second, finer relief octave (15 cm): pebble-scale moonlight texture
+        // that only resolves on foot (its own tighter footprint fade).
+        let w_n2 = footprint_fade(0.15, fw);
+        if w_n2 > 0.001 {
+            let step2 = 0.05;
+            let g0 = vnoise(p / 0.15, 52u);
+            let gx = vnoise((p + vec2(step2, 0.0)) / 0.15, 52u);
+            let gz = vnoise((p + vec2(0.0, step2)) / 0.15, 52u);
+            grad += w_n2 * vec2(gx - g0, gz - g0) / step2 * 0.035;
+        }
         pbr_input.N = normalize(pbr_input.N + w_n * vec3(-grad.x, 0.0, -grad.y));
     }
 
