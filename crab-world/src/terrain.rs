@@ -375,8 +375,10 @@ pub(crate) mod biome {
 /// kilometer-scale bands don't read as flat paint.
 #[cfg(feature = "render")]
 fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
-    use biome::{DEEP_VALLEY_M, DRY_GRASS_M, HIGH_BROWN_M, LOWLAND_M, ROCK_STEEP, SCREE_M,
-        SNOWLINE_M, SNOW_HOLD_STEEP};
+    use biome::{
+        DEEP_VALLEY_M, DRY_GRASS_M, HIGH_BROWN_M, LOWLAND_M, ROCK_STEEP, SCREE_M, SNOW_HOLD_STEEP,
+        SNOWLINE_M,
+    };
 
     // (elevation m, srgb color) stops, low → high (bake.py's hillshade palette).
     const LAND: [(f32, [f32; 3]); 5] = [
