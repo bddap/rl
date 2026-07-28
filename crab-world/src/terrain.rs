@@ -314,6 +314,58 @@ impl TerrainGrid {
     }
 }
 
+/// The biome's elevation/slope stops (datum-shifted meters; steepness = 1 − normal_y)
+/// and the placement weights the scatter layer derives from them — ONE source, so
+/// tufts grow exactly where [`biome_tint`] paints vegetation and pebbles where it
+/// paints scree (rl#304: decoration that disagrees with the ground's own colors
+/// reads as pasted-on).
+#[cfg(feature = "render")]
+pub(crate) mod biome {
+    use crate::sky::smoothstep;
+
+    pub(crate) const DEEP_VALLEY_M: f32 = -3200.0;
+    pub(crate) const LOWLAND_M: f32 = -1400.0;
+    pub(crate) const DRY_GRASS_M: f32 = -500.0;
+    pub(crate) const SCREE_M: f32 = 100.0;
+    pub(crate) const HIGH_BROWN_M: f32 = 600.0;
+    /// Steepness where rock takes over the tint (start, full).
+    pub(crate) const ROCK_STEEP: (f32, f32) = (0.18, 0.42);
+    /// Steepness band snow holds on: starts letting go where rock starts, fully
+    /// gone a little before rock fully owns the face (snow slides first).
+    pub(crate) const SNOW_HOLD_STEEP: (f32, f32) = (ROCK_STEEP.0, 0.38);
+    /// Steepness band loose pebbles hold on — looser than snow (rocks wedge in).
+    pub(crate) const PEBBLE_HOLD_STEEP: (f32, f32) = (0.35, 0.60);
+    /// Elevation where snow starts / fully holds.
+    pub(crate) const SNOWLINE_M: (f32, f32) = (350.0, 650.0);
+
+    /// 0..1 chance weight that a grass tuft stands at elevation `h` on ground with
+    /// up-normal `normal_y`: grass thins past the scree rim, is gone by the
+    /// high-brown band, and never grows on rock-steep faces or under snow.
+    pub(crate) fn tuft_weight(h: f32, normal_y: f32) -> f32 {
+        let steep = 1.0 - normal_y;
+        let low_enough = 1.0 - smoothstep(SCREE_M, HIGH_BROWN_M, h);
+        let flat_enough = 1.0 - smoothstep(ROCK_STEEP.0, ROCK_STEEP.1, steep);
+        let snow_free = 1.0 - smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h);
+        low_enough * flat_enough * snow_free
+    }
+
+    /// 0..1: green in the deep valleys, straw by the dry-grass band (the origin
+    /// plateau's tufts read sun-bleached, matching its tan tint).
+    pub(crate) fn grass_dryness(h: f32) -> f32 {
+        smoothstep(LOWLAND_M, DRY_GRASS_M, h)
+    }
+
+    /// 0..1 chance weight for a pebble: stonier toward (and above) the scree rim,
+    /// sparse in the greens, absent under snow and on faces too steep to hold loose
+    /// rock.
+    pub(crate) fn pebble_weight(h: f32, normal_y: f32) -> f32 {
+        let steep = 1.0 - normal_y;
+        let holds = 1.0 - smoothstep(PEBBLE_HOLD_STEEP.0, PEBBLE_HOLD_STEEP.1, steep);
+        let snow_free = 1.0 - smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h);
+        (0.35 + 0.65 * smoothstep(LOWLAND_M, SCREE_M, h)) * holds * snow_free
+    }
+}
+
 /// Per-vertex biome color (linear RGBA — multiplied into the terrain material):
 /// a hypsometric ramp over datum-shifted elevation `h` in METERS — not the tile's
 /// normalized range, because the datum shift puts y=0 where the crab lives (the tile's
@@ -323,17 +375,19 @@ impl TerrainGrid {
 /// kilometer-scale bands don't read as flat paint.
 #[cfg(feature = "render")]
 fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
+    use biome::{DEEP_VALLEY_M, DRY_GRASS_M, HIGH_BROWN_M, LOWLAND_M, ROCK_STEEP, SCREE_M,
+        SNOWLINE_M, SNOW_HOLD_STEEP};
+
     // (elevation m, srgb color) stops, low → high (bake.py's hillshade palette).
     const LAND: [(f32, [f32; 3]); 5] = [
-        (-3200.0, [0.20, 0.36, 0.16]), // deep valley green
-        (-1400.0, [0.27, 0.42, 0.18]), // lowland green
-        (-500.0, [0.40, 0.50, 0.24]),  // dry grass
-        (100.0, [0.60, 0.50, 0.32]),   // tan scree (crab country rim)
-        (600.0, [0.59, 0.47, 0.39]),   // high brown
+        (DEEP_VALLEY_M, [0.20, 0.36, 0.16]), // deep valley green
+        (LOWLAND_M, [0.27, 0.42, 0.18]),     // lowland green
+        (DRY_GRASS_M, [0.40, 0.50, 0.24]),   // dry grass
+        (SCREE_M, [0.60, 0.50, 0.32]),       // tan scree (crab country rim)
+        (HIGH_BROWN_M, [0.59, 0.47, 0.39]),  // high brown
     ];
     const ROCK: [f32; 3] = [0.42, 0.39, 0.36];
     const SNOW: [f32; 3] = [0.88, 0.89, 0.93];
-    const SNOWLINE_M: (f32, f32) = (350.0, 650.0);
 
     let lin = |c: [f32; 3]| LinearRgba::from(Color::srgb(c[0], c[1], c[2]));
     let mut c = lin(LAND[LAND.len() - 1].1);
@@ -347,9 +401,10 @@ fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
 
     // Slope 0 → normal_y 1. Rock takes over from ~35° and owns ~55°+.
     let steep = 1.0 - normal_y;
-    c = c.mix(&lin(ROCK), smoothstep(0.18, 0.42, steep));
+    c = c.mix(&lin(ROCK), smoothstep(ROCK_STEEP.0, ROCK_STEEP.1, steep));
     // Snowline: high AND not too steep (snow doesn't hold on cliffs).
-    let snow = smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h) * (1.0 - smoothstep(0.18, 0.38, steep));
+    let snow = smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h)
+        * (1.0 - smoothstep(SNOW_HOLD_STEEP.0, SNOW_HOLD_STEEP.1, steep));
     c = c.mix(&lin(SNOW), snow);
 
     // ±6% value jitter, deterministic per vertex.

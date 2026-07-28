@@ -75,6 +75,7 @@ pub struct ArenaVisualsPlugin;
 impl Plugin for ArenaVisualsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(GroundMaterialPlugin);
+        app.add_plugins(crate::scatter::ScatterPlugin);
         app.add_systems(Startup, setup_arena_visuals);
         // Update, not Startup: cameras spawn after Startup in some modes (same
         // pattern as NightSkyPlugin's skybox attach).
