@@ -38,6 +38,8 @@ pub mod ground;
 #[cfg(feature = "render")]
 pub mod play;
 #[cfg(feature = "render")]
+pub mod scatter;
+#[cfg(feature = "render")]
 pub mod screenshot;
 /// Procedural night-sky skybox shared by both rendered surfaces (rl-demo + GCR). `pub`
 /// because the `net` crate's GCR app builders add its [`sky::NightSkyPlugin`] too.
