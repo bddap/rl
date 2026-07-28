@@ -10,7 +10,7 @@ const VEHICLE_DENSITY: f32 = 50.0;
 /// Craft ground handling (thrust scales, ground roll, the rl#307 grounded-ship
 /// feel) was tuned while the terrain had no Friction component — a 0.5↔0.5 Average
 /// pair. The rl#318 grip fix raised the ground side
-/// (`physics::world::GROUND_FRICTION` 2.5), which would have silently tripled
+/// (`physics::world::GROUND_FRICTION`), which would have silently tripled
 /// craft–ground friction (a plane's breakaway ~32%→~96% throttle); `Min` at the old
 /// default keeps the craft–ground pair at its tuned 0.5 — `Average` could not, the
 /// raised ground side dominates any craft coefficient. Side effect accepted: `Min`
