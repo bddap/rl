@@ -13,8 +13,8 @@ const CLAW_SHOULDER_DOWN_STOP: f32 = 1.0;
 const LEG_FRICTION_CAP: f32 = 0.04;
 const CLAW_FRICTION_CAP: f32 = 0.04;
 
-/// Terminal hinge rates (rad/s): each joint carries a viscous damper sized so
-/// ceiling drive torque balances damping exactly here (bddap/rl#315). Without it
+/// Free rates (rad/s): each joint carries a viscous damper sized so ceiling
+/// drive torque balances damping exactly here (bddap/rl#315). Without it
 /// flailing is unbounded — full ceiling torque on gram-scale distal links
 /// reaches, within ONE 64 Hz tick, tip speeds that cross a neighboring limb's
 /// whole volume inside one solver substep, and no contact stiffness can fight a
@@ -23,11 +23,10 @@ const CLAW_FRICTION_CAP: f32 = 0.04;
 /// integration can bound within-tick acceleration of a light link. Legs: 10
 /// rad/s keeps headroom over a 2 Hz full-range carpus stride (~7 rad/s peak)
 /// while a coordinated whole-chain whip (joint rates COMPOSE at the tip) stays
-/// below what the contact solver can catch (15 measurably is not enough: one
-/// 58 mm carpus crossing). Claws: strong slow vises — the highest ceilings on
-/// the tiniest ranges (wrist ±0.24 rad) — whose cross-body slams were the last
-/// standing violations at 10; 5 rad/s still crosses a whole claw range in
-/// ≲0.15 s.
+/// below what the contact solver can catch — the `collider_check` actuator-load
+/// gate measurably fails at 15. Claws: strong slow vises — the highest ceilings
+/// on the tiniest ranges (wrist ±0.24 rad) — whose cross-body slams were the
+/// last standing violations at 10.
 const LEG_FREE_RATE: f32 = 10.0;
 const CLAW_FREE_RATE: f32 = 5.0;
 
@@ -337,7 +336,7 @@ pub fn plant_provenance() -> String {
         ),
     };
     let damper = format!(
-        "rl#315 viscous joint damper, terminal {LEG_FREE_RATE} rad/s legs / {CLAW_FREE_RATE} claws"
+        "rl#315 viscous joint damper, free rate {LEG_FREE_RATE} rad/s legs / {CLAW_FREE_RATE} claws"
     );
     let arena = format!(
         "arena {} (canonical since rl#293)",
@@ -471,9 +470,9 @@ impl CrabJointId {
         }
     }
 
-    /// The joint's terminal hinge rate under full drive ([`LEG_FREE_RATE`] /
-    /// [`CLAW_FREE_RATE`]).
-    pub fn free_rate(&self) -> f32 {
+    /// The joint's free rate — the hinge rate where full drive torque balances
+    /// the rl#315 damper ([`LEG_FREE_RATE`] / [`CLAW_FREE_RATE`]).
+    fn free_rate(&self) -> f32 {
         match self {
             CrabJointId::LegCoxa(..)
             | CrabJointId::LegBasis(..)
@@ -485,12 +484,9 @@ impl CrabJointId {
         }
     }
 
-    /// The rl#315 damper's viscous coefficient (N·m·s/rad): torque `-c·ω` capped
-    /// at the drive ceiling, sized so full drive torque balances damping at
-    /// [`Self::free_rate`]. Lives on its own motor (the damper impulse joint) —
-    /// the friction motor stays pure stiction, because one linear-clamp motor
-    /// line cannot express both the coulomb floor a resting pose needs and the
-    /// viscous slope that bounds flail speed.
+    /// The rl#315 damper's viscous coefficient (N·m·s/rad), sized so full drive
+    /// torque balances damping at [`Self::free_rate`]. Applied by the damper
+    /// impulse joint (`spawn::rig_joints`, which also caps it).
     pub fn drive_damping(&self) -> f32 {
         self.drive_torque_ceiling() / self.free_rate()
     }

@@ -14,7 +14,7 @@ pub const SPAWN_HEIGHT: f32 = 0.05;
 const FRICTION_RAMP: f32 = 4.0;
 
 /// Foot (carpus tip) contact friction. Not free-standing: it Average-pairs with
-/// [`crate::physics::world::GROUND_FRICTION`] to the μ≈2.0 the rl#318 slope-hold
+/// [`crate::physics::world::GROUND_FRICTION`] to the μ≈2.25 the rl#318 slope-hold
 /// acceptance is tuned against (`slope_hold_test`) — retune BOTH or the crab
 /// toboggans again. Deliberately NOT raised (nor `Max`-combined) to do the ground's
 /// job: feet also self-contact adjacent legs, and stiffer foot↔leg pairs jam them
@@ -22,11 +22,11 @@ const FRICTION_RAMP: f32 = 4.0;
 const FOOT_FRICTION: Friction = Friction::coefficient(1.5);
 
 /// Soft-CCD lookahead on every crab part (bddap/rl#315): the narrow phase widens its
-/// speculative-contact margin to one tick's actual travel (capped here), so a
-/// driven limb closing on a sibling at m/s speeds meets an active contact BEFORE
-/// overlap instead of crossing a thin capsule between two detection passes. Cheap
-/// (predictive constraints, no shape-cast) and velocity-gated, so resting bodies
-/// pay nothing.
+/// speculative-contact margin to one tick's actual travel (capped at 0.5 m — never
+/// binding at crab speeds), so a driven limb closing on a sibling at m/s speeds
+/// meets an active contact BEFORE overlap instead of crossing a thin capsule
+/// between two detection passes. Cheap (predictive constraints, no shape-cast) and
+/// velocity-gated, so resting bodies pay nothing.
 const SOFT_CCD: SoftCcd = SoftCcd { prediction: 0.5 };
 
 pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f32> =
@@ -185,7 +185,7 @@ pub fn spawn_crab(
         let id = link
             .actuated
             .expect("locked links are skipped before spawn");
-        let joint = rig_revolute(id, link.axis_local, link.anchor1);
+        let (joint, damper) = rig_joints(id, link.axis_local, link.anchor1);
         let mut ec = commands.spawn((
             CrabBodyPart,
             CrabEnvId(env),
@@ -195,7 +195,7 @@ pub fn spawn_crab(
             groups,
             ColliderMassProperties::Density(link.density),
             MultibodyJoint::new(parent_ent, joint),
-            ImpulseJoint::new(parent_ent, rig_damper(id, link.axis_local, link.anchor1)),
+            ImpulseJoint::new(parent_ent, damper),
             place(here),
             CrabRestPose(place(here)),
             Velocity::default(),
@@ -217,9 +217,29 @@ pub fn spawn_crab(
     carapace
 }
 
-fn rig_revolute(id: CrabJointId, axis: Vec3, anchor1: Vec3) -> TypedJoint {
+/// How far past a joint's own drive ceiling its damper may brake (bddap/rl#315).
+/// Below [`CrabJointId::free_rate`] the cap never engages (the line is `c·ω ≤`
+/// ceiling there); a whip the chain's momentum carries PAST the free rate may
+/// brake harder than the joint's own drive could push — drag can exceed muscle.
+const DAMPER_BRAKE_HEADROOM: f32 = 2.0;
+
+/// The two joints of one articulation, built from one frame so the damper can
+/// never damp about a different axis than the hinge it rides (bddap/rl#315):
+///
+/// - The MULTIBODY revolute: kinematics, limits, and a pure-stiction friction
+///   motor (it pins resting poses against slow gravity creep — rl#318's
+///   zero-input slope hold).
+/// - The IMPULSE damper: constrains NO axes, only an AngX motor `-c·ω` capped at
+///   [`DAMPER_BRAKE_HEADROOM`]× the drive ceiling — the viscous drag that bounds
+///   flail speed to [`CrabJointId::free_rate`].
+///
+/// Two joints because each offers ONE motor line (`clamp(c·ω, cap)`) and the
+/// coulomb floor a resting pose needs and the viscous slope that bounds flail
+/// speed have different slopes; the damper is an impulse joint because the
+/// multibody tree allows one joint per link.
+fn rig_joints(id: CrabJointId, axis: Vec3, anchor1: Vec3) -> (TypedJoint, TypedJoint) {
     let [lo, hi] = id.limits();
-    let mut joint = no_adjacent_contacts(
+    let mut revolute = no_adjacent_contacts(
         RevoluteJointBuilder::new(axis)
             .local_anchor1(anchor1)
             .local_anchor2(Vec3::ZERO)
@@ -228,35 +248,23 @@ fn rig_revolute(id: CrabJointId, axis: Vec3, anchor1: Vec3) -> TypedJoint {
             .motor_max_force(id.friction_cap())
             .motor_model(MotorModel::ForceBased),
     );
-    let generic: &mut GenericJoint = joint.as_mut();
+    let generic: &mut GenericJoint = revolute.as_mut();
     generic.raw.softness = LIMIT_SOFTNESS;
-    joint
-}
 
-/// The rl#315 viscous damper riding beside [`rig_revolute`]'s multibody joint: a
-/// second joint on the same body pair constraining NO axes — only an AngX motor,
-/// torque `-c·ω` up to the drive ceiling, terminal rate
-/// each joint's `free_rate` under full drive. A separate joint because
-/// each joint offers ONE motor line (`clamp(c·ω, cap)`), and stiction (the
-/// multibody motor, holding resting poses against gravity creep — rl#318's slope
-/// hold) and flail damping (this, bounding within-tick whip of light links) need
-/// different slopes; an impulse joint rather than a second multibody joint because
-/// the multibody tree allows one joint per link.
-fn rig_damper(id: CrabJointId, axis: Vec3, anchor1: Vec3) -> TypedJoint {
-    let joint = GenericJointBuilder::new(JointAxesMask::empty())
+    let damper = GenericJointBuilder::new(JointAxesMask::empty())
         .local_axis1(axis)
         .local_axis2(axis)
         .local_anchor1(anchor1)
         .local_anchor2(Vec3::ZERO)
         .motor_velocity(JointAxis::AngX, 0.0, id.drive_damping())
-        // 2× the drive ceiling: below the terminal rate the cap never engages (the
-        // line is c·ω ≤ ceiling there), but a whip the chain's momentum carries
-        // PAST terminal may brake harder than the joint's own drive could push —
-        // drag can exceed muscle.
-        .motor_max_force(JointAxis::AngX, 2.0 * id.drive_torque_ceiling())
+        .motor_max_force(
+            JointAxis::AngX,
+            DAMPER_BRAKE_HEADROOM * id.drive_torque_ceiling(),
+        )
         .motor_model(JointAxis::AngX, MotorModel::ForceBased)
         .build();
-    TypedJoint::GenericJoint(joint)
+
+    (revolute, TypedJoint::GenericJoint(damper))
 }
 
 #[cfg(test)]
