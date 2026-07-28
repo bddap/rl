@@ -496,13 +496,66 @@ fn crab_angular_momentum(app: &mut App) -> Vec3 {
     })
 }
 
-#[test]
-fn airborne_crab_conserves_angular_momentum() {
+/// Teleport env 0's crab to an airborne respawn at `y` — the contact-free harness
+/// both momentum-conservation tests build on.
+#[cfg(test)]
+fn respawn_airborne(app: &mut App, y: f32) {
     use super::body::{CrabAssets, CrabBodyPart, CrabEnvId};
     use super::respawn_crab;
     use bevy::ecs::system::RunSystemOnce;
+
+    app.world_mut()
+        .run_system_once(
+            move |mut commands: Commands,
+                  assets: Res<CrabAssets>,
+                  terrain: Res<crate::terrain::Terrain>,
+                  parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>| {
+                respawn_crab(
+                    &mut commands,
+                    &assets,
+                    &terrain,
+                    parts.iter().filter(|(_, id)| id.0 == 0).map(|(e, _)| e),
+                    Vec3::new(0.0, y, 0.0),
+                    0,
+                );
+            },
+        )
+        .expect("airborne respawn");
+}
+
+/// Kill every crab-part collision filter so the airborne window is contact-free by
+/// construction — the momentum checks isolate motors + joints, not contact response.
+#[cfg(test)]
+fn disable_crab_collisions(app: &mut App) {
+    use super::body::CrabBodyPart;
+    use bevy_rapier3d::prelude::{CollisionGroups, Group};
+
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&mut CollisionGroups, With<CrabBodyPart>>();
+    for mut g in q.iter_mut(app.world_mut()) {
+        g.filters = Group::NONE;
+    }
+}
+
+/// Touching contact-point count across the whole narrow phase this tick.
+#[cfg(test)]
+fn contact_points(app: &mut App) -> usize {
     use bevy_rapier3d::plugin::context::RapierContextSimulation;
-    use bevy_rapier3d::prelude::{CollisionGroups, Group, RapierConfiguration};
+
+    let mut q = app.world_mut().query::<&RapierContextSimulation>();
+    let sim = q.single(app.world()).expect("sim");
+    sim.narrow_phase
+        .contact_pairs()
+        .flat_map(|p| p.manifolds.iter())
+        .flat_map(|m| m.points.iter())
+        .filter(|pt| -pt.dist > 0.0)
+        .count()
+}
+
+#[test]
+fn airborne_crab_conserves_angular_momentum() {
+    use bevy_rapier3d::prelude::RapierConfiguration;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
@@ -515,45 +568,11 @@ fn airborne_crab_conserves_angular_momentum() {
             cfg.gravity = Vec3::ZERO;
         }
     }
-    app.world_mut()
-        .run_system_once(
-            |mut commands: Commands,
-             assets: Res<CrabAssets>,
-             terrain: Res<crate::terrain::Terrain>,
-             parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>| {
-                respawn_crab(
-                    &mut commands,
-                    &assets,
-                    &terrain,
-                    parts.iter().filter(|(_, id)| id.0 == 0).map(|(e, _)| e),
-                    Vec3::new(0.0, 80.0, 0.0),
-                    0,
-                );
-            },
-        )
-        .expect("airborne respawn");
+    respawn_airborne(&mut app, 80.0);
     tick(&mut app, 4);
 
-    {
-        let mut q = app
-            .world_mut()
-            .query_filtered::<&mut CollisionGroups, With<CrabBodyPart>>();
-        for mut g in q.iter_mut(app.world_mut()) {
-            g.filters = Group::NONE;
-        }
-    }
+    disable_crab_collisions(&mut app);
     tick(&mut app, 1);
-
-    let contacts = |app: &mut App| -> usize {
-        let mut q = app.world_mut().query::<&RapierContextSimulation>();
-        let sim = q.single(app.world()).expect("sim");
-        sim.narrow_phase
-            .contact_pairs()
-            .flat_map(|p| p.manifolds.iter())
-            .flat_map(|m| m.points.iter())
-            .filter(|pt| -pt.dist > 0.0)
-            .count()
-    };
 
     let l0 = crab_angular_momentum(&mut app).length();
     let mut rng = StdRng::seed_from_u64(3);
@@ -571,7 +590,7 @@ fn airborne_crab_conserves_angular_momentum() {
         );
         tick(&mut app, 1);
         peak = peak.max(crab_angular_momentum(&mut app).length());
-        total_contacts += contacts(&mut app);
+        total_contacts += contact_points(&mut app);
     }
 
     println!(
@@ -588,6 +607,247 @@ fn airborne_crab_conserves_angular_momentum() {
         "airborne crab spun ITSELF up: |L| grew from {l0:.4} to {peak:.4} with zero \
          contacts and no external torque — angular momentum is being injected by the \
          joint constraint solver (issue #17)"
+    );
+}
+
+/// Σ m·v over every crab body plus the total mass, from the rapier set (ground
+/// truth, not the bevy mirror).
+#[cfg(test)]
+fn crab_linear_momentum(app: &mut App) -> (Vec3, f32) {
+    use super::body::CrabBodyPart;
+    use bevy_rapier3d::plugin::context::RapierRigidBodySet;
+    use bevy_rapier3d::prelude::RapierRigidBodyHandle;
+
+    let handles: Vec<bevy_rapier3d::rapier::dynamics::RigidBodyHandle> = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&RapierRigidBodyHandle, With<CrabBodyPart>>();
+        q.iter(app.world()).map(|h| h.0).collect()
+    };
+    let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();
+    let set = set_q.single(app.world()).expect("rapier set");
+
+    let (mut p, mut m_tot) = (Vec3::ZERO, 0.0f32);
+    for h in &handles {
+        let rb = set.bodies.get(*h).expect("rapier body");
+        let m = rb.mass();
+        let v = rb.linvel();
+        m_tot += m;
+        p += m * v;
+    }
+    (p, m_tot)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Thrash {
+    /// Per-channel full-amplitude sinusoids at `freqs`/`phases`.
+    Sinusoid,
+    /// ±1 flipping every 5 ticks. Ignores `freqs` and repurposes each phase's SIGN
+    /// as the channel's fixed polarity — sound only because the phase draw in
+    /// `airborne_thrash_residual` is sign-symmetric over (−π, π).
+    Squarewave,
+}
+
+/// The three drives every rl#321 momentum gate runs — one list so the strict
+/// contract, the live ceiling, and the dated baselines in their docs can't drift
+/// onto different drives.
+#[cfg(test)]
+const MOMENTUM_GATE_DRIVES: [(Thrash, u64); 3] = [
+    (Thrash::Sinusoid, 11),
+    (Thrash::Sinusoid, 12),
+    (Thrash::Squarewave, 13),
+];
+
+/// One full-amplitude thrash row per tick.
+#[cfg(test)]
+fn thrash_row(
+    kind: Thrash,
+    t: u32,
+    freqs: &[f32],
+    phases: &[f32],
+) -> [f32; super::actuator::ACTION_SIZE] {
+    let secs = t as f32 * crate::physics::PHYSICS_DT;
+    let mut row = [0.0f32; super::actuator::ACTION_SIZE];
+    for (j, a) in row.iter_mut().enumerate() {
+        *a = match kind {
+            Thrash::Sinusoid => (std::f32::consts::TAU * freqs[j] * secs + phases[j]).sin(),
+            Thrash::Squarewave => {
+                let flip = if (t / 5).is_multiple_of(2) { 1.0 } else { -1.0 };
+                flip * phases[j].signum()
+            }
+        };
+    }
+    row
+}
+
+/// The airborne spawn height every rl#321 gate uses. Over the 256-tick window the
+/// crab falls ~78 m from here (v_end ≈ 39 m/s), staying far above the flat grid —
+/// the strict bound's v_max derivation and the "never lands" argument both key off
+/// this constant.
+#[cfg(test)]
+const MOMENTUM_SPAWN_Y: f32 = 400.0;
+
+/// 4 s of full-amplitude airborne thrash (gravity ON), returning the COM momentum
+/// residual as an equivalent acceleration — |Δp − m·g·Δt| / (m·Δt) — plus the
+/// touching contact-point total across the window. `isolate` kills the collision
+/// filters first, so the window exercises motors + joints alone (asserted
+/// contact-free — the harness-validity precondition, not the property under test);
+/// without it the production groups stay and the limbs beat against each other.
+/// Deterministic: seeded drive, fixed-dt physics.
+#[cfg(test)]
+fn airborne_thrash_residual(kind: Thrash, seed: u64, isolate: bool) -> (Vec3, usize) {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    const TICKS: u32 = 256;
+
+    let mut app = flat_headless_app();
+    tick(&mut app, 1);
+    respawn_airborne(&mut app, MOMENTUM_SPAWN_Y);
+    tick(&mut app, 4);
+    if isolate {
+        disable_crab_collisions(&mut app);
+    }
+    tick(&mut app, 1);
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let n = super::actuator::ACTION_SIZE;
+    let freqs: Vec<f32> = (0..n).map(|_| rng.gen_range(1.0..4.0)).collect();
+    let phases: Vec<f32> = (0..n)
+        .map(|_| rng.gen_range(-std::f32::consts::PI..std::f32::consts::PI))
+        .collect();
+
+    let part_ids = |app: &mut App| -> std::collections::BTreeSet<Entity> {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<Entity, With<super::body::CrabBodyPart>>();
+        q.iter(app.world()).collect()
+    };
+    let ids0 = part_ids(&mut app);
+
+    let (p0, m) = crab_linear_momentum(&mut app);
+    let mut total_contacts = 0usize;
+    for t in 0..TICKS {
+        assert!(
+            app.world_mut()
+                .resource_mut::<CrabActions>()
+                .set_row(0, thrash_row(kind, t, &freqs, &phases))
+        );
+        tick(&mut app, 1);
+        total_contacts += contact_points(&mut app);
+    }
+    let (p1, _) = crab_linear_momentum(&mut app);
+    assert_eq!(
+        ids0,
+        part_ids(&mut app),
+        "the crab's part entities changed mid-window — a rescue respawned her, so \
+         the momentum window mixes two bodies"
+    );
+    if isolate {
+        assert_eq!(
+            total_contacts, 0,
+            "isolated airborne window had {total_contacts} contact-points — not \
+             contact-free, so the momentum check isn't isolating internal forces"
+        );
+    }
+
+    let dt_total = TICKS as f32 * crate::physics::PHYSICS_DT;
+    let g: Vec3 = crate::physics::PHYSICS_GRAVITY;
+    let resid = (p1 - p0 - m * g * dt_total) / (m * dt_total);
+    println!(
+        "airborne thrash ({kind:?} seed {seed} isolate={isolate}): m={m:.3} kg  \
+         resid={:.5} m/s² ({:.3}% of g)  dir={:?}  contacts={total_contacts}",
+        resid.length(),
+        100.0 * resid.length() / g.length(),
+        resid,
+    );
+    (resid, total_contacts)
+}
+
+/// bddap/rl#321 — THE physics contract: joint motors are INTERNAL forces, so an
+/// airborne, contact-free crab can reorient itself but never translate its COM
+/// beyond gravity: Δp = m·g·Δt over any window. A residual means an un-modeled
+/// EXTERNAL force — the self-propulsion the owner observed in GCR. Gravity stays ON
+/// (unlike the angular twin): a velocity-proportional leak (world-frame damping) is
+/// invisible at v ≈ 0 and grows with the free-fall speed.
+///
+/// The bound is principled, not tuned-to-pass: f32 rounding on the velocity
+/// integration accumulates ≲ ε_f32·v_max·TICKS/2 ≈ 6e-8·39·128 ≈ 3e-4 m/s over the
+/// window → ~7e-5 m/s²; 1e-2 m/s² (0.1% of g) sits two orders above that floor and
+/// two below the ≥0.1 m/s² scale of visible self-propulsion.
+///
+/// IGNORED until the solver leak is fixed: the rapier multibody solver measurably
+/// violates the contract on every probed build back to at least 2026-07-09 —
+/// ~0.16–0.57 m/s² under full-amplitude thrash, dominated by joint-LIMIT impulses
+/// (see `airborne_contact_free_thrash_stays_below_known_leak` for the ablation
+/// numbers and the live ceiling). Un-ignore when the fork's solver conserves, and
+/// delete both ceiling gates below in the same change.
+#[test]
+#[ignore = "bddap/rl#321: rapier multibody joint-limit impulses leak ~0.16 m/s² of \
+            COM momentum; this is the strict contract to un-ignore once the solver \
+            is fixed — the live ceiling gate is \
+            airborne_contact_free_thrash_stays_below_known_leak"]
+fn airborne_crab_conserves_linear_momentum() {
+    for (kind, seed) in MOMENTUM_GATE_DRIVES {
+        let (resid, _) = airborne_thrash_residual(kind, seed, true);
+        assert!(
+            resid.length() < 1e-2,
+            "phantom COM force ({kind:?} seed {seed}): |Δp − m·g·Δt| ≡ {:.4} m/s² \
+             (direction {:?}) with zero contacts — an un-modeled EXTERNAL force is \
+             acting on the crab (bddap/rl#321)",
+            resid.length(),
+            resid.normalize(),
+        );
+    }
+}
+
+/// bddap/rl#321's live regression gate while the strict contract above stays
+/// ignored (delete this gate when that test is un-ignored): the KNOWN leak on
+/// 2026-07-28 main measures 0.159 / 0.419 / 0.574 m/s² on
+/// [`MOMENTUM_GATE_DRIVES`] (identical at the 2026-07-09 pin — the leak predates
+/// the rl#319 window). The 1.0 m/s² ceiling gives headroom over that chaotic
+/// baseline and catches a gross regression like dropping `LIMIT_SOFTNESS` for
+/// hard limits, which the ablation matrix measured at 3.28 m/s²; softness-tuning
+/// shifts of the 0.5 m/s² order (a 30 Hz spring measured 0.55) sit INSIDE the
+/// ceiling and are not caught here — only the strict contract sees those.
+/// Mechanism, from the matrix: substeps ×4 and solver iterations ×4 do NOT move
+/// the residual; amplitude 0.2 drops it 16× — a joint-limit impulse path, not
+/// convergence.
+#[test]
+fn airborne_contact_free_thrash_stays_below_known_leak() {
+    for (kind, seed) in MOMENTUM_GATE_DRIVES {
+        let (resid, _) = airborne_thrash_residual(kind, seed, true);
+        assert!(
+            resid.length() < 1.0,
+            "phantom COM force GREW past the known bddap/rl#321 leak ({kind:?} seed \
+             {seed}): {:.4} m/s² vs the ~0.16–0.57 baseline — a change made the \
+             momentum leak WORSE (limit softness? new external-force path?)",
+            resid.length(),
+        );
+    }
+}
+
+/// The self-collision half of bddap/rl#321 (delete alongside the contact-free
+/// gate when the strict contract is un-ignored): crab-part↔crab-part contacts are
+/// also internal, so momentum must still follow gravity when the airborne thrash
+/// runs WITH the production collision groups and the limbs beat against each
+/// other. Measured 0.64 m/s² on 2026-07-28 main (~1700 contact-points/window) —
+/// the same solver leak plus contact-pair rounding; the 2.0 ceiling catches a
+/// contact-solve change that starts injecting momentum wholesale.
+#[test]
+fn airborne_self_contact_thrash_stays_below_known_leak() {
+    let (resid, contacts) = airborne_thrash_residual(Thrash::Sinusoid, 21, false);
+    assert!(
+        contacts > 0,
+        "the thrash never produced a self-contact — this variant isn't exercising \
+         contact resolution; make the drive more violent"
+    );
+    assert!(
+        resid.length() < 2.0,
+        "phantom COM force UNDER SELF-CONTACT grew past the known bddap/rl#321 \
+         leak: {:.4} m/s² (baseline 0.64) across {contacts} contact-points — \
+         self-collision resolution injects momentum",
+        resid.length(),
     );
 }
 
@@ -627,4 +887,100 @@ fn scripted_flail_gait_pace() {
         dist / secs,
         dist / secs / height,
     );
+}
+
+/// NOT a regression test — the bddap/rl#321 diagnosis instrument (the
+/// `scripted_flail_gait_pace` pattern), `#[ignore]`d so suites never gate on it.
+/// Residual accel across a mechanism matrix — thrash amplitude, substeps, solver
+/// iterations, and a lone constant root torque — separating "joint-limit impulse
+/// leak" from "convergence error" (2026-07-28 findings: substeps/iterations ×4
+/// change nothing; amplitude 0.2 drops it 16×; a lone 5 N·m root torque leaks only
+/// 0.008 m/s²; removing joint limits drops the full-thrash leak 6.5×).
+#[test]
+#[ignore = "rl#321 diagnosis instrument"]
+fn phantom_force_instrument() {
+    use bevy_rapier3d::plugin::context::RapierContextSimulation;
+    use bevy_rapier3d::prelude::TimestepMode;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    let run = |amp: f32, substeps: usize, iters: usize, root_torque: f32| -> f32 {
+        use bevy_rapier3d::plugin::PhysicsSet;
+        use bevy_rapier3d::prelude::ExternalForce;
+
+        use super::BotSet;
+        use super::body::CrabCarapace;
+
+        let mut app = flat_headless_app();
+        app.insert_resource(TimestepMode::Fixed {
+            dt: crate::physics::PHYSICS_DT,
+            substeps,
+        });
+        if root_torque != 0.0 {
+            app.add_systems(
+                FixedUpdate,
+                (move |mut q: Query<&mut ExternalForce, With<CrabCarapace>>| {
+                    for mut f in q.iter_mut() {
+                        f.torque += Vec3::X * root_torque;
+                    }
+                })
+                .after(BotSet::Act)
+                .before(PhysicsSet::SyncBackend),
+            );
+        }
+        tick(&mut app, 1);
+        {
+            let mut q = app.world_mut().query::<&mut RapierContextSimulation>();
+            for mut sim in q.iter_mut(app.world_mut()) {
+                sim.integration_parameters.num_solver_iterations = iters;
+            }
+        }
+        respawn_airborne(&mut app, MOMENTUM_SPAWN_Y);
+        tick(&mut app, 4);
+        disable_crab_collisions(&mut app);
+        tick(&mut app, 1);
+
+        let mut rng = StdRng::seed_from_u64(11);
+        let n = super::actuator::ACTION_SIZE;
+        let freqs: Vec<f32> = (0..n).map(|_| rng.gen_range(1.0..4.0)).collect();
+        let phases: Vec<f32> = (0..n)
+            .map(|_| rng.gen_range(-std::f32::consts::PI..std::f32::consts::PI))
+            .collect();
+
+        let (p0, m) = crab_linear_momentum(&mut app);
+        for t in 0..256u32 {
+            let mut row = thrash_row(Thrash::Sinusoid, t, &freqs, &phases);
+            for a in row.iter_mut() {
+                *a *= amp;
+            }
+            assert!(
+                app.world_mut()
+                    .resource_mut::<CrabActions>()
+                    .set_row(0, row)
+            );
+            tick(&mut app, 1);
+        }
+        let (p1, _) = crab_linear_momentum(&mut app);
+        let dt_total = 256.0 * crate::physics::PHYSICS_DT;
+        let g: Vec3 = crate::physics::PHYSICS_GRAVITY;
+        ((p1 - p0 - m * g * dt_total) / (m * dt_total)).length()
+    };
+
+    for (label, amp, substeps, iters, root_tq) in [
+        (
+            "baseline            amp=1.0 sub=2 it=4",
+            1.0,
+            2usize,
+            4usize,
+            0.0,
+        ),
+        ("amp=0.5             ", 0.5, 2, 4, 0.0),
+        ("amp=0.2             ", 0.2, 2, 4, 0.0),
+        ("root-torque-only 1Nm", 0.0, 2, 4, 1.0),
+        ("root-torque-only 5Nm", 0.0, 2, 4, 5.0),
+        ("root-tq 5Nm sub=8   ", 0.0, 8, 4, 5.0),
+    ] {
+        let r = run(amp, substeps, iters, root_tq);
+        println!("INSTRUMENT {label}: resid={r:.5} m/s²");
+    }
 }
