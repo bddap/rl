@@ -88,16 +88,14 @@ impl Plugin for ArenaVisualsPlugin {
 /// this the collider had NO Friction component, i.e. rapier's default 0.5: averaged
 /// with the feet's `FOOT_FRICTION` 1.5 that paired to μ≈1.0, worth only ~35° after
 /// the solver's two-tangent cone approximation — Sally tobogganed down everything
-/// steeper (70 m/10 s on a 40° ramp, `slope_hold_test`). 3.0 pairs feet to 2.25
-/// (claw tips dig in — interlock, not bare material friction; the rl#315 rigid
-/// contacts shaved the 55° hold margin and the ground seam absorbed the retune)
-/// and the whole body to ≥1.75, and zero-input drift stays under a body length
-/// through 55°. The ground side is the right seam: a foot-side raise (μ or `Max`
-/// combine) also stiffens foot↔leg self-contacts and jams adjacent legs
-/// (`collider_check` catches it).
+/// steeper (70 m/10 s on a 40° ramp, `slope_hold_test`). 2.5 pairs feet to 2.0
+/// (claw tips dig in — interlock, not bare material friction) and the whole body to
+/// ≥1.5, and zero-input drift stays under a body length through 55°. The ground
+/// side is the right seam: a foot-side raise (μ or `Max` combine) also stiffens
+/// foot↔leg self-contacts and jams adjacent legs (`collider_check` catches it).
 /// Crafts opt back OUT to the old pairing (`vehicle::VEHICLE_FRICTION`) — their
 /// ground feel was tuned before this existed.
-const GROUND_FRICTION: Friction = Friction::coefficient(3.0);
+const GROUND_FRICTION: Friction = Friction::coefficient(2.5);
 
 /// Lay the ground collider — the one terrain heightfield. No meshes or lights (those
 /// are render-only — see [`setup_arena_visuals`]), so this is the one arena setup the
