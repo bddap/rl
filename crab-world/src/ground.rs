@@ -19,6 +19,9 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 
 /// Strength knobs for the shader's layers, one uniform so a taste iteration is a
 /// constant tweak, not a shader rewrite. Defaults are the shipped look.
+/// The SHADER FILE is the swap unit for competing ground looks — the full
+/// binding/behavior contract a replacement must keep is documented at the top
+/// of `ground.wgsl`, not here.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct GroundDetail {
     /// x: macro patchiness (hundreds of m), y: meso mottling (tens of m),
