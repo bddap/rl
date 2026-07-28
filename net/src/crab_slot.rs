@@ -514,8 +514,9 @@ pub(crate) fn pump_slot_steps(world: &mut World, steps: u32, inputs: &SlotInputs
 /// The rl#204 RESTART: re-pin every env's spawn origin to the fresh sim spawn layout —
 /// AT the sim's own coordinates, one frame (rl#298 stage 5) — cold-respawn every crab
 /// onto its origin (same call, so origin and body never disagree, rl#242), and reset
-/// the slot's bookkeeping. Crafts are untouched: with no bridge frame, a restart moves
-/// no coordinate system under them.
+/// the slot's bookkeeping. Surviving crafts teleport back too
+/// ([`park_crafts_at_sally`], rl#322) — a round otherwise resumes with every vehicle
+/// stranded wherever the last one ended.
 pub(crate) fn restart_crabs_to_spawns(world: &mut World, spawns: &[Pos]) {
     let layout: Vec<Vec2> = spawns.iter().map(|&s| pos_to_m(s)).collect();
     let base = *layout
@@ -527,7 +528,7 @@ pub(crate) fn restart_crabs_to_spawns(world: &mut World, spawns: &[Pos]) {
         // training grid (rl#290).
         world.insert_resource(crab_world::bot::InitialCrabLayout {
             base_xz: base,
-            spawns_m: layout,
+            spawns_m: layout.clone(),
         });
     } else {
         let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
@@ -550,6 +551,26 @@ pub(crate) fn restart_crabs_to_spawns(world: &mut World, spawns: &[Pos]) {
         .fill(crab_world::bot::RESET_GRACE_TICKS);
     *world.resource_mut::<CrabHunt>() = CrabHunt::default();
     cold_respawn_armed_crab(world);
+    park_crafts_at_sally(world, &layout);
+}
+
+/// rl#322: park surviving crafts on a ring around Sally's (env 0's) fresh origin, at
+/// the players' own spawn clearance ([`crate::sim::MIN_CRAB_SPAWN_DISTANCE_M`]) — a
+/// boarded pilot restarts with the same grace a walker spawn gets, since the pilot
+/// shadow rides the craft; the remaining envs' origins are the avoid set, steering a
+/// multi-crab round's slots away from the other crabs' reach. Host-only, like
+/// every transform this module writes: peers adopt the jump through the articulation
+/// pose windows, whose teleport guard restarts the window at the arrival pose instead
+/// of smearing the craft across the map.
+fn park_crafts_at_sally(world: &mut World, crab_spawns_m: &[Vec2]) {
+    let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
+    crab_world::vehicle::park_vehicles_near(
+        world,
+        crab_spawns_m[0],
+        crate::sim::MIN_CRAB_SPAWN_DISTANCE_M,
+        &crab_spawns_m[1..],
+        &terrain,
+    );
 }
 
 pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
@@ -982,6 +1003,90 @@ mod one_world_tests {
                 "env {env}'s crab must respawn on its re-pinned origin, carapace {c:?}"
             );
         }
+    }
+
+    /// rl#322: a round RESTART teleports surviving crafts back to Sally — parked on
+    /// the spawn-grace ring around her fresh origin, at rest, on the surface, on
+    /// distinct slots, clear of her body.
+    #[test]
+    fn restart_parks_crafts_on_the_sally_ring() {
+        use crab_world::vehicle::{VehicleKind, spawn_ram_vehicle};
+
+        let spawns = [Pos::from_meters(0.0, 0.0), Pos::from_meters(8.0, 0.0)];
+        let mut app = one_world_app(&spawns);
+        let strandings = [
+            (VehicleKind::Plane, Vec3::new(400.0, 60.0, -350.0)),
+            (VehicleKind::Ship, Vec3::new(-500.0, 10.0, 200.0)),
+        ];
+        let crafts: Vec<Entity> = strandings
+            .iter()
+            .map(|&(kind, at)| {
+                spawn_ram_vehicle(
+                    app.world_mut(),
+                    kind,
+                    Transform::from_translation(at),
+                    Velocity {
+                        linear: Vec3::new(25.0, -3.0, 8.0),
+                        angular: Vec3::new(1.0, 2.0, 3.0),
+                    },
+                )
+            })
+            .collect();
+
+        let fresh = [Pos::from_meters(3.0, -2.0), Pos::from_meters(9.0, 4.0)];
+        restart_crabs_to_spawns(app.world_mut(), &fresh);
+
+        let sally = pos_to_m(fresh[0]);
+        let radius = crate::sim::MIN_CRAB_SPAWN_DISTANCE_M;
+        let carapace = {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<(&CrabEnvId, &Transform), With<CrabCarapace>>();
+            q.iter(app.world())
+                .find(|(env, _)| env.0 == 0)
+                .expect("Sally's carapace")
+                .1
+                .translation
+        };
+        let mut parked = Vec::new();
+        for &e in &crafts {
+            let ent = app.world().entity(e);
+            let t = ent.get::<Transform>().unwrap();
+            let v = ent.get::<Velocity>().unwrap();
+            let d = (Vec2::new(t.translation.x, t.translation.z) - sally).length();
+            assert!(
+                (d - radius).abs() < 0.5,
+                "craft must park ON the grace ring: {d} m from Sally, ring {radius} m"
+            );
+            assert!(
+                (t.translation - carapace).length() > 2.0,
+                "a parked craft must be clear of Sally's body, got {:?} vs {carapace:?}",
+                t.translation
+            );
+            let d1 = (Vec2::new(t.translation.x, t.translation.z) - pos_to_m(fresh[1])).length();
+            assert!(
+                d1 > radius,
+                "the avoid set keeps the slot a full clearance from the OTHER crab \
+                 too, got {d1} m"
+            );
+            assert_eq!(
+                (v.linear, v.angular),
+                (Vec3::ZERO, Vec3::ZERO),
+                "a parked craft is at rest"
+            );
+            // Flat grid: on the surface (collider half + clearance above y=0), not
+            // buried and not dropped from its stranded altitude.
+            assert!(
+                t.translation.y > 0.0 && t.translation.y < 0.2,
+                "a parked craft sits on the local surface, got y={}",
+                t.translation.y
+            );
+            parked.push(t.translation);
+        }
+        assert!(
+            (parked[0] - parked[1]).length() > 1.0,
+            "distinct ring slots — crafts must not interpenetrate: {parked:?}"
+        );
     }
 
     /// A prey inside the training band poses WHERE IT IS ([`band_lure`] presents an

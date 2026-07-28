@@ -471,15 +471,67 @@ fn spawn_vehicle(
 /// Lift a craft pose just enough that its collider clears the terrain surface at its
 /// xz (plus `clearance`); never pulls a higher pose down (a flying craft is
 /// untouched). ONE formula for every path that poses a craft against ground it didn't
-/// measure: the boarding spawn above (with [`GROUND_CLEARANCE`]), and net's
-/// round-RESTART carry (with zero clearance — a settled craft must not pop upward,
-/// and rapier resolves a touching contact gently), which preserves a surviving
-/// craft's WORLD pose while the anchor re-pins, shifting its arena xz onto
-/// differently-tall terrain — an uncleaned carry can embed a parked craft in the new
-/// locale's hillside (rl#281 stage 6).
+/// measure: the boarding spawn above and the round-RESTART park
+/// ([`park_vehicles_near`]), both with [`GROUND_CLEARANCE`] — an uncleaned placement
+/// can embed a craft in a hillside (rl#281 stage 6, rl#283).
 pub fn clear_of_ground(pos: Vec3, clearance: f32, terrain: &crate::terrain::TerrainGrid) -> Vec3 {
     let floor = terrain.height(pos.x, pos.z) + VEHICLE_HALF.y + clearance;
     Vec3::new(pos.x, pos.y.max(floor), pos.z)
+}
+
+/// The round-RESTART park (rl#322): teleport every surviving craft onto a ring of
+/// `radius` around `center` (Sally's fresh origin, planar). A restart re-pins the
+/// whole round at the new sim spawns, and a craft left stranded across the map drags
+/// its boarded pilot's shadow with it, defeating the reset. Crafts take the ring
+/// slots FARTHEST from the `avoid` points (the other crabs' origins, in a multi-crab
+/// round) — the ring itself keeps them clear of the center crab — dealt in
+/// (pilot, entity) order over evenly-pitched candidates, so no two crafts share a
+/// slot. Each lands on its LOCAL surface ([`clear_of_ground`]) at rest: velocities
+/// AND the throttle lever zeroed — a lever held through the teleport would fly the
+/// craft straight back off the ring — nose pointing outward, so throttle-up leaves
+/// the crab rather than ramming her. Placement-only: no forces, colliders, or params
+/// touched.
+pub fn park_vehicles_near(
+    world: &mut World,
+    center: Vec2,
+    radius: f32,
+    avoid: &[Vec2],
+    terrain: &crate::terrain::TerrainGrid,
+) {
+    let mut crafts: Vec<(PilotId, Entity)> = world
+        .query::<(Entity, &Vehicle)>()
+        .iter(world)
+        .map(|(e, v)| (v.pilot, e))
+        .collect();
+    crafts.sort();
+    // More candidates than crafts, so there are clear slots to prefer; the floor of
+    // 16 bounds adjacent picks no closer than 2·r·sin(π/16) ≈ 0.39·r — over a craft
+    // length at any near-Sally radius, even when every craft lands on one clear arc.
+    let candidates = crafts.len().max(16);
+    let mut slots: Vec<(f32, f32)> = (0..candidates)
+        .map(|i| {
+            let angle = std::f32::consts::TAU * i as f32 / candidates as f32;
+            let slot = center + radius * Vec2::new(angle.sin(), angle.cos());
+            let clearance = avoid
+                .iter()
+                .map(|a| a.distance(slot))
+                .fold(f32::INFINITY, f32::min);
+            (angle, clearance)
+        })
+        .collect();
+    slots.sort_by(|a, b| b.1.total_cmp(&a.1));
+    slots.truncate(crafts.len());
+    for ((_, e), (yaw, _)) in crafts.into_iter().zip(slots) {
+        // Nose = body +Z rotated by `yaw` = (sin, cos) — the same direction as the
+        // slot's radial, so the craft points outward by construction.
+        let slot = center + radius * Vec2::new(yaw.sin(), yaw.cos());
+        let pos = clear_of_ground(terrain.place(slot, 0.0), GROUND_CLEARANCE, terrain);
+        let mut ent = world.entity_mut(e);
+        *ent.get_mut::<Transform>().unwrap() =
+            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw));
+        *ent.get_mut::<Velocity>().unwrap() = Velocity::default();
+        ent.get_mut::<Vehicle>().unwrap().throttle = 0.0;
+    }
 }
 
 pub fn spawn_ram_vehicle(
@@ -1102,6 +1154,47 @@ mod tests {
             })
             .find(|&(x, z)| g.height(x, z) > 10.0)
             .expect("a hill within ±5 km of the origin")
+    }
+
+    /// rl#322: the restart park lands the craft on its ring slot at rest with the
+    /// throttle LEVER zeroed — a lever held through the teleport would immediately fly
+    /// the craft back off the ring — nose outward, on the local surface.
+    #[test]
+    fn park_zeroes_the_lever_and_lands_on_the_surface() {
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(30.0, -5.0, 10.0));
+        app.world_mut()
+            .entity_mut(e)
+            .get_mut::<Velocity>()
+            .unwrap()
+            .angular = Vec3::new(1.0, 2.0, 3.0);
+
+        let terrain = app.world().resource::<crate::terrain::Terrain>().clone();
+        let center = Vec2::new(2.0, -3.0);
+        park_vehicles_near(app.world_mut(), center, 8.0, &[], &terrain);
+
+        let (t, v) = body(&app, e);
+        let d = Vec2::new(t.translation.x, t.translation.z) - center;
+        assert!(
+            (d.length() - 8.0).abs() < 1e-3,
+            "the craft parks on the ring: {} m out",
+            d.length()
+        );
+        assert!(
+            (t.rotation * Vec3::Z).dot(Vec3::new(d.x, 0.0, d.y).normalize()) > 0.99,
+            "the nose points outward, away from the center"
+        );
+        assert_eq!((v.linear, v.angular), (Vec3::ZERO, Vec3::ZERO));
+        let want_y = VEHICLE_HALF.y + GROUND_CLEARANCE;
+        assert!(
+            (t.translation.y - want_y).abs() < 1e-3,
+            "flat grid: parked on the surface, y={} want {want_y}",
+            t.translation.y
+        );
+        assert_eq!(
+            app.world().entity(e).get::<Vehicle>().unwrap().throttle,
+            0.0,
+            "the throttle lever resets — same known zero a fresh craft starts at"
+        );
     }
 
     /// rl#283: the boarding clamp is keyed to the TERRAIN surface at the boarding spot,

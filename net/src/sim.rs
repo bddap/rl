@@ -223,6 +223,10 @@ const SPAWN_GRACE_SECS: i64 = 5;
 /// against every rig.
 const MIN_CRAB_SPAWN_DISTANCE: i64 = CRAB_CHARGE_SPEED_PER_S * SPAWN_GRACE_SECS;
 
+/// [`MIN_CRAB_SPAWN_DISTANCE`] in world meters — the one conversion, so the rl#322
+/// craft-park ring and the tests measure the same clearance the sim enforces.
+pub(crate) const MIN_CRAB_SPAWN_DISTANCE_M: f32 = MIN_CRAB_SPAWN_DISTANCE as f32 / UNIT as f32;
+
 /// Spacing between player spawn slots along the z=0 spawn line.
 const SPAWN_SLOT_PITCH: i64 = player_heights(2.0 / 1.8);
 
@@ -2017,7 +2021,7 @@ mod tests {
             );
             let corner_m = half.x.hypot(half.z);
             assert!(
-                (MIN_CRAB_SPAWN_DISTANCE as f32 / UNIT as f32) > corner_m,
+                MIN_CRAB_SPAWN_DISTANCE_M > corner_m,
                 "{name}: spawn clearance must exceed the carapace's corner reach {corner_m:.2} m"
             );
         }
