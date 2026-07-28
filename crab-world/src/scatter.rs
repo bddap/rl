@@ -149,7 +149,11 @@ fn tuft_mesh() -> Mesh {
         positions.push([base.x + side.x, 0.0, base.y + side.y]);
         positions.push([base.x - side.x, 0.0, base.y - side.y]);
         positions.push([tip.x, height, tip.y]);
-        colors.extend([[0.8, 0.8, 0.75, 1.0], [0.8, 0.8, 0.75, 1.0], [1.0, 1.0, 0.9, 1.0]]);
+        colors.extend([
+            [0.8, 0.8, 0.75, 1.0],
+            [0.8, 0.8, 0.75, 1.0],
+            [1.0, 1.0, 0.9, 1.0],
+        ]);
     }
     let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
     let indices = (0..positions.len() as u32).collect::<Vec<_>>();
@@ -193,7 +197,10 @@ fn chunk_instances(terrain: &TerrainGrid, chunk: IVec2) -> Vec<(Kind, Transform)
             (kind, Vec3::splat(0.9 + 0.9 * r(4)))
         } else if pick > 1.0 - biome::pebble_weight(h, normal_y) * PEBBLE_DENSITY {
             let s = 0.6 + 1.2 * r(4);
-            (Kind::Pebble, Vec3::new(s, s * (0.45 + 0.3 * r(5)), 0.6 + 1.2 * r(6)))
+            (
+                Kind::Pebble,
+                Vec3::new(s, s * (0.45 + 0.3 * r(5)), 0.6 + 1.2 * r(6)),
+            )
         } else {
             continue;
         };
