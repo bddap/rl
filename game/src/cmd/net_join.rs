@@ -5,7 +5,7 @@ use net::{net_loop, render};
 
 use crab_world::RenderArgs;
 
-use super::shared::{nn_crab_policies, render_mode};
+use super::shared::{boot_view, nn_crab_policies};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -56,7 +56,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         }
     };
 
-    let render_mode = render_mode(args.render);
-    render::build_windowed_app(boot, nn_crabs, render_mode)?.run();
+    let boot_view = boot_view(args.render);
+    render::build_windowed_app(boot, nn_crabs, boot_view)?.run();
     Ok(())
 }

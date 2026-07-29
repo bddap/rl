@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 #[cfg(feature = "render")]
-use crate::ground::{GroundDetail, GroundMaterial, GroundMaterialPlugin};
+use crate::ground::{GroundDetail, GroundLook, GroundMaterial, GroundMaterialPlugin};
 
 use crate::bot::body::ARENA_COLLISION;
 use crate::terrain::{Terrain, TerrainGrid};
@@ -55,7 +55,9 @@ impl Plugin for PhysicsWorldPlugin {
 /// exactly this plugin, one formula that cannot drift per-surface. Headless hosts
 /// keep composing [`PhysicsWorldPlugin`] alone.
 #[cfg(feature = "render")]
-pub struct ArenaWorldPlugin;
+pub struct ArenaWorldPlugin {
+    pub ground_look: GroundLook,
+}
 
 #[cfg(feature = "render")]
 impl Plugin for ArenaWorldPlugin {
@@ -64,17 +66,23 @@ impl Plugin for ArenaWorldPlugin {
             .add_plugins(PhysicsWorldPlugin {
                 grid: TerrainGrid::gcr(),
             })
-            .add_plugins(ArenaVisualsPlugin);
+            .add_plugins(ArenaVisualsPlugin {
+                ground_look: self.ground_look,
+            });
     }
 }
 
 #[cfg(feature = "render")]
-pub struct ArenaVisualsPlugin;
+pub struct ArenaVisualsPlugin {
+    pub ground_look: GroundLook,
+}
 
 #[cfg(feature = "render")]
 impl Plugin for ArenaVisualsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(GroundMaterialPlugin);
+        app.add_plugins(GroundMaterialPlugin {
+            initial: self.ground_look,
+        });
         app.add_plugins(crate::scatter::ScatterPlugin);
         app.add_systems(Startup, setup_arena_visuals);
         // Update, not Startup: cameras spawn after Startup in some modes (same
@@ -117,6 +125,7 @@ fn setup_arena_visuals(
     terrain: Res<Terrain>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GroundMaterial>>,
+    look: Res<GroundLook>,
 ) {
     if !visuals.0 {
         return;
@@ -160,7 +169,7 @@ fn setup_arena_visuals(
                 perceptual_roughness: 0.95,
                 ..default()
             },
-            extension: GroundDetail::default(),
+            extension: GroundDetail::new(*look),
         })),
         Transform::IDENTITY,
     ));

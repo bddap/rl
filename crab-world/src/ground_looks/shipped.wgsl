@@ -5,37 +5,9 @@
 // detail exists on foot and at landing height (the rl#197 optic-flow duty the old
 // checker carried) but never shimmers from the plane.
 //
-// ─── THIS FILE IS THE SWAP UNIT ─────────────────────────────────────────────
-// Competing ground looks are written as replacements for this one file; the rest
-// of the system is fixed. The contract a replacement gets and must keep:
-//
-// Inputs (all set up by ground.rs's GroundMaterial =
-// ExtendedMaterial<StandardMaterial, GroundDetail>):
-// - `in: VertexOutput` (bevy_pbr forward/prepass io): `world_position` is true
-//   world space in METERS, y up, terrain spans ~±15.3 km in xz; `world_normal`
-//   is the smooth geometric normal. The mesh carries NO UVs — derive everything
-//   from world position. The per-vertex biome tint (hypsometric bands, see
-//   terrain.rs `biome`) arrives pre-multiplied into
-//   `pbr_input.material.base_color` via the mesh COLOR attribute.
-// - `strengths: vec4<f32>` at @group(#{MATERIAL_BIND_GROUP}) @binding(100) — the
-//   ONE extension uniform, the taste-iteration knob set (defaults + meaning in
-//   ground.rs `GroundDetail`). A replacement may reinterpret the lanes but must
-//   bind them at 100 (the Rust side is AsBindGroup on that binding).
-//
-// Rules (issue requirements, not style):
-// - entry point stays `fn fragment`. Only the FORWARD main pass loads this file
-//   (the extension overrides `fragment_shader` alone; prepass/deferred fall back
-//   to StandardMaterial's own shaders). The PREPASS_PIPELINE fork below is inert
-//   under that registration — it just keeps the file valid if prepass wiring is
-//   ever added.
-// - world-space procedural only: no sampled textures (tiling), and nothing that
-//   lies about geometry — normal perturbation is fine, parallax/displacement is
-//   NOT (the visual surface IS the collision heightfield).
-// - judge colors at rendered exposure (moon-sun + ambient are pre-exposed).
-//
-// Registration: ground.rs `embedded_asset!` + `GroundDetail::fragment_shader`;
-// the path is test-pinned there. To ADD a look instead of replacing: new file,
-// new `embedded_asset!`, point `fragment_shader()` at it.
+// One of the seven interchangeable looks in this directory; the contract every
+// file here keeps — inputs, binding 100, the `fragment` entry point — is
+// documented once on `GroundLook` in ground.rs.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,

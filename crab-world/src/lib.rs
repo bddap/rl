@@ -87,25 +87,43 @@ pub struct RenderArgs {
     /// canonical Sally mesh can't be resolved.
     #[arg(long, env = "RL_RENDER_MODE", value_enum)]
     pub render_mode: Option<crab_view::RenderMode>,
+    /// Which ground look to boot in (rl#304). The in-game toggle walks the same set;
+    /// this is the same one field, pre-set, so an evidence shot exercises the swap
+    /// the keybind does.
+    #[arg(long, env = "RL_GROUND_LOOK", value_enum)]
+    pub ground_look: Option<ground::GroundLook>,
 }
 
 #[cfg(feature = "render")]
 impl RenderArgs {
-    /// The mode `surface` boots in. With no usable canonical body, the flagless default is
-    /// the collider wireframe, and the fallback is LOGGED (latched for `surface`) — the render
-    /// stays honest about what it is drawing, never a procedural stand-in posing as Sally.
-    /// That logging is why this is `resolve` and not a getter: call it once, at the entrypoint.
-    pub fn resolve(self, surface: mesh_fallback::Surface) -> crab_view::RenderMode {
+    /// The view `surface` boots in. With no usable canonical body, the flagless render
+    /// default is the collider wireframe, and the fallback is LOGGED (latched for
+    /// `surface`) — the render stays honest about what it is drawing, never a procedural
+    /// stand-in posing as Sally. That logging is why this is `resolve` and not a getter:
+    /// call it once, at the entrypoint.
+    pub fn resolve(self, surface: mesh_fallback::Surface) -> BootView {
         let mesh_err = mesh_fallback::usable_model().as_ref().err();
         if let Some(reason) = mesh_err {
             mesh_fallback::log_fallback(surface, reason);
         }
-        self.render_mode.unwrap_or(if mesh_err.is_some() {
-            crab_view::RenderMode::Colliders
-        } else {
-            crab_view::RenderMode::Mesh
-        })
+        BootView {
+            render_mode: self.render_mode.unwrap_or(if mesh_err.is_some() {
+                crab_view::RenderMode::Colliders
+            } else {
+                crab_view::RenderMode::Mesh
+            }),
+            ground_look: self.ground_look.unwrap_or_default(),
+        }
     }
+}
+
+/// The resolved boot state of every runtime-cyclable view knob, so adding one does not
+/// grow every app-builder signature.
+#[cfg(feature = "render")]
+#[derive(Debug, Clone, Copy)]
+pub struct BootView {
+    pub render_mode: crab_view::RenderMode,
+    pub ground_look: ground::GroundLook,
 }
 
 /// Training config, consumed by the learner and its rollout threads (which build a

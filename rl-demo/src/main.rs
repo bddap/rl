@@ -222,12 +222,12 @@ fn main() {
         }
     }
 
-    let initial_render_mode = args
+    let view = args
         .render
         .resolve(crab_world::mesh_fallback::Surface::RlDemo);
     // Cage gate open always: the demo has no menu phase — it renders the round for its whole
     // life, so there is no screen the gizmos could leak behind (the gate exists for GCR, rl#211).
-    crab_world::crab_view::register(&mut app, initial_render_mode, || true);
+    crab_world::crab_view::register(&mut app, view.render_mode, || true);
     bot::body::register_pivot_markers(&mut app);
 
     // The demo simulates the plant the checkpoint TRAINED on (rl#281 stage 5): the
@@ -248,7 +248,9 @@ fn main() {
     }
     app.insert_resource(bot::NumEnvs(1))
         .add_plugins(physics::CrabPhysicsPlugin)
-        .add_plugins(physics::ArenaWorldPlugin)
+        .add_plugins(physics::ArenaWorldPlugin {
+            ground_look: view.ground_look,
+        })
         .insert_resource(mesh_state)
         .add_plugins(bot::BotPlugin);
 
