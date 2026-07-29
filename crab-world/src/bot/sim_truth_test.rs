@@ -776,17 +776,12 @@ fn airborne_thrash_residual(kind: Thrash, seed: u64, isolate: bool) -> (Vec3, us
 /// window → ~7e-5 m/s²; 1e-2 m/s² (0.1% of g) sits two orders above that floor and
 /// two below the ≥0.1 m/s² scale of visible self-propulsion.
 ///
-/// IGNORED until the solver leak is fixed: the rapier multibody solver measurably
-/// violates the contract on every probed build back to at least 2026-07-09 —
-/// ~0.16–0.57 m/s² under full-amplitude thrash, dominated by joint-LIMIT impulses
-/// (see `airborne_contact_free_thrash_stays_below_known_leak` for the ablation
-/// numbers and the live ceiling). Un-ignore when the fork's solver conserves, and
-/// delete both ceiling gates below in the same change.
+/// Live since the 2026-07-28 solver fix in bddap-bot/rapier (momentum-exact
+/// multibody substeps: per-substep base-momentum ledger, stabilization solves
+/// re-derived against the current mass matrix, free-joint quaternion
+/// renormalization). Post-fix the gate drives measure 0.00042 / 0.00001 /
+/// 0.00034 m/s² — 24× under this bound (pre-fix: 0.159–0.574).
 #[test]
-#[ignore = "bddap/rl#321: rapier multibody joint-limit impulses leak ~0.16 m/s² of \
-            COM momentum; this is the strict contract to un-ignore once the solver \
-            is fixed — the live ceiling gate is \
-            airborne_contact_free_thrash_stays_below_known_leak"]
 fn airborne_crab_conserves_linear_momentum() {
     for (kind, seed) in MOMENTUM_GATE_DRIVES {
         let (resid, _) = airborne_thrash_residual(kind, seed, true);
@@ -801,39 +796,37 @@ fn airborne_crab_conserves_linear_momentum() {
     }
 }
 
-/// bddap/rl#321's live regression gate while the strict contract above stays
-/// ignored (delete this gate when that test is un-ignored): the KNOWN leak on
-/// 2026-07-28 main measures 0.159 / 0.419 / 0.574 m/s² on
-/// [`MOMENTUM_GATE_DRIVES`] (identical at the 2026-07-09 pin — the leak predates
-/// the rl#319 window). The 1.0 m/s² ceiling gives headroom over that chaotic
-/// baseline and catches a gross regression like dropping `LIMIT_SOFTNESS` for
-/// hard limits, which the ablation matrix measured at 3.28 m/s²; softness-tuning
-/// shifts of the 0.5 m/s² order (a 30 Hz spring measured 0.55) sit INSIDE the
-/// ceiling and are not caught here — only the strict contract sees those.
-/// Mechanism, from the matrix: substeps ×4 and solver iterations ×4 do NOT move
-/// the residual; amplitude 0.2 drops it 16× — a joint-limit impulse path, not
-/// convergence.
+/// bddap/rl#321's coarse ceiling, kept alongside the strict contract as the
+/// far-backstop with slack for solver-tuning drift (the strict 1e-2 bound is
+/// the primary gate; this one names the historical scale). Pre-fix the leak
+/// measured 0.159 / 0.419 / 0.574 m/s² on [`MOMENTUM_GATE_DRIVES`]; post-fix
+/// (2026-07-28 solver fix) ≤ 0.0005. The 0.05 ceiling sits 100× above today's
+/// reality and 3× under the old best case, so it trips on any reappearance of
+/// the leak class even if the strict bound is later loosened.
 #[test]
 fn airborne_contact_free_thrash_stays_below_known_leak() {
     for (kind, seed) in MOMENTUM_GATE_DRIVES {
         let (resid, _) = airborne_thrash_residual(kind, seed, true);
         assert!(
-            resid.length() < 1.0,
-            "phantom COM force GREW past the known bddap/rl#321 leak ({kind:?} seed \
-             {seed}): {:.4} m/s² vs the ~0.16–0.57 baseline — a change made the \
-             momentum leak WORSE (limit softness? new external-force path?)",
+            resid.length() < 0.05,
+            "phantom COM force is back at pre-fix scale ({kind:?} seed \
+             {seed}): {:.4} m/s² vs the ≤0.0005 post-fix baseline — the \
+             bddap/rl#321 momentum leak reappeared (limit softness? new \
+             external-force path? solver regression?)",
             resid.length(),
         );
     }
 }
 
-/// The self-collision half of bddap/rl#321 (delete alongside the contact-free
-/// gate when the strict contract is un-ignored): crab-part↔crab-part contacts are
+/// The self-collision half of bddap/rl#321: crab-part↔crab-part contacts are
 /// also internal, so momentum must still follow gravity when the airborne thrash
 /// runs WITH the production collision groups and the limbs beat against each
-/// other. Measured 0.64 m/s² on 2026-07-28 main (~1700 contact-points/window) —
-/// the same solver leak plus contact-pair rounding; the 2.0 ceiling catches a
-/// contact-solve change that starts injecting momentum wholesale.
+/// other. Pre-fix this measured 0.64 m/s²; after the 2026-07-28 solver fix it
+/// measures 0.037 (contact impulses go through per-substep-fresh mass matrices,
+/// but contact-pair rounding under hundreds of contact points keeps it above the
+/// contact-free floor). The 0.5 ceiling is 13× above today's reality and under
+/// the pre-fix baseline — it catches a contact-solve change that starts
+/// injecting momentum wholesale.
 #[test]
 fn airborne_self_contact_thrash_stays_below_known_leak() {
     let (resid, contacts) = airborne_thrash_residual(Thrash::Sinusoid, 21, false);
@@ -843,10 +836,10 @@ fn airborne_self_contact_thrash_stays_below_known_leak() {
          contact resolution; make the drive more violent"
     );
     assert!(
-        resid.length() < 2.0,
-        "phantom COM force UNDER SELF-CONTACT grew past the known bddap/rl#321 \
-         leak: {:.4} m/s² (baseline 0.64) across {contacts} contact-points — \
-         self-collision resolution injects momentum",
+        resid.length() < 0.5,
+        "phantom COM force UNDER SELF-CONTACT is back at pre-fix scale \
+         (bddap/rl#321): {:.4} m/s² (post-fix baseline 0.037) across {contacts} \
+         contact-points — self-collision resolution injects momentum",
         resid.length(),
     );
 }
