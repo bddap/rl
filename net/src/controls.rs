@@ -85,10 +85,10 @@ pub enum PadButton {
     LeftStick,
     RightStick,
     /// Right-stick CLICK (R3) — distinct from [`PadButton::RightStick`], the analog
-    /// aim/look token; the click is the one pad button free in every context (rl#232).
+    /// aim/look token (rl#232).
     RightStickClick,
-    /// Left-stick CLICK (L3) — the same split against the analog move token, and the
-    /// last pad button free in every context (rl#304).
+    /// Left-stick CLICK (L3) — the same split against the analog move token (rl#304).
+    /// With R3 taken, the stick clicks are the last pad buttons free in every context.
     LeftStickClick,
     Dpad,
     /// Single D-pad directions — unlike [`PadButton::Dpad`] (the whole cluster, an

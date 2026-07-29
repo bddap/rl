@@ -126,6 +126,34 @@ pub struct BootView {
     pub ground_look: ground::GroundLook,
 }
 
+/// A view knob whose states ARE the values of its CLI flag. Blanket, so it names the
+/// concept without anyone implementing it — and lets crates without a clap dependency
+/// (`net`'s toggles) bound on it.
+pub trait CyclableView: clap::ValueEnum + PartialEq + Copy {}
+impl<T: clap::ValueEnum + PartialEq + Copy> CyclableView for T {}
+
+/// Advance a view knob one step, wrapping. The cycle order is clap's declaration
+/// order — the very list the knob's flag accepts — so a knob has ONE set of states
+/// and no hand-written `next` to forget a variant in.
+pub fn next_view_variant<T: CyclableView>(current: T) -> T {
+    let all = T::value_variants();
+    let i = all
+        .iter()
+        .position(|v| *v == current)
+        .expect("a value enum's variants include every value of the type");
+    all[(i + 1) % all.len()]
+}
+
+/// A view knob's canonical name — what you'd type after its flag, so the readout and
+/// the CLI never spell a state two ways.
+pub fn view_variant_name<T: CyclableView>(current: &T) -> String {
+    current
+        .to_possible_value()
+        .expect("a view knob has no skipped variants")
+        .get_name()
+        .to_string()
+}
+
 /// Training config, consumed by the learner and its rollout threads (which build a
 /// `TrainingState`). Parsed only by the `learn` subcommand.
 ///

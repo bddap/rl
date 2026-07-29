@@ -2,13 +2,11 @@
 //! mesh's macro biome tint. All detail is computed in the fragment shader from
 //! WORLD-SPACE position — no repeated texture anywhere in the ground path, so there
 //! is no tile period to spot at any play scale, and the mesh stays the collider's
-//! exact geometry (render matches physics; beauty is shading only). The fine
-//! octaves double as the rl#197 optic-flow cue the deleted checker used to carry:
-//! high-frequency luminance detail at on-foot/landing scale, faded per-pixel by
-//! screen footprint so altitude views get the macro layers without shimmer.
+//! exact geometry (render matches physics; beauty is shading only).
 //!
-//! Seven looks ship, swapped at runtime with no effect on physics or eval: the swap
-//! reaches only the fragment shader the ground pipeline is specialized with.
+//! Every [`GroundLook`] is swappable at runtime and none of them can move physics or
+//! eval: the swap reaches only the fragment shader the ground pipeline is specialized
+//! with.
 
 use bevy::asset::{load_internal_asset, uuid_handle};
 use bevy::mesh::MeshVertexBufferLayoutRef;
@@ -50,11 +48,14 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 /// Rules (issue requirements, not style):
 /// - entry point stays `fn fragment`. Only the FORWARD main pass draws these files
 ///   ([`GroundDetail::specialize`] leaves the prepass alone), so the
-///   `PREPASS_PIPELINE` fork some of them carry is inert — it just keeps the file
-///   valid if prepass wiring is ever added.
+///   `PREPASS_PIPELINE` fork they carry is inert — it just keeps the file valid if
+///   prepass wiring is ever added.
 /// - world-space procedural only: no sampled textures (tiling), and nothing that
 ///   lies about geometry — normal perturbation is fine, parallax/displacement is
 ///   NOT (the visual surface IS the collision heightfield).
+/// - octaves faded by their on-screen footprint (`fwidth`): fine detail must exist
+///   on foot and at landing height — the rl#197 optic-flow cue the deleted checker
+///   used to carry — without shimmering from the plane.
 /// - judge colors at rendered exposure (moon-sun + ambient are pre-exposed).
 ///
 /// To add a look: a file in `src/ground_looks/`, a variant here, and a row in
@@ -72,12 +73,13 @@ pub enum GroundLook {
     WetNocturne,
 }
 
-/// The one place a look's three facts live together — its shader UUID, its file,
-/// and its on-screen name. Splitting them across a `match` and seven registration
-/// calls is how a look ends up drawing its neighbour's shader with every test still
-/// green.
+/// The one place a look's shader UUID and its file sit together. Split across a
+/// `match` and a separate registration call, they drift, and a look ends up drawing
+/// its neighbour's shader with every test still green. A macro because
+/// `load_internal_asset!` embeds via `include_str!` — the path must be a literal per
+/// look, so no loop over the variants can build the registration list.
 macro_rules! ground_looks {
-    ($($look:ident => $file:literal, $uuid:literal, $label:literal;)*) => {
+    ($($look:ident => $file:literal, $uuid:literal;)*) => {
         impl GroundLook {
             /// The look's shader. A const UUID handle rather than a loaded path
             /// because [`MaterialExtension::specialize`] — the only place that can
@@ -87,13 +89,6 @@ macro_rules! ground_looks {
             fn shader(self) -> Handle<Shader> {
                 match self {
                     $(GroundLook::$look => uuid_handle!($uuid),)*
-                }
-            }
-
-            /// What the on-screen toggle readout says.
-            pub fn label(self) -> &'static str {
-                match self {
-                    $(GroundLook::$look => $label,)*
                 }
             }
         }
@@ -113,33 +108,13 @@ macro_rules! ground_looks {
 }
 
 ground_looks! {
-    Shipped => "shipped", "9f2a7c14-3b6d-4e58-9a01-5c7d2e8f4b60", "Shipped";
-    CarvedStrata => "carved_strata", "1c4e8a92-77b5-4d03-8fa6-2e91b0c5d7a3", "Carved strata";
-    NightBloom => "night_bloom", "6b0d3f57-92ac-41e8-b74d-0a3e5c81f296", "Night-bloom";
-    PatternedGround => "patterned_ground", "e83c1a06-5d4f-4b29-97e0-6c2b8d70a415", "Patterned ground";
-    WindCombed => "wind_combed", "2d795be8-0c31-4a76-8b5e-91f4a03d6c27", "Wind-combed";
-    CrackedLoam => "cracked_loam", "48a6f2d1-b90e-4c53-a812-7d05e9b34f6a", "Cracked loam & cobble";
-    WetNocturne => "wet_nocturne", "7fe15b83-2a4c-49d0-91b6-c3820e5a7d14", "Wet nocturne";
-}
-
-impl GroundLook {
-    /// Cycle order is DECLARATION order, straight off the enum — clap already
-    /// maintains that list for `--ground-look`, so there is no second one to forget
-    /// a variant in.
-    fn all() -> &'static [Self] {
-        <Self as clap::ValueEnum>::value_variants()
-    }
-
-    /// Advance one step and report where we landed.
-    pub fn cycle(&mut self) -> Self {
-        let all = Self::all();
-        let i = all
-            .iter()
-            .position(|l| l == self)
-            .expect("every variant is one of clap's value variants");
-        *self = all[(i + 1) % all.len()];
-        *self
-    }
+    Shipped => "shipped", "9f2a7c14-3b6d-4e58-9a01-5c7d2e8f4b60";
+    CarvedStrata => "carved_strata", "1c4e8a92-77b5-4d03-8fa6-2e91b0c5d7a3";
+    NightBloom => "night_bloom", "6b0d3f57-92ac-41e8-b74d-0a3e5c81f296";
+    PatternedGround => "patterned_ground", "e83c1a06-5d4f-4b29-97e0-6c2b8d70a415";
+    WindCombed => "wind_combed", "2d795be8-0c31-4a76-8b5e-91f4a03d6c27";
+    CrackedLoam => "cracked_loam", "48a6f2d1-b90e-4c53-a812-7d05e9b34f6a";
+    WetNocturne => "wet_nocturne", "7fe15b83-2a4c-49d0-91b6-c3820e5a7d14";
 }
 
 /// Strength knobs for the shader's layers, one uniform so a taste iteration is a
@@ -198,7 +173,13 @@ impl MaterialExtension for GroundDetail {
         // output), so stamping it onto the prepass descriptor breaks the ground's
         // shadow pass wherever the prepass carries a fragment stage — adapters
         // without DEPTH_CLIP_CONTROL, which emulate unclipped depth in the shader.
-        if fragment.shader_defs.contains(&"PREPASS_PIPELINE".into()) {
+        // Match the DEF NAME, not a whole `ShaderDefVal`: were bevy ever to push it
+        // with a different payload, an equality check would silently stop matching
+        // and break shadows only on the adapters nobody tests on.
+        let is_prepass = fragment.shader_defs.iter().any(
+            |def| matches!(def, bevy::shader::ShaderDefVal::Bool(name, _) if name == "PREPASS_PIPELINE"),
+        );
+        if is_prepass {
             return Ok(());
         }
         fragment.shader = key.bind_group_data.shader();
@@ -206,8 +187,6 @@ impl MaterialExtension for GroundDetail {
     }
 }
 
-/// Repoint every ground material at the selected look. Shading only — no physics,
-/// mesh, or eval input is touched, by construction.
 fn apply_ground_look(look: Res<GroundLook>, mut materials: ResMut<Assets<GroundMaterial>>) {
     if !look.is_changed() {
         return;
@@ -221,14 +200,13 @@ fn apply_ground_look(look: Res<GroundLook>, mut materials: ResMut<Assets<GroundM
 /// cycling, short enough to be gone from the frame you were judging.
 const LOOK_READOUT_SECS: f32 = 2.5;
 
-/// The transient "Ground: <name>" readout, sitting one row above the render-mode
-/// label it shares a corner with.
+/// The transient "Ground: <name>" readout.
 #[derive(Component)]
 struct GroundLookReadout(Timer);
 
 fn spawn_look_readout(mut commands: Commands) {
     commands.spawn((
-        crate::crab_view::hud_corner_label(1),
+        crate::crab_view::hud_corner_label(crate::crab_view::HudRow::GroundLook),
         GroundLookReadout(Timer::from_seconds(LOOK_READOUT_SECS, TimerMode::Once)),
     ));
 }
@@ -245,7 +223,7 @@ fn update_look_readout(
         return;
     };
     if look.is_changed() && !look.is_added() {
-        **text = format!("Ground: {}", look.label());
+        **text = format!("Ground: {}", crate::view_variant_name(&*look));
         state.0.reset();
     }
     if !state.0.is_finished() && state.0.tick(time.delta()).just_finished() {
@@ -253,9 +231,9 @@ fn update_look_readout(
     }
 }
 
-/// Registers [`GroundMaterial`], the seven embedded looks, and the swap system.
-/// Added by `ArenaVisualsPlugin`, so every rendered surface gets it through the one
-/// arena path. `initial` is the look the app boots in (`--ground-look`).
+/// Registers [`GroundMaterial`], every embedded look, and the swap system. Added by
+/// `ArenaVisualsPlugin`, so every rendered surface gets it through the one arena
+/// path. `initial` is the look the app boots in (`--ground-look`).
 pub struct GroundMaterialPlugin {
     pub initial: GroundLook,
 }
@@ -278,10 +256,11 @@ mod tests {
     /// still "work" and the player would just never see one of them.
     #[test]
     fn every_look_has_its_own_shader() {
-        let mut ids: Vec<_> = GroundLook::all().iter().map(|l| l.shader().id()).collect();
+        let all = <GroundLook as clap::ValueEnum>::value_variants();
+        let mut ids: Vec<_> = all.iter().map(|l| l.shader().id()).collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), GroundLook::all().len());
+        assert_eq!(ids.len(), all.len());
     }
 
     /// The runtime swap, end to end below the keybind: cycling the resource must
@@ -304,8 +283,9 @@ mod tests {
                 extension: GroundDetail::new(GroundLook::Shipped),
             });
 
-        let next = app.world_mut().resource_mut::<GroundLook>().cycle();
+        let next = crate::next_view_variant(GroundLook::Shipped);
         assert_ne!(next, GroundLook::Shipped);
+        *app.world_mut().resource_mut::<GroundLook>() = next;
         app.update();
 
         let materials = app.world().resource::<Assets<GroundMaterial>>();
@@ -316,12 +296,18 @@ mod tests {
     /// strand variants no player could ever see.
     #[test]
     fn cycling_visits_every_look_then_returns() {
+        let all = <GroundLook as clap::ValueEnum>::value_variants();
         let mut look = GroundLook::default();
         let mut seen = vec![look];
-        for _ in 1..GroundLook::all().len() {
-            seen.push(look.cycle());
+        for _ in 1..all.len() {
+            look = crate::next_view_variant(look);
+            seen.push(look);
         }
-        assert_eq!(look.cycle(), GroundLook::default(), "cycle does not close");
-        assert_eq!(seen, GroundLook::all());
+        assert_eq!(
+            crate::next_view_variant(look),
+            GroundLook::default(),
+            "cycle does not close"
+        );
+        assert_eq!(seen, all);
     }
 }

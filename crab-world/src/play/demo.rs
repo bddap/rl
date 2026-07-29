@@ -108,7 +108,7 @@ pub(super) fn demo_controls(
         exit.write(AppExit::Success);
     }
     if cycle_view {
-        *render_mode = render_mode.next();
+        *render_mode = crate::next_view_variant(*render_mode);
         info!("demo render mode: {:?}", *render_mode);
     }
     // The swapped label reaches the screen through the every-frame `publish_brain_label`;

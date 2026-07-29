@@ -13,12 +13,19 @@ pub const COLLIDER_WIREFRAME_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
 /// labels — one source, so the overlay can't drift into two near-greens.
 const HUD_TEXT_COLOR: Color = Color::srgb(0.4, 1.0, 0.55);
 
-/// One bottom-right status line, `row` counting upward from the corner. The stack
-/// is shared (render mode is row 0, the rl#304 ground look row 1), so the rows come
-/// from one place and can't be nudged into overlapping each other.
-pub(crate) fn hud_corner_label(row: u8) -> impl Bundle {
+/// The bottom-right status stack, one variant per line. Being an enum is the point:
+/// two lines cannot claim the same row.
+#[derive(Clone, Copy)]
+pub(crate) enum HudRow {
+    RenderMode,
+    GroundLook,
+}
+
+/// One bottom-right status line, stacked upward from the corner.
+pub(crate) fn hud_corner_label(row: HudRow) -> impl Bundle {
     const FONT_SIZE: f32 = 18.0;
     const MARGIN: f32 = 14.0;
+    let row = row as u8;
     (
         Text::new(""),
         TextFont {
@@ -48,14 +55,6 @@ pub enum RenderMode {
 }
 
 impl RenderMode {
-    pub fn next(self) -> Self {
-        match self {
-            RenderMode::Mesh => RenderMode::MeshColliders,
-            RenderMode::MeshColliders => RenderMode::Colliders,
-            RenderMode::Colliders => RenderMode::Mesh,
-        }
-    }
-
     pub fn shows_mesh(self) -> bool {
         !matches!(self, RenderMode::Colliders)
     }
@@ -113,7 +112,7 @@ pub fn register<M>(app: &mut App, initial: RenderMode, cage_gate: impl SystemCon
 }
 
 fn spawn_render_mode_label(mut commands: Commands) {
-    commands.spawn((hud_corner_label(0), RenderModeLabel));
+    commands.spawn((hud_corner_label(HudRow::RenderMode), RenderModeLabel));
 }
 
 fn update_render_mode_label(
@@ -407,7 +406,7 @@ mod tests {
         let mut seen = vec![RenderMode::Mesh];
         let mut m = RenderMode::Mesh;
         for _ in 0..2 {
-            m = m.next();
+            m = crate::next_view_variant(m);
             seen.push(m);
         }
         assert_eq!(
@@ -418,7 +417,11 @@ mod tests {
                 RenderMode::Colliders
             ]
         );
-        assert_eq!(m.next(), RenderMode::Mesh, "the cycle must close");
+        assert_eq!(
+            crate::next_view_variant(m),
+            RenderMode::Mesh,
+            "the cycle must close"
+        );
     }
 
     /// rl#314: the shape bevy_rapier degrades a non-uniformly scaled capsule into must be

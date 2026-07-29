@@ -19,8 +19,8 @@ pub fn register(app: &mut App, initial: RenderMode) {
     app.add_systems(
         Update,
         (
-            cycle_render_mode.run_if(in_state(AppPhase::Playing)),
-            cycle_ground_look.run_if(in_state(AppPhase::Playing)),
+            cycle_view::<RenderMode>.run_if(in_state(AppPhase::Playing)),
+            cycle_view::<crab_world::ground::GroundLook>.run_if(in_state(AppPhase::Playing)),
             manage_silhouette_visibility,
         ),
     );
@@ -32,35 +32,38 @@ pub fn register(app: &mut App, initial: RenderMode) {
     );
 }
 
-fn cycle_render_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    pads: Query<&Gamepad>,
-    mut mode: ResMut<RenderMode>,
-) {
-    if crab_world::controls::just_pressed::<controls::GcrControls>(
-        Action::CycleRenderMode,
-        &keys,
-        &pads,
-    ) {
-        *mode = mode.next();
-        info!("render mode: {:?}", *mode);
-    }
+/// A view knob the player walks with one button: a `clap` value enum that is ALSO the
+/// live resource, so the states its flag accepts and the states the button reaches are
+/// one list. Both knobs are pure dressing — neither reaches simulated state, so cycling
+/// mid-round changes nothing an eval or a peer would see.
+trait ViewKnob: Resource + crab_world::CyclableView {
+    const ACTION: Action;
+    /// How the knob names itself in the log line.
+    const LOG_LABEL: &'static str;
 }
 
-/// Walk the seven ground looks (rl#304). Shading only — the swap repoints the ground
-/// material's fragment shader and touches no simulated state, so a player cycling looks
-/// mid-round changes nothing an eval or a peer would see.
-fn cycle_ground_look(
+impl ViewKnob for RenderMode {
+    const ACTION: Action = Action::CycleRenderMode;
+    const LOG_LABEL: &'static str = "render mode";
+}
+
+impl ViewKnob for crab_world::ground::GroundLook {
+    const ACTION: Action = Action::CycleGroundLook;
+    const LOG_LABEL: &'static str = "ground look";
+}
+
+fn cycle_view<V: ViewKnob>(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
-    mut look: ResMut<crab_world::ground::GroundLook>,
+    mut knob: ResMut<V>,
 ) {
-    if crab_world::controls::just_pressed::<controls::GcrControls>(
-        Action::CycleGroundLook,
-        &keys,
-        &pads,
-    ) {
-        info!("ground look: {}", look.cycle().label());
+    if crab_world::controls::just_pressed::<controls::GcrControls>(V::ACTION, &keys, &pads) {
+        *knob = crab_world::next_view_variant(*knob);
+        info!(
+            "{}: {}",
+            V::LOG_LABEL,
+            crab_world::view_variant_name(&*knob)
+        );
     }
 }
 
