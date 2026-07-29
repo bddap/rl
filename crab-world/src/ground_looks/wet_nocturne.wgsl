@@ -5,7 +5,7 @@
 // detail exists on foot and at landing height (the rl#197 optic-flow duty the old
 // checker carried) but never shimmers from the plane.
 //
-// One of the seven interchangeable looks in this directory; the contract every
+// One of the interchangeable looks in this directory; the contract every
 // file here keeps — inputs, binding 100, the `fragment` entry point — is
 // documented once on `GroundLook` in ground.rs.
 
