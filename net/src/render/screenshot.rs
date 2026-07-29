@@ -28,7 +28,7 @@ pub fn build_screenshot_app(
     if let Some((policy, spawns)) = armed_crab {
         install_armed_nn_crab(&mut app, vec![policy], spawns);
     }
-    finish_offscreen_app(&mut app, cfg, view, controls);
+    finish_offscreen_app(&mut app, cfg, view.render_mode, controls);
     app
 }
 
@@ -45,7 +45,7 @@ pub fn build_net_screenshot_app(
     let coord = coordinator(Some(net), client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
     install_armed_nn_crab(&mut app, vec![nn_crab], spawns);
-    finish_offscreen_app(&mut app, cfg, view, controls);
+    finish_offscreen_app(&mut app, cfg, view.render_mode, controls);
     app
 }
 
@@ -74,7 +74,7 @@ fn offscreen_app_scaffold(ground_look: crab_world::ground::GroundLook) -> App {
 fn finish_offscreen_app(
     app: &mut App,
     cfg: ScreenshotConfig,
-    view: crab_world::BootView,
+    render_mode: super::RenderMode,
     controls: ControlsOverrides<GcrControls>,
 ) {
     crab_world::controls::install_overlay(app, &controls);
@@ -100,7 +100,7 @@ fn finish_offscreen_app(
             )
                 .chain(),
         );
-    super::render_mode::register(app, view.render_mode);
+    super::render_mode::register(app, render_mode);
 }
 
 /// A scripted local pilot for the offscreen apps: press the E-cycle at the given frames and
