@@ -6,7 +6,7 @@ use net::sim::PlayerId;
 use crab_world::RenderArgs;
 use crab_world::controls::ControlsOverlayArgs;
 
-use super::shared::{MATCH_SEED, gcr_controls, nn_crab_policy, render_mode};
+use super::shared::{MATCH_SEED, boot_view, gcr_controls, nn_crab_policy};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -60,9 +60,9 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .nn_crab_checkpoint
         .map(|flag| nn_crab_policy(Some(flag)).map(|(_, policy)| policy))
         .transpose()?;
-    let render_mode = render_mode(args.render);
+    let boot_view = boot_view(args.render);
     let controls = gcr_controls(&args.controls)?;
     let pack = net::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
-    render::build_screenshot_app(client, cfg, nn_crab, render_mode, controls, pack).run();
+    render::build_screenshot_app(client, cfg, nn_crab, boot_view, controls, pack).run();
     Ok(())
 }

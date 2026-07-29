@@ -16,11 +16,11 @@ pub fn build_screenshot_app(
     mut client: ClientSim,
     cfg: ScreenshotConfig,
     nn_crab: Option<crab_world::policy::Policy>,
-    render_mode: super::RenderMode,
+    view: crab_world::BootView,
     controls: ControlsOverrides<GcrControls>,
     pack: Input,
 ) -> App {
-    let mut app = offscreen_app_scaffold();
+    let mut app = offscreen_app_scaffold(view.ground_look);
     let armed_crab = nn_crab.map(|policy| (policy, seed_round_crabs(&mut client, 1)));
     let coord = coordinator(None, client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
@@ -28,7 +28,7 @@ pub fn build_screenshot_app(
     if let Some((policy, spawns)) = armed_crab {
         install_armed_nn_crab(&mut app, vec![policy], spawns);
     }
-    finish_offscreen_app(&mut app, cfg, render_mode, controls);
+    finish_offscreen_app(&mut app, cfg, view, controls);
     app
 }
 
@@ -37,19 +37,19 @@ pub fn build_net_screenshot_app(
     net: NetDriver,
     cfg: ScreenshotConfig,
     nn_crab: crab_world::policy::Policy,
-    render_mode: super::RenderMode,
+    view: crab_world::BootView,
     controls: ControlsOverrides<GcrControls>,
 ) -> App {
-    let mut app = offscreen_app_scaffold();
+    let mut app = offscreen_app_scaffold(view.ground_look);
     let spawns = seed_round_crabs(&mut client, 1);
     let coord = coordinator(Some(net), client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
     install_armed_nn_crab(&mut app, vec![nn_crab], spawns);
-    finish_offscreen_app(&mut app, cfg, render_mode, controls);
+    finish_offscreen_app(&mut app, cfg, view, controls);
     app
 }
 
-fn offscreen_app_scaffold() -> App {
+fn offscreen_app_scaffold(ground_look: crab_world::ground::GroundLook) -> App {
     let mut app = App::new();
     app.add_plugins(crab_world::app_boot::base_plugins(None));
     // The screenshot app has no menu: its round is installed before the first frame, so it is
@@ -62,7 +62,7 @@ fn offscreen_app_scaffold() -> App {
         Duration::from_secs_f64(1.0 / 60.0),
     ));
     app.add_plugins(crab_world::sky::NightSkyPlugin);
-    app.add_plugins(crab_world::physics::ArenaWorldPlugin);
+    app.add_plugins(crab_world::physics::ArenaWorldPlugin { ground_look });
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_secs_f64(TICK_DT),
     ));
@@ -74,7 +74,7 @@ fn offscreen_app_scaffold() -> App {
 fn finish_offscreen_app(
     app: &mut App,
     cfg: ScreenshotConfig,
-    render_mode: super::RenderMode,
+    view: crab_world::BootView,
     controls: ControlsOverrides<GcrControls>,
 ) {
     crab_world::controls::install_overlay(app, &controls);
@@ -100,7 +100,7 @@ fn finish_offscreen_app(
             )
                 .chain(),
         );
-    super::render_mode::register(app, render_mode);
+    super::render_mode::register(app, view.render_mode);
 }
 
 /// A scripted local pilot for the offscreen apps: press the E-cycle at the given frames and

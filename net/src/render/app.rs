@@ -29,7 +29,7 @@ pub enum AppPhase {
 pub fn build_windowed_app(
     boot: Boot,
     nn_crabs: Vec<crab_world::policy::Policy>,
-    render_mode: super::RenderMode,
+    view: crab_world::BootView,
 ) -> anyhow::Result<App> {
     // NO determinism pin, on ANY boot (rl#199): only the solo/host peer steps the float NN
     // crab — a remote client adopts snapshots and steps nothing — so no runtime path compares
@@ -47,7 +47,9 @@ pub fn build_windowed_app(
         ..default()
     })));
     app.add_plugins(crab_world::sky::NightSkyPlugin);
-    app.add_plugins(crab_world::physics::ArenaWorldPlugin);
+    app.add_plugins(crab_world::physics::ArenaWorldPlugin {
+        ground_look: view.ground_look,
+    });
     app.init_state::<AppPhase>();
 
     // The controls hint/overlay is app-global chrome (rl#117): the plugin owns its whole
@@ -134,7 +136,7 @@ pub fn build_windowed_app(
         }
     }
 
-    super::render_mode::register(&mut app, render_mode);
+    super::render_mode::register(&mut app, view.render_mode);
 
     Ok(app)
 }

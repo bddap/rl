@@ -13,6 +13,28 @@ pub const COLLIDER_WIREFRAME_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
 /// labels — one source, so the overlay can't drift into two near-greens.
 const HUD_TEXT_COLOR: Color = Color::srgb(0.4, 1.0, 0.55);
 
+/// One bottom-right status line, `row` counting upward from the corner. The stack
+/// is shared (render mode is row 0, the rl#304 ground look row 1), so the rows come
+/// from one place and can't be nudged into overlapping each other.
+pub(crate) fn hud_corner_label(row: u8) -> impl Bundle {
+    const FONT_SIZE: f32 = 18.0;
+    const MARGIN: f32 = 14.0;
+    (
+        Text::new(""),
+        TextFont {
+            font_size: FONT_SIZE,
+            ..default()
+        },
+        TextColor(HUD_TEXT_COLOR),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(MARGIN + f32::from(row) * FONT_SIZE * 1.35),
+            right: Val::Px(MARGIN),
+            ..default()
+        },
+    )
+}
+
 /// Which view of the crab a render surface shows. A [`clap::ValueEnum`] because it IS a CLI
 /// value ([`crate::RenderArgs`]): clap owns the string→mode mapping, so an unrecognized value
 /// is a parse error at t=0 rather than anything this code has to decide.
@@ -91,21 +113,7 @@ pub fn register<M>(app: &mut App, initial: RenderMode, cage_gate: impl SystemCon
 }
 
 fn spawn_render_mode_label(mut commands: Commands) {
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: 18.0,
-            ..default()
-        },
-        TextColor(HUD_TEXT_COLOR),
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(14.0),
-            right: Val::Px(14.0),
-            ..default()
-        },
-        RenderModeLabel,
-    ));
+    commands.spawn((hud_corner_label(0), RenderModeLabel));
 }
 
 fn update_render_mode_label(

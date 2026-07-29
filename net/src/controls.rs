@@ -25,6 +25,7 @@ pub enum Action {
     Quit,
     EnterExit,
     CycleRenderMode,
+    CycleGroundLook,
     SwapBrain,
     RevealControls,
 
@@ -51,6 +52,7 @@ pub enum Key {
     S,
     D,
     E,
+    G,
     R,
     V,
     B,
@@ -85,6 +87,9 @@ pub enum PadButton {
     /// Right-stick CLICK (R3) — distinct from [`PadButton::RightStick`], the analog
     /// aim/look token; the click is the one pad button free in every context (rl#232).
     RightStickClick,
+    /// Left-stick CLICK (L3) — the same split against the analog move token, and the
+    /// last pad button free in every context (rl#304).
+    LeftStickClick,
     Dpad,
     /// Single D-pad directions — unlike [`PadButton::Dpad`] (the whole cluster, an
     /// analog-style multi-input) these resolve to one `GamepadButton`, so menu nav can
@@ -161,6 +166,7 @@ impl ControlScheme for GcrControls {
             Key::S => "controls/keyboard_s.png",
             Key::D => "controls/keyboard_d.png",
             Key::E => "controls/keyboard_e.png",
+            Key::G => return Glyph::Label("G"),
             Key::R => "controls/keyboard_r.png",
             Key::V => "controls/keyboard_v.png",
             Key::B => return Glyph::Label("B"),
@@ -189,6 +195,7 @@ impl ControlScheme for GcrControls {
             PadButton::LeftStick => Glyph::Icon("controls/xbox_stick_l.png"),
             PadButton::RightStick => Glyph::Icon("controls/xbox_stick_r.png"),
             PadButton::RightStickClick => Glyph::Label("R3"),
+            PadButton::LeftStickClick => Glyph::Label("L3"),
             PadButton::Dpad | PadButton::DpadUp | PadButton::DpadDown => {
                 Glyph::Icon("controls/xbox_dpad.png")
             }
@@ -203,7 +210,7 @@ impl ControlScheme for GcrControls {
     }
 }
 
-pub const BINDINGS: [Binding<GcrControls>; 24] = [
+pub const BINDINGS: [Binding<GcrControls>; 25] = [
     Binding {
         action: Action::MoveForward,
         keyboard: KbBinding::new(&[Key::W], &[]),
@@ -253,6 +260,11 @@ pub const BINDINGS: [Binding<GcrControls>; 24] = [
         action: Action::CycleRenderMode,
         keyboard: KbBinding::new(&[Key::V], &[]),
         pad: PadBinding::new(&[PadButton::East]),
+    },
+    Binding {
+        action: Action::CycleGroundLook,
+        keyboard: KbBinding::new(&[Key::G], &[]),
+        pad: PadBinding::new(&[PadButton::LeftStickClick]),
     },
     Binding {
         action: Action::SwapBrain,
@@ -329,7 +341,7 @@ pub const BINDINGS: [Binding<GcrControls>; 24] = [
     },
 ];
 
-pub const FOOT_ROWS: [ContextRow<GcrControls>; 12] = [
+pub const FOOT_ROWS: [ContextRow<GcrControls>; 13] = [
     ContextRow {
         action: Action::MoveForward,
         label: "Forward",
@@ -363,6 +375,10 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 12] = [
         label: "Render view",
     },
     ContextRow {
+        action: Action::CycleGroundLook,
+        label: "Ground look",
+    },
+    ContextRow {
         action: Action::SwapBrain,
         label: "Swap Sally brain",
     },
@@ -380,7 +396,7 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 12] = [
     },
 ];
 
-pub const PLANE_ROWS: [ContextRow<GcrControls>; 8] = [
+pub const PLANE_ROWS: [ContextRow<GcrControls>; 9] = [
     ContextRow {
         action: Action::PlaneAttitude,
         label: "Pitch / roll",
@@ -402,6 +418,10 @@ pub const PLANE_ROWS: [ContextRow<GcrControls>; 8] = [
         label: "Render view",
     },
     ContextRow {
+        action: Action::CycleGroundLook,
+        label: "Ground look",
+    },
+    ContextRow {
         action: Action::Restart,
         label: "Restart round",
     },
@@ -415,7 +435,7 @@ pub const PLANE_ROWS: [ContextRow<GcrControls>; 8] = [
     },
 ];
 
-pub const SHIP_ROWS: [ContextRow<GcrControls>; 10] = [
+pub const SHIP_ROWS: [ContextRow<GcrControls>; 11] = [
     ContextRow {
         action: Action::ShipThrust,
         label: "Thrust: move / strafe",
@@ -443,6 +463,10 @@ pub const SHIP_ROWS: [ContextRow<GcrControls>; 10] = [
     ContextRow {
         action: Action::CycleRenderMode,
         label: "Render view",
+    },
+    ContextRow {
+        action: Action::CycleGroundLook,
+        label: "Ground look",
     },
     ContextRow {
         action: Action::Restart,
@@ -495,6 +519,7 @@ mod bevy_glue {
                 Key::S => &[KeyCode::KeyS],
                 Key::D => &[KeyCode::KeyD],
                 Key::E => &[KeyCode::KeyE],
+                Key::G => &[KeyCode::KeyG],
                 Key::R => &[KeyCode::KeyR],
                 Key::V => &[KeyCode::KeyV],
                 Key::B => &[KeyCode::KeyB],
@@ -533,6 +558,7 @@ mod bevy_glue {
                 PadButton::Start => Some(GamepadButton::Start),
                 PadButton::Back => Some(GamepadButton::Select),
                 PadButton::RightStickClick => Some(GamepadButton::RightThumb),
+                PadButton::LeftStickClick => Some(GamepadButton::LeftThumb),
                 PadButton::DpadUp => Some(GamepadButton::DPadUp),
                 PadButton::DpadDown => Some(GamepadButton::DPadDown),
                 PadButton::LeftStick | PadButton::RightStick | PadButton::Dpad => None,
@@ -572,7 +598,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 24] = [
+    const ALL_ACTIONS: [Action; 25] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -583,6 +609,7 @@ mod tests {
         Action::Quit,
         Action::EnterExit,
         Action::CycleRenderMode,
+        Action::CycleGroundLook,
         Action::SwapBrain,
         Action::RevealControls,
         Action::PlaneAttitude,
@@ -620,6 +647,7 @@ mod tests {
                 | Action::Quit
                 | Action::EnterExit
                 | Action::CycleRenderMode
+                | Action::CycleGroundLook
                 | Action::SwapBrain
                 | Action::RevealControls
                 | Action::PlaneAttitude
@@ -859,9 +887,21 @@ mod tests {
                             b.action
                         ),
                         Glyph::Label(l) => assert!(
-                            matches!(l, "LT" | "LB" | "RB" | "R3" | "B" | "Up" | "Down" | "Enter"),
+                            matches!(
+                                l,
+                                "LT" | "LB"
+                                    | "RB"
+                                    | "R3"
+                                    | "L3"
+                                    | "B"
+                                    | "G"
+                                    | "Up"
+                                    | "Down"
+                                    | "Enter"
+                            ),
                             "unexpected text glyph {l:?} for {:?} (only the art-less \
-                             triggers/bumpers, the rl#232 swap inputs, and the menu keys)",
+                             triggers/bumpers, the rl#232 swap and rl#304 ground-look \
+                             inputs, and the menu keys)",
                             b.action
                         ),
                     }

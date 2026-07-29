@@ -20,6 +20,7 @@ pub fn register(app: &mut App, initial: RenderMode) {
         Update,
         (
             cycle_render_mode.run_if(in_state(AppPhase::Playing)),
+            cycle_ground_look.run_if(in_state(AppPhase::Playing)),
             manage_silhouette_visibility,
         ),
     );
@@ -43,6 +44,23 @@ fn cycle_render_mode(
     ) {
         *mode = mode.next();
         info!("render mode: {:?}", *mode);
+    }
+}
+
+/// Walk the seven ground looks (rl#304). Shading only — the swap repoints the ground
+/// material's fragment shader and touches no simulated state, so a player cycling looks
+/// mid-round changes nothing an eval or a peer would see.
+fn cycle_ground_look(
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
+    mut look: ResMut<crab_world::ground::GroundLook>,
+) {
+    if crab_world::controls::just_pressed::<controls::GcrControls>(
+        Action::CycleGroundLook,
+        &keys,
+        &pads,
+    ) {
+        info!("ground look: {}", look.cycle().label());
     }
 }
 

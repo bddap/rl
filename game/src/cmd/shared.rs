@@ -14,9 +14,9 @@ pub(crate) const MATCH_SEED: u64 = 0x6372_6162;
 /// honors it, so the flags and the error prose below can't drift apart.
 pub(crate) const CHECKPOINT_ENV: &str = "RL_CRAB_CHECKPOINT_DIR";
 
-/// The render mode this binary boots in — every GCR surface is [`Surface::Game`], so the
+/// The view this binary boots in — every GCR surface is [`Surface::Game`], so the
 /// surface is named once rather than at each entrypoint.
-pub(crate) fn render_mode(args: crab_world::RenderArgs) -> net::render::RenderMode {
+pub(crate) fn boot_view(args: crab_world::RenderArgs) -> crab_world::BootView {
     args.resolve(crab_world::mesh_fallback::Surface::Game)
 }
 
