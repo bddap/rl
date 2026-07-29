@@ -71,6 +71,7 @@ pub enum GroundLook {
     WindCombed,
     CrackedLoam,
     WetNocturne,
+    Watershed,
 }
 
 /// The one place a look's shader UUID and its file sit together. Split across a
@@ -115,6 +116,7 @@ ground_looks! {
     WindCombed => "wind_combed", "2d795be8-0c31-4a76-8b5e-91f4a03d6c27";
     CrackedLoam => "cracked_loam", "48a6f2d1-b90e-4c53-a812-7d05e9b34f6a";
     WetNocturne => "wet_nocturne", "7fe15b83-2a4c-49d0-91b6-c3820e5a7d14";
+    Watershed => "watershed", "3a9d6c07-14be-4f82-a5c3-8e07b12d9f4b";
 }
 
 /// Strength knobs for the shader's layers, one uniform so a taste iteration is a
