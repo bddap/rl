@@ -26,9 +26,11 @@
       "tests": [
         "nix-shell --run 'cargo fmt --check'",
         "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
+        "nix-shell --run 'cargo build --release -p rl-train'",
+        "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
         "nix-shell --run 'cargo test -q -- --test-threads=2'"
       ],
-      "why": "AGENTS.md's pre-submission contract, workspace-wide: the crates interlock (net/game consume crab-world's sim seams), so per-crate scoping would miss cross-crate breakage; --test-threads=2 because the live trainer saturates the cores and the heavy physics tests hang at default parallelism; assets and golden data ride the same rule because the suite consumes them (terrain fixtures, golden-env data, controls-display images)"
+      "why": "AGENTS.md's pre-submission contract, workspace-wide: the crates interlock (net/game consume crab-world's sim seams), so per-crate scoping would miss cross-crate breakage; --test-threads=2 because the live trainer saturates the cores and the heavy physics tests hang at default parallelism; assets and golden data ride the same rule because the suite consumes them (terrain fixtures, golden-env data, controls-display images). The two ISOLATED --release builds are the literal configs rl-release.service ships, which workspace feature-unification MASKS (bothouse#79/#97, formerly botq's hardcoded rl build matrix): `-p rl-train` is the trainer/eval build — default features only (wgpu, no render), where rl#275's ungated `pub use` of render-gated code broke E0432 while every workspace-level build stayed green; `-p rl-demo -p game -p rl-update-ui` is the deck-bundle build — render on WITHOUT the trainer's wgpu, the symmetric unification gap"
     }
   ]
 }
