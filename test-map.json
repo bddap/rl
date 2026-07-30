@@ -3,8 +3,11 @@
   "rules": [
     {
       "paths": ["test-map.json"],
-      "tests": ["botq test-map --check"],
-      "why": "editing the map re-lints its own completeness over every tracked file"
+      "tests": [
+        "botq test-map --check",
+        "nix-shell --run 'cargo test -q -p crab-world --test test_map_guard -- --test-threads=2'"
+      ],
+      "why": "editing the map re-lints its own completeness over every tracked file, and the guard test pins the landing-matrix commands so a config cannot be silently dropped from the rule below (--check lints completeness, not content)"
     },
     {
       "paths": ["**/*.md", "**/.gitignore", "LICENSE-*", "NOTICE", "docs/**"],
