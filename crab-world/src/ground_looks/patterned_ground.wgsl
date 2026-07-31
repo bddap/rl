@@ -8,7 +8,7 @@
 // so no repeat period exists to spot from any altitude. Cell tiers are faded by
 // their on-screen footprint (fwidth), so nothing shimmers from the plane.
 //
-// One of the seven interchangeable looks in this directory; the contract every
+// One of the interchangeable looks in this directory; the contract every
 // file here keeps — inputs, binding 100, the `fragment` entry point — is
 // documented once on `GroundLook` in ground.rs.
 

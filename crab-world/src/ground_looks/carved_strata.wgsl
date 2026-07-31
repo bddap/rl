@@ -9,7 +9,7 @@
 // Octaves are faded by their on-screen footprint (fwidth), so fine detail
 // exists on foot but never shimmers from the plane.
 //
-// One of the seven interchangeable looks in this directory; the contract every
+// One of the interchangeable looks in this directory; the contract every
 // file here keeps — inputs, binding 100, the `fragment` entry point — is
 // documented once on `GroundLook` in ground.rs.
 

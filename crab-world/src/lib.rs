@@ -36,6 +36,8 @@ pub mod frame_telemetry;
 #[cfg(feature = "render")]
 pub mod ground;
 #[cfg(feature = "render")]
+pub mod moisture;
+#[cfg(feature = "render")]
 pub mod play;
 #[cfg(feature = "render")]
 pub mod scatter;
