@@ -46,6 +46,14 @@ pub(crate) struct Args {
     /// rl#249) rather than only frontal pursuit.
     #[arg(long, default_value_t = 0.0)]
     pack_look_yaw: f32,
+
+    /// Capture this many frames as `<out-stem>.NNNN.png` instead of one shot —
+    /// evidence clips for the animated ground looks (assemble with ffmpeg).
+    #[arg(long)]
+    anim_frames: Option<u32>,
+    /// Render frames between captured anim frames (60 = 1 s of shader time).
+    #[arg(long, default_value_t = 6)]
+    anim_every: u32,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -55,7 +63,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(args.cam_yaw, args.cam_pitch)
         .with_cam_height(args.cam_height)
-        .with_fov(args.cam_fov);
+        .with_fov(args.cam_fov)
+        .with_anim(args.anim_frames.map(|count| (count, args.anim_every)));
     let nn_crab = args
         .nn_crab_checkpoint
         .map(|flag| nn_crab_policy(Some(flag)).map(|(_, policy)| policy))
