@@ -76,6 +76,14 @@ pub enum GroundLook {
     CrackedLoam,
     WetNocturne,
     Watershed,
+    // The wet-nocturne variation set (owner request 2026-07-31: "more variations
+    // of it including animated variations") — two palette regrades and three
+    // globals.time-animated takes, exploration for a taste call.
+    AmberNocturne,
+    VioletNocturne,
+    AuroraNocturne,
+    TwinkleNocturne,
+    PulseNocturne,
 }
 
 /// The one place a look's shader UUID and its file sit together. Split across a
@@ -121,6 +129,11 @@ ground_looks! {
     CrackedLoam => "cracked_loam", "48a6f2d1-b90e-4c53-a812-7d05e9b34f6a";
     WetNocturne => "wet_nocturne", "7fe15b83-2a4c-49d0-91b6-c3820e5a7d14";
     Watershed => "watershed", "3a9d6c07-14be-4f82-a5c3-8e07b12d9f4b";
+    AmberNocturne => "amber_nocturne", "b8e51e77-e7f6-4d3d-8e16-f345893df738";
+    VioletNocturne => "violet_nocturne", "f95c76b2-b2a1-49bb-8a77-6fc05ea2bb3b";
+    AuroraNocturne => "aurora_nocturne", "f585dff1-020e-443d-b7a0-0e03c40c5f7f";
+    TwinkleNocturne => "twinkle_nocturne", "75f150e7-0580-460a-8e2f-a9ef8d52cc83";
+    PulseNocturne => "pulse_nocturne", "e8ac73c7-8606-48bb-9960-466c2caa44e8";
 }
 
 /// Strength knobs for the shader's layers, one uniform so a taste iteration is a
