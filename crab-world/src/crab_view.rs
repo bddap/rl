@@ -82,8 +82,14 @@ impl RenderMode {
     }
 }
 
+/// How long a corner readout stays up after a toggle. Long enough to read while
+/// cycling, short enough to be gone from the frame you were judging — the corner
+/// rows carry NO standing text, so normal play is chrome-free.
+pub(crate) const READOUT_SECS: f32 = 2.5;
+
+/// The transient "Render: <mode>" readout.
 #[derive(Component)]
-struct RenderModeLabel;
+struct RenderModeLabel(Timer);
 
 pub fn register<M>(app: &mut App, initial: RenderMode, cage_gate: impl SystemCondition<M>) {
     app.insert_resource(initial);
@@ -112,18 +118,28 @@ pub fn register<M>(app: &mut App, initial: RenderMode, cage_gate: impl SystemCon
 }
 
 fn spawn_render_mode_label(mut commands: Commands) {
-    commands.spawn((hud_corner_label(HudRow::RenderMode), RenderModeLabel));
+    commands.spawn((
+        hud_corner_label(HudRow::RenderMode),
+        RenderModeLabel(Timer::from_seconds(READOUT_SECS, TimerMode::Once)),
+    ));
 }
 
+/// Name the mode on every change EXCEPT the boot one (`is_added`): booting into a
+/// mode is not a toggle, and a standing readout would sit in every frame of play.
 fn update_render_mode_label(
     mode: Res<RenderMode>,
-    mut label: Query<&mut Text, With<RenderModeLabel>>,
+    time: Res<Time>,
+    mut label: Query<(&mut Text, &mut RenderModeLabel)>,
 ) {
-    if !mode.is_changed() {
+    let Ok((mut text, mut state)) = label.single_mut() else {
         return;
-    }
-    if let Ok(mut text) = label.single_mut() {
+    };
+    if mode.is_changed() && !mode.is_added() {
         **text = format!("Render: {}", mode.label());
+        state.0.reset();
+    }
+    if !state.0.is_finished() && state.0.tick(time.delta()).just_finished() {
+        text.clear();
     }
 }
 

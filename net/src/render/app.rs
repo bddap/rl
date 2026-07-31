@@ -1,7 +1,7 @@
+use super::controls_sync::{sync_controls_context, sync_menu_controls_context};
 use super::driver::{
     PendingRound, drive_client_sim, ensure_round_installed, insert_core, teardown_round,
 };
-use super::hud::{spawn_hud, sync_controls_context, sync_menu_controls_context, update_hud};
 use super::input::{gather_input, grab_cursor, quit_game, release_cursor};
 use super::scene::{
     apply_transforms, place_extraction_pillar, reconcile_avatars, spawn_fp_camera, spawn_world,
@@ -62,13 +62,7 @@ pub fn build_windowed_app(
     app.init_non_send_resource::<PendingRound>()
         .add_systems(
             OnEnter(AppPhase::Playing),
-            (
-                ensure_round_installed,
-                spawn_world,
-                spawn_fp_camera,
-                spawn_hud,
-            )
-                .chain(),
+            (ensure_round_installed, spawn_world, spawn_fp_camera).chain(),
         )
         .add_systems(
             Update,
@@ -79,7 +73,6 @@ pub fn build_windowed_app(
                 reconcile_avatars,
                 apply_transforms,
                 place_extraction_pillar,
-                update_hud,
             )
                 .chain()
                 .run_if(in_state(AppPhase::Playing)),

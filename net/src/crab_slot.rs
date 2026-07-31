@@ -38,8 +38,6 @@ use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crab_world::bot::pose_sentinel::modeled_shape;
 use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns, recenter_drifted_origins};
-#[cfg(feature = "render")]
-use crab_world::crab_view::CrabBrainLabels;
 use crab_world::policy::Policy;
 use crab_world::training::targets::band_lure;
 
@@ -177,19 +175,6 @@ impl Plugin for NnCrabPlugin {
             )
                 .run_if(crabs_armed),
         );
-        // Publish each binding's on-screen brain label (rl#200 increment 7). In FixedUpdate
-        // deliberately: only the physics-pumping peer (solo/host) advances FixedUpdate
-        // (the wall-clock auto-pump is PARKED — `park_fixed_auto_pump`, exact since
-        // rl#298 stage 4 — and `pump_fixed_steps` is driven by the client-sim tick drain),
-        // so this is host-only by construction; on a remote-adopt client the articulation
-        // `apply` is the sole label writer and the two can't fight over the resource.
-        // Render-gated: labels feed UI a renderless host doesn't have — the seam itself
-        // is render-free (rl#298 stage 4).
-        #[cfg(feature = "render")]
-        {
-            app.init_resource::<CrabBrainLabels>();
-            app.add_systems(FixedUpdate, publish_brain_labels.run_if(crabs_armed));
-        }
     }
 }
 
@@ -202,19 +187,6 @@ fn ensure_crab_env(settle: Res<CrabSettle>, mut num_envs: ResMut<crab_world::bot
 
 fn crab_not_yet_spawned(crabs: Query<(), With<CrabCarapace>>) -> bool {
     crabs.is_empty()
-}
-
-/// Keep [`CrabBrainLabels`] current with the bindings — one label per env, formatted by the
-/// ONE formatter (`Policy::brain_label`), write-on-change. GCR policies never hot-reload, so
-/// this settles to one write per arm; it stays a system (not an arm-time one-shot) so the
-/// labels can never go stale against whatever drives the crabs. Teardown clears the resource
-/// (`crate::render`'s `teardown_round`), un-labeling the crab bodies that outlive the round.
-#[cfg(feature = "render")]
-fn publish_brain_labels(policies: NonSend<CrabPolicies>, mut labels: ResMut<CrabBrainLabels>) {
-    let want: Vec<String> = policies.0.iter().map(|p| p.brain_label()).collect();
-    if labels.0 != want {
-        labels.0 = want;
-    }
 }
 
 /// Pose each env's walk target at its hunt prey, lured to at most one band edge from
