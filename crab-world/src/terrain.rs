@@ -197,6 +197,24 @@ impl TerrainGrid {
         self.heights[row * self.cols + col]
     }
 
+    /// (rows, cols) — the hydrology bake (moisture.rs) walks the raw grid.
+    #[cfg(feature = "render")]
+    pub(crate) fn dims(&self) -> (usize, usize) {
+        (self.rows, self.cols)
+    }
+
+    /// World meters per cell edge.
+    #[cfg(feature = "render")]
+    pub(crate) fn cell_m(&self) -> f32 {
+        self.cell
+    }
+
+    /// The raw height samples, row-major `[row * cols + col]`.
+    #[cfg(feature = "render")]
+    pub(crate) fn heights_row_major(&self) -> &[f32] {
+        &self.heights
+    }
+
     /// Surface height at world `(x, z)` — exact on the collider's triangles: parry's
     /// default (non-zigzag) subdivision splits each cell along the (row+1,col)—(row,col+1)
     /// diagonal, and this reproduces that split, so a point this fn puts ON the surface

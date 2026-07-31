@@ -24,8 +24,8 @@ use bevy::shader::ShaderRef;
 /// with the procedural detail fragment on top.
 pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 
-/// One interchangeable ground look — the shipped one plus the six rl#304
-/// competition entries — and the live selection: `GroundLook` is BOTH the
+/// One interchangeable ground look — the shipped one, the six rl#304 competition
+/// entries, and the rl#323 watershed unification — and the live selection: `GroundLook` is BOTH the
 /// `--ground-look` value and the resource the in-game toggle cycles, the same
 /// shape [`crate::crab_view::RenderMode`] uses, so there is one field to write and
 /// no wrapper to keep in sync.
@@ -44,13 +44,17 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 ///   ONE extension uniform, the taste-iteration knob set (defaults + meaning in
 ///   [`GroundDetail`]). A look may reinterpret the lanes but must bind them at 100
 ///   (the Rust side is `AsBindGroup` on that binding).
+/// - the hydrology bake at bindings 101 (texture, R wetness / G standing water),
+///   102 (sampler), 103 (world-extent uniform) — optional to declare; watershed is
+///   the consumer. World-mapped over the whole tile, so it cannot tile.
 ///
 /// Rules (issue requirements, not style):
 /// - entry point stays `fn fragment`. Only the FORWARD main pass draws these files
 ///   ([`GroundDetail::specialize`] leaves the prepass alone), so the
 ///   `PREPASS_PIPELINE` fork they carry is inert — it just keeps the file valid if
 ///   prepass wiring is ever added.
-/// - world-space procedural only: no sampled textures (tiling), and nothing that
+/// - world-space procedural only: no REPEATED textures (the world-spanning
+///   hydrology bake above is the one sanctioned sample), and nothing that
 ///   lies about geometry — normal perturbation is fine, parallax/displacement is
 ///   NOT (the visual surface IS the collision heightfield).
 /// - octaves faded by their on-screen footprint (`fwidth`): fine detail must exist
@@ -71,6 +75,7 @@ pub enum GroundLook {
     WindCombed,
     CrackedLoam,
     WetNocturne,
+    Watershed,
 }
 
 /// The one place a look's shader UUID and its file sit together. Split across a
@@ -115,6 +120,7 @@ ground_looks! {
     WindCombed => "wind_combed", "2d795be8-0c31-4a76-8b5e-91f4a03d6c27";
     CrackedLoam => "cracked_loam", "48a6f2d1-b90e-4c53-a812-7d05e9b34f6a";
     WetNocturne => "wet_nocturne", "7fe15b83-2a4c-49d0-91b6-c3820e5a7d14";
+    Watershed => "watershed", "3a9d6c07-14be-4f82-a5c3-8e07b12d9f4b";
 }
 
 /// Strength knobs for the shader's layers, one uniform so a taste iteration is a
@@ -127,6 +133,16 @@ pub struct GroundDetail {
     /// z: fine on-foot detail, w: detail-normal strength.
     #[uniform(100)]
     pub strengths: Vec4,
+    /// The hydrology bake over the terrain grid ([`crate::moisture::MoistureMap`]):
+    /// R wetness, G standing water. World-mapped (`uv = world_xz / extent + 0.5`),
+    /// so it has no repeat period — the one texture the no-tiling rule permits.
+    #[texture(101)]
+    #[sampler(102)]
+    pub moisture: Handle<Image>,
+    /// x, y: the moisture map's world extents in meters (terrain extent_x/extent_z)
+    /// — the shader's world→uv scale. z, w unused.
+    #[uniform(103)]
+    pub moisture_extent: Vec4,
     /// Which look this material draws. Not a binding — it rides in the material to
     /// reach [`MaterialExtension::specialize`] as the pipeline key, so two ground
     /// materials share a pipeline iff they draw the same look and a swap is a
@@ -135,9 +151,11 @@ pub struct GroundDetail {
 }
 
 impl GroundDetail {
-    pub fn new(look: GroundLook) -> Self {
+    pub fn new(look: GroundLook, moisture: Handle<Image>, extent: Vec2) -> Self {
         Self {
             strengths: Vec4::new(0.55, 0.35, 0.45, 0.6),
+            moisture,
+            moisture_extent: Vec4::new(extent.x, extent.y, 0.0, 0.0),
             look,
         }
     }
@@ -279,7 +297,7 @@ mod tests {
             .resource_mut::<Assets<GroundMaterial>>()
             .add(GroundMaterial {
                 base: StandardMaterial::default(),
-                extension: GroundDetail::new(GroundLook::Shipped),
+                extension: GroundDetail::new(GroundLook::Shipped, Handle::default(), Vec2::ONE),
             });
 
         let next = crate::next_view_variant(GroundLook::Shipped);

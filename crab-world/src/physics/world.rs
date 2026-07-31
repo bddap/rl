@@ -125,6 +125,7 @@ fn setup_arena_visuals(
     terrain: Res<Terrain>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GroundMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     look: Res<GroundLook>,
 ) {
     if !visuals.0 {
@@ -161,6 +162,10 @@ fn setup_arena_visuals(
     // [`GroundDetail`]'s fragment shader (rl#304 — it replaced the rl#197 checker,
     // including its optic-flow duty) — inside the one ground path, never a second
     // surface.
+    // The hydrology bake (rl#323): wetness + standing water derived from the SAME
+    // grid as the mesh and collider, so the watershed look's moisture agrees with
+    // the silhouette by construction.
+    let moisture = images.add(crate::moisture::MoistureMap::bake(&terrain).image());
     commands.spawn((
         Mesh3d(meshes.add(terrain.mesh())),
         MeshMaterial3d(materials.add(GroundMaterial {
@@ -169,7 +174,11 @@ fn setup_arena_visuals(
                 perceptual_roughness: 0.95,
                 ..default()
             },
-            extension: GroundDetail::new(*look),
+            extension: GroundDetail::new(
+                *look,
+                moisture,
+                Vec2::new(terrain.extent_x(), terrain.extent_z()),
+            ),
         })),
         Transform::IDENTITY,
     ));
