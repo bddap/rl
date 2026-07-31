@@ -1,8 +1,8 @@
 use super::app::{install_armed_nn_crab, seed_round_crabs};
+use super::controls_sync::sync_controls_context;
 use super::driver::{
     FlightInput, PendingInput, ScriptedPackInput, coordinator, drive_client_sim, insert_core,
 };
-use super::hud::{spawn_hud, sync_controls_context, update_hud};
 use super::input::gather_input;
 use super::scene::{
     FpCamera, apply_transforms, place_extraction_pillar, reconcile_avatars, spawn_world,
@@ -80,7 +80,7 @@ fn finish_offscreen_app(
     crab_world::controls::install_overlay(app, &controls);
     app.insert_resource(cfg)
         .init_resource::<ShotProgress>()
-        .add_systems(Startup, (spawn_world, spawn_offscreen_camera, spawn_hud))
+        .add_systems(Startup, (spawn_world, spawn_offscreen_camera))
         .add_systems(
             Update,
             (
@@ -92,10 +92,9 @@ fn finish_offscreen_app(
                 apply_transforms,
                 place_extraction_pillar,
                 apply_shot_cam_offset,
-                // Keeps the HUD context live like the windowed app. A shot that PINNED a
-                // context is unaffected: ActiveContext::sync is a no-op while pinned.
+                // Keeps the controls context live like the windowed app. A shot that PINNED
+                // a context is unaffected: ActiveContext::sync is a no-op while pinned.
                 sync_controls_context.before(update_controls_ui::<GcrControls>),
-                update_hud,
                 capture_when_settled,
             )
                 .chain(),

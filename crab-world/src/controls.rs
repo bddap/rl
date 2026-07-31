@@ -391,9 +391,6 @@ mod overlay {
     pub struct ControlsRevealed(pub bool);
 
     #[derive(Component)]
-    pub struct ContextHintLabel;
-
-    #[derive(Component)]
     pub struct ContextHeading;
 
     #[derive(Component)]
@@ -523,23 +520,6 @@ mod overlay {
                 ..default()
             })
             .with_children(|hint| {
-                hint.spawn((
-                    Text::new(default_label),
-                    TextFont {
-                        font_size: 18.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(1.0, 0.95, 0.6)),
-                    ContextHintLabel,
-                ));
-                hint.spawn((
-                    Text::new("·"),
-                    TextFont {
-                        font_size: 18.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.6, 0.6, 0.6)),
-                ));
                 for device in [Device::KeyboardMouse, Device::Gamepad] {
                     let Some(glyph) = reveal_glyph::<S>(device) else {
                         continue;
@@ -558,14 +538,6 @@ mod overlay {
                     ))
                     .with_children(|slot| spawn_glyph(slot, &asset_server, glyph));
                 }
-                hint.spawn((
-                    Text::new("Hold - Controls"),
-                    TextFont {
-                        font_size: 18.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
             });
 
         commands
@@ -675,8 +647,7 @@ mod overlay {
             (&HintGlyphFor, &mut Node),
             (Without<ControlsOverlayRoot>, Without<LegendColumn<S>>),
         >,
-        mut headings: Query<&mut Text, (With<ContextHeading>, Without<ContextHintLabel>)>,
-        mut hint_labels: Query<&mut Text, (With<ContextHintLabel>, Without<ContextHeading>)>,
+        mut headings: Query<&mut Text, With<ContextHeading>>,
     ) {
         let revealed = force_reveal.0 || pressed::<S>(S::reveal_action(), &keys, &gamepads);
         revealed_out.0 = revealed;
@@ -706,11 +677,6 @@ mod overlay {
 
         let label = S::context_label(context.get());
         for mut text in &mut headings {
-            if text.0 != label {
-                text.0 = label.to_string();
-            }
-        }
-        for mut text in &mut hint_labels {
             if text.0 != label {
                 text.0 = label.to_string();
             }

@@ -196,10 +196,6 @@ fn apply_ground_look(look: Res<GroundLook>, mut materials: ResMut<Assets<GroundM
     }
 }
 
-/// How long the look's name stays up after a toggle. Long enough to read while
-/// cycling, short enough to be gone from the frame you were judging.
-const LOOK_READOUT_SECS: f32 = 2.5;
-
 /// The transient "Ground: <name>" readout.
 #[derive(Component)]
 struct GroundLookReadout(Timer);
@@ -207,7 +203,10 @@ struct GroundLookReadout(Timer);
 fn spawn_look_readout(mut commands: Commands) {
     commands.spawn((
         crate::crab_view::hud_corner_label(crate::crab_view::HudRow::GroundLook),
-        GroundLookReadout(Timer::from_seconds(LOOK_READOUT_SECS, TimerMode::Once)),
+        GroundLookReadout(Timer::from_seconds(
+            crate::crab_view::READOUT_SECS,
+            TimerMode::Once,
+        )),
     ));
 }
 
