@@ -163,13 +163,15 @@ impl MoistureMap {
 
         // One 3×3 box pass on wetness: D8 drainage lines are one cell wide, and a
         // single blur widens them past the bilinear filter's reach so streams read
-        // as damp corridors instead of jaggies. Ponds keep their exact shorelines.
+        // as damp corridors instead of jaggies. The pond floor is re-applied after
+        // the blur — a one-cell pond must not have its wet ground averaged away.
         let blurred = box3(&wetness, rows, cols);
 
         let data = blurred
             .iter()
             .zip(&pond)
-            .flat_map(|(&w, &p)| {
+            .map(|(&w, &p)| (w.max(p), p))
+            .flat_map(|(w, p)| {
                 [
                     (w.clamp(0.0, 1.0) * 255.0) as u8,
                     (p.clamp(0.0, 1.0) * 255.0) as u8,
