@@ -161,6 +161,10 @@ pub struct ScreenshotConfig {
     cam_pitch_deg: f32,
     cam_height_m: f32,
     cam_fov_deg: Option<f32>,
+    /// `Some((count, every))`: capture `count` frames, one every `every` render
+    /// frames after settle, as `<stem>.NNNN.png` — the animated-look evidence
+    /// path (assemble with ffmpeg). `None`: the single shot at settle.
+    anim: Option<(u32, u32)>,
 }
 
 impl ScreenshotConfig {
@@ -174,7 +178,14 @@ impl ScreenshotConfig {
             cam_pitch_deg: 0.0,
             cam_height_m: 0.0,
             cam_fov_deg: None,
+            anim: None,
         }
+    }
+
+    /// Capture a frame sequence instead of one shot (see [`Self::anim`]).
+    pub fn with_anim(mut self, anim: Option<(u32, u32)>) -> Self {
+        self.anim = anim.filter(|&(count, _)| count > 1);
+        self
     }
 
     /// Raise the camera this far above the normal eye point — vista/altitude
@@ -246,10 +257,28 @@ fn capture_when_settled(
     let Some(frame) = screenshot::advance_capture(&mut progress, cfg.settle, &mut exit) else {
         return;
     };
-    screenshot::save_target_to(&mut commands, &target, cfg.path.clone());
-    info!(
-        "fp screenshot: captured at render frame {frame}, writing {}",
-        cfg.path.display()
-    );
-    screenshot::finish_capture(&mut progress);
+    let Some((count, every)) = cfg.anim else {
+        screenshot::save_target_to(&mut commands, &target, cfg.path.clone());
+        info!(
+            "fp screenshot: captured at render frame {frame}, writing {}",
+            cfg.path.display()
+        );
+        screenshot::finish_capture(&mut progress);
+        return;
+    };
+    // Sequence capture: frame `settle + k*every` is shot number k. Time advances
+    // ManualDuration(TICK_DT) per render frame, so `every` ticks = every/60 s of
+    // shader time between shots — deterministic, replayable animation evidence.
+    let since_settle = frame - cfg.settle;
+    let every = every.max(1);
+    if since_settle % every != 0 {
+        return;
+    }
+    let shot = since_settle / every;
+    let path = cfg.path.with_extension(format!("{shot:04}.png"));
+    screenshot::save_target_to(&mut commands, &target, path.clone());
+    info!("fp screenshot: anim frame {shot}/{count} at render frame {frame} -> {}", path.display());
+    if shot + 1 >= count {
+        screenshot::finish_capture(&mut progress);
+    }
 }
