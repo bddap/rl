@@ -193,28 +193,33 @@ fn fragment(
         );
     }
 
-    // Dew glints: sparse bright points on a 0.4 m jittered grid, near-field
-    // only (footprint-faded), boosted on snow, drowned in puddles. Added
-    // post-lighting — a glint is a glint, not a brighter patch of albedo.
+    // Dew glints: sparse bright points on a 0.8 m jittered grid (2x the base
+    // look: bigger drops survive the footprint fade from standing eye height),
+    // near-field only, drowned in puddles. Post-lighting - light, not albedo.
     // ANIMATED: each glint twinkles on its own hash-derived phase and rate
     // (0.6–1.8 Hz), squared so it spends most of the cycle dim and BLINKS
     // bright — glitter, not a slow throb. Denser than wet_nocturne (0.975)
     // because at any instant only part of the field is lit.
-    let spark_f = footprint_fade(0.4, fw) * S.z * (1.0 - pud);
+    let spark_f = footprint_fade(0.25, fw) * S.z * (1.0 - pud);
     if spark_f > 0.001 {
-        let cell = vec2<i32>(floor(p / 0.4));
+        let cell = vec2<i32>(floor(p / 0.25));
         let h = rand01(hash2(cell, 118u));
-        if h > 0.975 {
+        // MUCH denser than the base look (15% of 0.25 m cells vs 1.5% of
+        // 0.4 m ones): a twinkle field reads only if many glints share the
+        // frame — at the base density a whole camera view holds ~one glint
+        // (probe-verified), so there is nothing to glitter. At any instant
+        // most sit dim in their cycle; the population carries the effect.
+        if h > 0.85 {
             let h2 = hash2(cell, 122u);
             let jp = vec2(rand01(h2), rand01(h2 ^ 0x9e3779b9u));
-            let dpt = length(fract(p / 0.4) - jp);
-            let star = 1.0 - smoothstep(0.0, 0.12, dpt);
+            let dpt = length(fract(p / 0.25) - jp);
+            let star = 1.0 - smoothstep(0.0, 0.18, dpt);
             let ndv = max(dot(pbr_input.N, pbr_input.V), 0.0);
             let phase = rand01(hash2(cell, 216u)) * 6.2831853;
             let rate = 3.8 + 7.5 * rand01(hash2(cell, 217u));
             let twinkle = pow(0.5 + 0.5 * sin(t * rate + phase), 2.0);
-            let amt = spark_f * star * ndv * (h - 0.975) / 0.025
-                * (0.35 + 0.65 * snow) * (0.15 + 1.35 * twinkle);
+            let amt = spark_f * star * ndv * (h - 0.85) / 0.15
+                * (0.9 + 0.1 * snow) * (0.15 + 1.85 * twinkle);
             out.color = vec4(out.color.rgb + vec3(0.70, 0.78, 0.92) * amt, out.color.a);
         }
     }
