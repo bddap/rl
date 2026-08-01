@@ -671,7 +671,10 @@ mod tests {
             GCR_CHORDS.lookup(&[ChordDir::Down]),
             Some(Action::CycleGroundLook)
         );
-        assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Left]), Some(Action::SwapBrain));
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Left]),
+            Some(Action::SwapBrain)
+        );
         assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Right]), None);
     }
 
