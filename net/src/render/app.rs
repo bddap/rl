@@ -63,7 +63,15 @@ pub fn build_windowed_app(
     app.init_non_send_resource::<PendingRound>()
         .add_systems(
             OnEnter(AppPhase::Playing),
-            (ensure_round_installed, spawn_world, spawn_fp_camera).chain(),
+            (
+                ensure_round_installed,
+                spawn_world,
+                spawn_fp_camera,
+                // A modifier held across menu-confirm must not smuggle menu-time d-pad
+                // taps into the round as a chord (rl#330).
+                crab_world::chord::reset_chords::<GcrControls>,
+            )
+                .chain(),
         )
         .add_systems(
             Update,

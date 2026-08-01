@@ -73,50 +73,67 @@ impl<A: Copy + PartialEq + Debug> ChordRegistry<A> {
 
 /// The capture state machine, pure and frame-stepped: feed it each frame's modifier state
 /// and the directions just pressed, get the completed code back on the release edge.
+/// A newtype over a private enum so the illegal combinations (a buffer while idle, a
+/// poison flag with no capture) are unrepresentable, not merely unreached.
 #[derive(Default)]
-pub struct ChordCapture {
-    capturing: bool,
-    buf: Vec<ChordDir>,
-    poisoned: bool,
+pub struct ChordCapture(CaptureState);
+
+#[derive(Default)]
+enum CaptureState {
+    #[default]
+    Idle,
+    Capturing(Vec<ChordDir>),
+    /// Overflowed past [`MAX_CHORD_LEN`]; the release is a no-op.
+    Poisoned,
 }
 
 impl ChordCapture {
     /// Advance one frame. `modifier_down` is whether the modifier is held THIS frame;
-    /// `taps` are the directions just pressed this frame (buffered only while the
-    /// modifier is down — a stray d-pad tap outside a capture is not code entry).
-    /// Returns the completed code exactly once, on the frame the modifier is released —
-    /// possibly empty (a bare tap; the registry decides what that means). An
-    /// overflow-poisoned capture returns `None` on release.
+    /// `taps` are the directions just pressed this frame. Taps buffer while a capture is
+    /// live — INCLUDING the release frame, since on a fast flick the last tap and the
+    /// release routinely land together, and dropping the tap would execute the typed
+    /// code's PREFIX, a command the player didn't enter. A stray tap outside a capture
+    /// is not code entry. Returns the completed code exactly once, on the frame the
+    /// modifier is released — possibly empty (a bare tap; the registry decides what that
+    /// means). An overflow-poisoned capture returns `None` on release.
     pub fn step(
         &mut self,
         modifier_down: bool,
         taps: impl IntoIterator<Item = ChordDir>,
     ) -> Option<Vec<ChordDir>> {
-        if modifier_down {
-            self.capturing = true;
+        use CaptureState::*;
+        if modifier_down && matches!(self.0, Idle) {
+            self.0 = Capturing(Vec::new());
+        }
+        if !matches!(self.0, Idle) {
             for d in taps {
-                if self.buf.len() < MAX_CHORD_LEN {
-                    self.buf.push(d);
-                } else {
-                    self.poisoned = true;
+                match &mut self.0 {
+                    Capturing(buf) if buf.len() < MAX_CHORD_LEN => buf.push(d),
+                    Capturing(_) => self.0 = Poisoned,
+                    Idle | Poisoned => {}
                 }
             }
+        }
+        if modifier_down {
             return None;
         }
-        if !self.capturing {
-            return None;
+        match std::mem::take(&mut self.0) {
+            Idle | Poisoned => None,
+            Capturing(buf) => Some(buf),
         }
-        self.capturing = false;
-        let code = std::mem::take(&mut self.buf);
-        let poisoned = std::mem::take(&mut self.poisoned);
-        (!poisoned).then_some(code)
     }
 
     /// Whether a capture is live — input readers suppress WASD/d-pad MOVEMENT while the
     /// player is typing a code on those same inputs (sticks stay live; analog is out of
     /// chord scope).
     pub fn capturing(&self) -> bool {
-        self.capturing
+        !matches!(self.0, CaptureState::Idle)
+    }
+
+    /// Drop any half-typed code — for state transitions (menu → round) that a held
+    /// modifier could otherwise smuggle buffered taps across.
+    pub fn reset(&mut self) {
+        self.0 = CaptureState::Idle;
     }
 }
 
@@ -190,8 +207,16 @@ mod glue {
         pads: Query<&Gamepad>,
         mut chords: ResMut<Chords<S>>,
     ) {
+        // `just_pressed` too: a press-and-release inside one frame (a hitch, a low-FPS
+        // stretch) reads `pressed == false` on both frames, and a level-only sample
+        // would drop the tap outright — the empty-code verb would intermittently die.
+        // Seen this frame as just-pressed, the capture opens now and completes on the
+        // next frame's release.
         let modifier = mouse.pressed(CHORD_MODIFIER_MOUSE)
-            || pads.iter().any(|gp| gp.pressed(CHORD_MODIFIER_PAD));
+            || mouse.just_pressed(CHORD_MODIFIER_MOUSE)
+            || pads
+                .iter()
+                .any(|gp| gp.pressed(CHORD_MODIFIER_PAD) || gp.just_pressed(CHORD_MODIFIER_PAD));
         let taps = keys
             .get_just_pressed()
             .filter_map(|&k| key_dir(k))
@@ -204,6 +229,14 @@ mod glue {
         chords.executed = code.and_then(|c| chords.registry.lookup(&c));
     }
 
+    /// See [`ChordCapture::reset`] — schedule on the surface's round-entry transition
+    /// (e.g. `OnEnter(Playing)`) so a modifier held across it can't smuggle menu-time
+    /// taps into the round.
+    pub fn reset_chords<S: ControlScheme>(mut chords: ResMut<Chords<S>>) {
+        chords.capture.reset();
+        chords.executed = None;
+    }
+
     /// The one wiring of chord input onto an app: the resource plus the capture system.
     pub fn install_chords<S: ControlScheme>(app: &mut App, registry: ChordRegistry<S::Action>) {
         app.insert_resource(Chords::<S>::new(registry)).add_systems(
@@ -214,7 +247,9 @@ mod glue {
 }
 
 #[cfg(feature = "render")]
-pub use glue::{CHORD_MODIFIER_MOUSE, CHORD_MODIFIER_PAD, Chords, capture_chords, install_chords};
+pub use glue::{
+    CHORD_MODIFIER_MOUSE, CHORD_MODIFIER_PAD, Chords, capture_chords, install_chords, reset_chords,
+};
 
 #[cfg(test)]
 mod tests {
@@ -250,6 +285,24 @@ mod tests {
         assert_eq!(c.step(true, [Down]), None);
         assert_eq!(c.step(false, []), Some(vec![Up, Down]));
         assert_eq!(REG.lookup(&[Up, Down]), Some(Cmd::Two));
+    }
+
+    #[test]
+    fn release_frame_taps_join_the_code_not_its_prefix() {
+        // A fast flick lands the last tap and the release on the same frame; the code
+        // must be [Up], never the empty prefix (which is a REGISTERED command).
+        let mut c = ChordCapture::default();
+        assert_eq!(c.step(true, []), None);
+        assert_eq!(c.step(false, [Up]), Some(vec![Up]));
+    }
+
+    #[test]
+    fn reset_drops_a_half_typed_code() {
+        let mut c = ChordCapture::default();
+        c.step(true, [Up]);
+        c.reset();
+        assert!(!c.capturing());
+        assert_eq!(c.step(false, []), None, "reset capture must not fire");
     }
 
     #[test]
