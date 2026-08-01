@@ -55,9 +55,12 @@ impl ViewKnob for crab_world::ground::GroundLook {
 fn cycle_view<V: ViewKnob>(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    chords: Res<crab_world::chord::Chords<controls::GcrControls>>,
     mut knob: ResMut<V>,
 ) {
-    if crab_world::controls::just_pressed::<controls::GcrControls>(V::ACTION, &keys, &pads) {
+    if crab_world::controls::just_pressed::<controls::GcrControls>(V::ACTION, &keys, &pads)
+        || chords.executed(V::ACTION)
+    {
         *knob = crab_world::next_view_variant(*knob);
         info!(
             "{}: {}",

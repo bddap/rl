@@ -41,6 +41,7 @@ pub(super) fn gather_input(
     gamepads: Query<&Gamepad>,
     time: Res<Time>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
+    chords: Res<crab_world::chord::Chords<controls::GcrControls>>,
     mut pending: ResMut<PendingInput>,
     mut flight: ResMut<FlightInput>,
     mut pitch: ResMut<CameraPitch>,
@@ -48,21 +49,33 @@ pub(super) fn gather_input(
 ) {
     let dt = time.delta_secs();
 
+    // While a chord is being typed (rl#330) the WASD keys and d-pad ARE the code entry,
+    // so their movement/flight readings go quiet for the span of the hold; the sticks
+    // stay live (analog is out of chord scope).
+    let typing = chords.capturing();
+
     let kc = controls::key_code_for;
     let held = |a| kc(a).is_some_and(|k| keys.pressed(k));
 
     let mut strafe = 0.0f32;
     let mut forward = 0.0f32;
-    forward += held(Action::MoveForward) as i32 as f32;
-    forward -= held(Action::MoveBack) as i32 as f32;
-    strafe += held(Action::StrafeRight) as i32 as f32;
-    strafe -= held(Action::StrafeLeft) as i32 as f32;
+    if !typing {
+        forward += held(Action::MoveForward) as i32 as f32;
+        forward -= held(Action::MoveBack) as i32 as f32;
+        strafe += held(Action::StrafeRight) as i32 as f32;
+        strafe -= held(Action::StrafeLeft) as i32 as f32;
+    }
 
     let mut action = held(Action::Extract);
     if kc(Action::Restart).is_some_and(|k| keys.just_pressed(k)) {
         pending.restart = true;
     }
     if kc(Action::EnterExit).is_some_and(|k| keys.just_pressed(k)) {
+        pending.toggle_vehicle = true;
+    }
+    // Pad boarding is a chord now (rl#330): X is the chord modifier, so its press opens
+    // a capture and the verb rides the empty code, firing on release of a bare tap.
+    if chords.executed(Action::EnterExit) {
         pending.toggle_vehicle = true;
     }
 
@@ -85,16 +98,15 @@ pub(super) fn gather_input(
         forward += pad.forward;
         d_yaw += pad.d_yaw;
         d_pitch += pad.d_pitch;
-        forward += (gp.pressed(GamepadButton::DPadUp) as i32
-            - gp.pressed(GamepadButton::DPadDown) as i32) as f32;
-        strafe += (gp.pressed(GamepadButton::DPadRight) as i32
-            - gp.pressed(GamepadButton::DPadLeft) as i32) as f32;
+        if !typing {
+            forward += (gp.pressed(GamepadButton::DPadUp) as i32
+                - gp.pressed(GamepadButton::DPadDown) as i32) as f32;
+            strafe += (gp.pressed(GamepadButton::DPadRight) as i32
+                - gp.pressed(GamepadButton::DPadLeft) as i32) as f32;
+        }
         action |= controls::gamepad_buttons_for(Action::Extract).any(|b| gp.pressed(b));
         if controls::gamepad_buttons_for(Action::Restart).any(|b| gp.just_pressed(b)) {
             pending.restart = true;
-        }
-        if controls::gamepad_buttons_for(Action::EnterExit).any(|b| gp.just_pressed(b)) {
-            pending.toggle_vehicle = true;
         }
     }
     if let Some(mb) = controls::MouseInput::Left.mouse_button() {
@@ -116,12 +128,16 @@ pub(super) fn gather_input(
     };
     let nth_pad = |a: Action, n: usize| controls::gamepad_buttons_for(a).nth(n);
     let mut fi = FlightInput {
-        wasd: Vec2::new(
-            nth_key(Action::PlaneRudder, 1) as i32 as f32
-                - nth_key(Action::PlaneRudder, 0) as i32 as f32,
-            nth_key(Action::PlaneThrottle, 0) as i32 as f32
-                - nth_key(Action::PlaneThrottle, 1) as i32 as f32,
-        ),
+        wasd: if typing {
+            Vec2::ZERO
+        } else {
+            Vec2::new(
+                nth_key(Action::PlaneRudder, 1) as i32 as f32
+                    - nth_key(Action::PlaneRudder, 0) as i32 as f32,
+                nth_key(Action::PlaneThrottle, 0) as i32 as f32
+                    - nth_key(Action::PlaneThrottle, 1) as i32 as f32,
+            )
+        },
         match_vel: nth_key(Action::MatchVelocity, 0),
         ..default()
     };

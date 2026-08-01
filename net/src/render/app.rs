@@ -58,6 +58,7 @@ pub fn build_windowed_app(
     // drives the legend; it goes through the one installer anyway so there is no second
     // wiring of the overlay to drift.
     crab_world::controls::install_overlay::<GcrControls>(&mut app, &Default::default());
+    crab_world::chord::install_chords::<GcrControls>(&mut app, crate::controls::GCR_CHORDS);
 
     app.init_non_send_resource::<PendingRound>()
         .add_systems(
