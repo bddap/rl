@@ -89,14 +89,17 @@ pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
                 ..default()
             })
             .add(UiScalePlugin)
-            .add(crate::frame_telemetry::FrameTelemetryPlugin),
+            .add(crate::frame_telemetry::FrameTelemetryPlugin)
+            .add(crate::debug_overlay::DebugOverlayPlugin),
         None => plugins
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: bevy::window::ExitCondition::DontExit,
                 ..default()
             })
-            .disable::<bevy::winit::WinitPlugin>(),
+            .disable::<bevy::winit::WinitPlugin>()
+            // Offscreen too, so the fp-screenshot evidence path can capture the overlay.
+            .add(crate::debug_overlay::DebugOverlayPlugin),
     }
 }
 
