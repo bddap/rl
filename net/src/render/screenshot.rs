@@ -78,6 +78,7 @@ fn finish_offscreen_app(
     controls: ControlsOverrides<GcrControls>,
 ) {
     crab_world::controls::install_overlay(app, &controls);
+    crab_world::chord::install_chords::<GcrControls>(app, crate::controls::GCR_CHORDS);
     app.insert_resource(cfg)
         .init_resource::<ShotProgress>()
         .add_systems(Startup, (spawn_world, spawn_offscreen_camera))

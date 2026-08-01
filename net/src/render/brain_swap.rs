@@ -16,6 +16,7 @@ use super::driver::GameState;
 pub(super) fn swap_brain(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    chords: Res<crab_world::chord::Chords<GcrControls>>,
     ctx: Res<ActiveContext<GcrControls>>,
     state: Option<NonSend<GameState>>,
     policies: Option<NonSendMut<CrabPolicies>>,
@@ -23,9 +24,9 @@ pub(super) fn swap_brain(
     // On-foot only, matching the one FOOT_ROWS legend row — and R3 is the click of the
     // stick that aims the ship / attitudes the plane, so a piloting hand must not be
     // able to swap Sally by accident.
-    if ctx.get() != GcrContext::OnFoot
-        || !crab_world::controls::just_pressed::<GcrControls>(Action::SwapBrain, &keys, &pads)
-    {
+    let pressed = crab_world::controls::just_pressed::<GcrControls>(Action::SwapBrain, &keys, &pads)
+        || chords.executed(Action::SwapBrain);
+    if ctx.get() != GcrContext::OnFoot || !pressed {
         return;
     }
     let Some(state) = state else {

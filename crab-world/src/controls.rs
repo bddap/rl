@@ -14,7 +14,7 @@ pub enum Glyph {
 }
 
 pub trait ControlScheme: 'static + Send + Sync {
-    type Action: Copy + PartialEq + Debug;
+    type Action: Copy + PartialEq + Debug + Send + Sync + 'static;
     type Key: Copy + PartialEq;
     type Pad: Copy + PartialEq;
     type Mouse: Copy + PartialEq;

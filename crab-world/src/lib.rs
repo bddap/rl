@@ -12,6 +12,7 @@ test_watchdog::arm!();
 
 pub mod assets;
 pub mod bot;
+pub mod chord;
 pub mod controls;
 /// The headless training-SUCCESS eval — the true measure of the policy, distinct from the
 /// training reward: reuses the demo/train crab+ball scenario headless, places the ball far,

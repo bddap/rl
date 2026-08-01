@@ -1,6 +1,31 @@
+use crab_world::chord::{ChordDir, ChordEntry, ChordRegistry};
 use crab_world::controls::{Binding, ContextRow, ControlScheme, Glyph, KbBinding, PadBinding};
 
 pub struct GcrControls;
+
+/// GCR's chord table (rl#330) — the ONE list of code → command assignments; the owner
+/// tunes codes here in play. The empty code (bare modifier tap) keeps the pad's
+/// tap-X-to-board verb: X can't stay a press-verb once it is the chord modifier (its
+/// press now opens a capture), so EnterExit moved to execute-on-release. Pilot verbs
+/// below still keep their direct bindings until the stage-2/3 migration deletes them.
+pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
+    ChordEntry {
+        code: &[],
+        action: Action::EnterExit,
+    },
+    ChordEntry {
+        code: &[ChordDir::Up],
+        action: Action::CycleRenderMode,
+    },
+    ChordEntry {
+        code: &[ChordDir::Down],
+        action: Action::CycleGroundLook,
+    },
+    ChordEntry {
+        code: &[ChordDir::Left],
+        action: Action::SwapBrain,
+    },
+]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GcrContext {
@@ -632,6 +657,23 @@ mod tests {
         GcrContext::Ship,
         GcrContext::Menu,
     ];
+
+    #[test]
+    fn chord_table_is_well_formed_and_carries_the_pilots() {
+        GCR_CHORDS.assert_well_formed();
+        // The empty code preserves tap-X boarding (X is the chord modifier now).
+        assert_eq!(GCR_CHORDS.lookup(&[]), Some(Action::EnterExit));
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Up]),
+            Some(Action::CycleRenderMode)
+        );
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Down]),
+            Some(Action::CycleGroundLook)
+        );
+        assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Left]), Some(Action::SwapBrain));
+        assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Right]), None);
+    }
 
     #[test]
     fn scheme_is_well_formed() {
