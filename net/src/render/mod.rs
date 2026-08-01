@@ -35,12 +35,6 @@ const FLIGHT_MOUSE_SENS: f32 = 0.01;
 
 const PAD_LOOK_SPEED: f32 = 2.5;
 
-/// How long the pad Quit button (North/Y) must be HELD to quit (seconds). A hold, not a
-/// tap, so a stray press can't end the round for everyone on the couch — the kid-safe
-/// equivalent of Esc. Client-local (sends AppExit, never touches the sim), so it can't
-/// desync a peer.
-const PAD_QUIT_HOLD_SECS: f32 = 1.0;
-
 const PITCH_LIMIT: f32 = 1.5;
 
 fn world(pos: Pos, y: f32) -> Vec3 {

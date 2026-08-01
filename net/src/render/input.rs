@@ -67,16 +67,14 @@ pub(super) fn gather_input(
     }
 
     let mut action = held(Action::Extract);
-    if kc(Action::Restart).is_some_and(|k| keys.just_pressed(k)) {
-        pending.restart = true;
-    }
-    if kc(Action::EnterExit).is_some_and(|k| keys.just_pressed(k)) {
-        pending.toggle_vehicle = true;
-    }
-    // Pad boarding is a chord now (rl#330): X is the chord modifier, so its press opens
-    // a capture and the verb rides the empty code, firing on release of a bare tap.
+    // Boarding and restart are chords (rl#330): X / right-click is the chord modifier,
+    // so boarding rides the empty code (a bare tap, firing on release) and restart its
+    // registered code — no direct key or button remains for either.
     if chords.executed(Action::EnterExit) {
         pending.toggle_vehicle = true;
+    }
+    if chords.executed(Action::Restart) {
+        pending.restart = true;
     }
 
     let mut d_yaw = 0.0f32;
@@ -105,9 +103,6 @@ pub(super) fn gather_input(
                 - gp.pressed(GamepadButton::DPadLeft) as i32) as f32;
         }
         action |= controls::gamepad_buttons_for(Action::Extract).any(|b| gp.pressed(b));
-        if controls::gamepad_buttons_for(Action::Restart).any(|b| gp.just_pressed(b)) {
-            pending.restart = true;
-        }
     }
     if let Some(mb) = controls::MouseInput::Left.mouse_button() {
         action |= mouse_buttons.pressed(mb);
@@ -167,24 +162,15 @@ pub(super) fn gather_input(
     *flight = fi;
 }
 
+/// Quit is a chord (rl#330) — its code is deliberately the table's longest, the chord
+/// system's replacement for the old timed pad hold: leaving the round stays the
+/// hardest input to hit by accident, on both devices through the one path.
 pub(super) fn quit_game(
-    keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
-    time: Res<Time>,
-    mut quit_held: Local<f32>,
+    chords: Res<crab_world::chord::Chords<controls::GcrControls>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if controls::key_code_for(Action::Quit).is_some_and(|k| keys.just_pressed(k)) {
+    if chords.executed(Action::Quit) {
         exit.write(AppExit::Success);
-        return;
-    }
-    if pad_action_held(&gamepads, Action::Quit) {
-        *quit_held += time.delta_secs();
-        if *quit_held >= PAD_QUIT_HOLD_SECS {
-            exit.write(AppExit::Success);
-        }
-    } else {
-        *quit_held = 0.0;
     }
 }
 
@@ -202,10 +188,4 @@ pub(super) fn release_cursor(mut cursor: Query<&mut CursorOptions, With<PrimaryW
         c.grab_mode = CursorGrabMode::None;
         c.visible = true;
     }
-}
-
-fn pad_action_held(gamepads: &Query<&Gamepad>, action: Action) -> bool {
-    gamepads
-        .iter()
-        .any(|gp| controls::gamepad_buttons_for(action).any(|b| gp.pressed(b)))
 }

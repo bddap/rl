@@ -4,10 +4,13 @@ use crab_world::controls::{Binding, ContextRow, ControlScheme, Glyph, KbBinding,
 pub struct GcrControls;
 
 /// GCR's chord table (rl#330) — the ONE list of code → command assignments; the owner
-/// tunes codes here in play. The empty code (bare modifier tap) keeps the pad's
-/// tap-X-to-board verb: X can't stay a press-verb once it is the chord modifier (its
-/// press now opens a capture), so EnterExit moved to execute-on-release. Pilot verbs
-/// below still keep their direct bindings until the stage-2/3 migration deletes them.
+/// tunes codes here in play. These are the surface's ONLY triggers for these commands:
+/// stage 2 deleted every direct binding they had (the one-route-per-action rule,
+/// enforced by `assert_scheme_well_formed`). The empty code (bare modifier tap) keeps
+/// the pad's tap-X-to-board verb: X can't stay a press-verb once it is the chord
+/// modifier (its press now opens a capture), so EnterExit moved to execute-on-release.
+/// Quit gets the longest code — leaving the round should take the most deliberate
+/// input, the chord system's replacement for the old hold-to-quit guard.
 pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
     ChordEntry {
         code: &[],
@@ -24,6 +27,14 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
     ChordEntry {
         code: &[ChordDir::Left],
         action: Action::SwapBrain,
+    },
+    ChordEntry {
+        code: &[ChordDir::Right],
+        action: Action::Restart,
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Down],
+        action: Action::Quit,
     },
 ]);
 
@@ -76,11 +87,6 @@ pub enum Key {
     A,
     S,
     D,
-    E,
-    G,
-    R,
-    V,
-    B,
     Tab,
     Space,
     Escape,
@@ -98,23 +104,14 @@ pub enum MouseInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PadButton {
     South,
-    North,
-    West,
     East,
     RightTrigger,
     LeftTrigger,
     LeftBumper,
     RightBumper,
-    Start,
     Back,
     LeftStick,
     RightStick,
-    /// Right-stick CLICK (R3) — distinct from [`PadButton::RightStick`], the analog
-    /// aim/look token (rl#232).
-    RightStickClick,
-    /// Left-stick CLICK (L3) — the same split against the analog move token (rl#304).
-    /// With R3 taken, the stick clicks are the last pad buttons free in every context.
-    LeftStickClick,
     Dpad,
     /// Single D-pad directions — unlike [`PadButton::Dpad`] (the whole cluster, an
     /// analog-style multi-input) these resolve to one `GamepadButton`, so menu nav can
@@ -132,6 +129,10 @@ impl ControlScheme for GcrControls {
 
     fn bindings() -> &'static [Binding<Self>] {
         &BINDINGS
+    }
+
+    fn chords() -> ChordRegistry<Action> {
+        GCR_CHORDS
     }
 
     fn contexts() -> &'static [GcrContext] {
@@ -190,11 +191,6 @@ impl ControlScheme for GcrControls {
             Key::A => "controls/keyboard_a.png",
             Key::S => "controls/keyboard_s.png",
             Key::D => "controls/keyboard_d.png",
-            Key::E => "controls/keyboard_e.png",
-            Key::G => return Glyph::Label("G"),
-            Key::R => "controls/keyboard_r.png",
-            Key::V => "controls/keyboard_v.png",
-            Key::B => return Glyph::Label("B"),
             Key::Tab => "controls/keyboard_tab.png",
             Key::Space => "controls/keyboard_space.png",
             Key::Escape => "controls/keyboard_escape.png",
@@ -208,19 +204,14 @@ impl ControlScheme for GcrControls {
     fn pad_glyph(pad: PadButton) -> Glyph {
         match pad {
             PadButton::South => Glyph::Icon("controls/xbox_button_a.png"),
-            PadButton::North => Glyph::Icon("controls/xbox_button_y.png"),
-            PadButton::West => Glyph::Icon("controls/xbox_button_x.png"),
             PadButton::East => Glyph::Icon("controls/xbox_button_b.png"),
             PadButton::RightTrigger => Glyph::Icon("controls/xbox_rt.png"),
             PadButton::LeftTrigger => Glyph::Label("LT"),
             PadButton::LeftBumper => Glyph::Label("LB"),
             PadButton::RightBumper => Glyph::Label("RB"),
-            PadButton::Start => Glyph::Icon("controls/xbox_button_menu.png"),
             PadButton::Back => Glyph::Icon("controls/xbox_button_view.png"),
             PadButton::LeftStick => Glyph::Icon("controls/xbox_stick_l.png"),
             PadButton::RightStick => Glyph::Icon("controls/xbox_stick_r.png"),
-            PadButton::RightStickClick => Glyph::Label("R3"),
-            PadButton::LeftStickClick => Glyph::Label("L3"),
             PadButton::Dpad | PadButton::DpadUp | PadButton::DpadDown => {
                 Glyph::Icon("controls/xbox_dpad.png")
             }
@@ -235,7 +226,11 @@ impl ControlScheme for GcrControls {
     }
 }
 
-pub const BINDINGS: [Binding<GcrControls>; 25] = [
+// The command verbs (EnterExit, render/ground cycles, SwapBrain, Restart, Quit) have NO
+// rows here: they are chord codes in [`GCR_CHORDS`] and a second trigger route is a
+// well-formedness error. What remains is analog/held state plus menu nav and the
+// hold-to-reveal legend — reads the chord system's execute-on-release can't express.
+pub const BINDINGS: [Binding<GcrControls>; 19] = [
     Binding {
         action: Action::MoveForward,
         keyboard: KbBinding::new(&[Key::W], &[]),
@@ -265,36 +260,6 @@ pub const BINDINGS: [Binding<GcrControls>; 25] = [
         action: Action::Extract,
         keyboard: KbBinding::new(&[Key::Space], &[MouseInput::Left]),
         pad: PadBinding::new(&[PadButton::South, PadButton::RightTrigger]),
-    },
-    Binding {
-        action: Action::Restart,
-        keyboard: KbBinding::new(&[Key::R], &[]),
-        pad: PadBinding::new(&[PadButton::Start]),
-    },
-    Binding {
-        action: Action::Quit,
-        keyboard: KbBinding::hold(&[Key::Escape], &[]),
-        pad: PadBinding::hold(&[PadButton::North]),
-    },
-    Binding {
-        action: Action::EnterExit,
-        keyboard: KbBinding::new(&[Key::E], &[]),
-        pad: PadBinding::new(&[PadButton::West]),
-    },
-    Binding {
-        action: Action::CycleRenderMode,
-        keyboard: KbBinding::new(&[Key::V], &[]),
-        pad: PadBinding::new(&[PadButton::East]),
-    },
-    Binding {
-        action: Action::CycleGroundLook,
-        keyboard: KbBinding::new(&[Key::G], &[]),
-        pad: PadBinding::new(&[PadButton::LeftStickClick]),
-    },
-    Binding {
-        action: Action::SwapBrain,
-        keyboard: KbBinding::new(&[Key::B], &[]),
-        pad: PadBinding::new(&[PadButton::RightStickClick]),
     },
     Binding {
         action: Action::RevealControls,
@@ -366,7 +331,10 @@ pub const BINDINGS: [Binding<GcrControls>; 25] = [
     },
 ];
 
-pub const FOOT_ROWS: [ContextRow<GcrControls>; 13] = [
+// The in-round row tables list only DIRECT-bound controls for now: the chorded command
+// verbs re-enter the legend in stage 4 (rl#330), rendered from [`GCR_CHORDS`] itself —
+// a row for an unbound action would either lie or panic today.
+pub const FOOT_ROWS: [ContextRow<GcrControls>; 7] = [
     ContextRow {
         action: Action::MoveForward,
         label: "Forward",
@@ -392,36 +360,12 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 13] = [
         label: "Extract",
     },
     ContextRow {
-        action: Action::EnterExit,
-        label: "Enter plane",
-    },
-    ContextRow {
-        action: Action::CycleRenderMode,
-        label: "Render view",
-    },
-    ContextRow {
-        action: Action::CycleGroundLook,
-        label: "Ground look",
-    },
-    ContextRow {
-        action: Action::SwapBrain,
-        label: "Swap Sally brain",
-    },
-    ContextRow {
-        action: Action::Restart,
-        label: "Restart round",
-    },
-    ContextRow {
-        action: Action::Quit,
-        label: "Quit",
-    },
-    ContextRow {
         action: Action::RevealControls,
         label: "Controls",
     },
 ];
 
-pub const PLANE_ROWS: [ContextRow<GcrControls>; 9] = [
+pub const PLANE_ROWS: [ContextRow<GcrControls>; 4] = [
     ContextRow {
         action: Action::PlaneAttitude,
         label: "Pitch / roll",
@@ -435,32 +379,12 @@ pub const PLANE_ROWS: [ContextRow<GcrControls>; 9] = [
         label: "Rudder (yaw)",
     },
     ContextRow {
-        action: Action::EnterExit,
-        label: "Switch to ship",
-    },
-    ContextRow {
-        action: Action::CycleRenderMode,
-        label: "Render view",
-    },
-    ContextRow {
-        action: Action::CycleGroundLook,
-        label: "Ground look",
-    },
-    ContextRow {
-        action: Action::Restart,
-        label: "Restart round",
-    },
-    ContextRow {
-        action: Action::Quit,
-        label: "Quit",
-    },
-    ContextRow {
         action: Action::RevealControls,
         label: "Controls",
     },
 ];
 
-pub const SHIP_ROWS: [ContextRow<GcrControls>; 11] = [
+pub const SHIP_ROWS: [ContextRow<GcrControls>; 6] = [
     ContextRow {
         action: Action::ShipThrust,
         label: "Thrust: move / strafe",
@@ -480,26 +404,6 @@ pub const SHIP_ROWS: [ContextRow<GcrControls>; 11] = [
     ContextRow {
         action: Action::MatchVelocity,
         label: "Match velocity (brake)",
-    },
-    ContextRow {
-        action: Action::EnterExit,
-        label: "Exit to foot",
-    },
-    ContextRow {
-        action: Action::CycleRenderMode,
-        label: "Render view",
-    },
-    ContextRow {
-        action: Action::CycleGroundLook,
-        label: "Ground look",
-    },
-    ContextRow {
-        action: Action::Restart,
-        label: "Restart round",
-    },
-    ContextRow {
-        action: Action::Quit,
-        label: "Quit",
     },
     ContextRow {
         action: Action::RevealControls,
@@ -543,11 +447,6 @@ mod bevy_glue {
                 Key::A => &[KeyCode::KeyA],
                 Key::S => &[KeyCode::KeyS],
                 Key::D => &[KeyCode::KeyD],
-                Key::E => &[KeyCode::KeyE],
-                Key::G => &[KeyCode::KeyG],
-                Key::R => &[KeyCode::KeyR],
-                Key::V => &[KeyCode::KeyV],
-                Key::B => &[KeyCode::KeyB],
                 Key::Tab => &[KeyCode::Tab],
                 Key::Space => &[KeyCode::Space],
                 Key::Escape => &[KeyCode::Escape],
@@ -573,17 +472,12 @@ mod bevy_glue {
         fn gamepad_button(self) -> Option<GamepadButton> {
             match self {
                 PadButton::South => Some(GamepadButton::South),
-                PadButton::North => Some(GamepadButton::North),
-                PadButton::West => Some(GamepadButton::West),
                 PadButton::East => Some(GamepadButton::East),
                 PadButton::RightTrigger => Some(GamepadButton::RightTrigger2),
                 PadButton::LeftTrigger => Some(GamepadButton::LeftTrigger2),
                 PadButton::LeftBumper => Some(GamepadButton::LeftTrigger),
                 PadButton::RightBumper => Some(GamepadButton::RightTrigger),
-                PadButton::Start => Some(GamepadButton::Start),
                 PadButton::Back => Some(GamepadButton::Select),
-                PadButton::RightStickClick => Some(GamepadButton::RightThumb),
-                PadButton::LeftStickClick => Some(GamepadButton::LeftThumb),
                 PadButton::DpadUp => Some(GamepadButton::DPadUp),
                 PadButton::DpadDown => Some(GamepadButton::DPadDown),
                 PadButton::LeftStick | PadButton::RightStick | PadButton::Dpad => None,
@@ -659,7 +553,7 @@ mod tests {
     ];
 
     #[test]
-    fn chord_table_is_well_formed_and_carries_the_pilots() {
+    fn chord_table_carries_every_migrated_command() {
         GCR_CHORDS.assert_well_formed();
         // The empty code preserves tap-X boarding (X is the chord modifier now).
         assert_eq!(GCR_CHORDS.lookup(&[]), Some(Action::EnterExit));
@@ -675,7 +569,41 @@ mod tests {
             GCR_CHORDS.lookup(&[ChordDir::Left]),
             Some(Action::SwapBrain)
         );
-        assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Right]), None);
+        assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Right]), Some(Action::Restart));
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Down]),
+            Some(Action::Quit)
+        );
+    }
+
+    /// Stage 2 (rl#330): the migrated command verbs are chord-ONLY — a surviving direct
+    /// binding would be a second trigger route, the exact drift the migration deletes.
+    /// (`assert_scheme_well_formed` enforces the rule generically; this pins WHICH
+    /// actions moved.) Quit deliberately wears the longest code: it replaced the old
+    /// hold-to-quit guard, so leaving the round must stay the hardest input to fat-finger.
+    #[test]
+    fn migrated_commands_have_no_direct_binding() {
+        for e in GCR_CHORDS.entries() {
+            assert!(
+                binding::<GcrControls>(e.action).is_none(),
+                "{:?} is chorded AND bound",
+                e.action
+            );
+        }
+        let quit_len = GCR_CHORDS
+            .entries()
+            .iter()
+            .find(|e| e.action == Action::Quit)
+            .unwrap()
+            .code
+            .len();
+        assert!(
+            GCR_CHORDS
+                .entries()
+                .iter()
+                .all(|e| e.action == Action::Quit || e.code.len() < quit_len),
+            "Quit must have the strictly longest chord code"
+        );
     }
 
     #[test]
@@ -753,7 +681,6 @@ mod tests {
         assert!(plane.iter().any(|l| l.label == "Throttle / brake"));
         assert!(plane.iter().any(|l| l.label == "Pitch / roll"));
         assert!(plane.iter().any(|l| l.label == "Rudder (yaw)"));
-        assert!(plane.iter().any(|l| l.label == "Switch to ship"));
         assert!(!plane.iter().any(|l| l.label == "Strafe left"));
         assert!(
             !plane.iter().any(|l| l.label == "Extract"),
@@ -787,7 +714,6 @@ mod tests {
         assert!(ship.iter().any(|l| l.label == "Aim: pitch / yaw"));
         assert!(ship.iter().any(|l| l.label == "Roll"));
         assert!(ship.iter().any(|l| l.label == "Match velocity (brake)"));
-        assert!(ship.iter().any(|l| l.label == "Exit to foot"));
         assert!(!ship.iter().any(|l| l.label == "Throttle / brake"));
         assert!(
             !ship.iter().any(|l| l.label == "Extract"),
@@ -932,21 +858,9 @@ mod tests {
                             b.action
                         ),
                         Glyph::Label(l) => assert!(
-                            matches!(
-                                l,
-                                "LT" | "LB"
-                                    | "RB"
-                                    | "R3"
-                                    | "L3"
-                                    | "B"
-                                    | "G"
-                                    | "Up"
-                                    | "Down"
-                                    | "Enter"
-                            ),
+                            matches!(l, "LT" | "LB" | "RB" | "Up" | "Down" | "Enter"),
                             "unexpected text glyph {l:?} for {:?} (only the art-less \
-                             triggers/bumpers, the rl#232 swap and rl#304 ground-look \
-                             inputs, and the menu keys)",
+                             triggers/bumpers and the menu keys)",
                             b.action
                         ),
                     }
@@ -999,20 +913,5 @@ mod tests {
                 Glyph::Icon("controls/xbox_rt.png")
             ]
         );
-    }
-
-    #[test]
-    fn pad_quit_is_a_hold_on_its_own_button_not_start() {
-        let restart = binding::<GcrControls>(Action::Restart).unwrap();
-        let quit = binding::<GcrControls>(Action::Quit).unwrap();
-        assert_eq!(restart.pad.buttons, &[PadButton::Start]);
-        assert!(!restart.pad.hold, "Restart is a tap");
-        assert!(quit.pad.hold, "Quit is a hold");
-        assert!(
-            !quit.pad.buttons.contains(&PadButton::Start),
-            "Quit must not share Start with Restart (a quit-hold would broadcast RESTART)"
-        );
-        let reveal = binding::<GcrControls>(Action::RevealControls).unwrap();
-        assert_ne!(quit.pad.buttons, reveal.pad.buttons);
     }
 }
