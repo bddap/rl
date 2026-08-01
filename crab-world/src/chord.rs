@@ -205,10 +205,7 @@ mod glue {
     }
 
     /// The one wiring of chord input onto an app: the resource plus the capture system.
-    pub fn install_chords<S: ControlScheme>(
-        app: &mut App,
-        registry: ChordRegistry<S::Action>,
-    ) {
+    pub fn install_chords<S: ControlScheme>(app: &mut App, registry: ChordRegistry<S::Action>) {
         app.insert_resource(Chords::<S>::new(registry)).add_systems(
             PreUpdate,
             capture_chords::<S>.after(bevy::input::InputSystems),
@@ -217,9 +214,7 @@ mod glue {
 }
 
 #[cfg(feature = "render")]
-pub use glue::{
-    CHORD_MODIFIER_MOUSE, CHORD_MODIFIER_PAD, Chords, capture_chords, install_chords,
-};
+pub use glue::{CHORD_MODIFIER_MOUSE, CHORD_MODIFIER_PAD, Chords, capture_chords, install_chords};
 
 #[cfg(test)]
 mod tests {

@@ -24,8 +24,9 @@ pub(super) fn swap_brain(
     // On-foot only, matching the one FOOT_ROWS legend row — and R3 is the click of the
     // stick that aims the ship / attitudes the plane, so a piloting hand must not be
     // able to swap Sally by accident.
-    let pressed = crab_world::controls::just_pressed::<GcrControls>(Action::SwapBrain, &keys, &pads)
-        || chords.executed(Action::SwapBrain);
+    let pressed =
+        crab_world::controls::just_pressed::<GcrControls>(Action::SwapBrain, &keys, &pads)
+            || chords.executed(Action::SwapBrain);
     if ctx.get() != GcrContext::OnFoot || !pressed {
         return;
     }
