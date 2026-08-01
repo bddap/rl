@@ -56,6 +56,27 @@ impl std::fmt::Display for ServerDown {
     }
 }
 
+impl Drop for NetDriver {
+    fn drop(&mut self) {
+        // Close both iroh endpoints (telemetry sender's + session's) before `rt` — the FIRST
+        // field, so it drops before them — shuts down and aborts their tasks: an endpoint
+        // dropped unclosed makes iroh log "Endpoint dropped without calling `Endpoint::close`"
+        // at ERROR on every round teardown (fleet-error 2026-08-01).
+        let telemetry = self.telemetry.take();
+        let session = &self.session;
+        self.rt.block_on(close_session(session, telemetry));
+    }
+}
+
+/// The one graceful teardown for a bound session and its optional telemetry stream — every
+/// pre-round exit path and [`NetDriver`]'s `Drop` end through here.
+pub async fn close_session(session: &Session, telemetry: Option<TelemetrySender>) {
+    if let Some(t) = telemetry {
+        t.close().await;
+    }
+    session.shutdown().await;
+}
+
 impl NetDriver {
     /// The live-telemetry handle, if this client is streaming to a collector (`None` when
     /// launched without `--telemetry`).
@@ -495,10 +516,12 @@ fn connect_and_form_inner(
 
     let frozen = match formation {
         Formation::Agreed(frozen) => frozen,
-        Formation::Alone => return Ok(MatchResult::Alone),
+        Formation::Alone => {
+            rt.block_on(close_session(&session, telemetry));
+            return Ok(MatchResult::Alone);
+        }
         Formation::Cancelled => {
-            drop(telemetry);
-            rt.block_on(session.shutdown());
+            rt.block_on(close_session(&session, telemetry));
             return Ok(MatchResult::Cancelled);
         }
     };
@@ -608,12 +631,11 @@ pub fn connect_and_join(
     match verdict {
         AdmissionVerdict::Refused(verdict) => {
             tracing::error!("host refused our join: {verdict}");
-            rt.block_on(session.shutdown());
+            rt.block_on(close_session(&session, telemetry));
             Ok(JoinResult::Refused(verdict))
         }
         AdmissionVerdict::Timeout => {
-            drop(telemetry);
-            rt.block_on(session.shutdown());
+            rt.block_on(close_session(&session, telemetry));
             Ok(JoinResult::Unreachable)
         }
         AdmissionVerdict::Admitted(adm) => {

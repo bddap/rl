@@ -735,7 +735,7 @@ impl Session {
         self.inbox.recv().await
     }
 
-    pub async fn shutdown(self) {
+    pub async fn shutdown(&self) {
         self.endpoint.close().await;
     }
 }

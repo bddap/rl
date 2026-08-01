@@ -50,8 +50,7 @@ async fn run_net(args: Args) -> Result<()> {
     {
         formation::Formation::Agreed(frozen) => frozen,
         formation::Formation::Alone => {
-            drop(tel);
-            session.shutdown().await;
+            net_loop::close_session(&session, tel).await;
             return run_solo_round(args.run_secs);
         }
         formation::Formation::Cancelled => unreachable!("headless net has no lobby to cancel"),
@@ -256,14 +255,11 @@ async fn run_net(args: Args) -> Result<()> {
             args.run_secs
         );
     }
-    if tel.is_some() {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
     if let Some(mut w) = hash_log.take() {
         use std::io::Write as _;
         w.flush().context("flushing hash log")?;
     }
-    drop(tel);
-    session.shutdown().await;
+    // close_session drains queued telemetry before closing — no flush-sleep needed.
+    net_loop::close_session(&session, tel).await;
     Ok(())
 }
