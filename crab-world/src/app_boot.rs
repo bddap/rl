@@ -83,13 +83,17 @@ pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
         })
         .disable::<bevy::log::LogPlugin>();
     match window {
-        Some(window) => plugins
-            .set(WindowPlugin {
-                primary_window: Some(window),
-                ..default()
-            })
-            .add(UiScalePlugin)
-            .add(crate::frame_telemetry::FrameTelemetryPlugin),
+        Some(window) => {
+            let plugins = plugins
+                .set(WindowPlugin {
+                    primary_window: Some(window),
+                    ..default()
+                })
+                .add(UiScalePlugin);
+            #[cfg(not(target_arch = "wasm32"))]
+            let plugins = plugins.add(crate::frame_telemetry::FrameTelemetryPlugin);
+            plugins
+        }
         None => plugins
             .set(WindowPlugin {
                 primary_window: None,

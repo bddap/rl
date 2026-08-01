@@ -18,6 +18,10 @@ use super::systems::{HorizonOutput, HorizonRequest, TrainingState};
 
 type SnapshotRecorder = BinBytesRecorder<FullPrecisionSettings>;
 
+#[cfg(not(unix))]
+fn apply_nice(_nice: i32) {}
+
+#[cfg(unix)]
 fn apply_nice(nice: i32) {
     let nice = nice.clamp(0, 19);
     if nice == 0 {
