@@ -46,6 +46,10 @@ pub(crate) struct Args {
     /// rl#249) rather than only frontal pursuit.
     #[arg(long, default_value_t = 0.0)]
     pack_look_yaw: f32,
+
+    /// Boot with the developer debug overlay (rl#326) visible — offscreen has no F3.
+    #[arg(long)]
+    debug_overlay: bool,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -63,6 +67,10 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let boot_view = boot_view(args.render);
     let controls = gcr_controls(&args.controls)?;
     let pack = net::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
-    render::build_screenshot_app(client, cfg, nn_crab, boot_view, controls, pack).run();
+    let mut app = render::build_screenshot_app(client, cfg, nn_crab, boot_view, controls, pack);
+    if args.debug_overlay {
+        app.insert_resource(crab_world::debug_overlay::DebugOverlay { visible: true });
+    }
+    app.run();
     Ok(())
 }

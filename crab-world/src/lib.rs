@@ -32,6 +32,8 @@ pub mod app_boot;
 #[cfg(feature = "render")]
 pub mod crab_view;
 #[cfg(feature = "render")]
+pub mod debug_overlay;
+#[cfg(feature = "render")]
 pub mod frame_telemetry;
 #[cfg(feature = "render")]
 pub mod ground;
