@@ -41,11 +41,13 @@ fn rand01(h: u32) -> f32 {
     return f32(h & 0xffffffu) / f32(0x1000000u);
 }
 
-// Value noise in [-1, 1], C1-smooth.
+// Value noise in [-1, 1]. Quintic (C2) interpolant: smoothstep's discontinuous
+// second derivative creases along every lattice edge, and the rl#324 close-up
+// octaves are large enough on screen to read those creases as a woven grid.
 fn vnoise(p: vec2<f32>, seed: u32) -> f32 {
     let i = vec2<i32>(floor(p));
     let f = fract(p);
-    let w = f * f * (3.0 - 2.0 * f);
+    let w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     let a = rand01(hash2(i, seed));
     let b = rand01(hash2(i + vec2(1, 0), seed));
     let c = rand01(hash2(i + vec2(0, 1), seed));
@@ -56,6 +58,14 @@ fn vnoise(p: vec2<f32>, seed: u32) -> f32 {
 // 1 while the octave's wavelength spans many pixels, 0 once it is subpixel.
 fn footprint_fade(wavelength: f32, fw: f32) -> f32 {
     return 1.0 - smoothstep(wavelength * 0.15, wavelength * 0.5, fw);
+}
+
+// The adaptive-descent fade (rl#324): wider margins than footprint_fade, so the
+// finest octave the descent keeps still spans ~8+ pixels per wavelength. Letting
+// octaves ride down toward Nyquist (footprint_fade's window) turns the fine tail
+// into per-pixel salt noise — grain must stay coarse enough to read as surface.
+fn grain_fade(wavelength: f32, fw: f32) -> f32 {
+    return 1.0 - smoothstep(wavelength * 0.05, wavelength * 0.125, fw);
 }
 
 @fragment
@@ -93,18 +103,34 @@ fn fragment(
     rgb *= 1.0 + 0.35 * strengths.y * meso_n;
 
     // Fine detail (meters and below): the on-foot / landing-height optic-flow cue.
-    var fine_n = vnoise(p / 2.6, 31u) * footprint_fade(2.6, fw)
-        + vnoise(p / 0.9, 32u) * 0.8 * footprint_fade(0.9, fw)
-        + vnoise(p / 0.31, 33u) * 0.6 * footprint_fade(0.31, fw);
-    // The two sub-30 cm octaves are the "higher-res up close" tier — soil grit
-    // that only resolves within a few meters. Branch-gated (screen-coherent,
-    // distance-driven) so the near-fullscreen far ground never pays for them.
-    // The 4.5 cm lattice is the first fine enough to feel the f32 floor: at the
-    // ±15 km map corners the ~1 mm ulp quantizes its interpolant slightly.
-    let grit_fade = vec2(footprint_fade(0.11, fw), footprint_fade(0.045, fw));
-    if grit_fade.x + grit_fade.y > 0.001 {
-        fine_n += vnoise(p / 0.11, 35u) * 0.45 * grit_fade.x
-            + vnoise(p / 0.045, 36u) * 0.3 * grit_fade.y;
+    // ADAPTIVE descent (rl#324): a fixed finest octave IS a resolution — its lattice
+    // reads as an upscaled low-res texture the moment the camera gets closer than it
+    // was tuned for. So descend by thirds from 2.6 m until the octave is subpixel
+    // (footprint-faded to nothing), down to a 3.5 mm floor: finer than any standing
+    // eye can resolve (~2 mm ground per pixel on foot at 720p) yet coarse enough
+    // that the f32 ulp at the ±15 km map corners (~1 mm) never dominates a lattice
+    // cell. Distant ground exits after one test — fw alone decides, so the loop is
+    // quad-coherent and the near-fullscreen far ground pays nothing.
+    // Each octave rotated 55.62° (90°/φ) from the last: value noise's lattice is
+    // axis-aligned, and any octave landing near a multiple of 90° reads as a woven
+    // plaid — 90°/φ keeps every small multiple ≥13° away from the axes (the golden
+    // angle itself fails: 2×137.5° mod 90° = 5°, a visibly axis-aligned octave).
+    let rot = mat2x2<f32>(0.5646, 0.8254, -0.8254, 0.5646);
+    var fine_n = 0.0;
+    var q = p;
+    var wl = 2.6;
+    var amp = 1.0;
+    var seed = 31u;
+    while wl > 0.0035 {
+        let fade = grain_fade(wl, fw);
+        if fade <= 0.001 {
+            break;
+        }
+        fine_n += vnoise(q / wl, seed) * amp * fade;
+        q = rot * q;
+        wl /= 3.0;
+        amp *= 0.72;
+        seed += 1u;
     }
     rgb *= 1.0 + 0.30 * strengths.z * fine_n;
 
@@ -122,27 +148,43 @@ fn fragment(
 
     pbr_input.material.base_color = vec4(rgb, pbr_input.material.base_color.a);
 
-    // Detail normal from the fine-noise heightfield gradient: moonlit micro-relief
-    // up close. Faded with the same footprint rule, so distant ground keeps the
-    // smooth geometric normal.
-    let w_n = strengths.w * footprint_fade(0.45, fw);
-    if w_n > 0.001 {
-        let step = 0.12;
-        let h0 = vnoise(p / 0.45, 51u);
-        let hx = vnoise((p + vec2(step, 0.0)) / 0.45, 51u);
-        let hz = vnoise((p + vec2(0.0, step)) / 0.45, 51u);
-        var grad = vec2(hx - h0, hz - h0) / step * 0.06;
-        // Second, finer relief octave (15 cm): pebble-scale moonlight texture
-        // that only resolves on foot (its own tighter footprint fade).
-        let w_n2 = footprint_fade(0.15, fw);
-        if w_n2 > 0.001 {
-            let step2 = 0.05;
-            let g0 = vnoise(p / 0.15, 52u);
-            let gx = vnoise((p + vec2(step2, 0.0)) / 0.15, 52u);
-            let gz = vnoise((p + vec2(0.0, step2)) / 0.15, 52u);
-            grad += w_n2 * vec2(gx - g0, gz - g0) / step2 * 0.035;
+    // Detail normal from the fine-noise heightfield gradient: micro-relief up
+    // close, faded with the same footprint rule so distant ground keeps the smooth
+    // geometric normal. Same adaptive descent as the color detail (rl#324): a
+    // relief lattice that stops at a fixed wavelength is the "low-res normal map"
+    // the eye catches on foot, so descend by thirds from 45 cm until subpixel
+    // (same 3.5 mm floor / f32-ulp rationale as above). The finite-difference step
+    // scales with the wavelength so each octave's gradient stays honest; per-octave
+    // gradient weight falls slower than the color amplitude (relief keeps more of
+    // its punch as it refines — pebbles under moonlight, not blur).
+    if strengths.w * footprint_fade(0.45, fw) > 0.001 {
+        var grad = vec2(0.0);
+        // Cumulative rotation for this octave's lattice; its transpose (== inverse)
+        // carries the octave's gradient back to world space.
+        var nrot = mat2x2<f32>(1.0, 0.0, 0.0, 1.0);
+        var nwl = 0.45;
+        var nweight = 0.06;
+        var nseed = 51u;
+        while nwl > 0.0035 {
+            let fade = grain_fade(nwl, fw);
+            if fade <= 0.001 {
+                break;
+            }
+            let nq = nrot * p;
+            let step = nwl * 0.27;
+            let h0 = vnoise(nq / nwl, nseed);
+            let hx = vnoise((nq + vec2(step, 0.0)) / nwl, nseed);
+            let hz = vnoise((nq + vec2(0.0, step)) / nwl, nseed);
+            grad += fade * (transpose(nrot) * vec2(hx - h0, hz - h0)) / step * nweight;
+            nrot = rot * nrot;
+            nwl /= 3.0;
+            nweight *= 0.45;
+            nseed += 1u;
         }
-        pbr_input.N = normalize(pbr_input.N + w_n * vec3(-grad.x, 0.0, -grad.y));
+        // Soft-limit the stacked slope: unbounded octave sums tilt the normal past
+        // grazing and light it as black speckle pits.
+        grad *= 1.0 / (1.0 + 0.8 * length(grad));
+        pbr_input.N = normalize(pbr_input.N + strengths.w * vec3(-grad.x, 0.0, -grad.y));
     }
 
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
