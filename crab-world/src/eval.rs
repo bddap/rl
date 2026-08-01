@@ -36,24 +36,121 @@ pub const DEFAULT_TARGET_DISTANCE_M: f32 = 24.0;
 /// headline = MEDIAN over locales of min-over-bearings. The median keeps one
 /// pathological locale (a cliff ring) from capping the headline forever the way a
 /// min-over-locales would, while still refusing to let a single lucky meadow carry
-/// it. Locales are drawn deterministically from the bake ([`eval_locales`]), so the
-/// eval stays reproducible per brain; locale 0 is the tile center — the close and
-/// pace probes run there, keeping the charge instrument's geometry fixed.
+/// it. Locales are derived deterministically from the bake ([`eval_locales`]), so
+/// the eval stays reproducible per brain; the close and pace probes run at the tile
+/// center, keeping the charge instrument's geometry fixed.
 pub const EVAL_LOCALES: usize = 3;
 
-/// The fixed eval locales: tile center plus [`EVAL_LOCALES`]−1 pinned interior
-/// coordinates. LITERALS on purpose — deriving them from the training sampler (a
-/// seeded `random_episode_origin`) would silently move the instrument whenever a
-/// training knob (band, edge margin) or the RNG's stream changes, making headlines
-/// incomparable with no signal. These move only when the bake or this constant does.
-/// Both points sit kilometers inside the ±15 km tile with the full band clear of the
-/// edge extension.
-fn eval_locales() -> [Vec2; EVAL_LOCALES] {
-    [
-        Vec2::ZERO,
-        Vec2::new(4800.0, -3600.0),
-        Vec2::new(-6400.0, 5200.0),
-    ]
+/// The locale search's spread anchors — the rl#293/b8fdb51d pinned coordinates,
+/// kept as ANCHORS (not scored locales) so the instrument stays spatially spread
+/// across the tile interior and near its historical pins. Each anchor resolves to
+/// the nearest PROGRESSABLE locale ([`eval_locales`]); anchors move only when the
+/// bake or this constant does. All three sit kilometers inside the ±15 km tile with
+/// the full band clear of the edge extension, and far enough apart that the
+/// searches can never converge on one meadow.
+const LOCALE_ANCHORS: [Vec2; EVAL_LOCALES] = [
+    Vec2::ZERO,
+    Vec2::new(4800.0, -3600.0),
+    Vec2::new(-6400.0, 5200.0),
+];
+
+/// Max uphill grade (rise/run) a scored far bearing may demand anywhere along its
+/// ray — the rl#328 progressability bar. The hard-0.000 terrain evals happened
+/// because pinned locales carried bearings demanding 0.70–1.16 (35–49°) climbs:
+/// geometrically un-progressable for ANY policy, so `max(0, initial − closest)`
+/// floored the min-over-bearings at exactly 0 forever and the instrument had zero
+/// discriminating power. 0.36 ≈ 20° is deliberately conservative — far below the
+/// 55° zero-input HOLD the contact fix guarantees (`slope_hold_test`), moderate for
+/// a competent walker, and still passed by ~12% of tile-interior locales (census on
+/// the committed bake: nearest passing locale within 240 m of every anchor).
+/// Rejecting more terrain only flattens the arena; accepting an unclimbable bearing
+/// re-opens the dead instrument, so err strict.
+pub const MAX_PROGRESSABLE_GRADE: f32 = 0.36;
+
+/// Ray-sampling stride for the progressability check — about one body length, dense
+/// against the bake's 30 m cells (the sampler is triangle-exact, so features
+/// narrower than a cell don't exist to miss).
+const PROGRESSABLE_STEP_M: f32 = 1.0;
+
+/// Locale-search spiral: candidate rings every this many meters around an anchor…
+const LOCALE_SEARCH_RING_M: f32 = 60.0;
+/// …out to this many rings (3 km) before the search REFUSES: a bake so rough that
+/// no progressable locale sits within 3 km of an anchor is a broken instrument, and
+/// the eval must fail loud rather than score rock (rl#328).
+const LOCALE_SEARCH_MAX_RINGS: usize = 50;
+
+/// Whether a policy can make progress along `bearing_rad` from `origin`: no step of
+/// the ray to `distance_m` demands more than [`MAX_PROGRESSABLE_GRADE`] uphill.
+/// Samples through [`polar_target`] — the SAME formula that poses the ball — so the
+/// checked ray and the swept ray can never fork. Downhill is never blocking: gravity
+/// tumbles score against the policy's control, not its existence.
+fn bearing_progressable(
+    grid: &crate::terrain::TerrainGrid,
+    origin: Vec2,
+    bearing_rad: f32,
+    distance_m: f32,
+) -> bool {
+    let origin3 = Vec3::new(origin.x, 0.0, origin.y);
+    let steps = (distance_m / PROGRESSABLE_STEP_M).ceil().max(1.0) as usize;
+    let step = distance_m / steps as f32;
+    let mut prev = grid.height(origin.x, origin.y);
+    for i in 1..=steps {
+        let p = polar_target(origin3, bearing_rad, step * i as f32, 0.0);
+        let h = grid.height(p.x, p.z);
+        if h - prev > MAX_PROGRESSABLE_GRADE * step {
+            return false;
+        }
+        prev = h;
+    }
+    true
+}
+
+/// A locale is scoreable iff EVERY compass bearing is progressable to the far
+/// distance — the rl#328 invariant: a locale with even one dead bearing pins the
+/// min-over-bearings at 0 for every policy forever.
+fn locale_progressable(grid: &crate::terrain::TerrainGrid, xz: Vec2, far_distance_m: f32) -> bool {
+    eval_bearings().all(|b| bearing_progressable(grid, xz, b, far_distance_m))
+}
+
+/// The far-sweep locales: for each [`LOCALE_ANCHORS`] anchor, the first locale on a
+/// deterministic outward spiral where every compass bearing is progressable
+/// ([`locale_progressable`]) — so a locale that can never score is NOT
+/// CONSTRUCTIBLE (rl#328; the pinned-literal predecessor shipped ≥2 dead locales
+/// and read hard 0.000 policy-independently for its whole life). Pure function of
+/// (bake, far distance): same bake ⇒ same locales, so the instrument moves only
+/// when the bake does — which was already the re-base boundary. On the flat test
+/// grids every candidate passes and the anchors return unchanged.
+fn eval_locales(grid: &crate::terrain::TerrainGrid, far_distance_m: f32) -> [Vec2; EVAL_LOCALES] {
+    let locales = LOCALE_ANCHORS.map(|anchor| {
+        for ring in 0..LOCALE_SEARCH_MAX_RINGS {
+            let r = ring as f32 * LOCALE_SEARCH_RING_M;
+            let n = (ring * 8).max(1);
+            for k in 0..n {
+                let a = k as f32 * std::f32::consts::TAU / n as f32;
+                let candidate = anchor + r * Vec2::from_angle(a);
+                if locale_progressable(grid, candidate, far_distance_m) {
+                    return candidate;
+                }
+            }
+        }
+        panic!(
+            "no progressable eval locale within {:.0} m of anchor ({},{}) — the bake \
+             changed under the instrument (rl#328); re-anchor LOCALE_ANCHORS",
+            LOCALE_SEARCH_MAX_RINGS as f32 * LOCALE_SEARCH_RING_M,
+            anchor.x,
+            anchor.y,
+        )
+    });
+    for (i, a) in locales.iter().enumerate() {
+        for b in locales.iter().skip(i + 1) {
+            assert!(
+                a.distance(*b) > 2.0 * far_distance_m,
+                "eval locales {a} and {b} overlap sweeps — anchors too close or search \
+                 drifted (rl#328)"
+            );
+        }
+    }
+    locales
 }
 
 /// The close-range probe distance (rl#252): the same compass swept with the ball just
@@ -301,13 +398,13 @@ pub struct EvalReport {
     /// The far sweeps, one compass per [`eval_locales`] locale — the chase eval
     /// proper, sole source of the headline (the MEDIAN locale's worst bearing).
     pub far: [CompassSweep; EVAL_LOCALES],
-    /// The rl#252 close-range probe at [`CLOSE_PROBE_DISTANCE_M`], locale 0 only
+    /// The rl#252 close-range probe at [`CLOSE_PROBE_DISTANCE_M`], tile center only
     /// (fixed geometry — the emergence readout diffs against recorded baselines).
     /// SIDECAR ONLY — nothing here may feed [`Self::progress_m`]/[`Self::reached`],
     /// the headline every gate keys off: folding it in would be a training-adjacent
     /// metric change riding along with a measurement.
     pub close: CompassSweep,
-    /// The rl#280 pace probe at [`PACE_PROBE_DISTANCE_M`], locale 0 only (the
+    /// The rl#280 pace probe at [`PACE_PROBE_DISTANCE_M`], tile center only (the
     /// charge instrument's geometry stays fixed so the pin stays comparable).
     /// SIDECAR like the close probe: sole source of
     /// [`Self::measured_charge_heights_per_s`], never of the headline.
@@ -324,8 +421,13 @@ impl EvalReport {
         by_worst[EVAL_LOCALES / 2]
     }
 
-    /// Median-over-locales of min-over-bearings FAR chase progress — THE headline
-    /// scalar every gate compares.
+    /// THE headline scalar every gate compares — one ruler, one convention:
+    /// MEDIAN over [`EVAL_LOCALES`] progressable locales of MIN over
+    /// [`EVAL_BEARINGS`] bearings of zero-floored best-approach FAR progress, at
+    /// [`DEFAULT_TARGET_DISTANCE_M`]. Every scored bearing is geometrically
+    /// progressable BY CONSTRUCTION ([`eval_locales`] admits no locale with a
+    /// bearing demanding more than [`MAX_PROGRESSABLE_GRADE`] uphill, rl#328), so a
+    /// 0 here is a policy that didn't walk — never terrain that couldn't be walked.
     pub fn progress_m(&self) -> f32 {
         self.median_far().worst().progress_m
     }
@@ -444,9 +546,20 @@ pub fn run_eval(
     // The close and pace probes reuse the far sweep's episode definition (same
     // compass, same fresh-world episode) so their numbers read on the same scale; the
     // pace probe differs only where its geometry forces it to (rl#280). Only the far
-    // sweep fans over locales (rl#293) — the probes are instruments with fixed
-    // geometry at locale 0, the tile center.
-    let locales = eval_locales();
+    // sweep fans over locales (rl#293) — and only the far locales are
+    // progressability-validated (rl#328): the probes keep their FIXED tile-center
+    // geometry, because the charge pin and the close probe's recorded baselines were
+    // measured there and moving either instrument re-pins/re-baselines it. Both are
+    // SIDECARS (never the headline), the close probe's readout is reached_count, and
+    // the pace probe reads its BEST bearing — neither is floored by a dead one.
+    let grid = crate::terrain::TerrainGrid::gcr();
+    let locales = eval_locales(&grid, target_distance);
+    println!(
+        "eval: far locales (max uphill grade {MAX_PROGRESSABLE_GRADE}): {}",
+        locales
+            .map(|l| format!("({:.0},{:.0})", l.x, l.y))
+            .join(" ")
+    );
     let report = EvalReport {
         policy_loaded,
         far: locales.map(|l| run_compass(&policy, active_ticks, target_distance, false, l)),
@@ -455,9 +568,9 @@ pub fn run_eval(
             active_ticks,
             CLOSE_PROBE_DISTANCE_M,
             false,
-            locales[0],
+            Vec2::ZERO,
         ),
-        pace: run_pace_probe(&policy, active_ticks, locales[0]),
+        pace: run_pace_probe(&policy, active_ticks, Vec2::ZERO),
     };
     // The rl#266 speed guard, HERE so every judge (CLI, keep-best gate) flags for free:
     // a flag, not a verdict — a drifted pin is a re-measure chore, not a bad brain.
@@ -1056,12 +1169,147 @@ mod tests {
         }
     }
 
+    /// rl#328 progressability primitives: flat ground is progressable everywhere; a
+    /// cliff across +X kills bearing 0 (pinning the 0 = +X ray convention against
+    /// [`polar_target`]), leaves 180° open, and one dead bearing kills the locale.
+    #[test]
+    fn bearing_progressability_tracks_the_terrain() {
+        let flat = crate::terrain::TerrainGrid::flat(512.0);
+        for b in eval_bearings() {
+            assert!(
+                bearing_progressable(&flat, Vec2::ZERO, b, DEFAULT_TARGET_DISTANCE_M),
+                "flat ground is progressable at {:.0}°",
+                b.to_degrees()
+            );
+        }
+
+        // 257² × 4 m cells (±512 m), a 100 m cliff wall over x > 10.
+        let n = 257;
+        let heights: Vec<i16> = (0..n * n)
+            .map(|i| {
+                let x = ((i % n) as f32 / (n - 1) as f32 - 0.5) * 1024.0;
+                if x > 10.0 { 100 } else { 0 }
+            })
+            .collect();
+        let walled = crate::terrain::TerrainGrid::test_grid(n, n, 4.0, 1.0, &heights);
+        assert!(
+            !bearing_progressable(&walled, Vec2::ZERO, 0.0, DEFAULT_TARGET_DISTANCE_M),
+            "+X runs into the cliff"
+        );
+        assert!(
+            bearing_progressable(
+                &walled,
+                Vec2::ZERO,
+                std::f32::consts::PI,
+                DEFAULT_TARGET_DISTANCE_M
+            ),
+            "−X is open ground"
+        );
+        assert!(
+            !locale_progressable(&walled, Vec2::ZERO, DEFAULT_TARGET_DISTANCE_M),
+            "one dead bearing must kill the whole locale"
+        );
+    }
+
+    /// rl#328: a locale with an un-progressable bearing is NOT constructible — a
+    /// ring cliff around an anchor forces the search off it, every returned locale
+    /// is fully progressable, and the derivation is deterministic per bake.
+    #[test]
+    fn eval_locales_reroll_off_an_unprogressable_anchor() {
+        // A 100 m ring cliff at r 16–28 m around the origin anchor: every compass
+        // bearing from the anchor climbs it inside the 24 m sweep.
+        let n = 257;
+        let heights: Vec<i16> = (0..n * n)
+            .map(|i| {
+                let x = ((i % n) as f32 / (n - 1) as f32 - 0.5) * 1024.0;
+                let z = ((i / n) as f32 / (n - 1) as f32 - 0.5) * 1024.0;
+                if (16.0..=28.0).contains(&(x * x + z * z).sqrt()) {
+                    100
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let grid = crate::terrain::TerrainGrid::test_grid(n, n, 4.0, 1.0, &heights);
+        assert!(!locale_progressable(
+            &grid,
+            Vec2::ZERO,
+            DEFAULT_TARGET_DISTANCE_M
+        ));
+        let locales = eval_locales(&grid, DEFAULT_TARGET_DISTANCE_M);
+        assert_ne!(locales[0], Vec2::ZERO, "the ringed anchor was re-rolled");
+        for l in locales {
+            assert!(locale_progressable(&grid, l, DEFAULT_TARGET_DISTANCE_M));
+        }
+        assert_eq!(
+            locales,
+            eval_locales(&grid, DEFAULT_TARGET_DISTANCE_M),
+            "same bake ⇒ same locales"
+        );
+    }
+
+    /// rl#328 on the committed bake: the pinned locales that read hard 0.000 for
+    /// every policy (tile center: 35–49° climbs at 90–180°; (4800,−3600): 39–40° at
+    /// 270°/315°) are rejected, and at every derived locale a scripted surface
+    /// walker — no physics, no policy, just carapace-height steps along the ray —
+    /// makes real progress on EVERY bearing through the same fold `run_bearing`
+    /// ships. Nonzero progress is achievable wherever the instrument scores, so a
+    /// 0.000 headline once again measures the policy.
+    #[test]
+    fn gcr_locales_admit_a_scripted_walker_where_the_dead_pins_are_rejected() {
+        let g = crate::terrain::TerrainGrid::gcr();
+        for dead in [Vec2::ZERO, Vec2::new(4800.0, -3600.0)] {
+            assert!(
+                !locale_progressable(&g, dead, DEFAULT_TARGET_DISTANCE_M),
+                "pinned locale {dead} carried un-progressable bearings — the rl#328 \
+                 zero factory must stay rejected on this bake"
+            );
+        }
+
+        for locale in eval_locales(&g, DEFAULT_TARGET_DISTANCE_M) {
+            let origin3 = Vec3::new(locale.x, 0.0, locale.y);
+            for bearing in eval_bearings() {
+                let tp = polar_target(origin3, bearing, DEFAULT_TARGET_DISTANCE_M, TARGET_Y);
+                let target = g.place(Vec2::new(tp.x, tp.z), TARGET_Y);
+                let walk = |s: f32| {
+                    let p = polar_target(origin3, bearing, s, 0.0);
+                    dist_3d(g.place(Vec2::new(p.x, p.z), 0.5), target)
+                };
+                let initial = walk(0.0);
+                let mut closest = initial;
+                let mut s = 0.0;
+                while s < DEFAULT_TARGET_DISTANCE_M {
+                    s += 0.5;
+                    closest = closest.min(walk(s));
+                }
+                let report = EvalState {
+                    initial_dist: initial,
+                    closest_dist: closest,
+                    last_dist: closest,
+                    ..Default::default()
+                }
+                .bearing_report(bearing);
+                assert!(
+                    report.progress_m > DEFAULT_TARGET_DISTANCE_M / 2.0,
+                    "walker only made {:.2} m at locale {locale} bearing {:.0}°",
+                    report.progress_m,
+                    bearing.to_degrees()
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore = "builds a headless bevy+rapier App per bearing; run with --ignored"]
     fn rest_pose_has_zero_torque_and_no_progress() {
         let dir = std::env::temp_dir().join(format!("rl-eval-restpose-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // Stamp the resolved plant: since the rl#293 strict adoption a recordless dir
+        // REFUSES (unknown ground provenance), so the legitimate no-brain-yet
+        // baseline is a plant-stamped dir with no brain — what a fresh run's
+        // checkpoint dir looks like before the first save.
+        crate::bot::body::record_plant(&dir).unwrap();
 
         // Explicit, greppable test-only opt-in: this eval deliberately runs whatever
         // body the test env constructs (usually the fallback — no sally.glb in CI).
