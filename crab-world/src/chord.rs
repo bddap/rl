@@ -199,6 +199,19 @@ mod glue {
         }
     }
 
+    /// Level OR this-frame edge. Level-only sampling of the modifier drops a
+    /// press-and-release that lands inside one frame (a hitch, a low-FPS stretch) —
+    /// `pressed` reads false on both frames and the empty-code verb intermittently
+    /// dies. Seen as just-pressed, the capture opens now and completes on the next
+    /// frame's release. (The pad reads the same expression inline — `Gamepad` is a
+    /// component, not a `ButtonInput`.)
+    fn held_or_tapped<T: Copy + Eq + std::hash::Hash + Send + Sync + 'static>(
+        input: &ButtonInput<T>,
+        button: T,
+    ) -> bool {
+        input.pressed(button) || input.just_pressed(button)
+    }
+
     /// Drive the capture from the real inputs, once per frame in `PreUpdate` (after
     /// bevy's input update, before every dispatch system in `Update`).
     pub fn capture_chords<S: ControlScheme>(
@@ -207,13 +220,7 @@ mod glue {
         pads: Query<&Gamepad>,
         mut chords: ResMut<Chords<S>>,
     ) {
-        // `just_pressed` too: a press-and-release inside one frame (a hitch, a low-FPS
-        // stretch) reads `pressed == false` on both frames, and a level-only sample
-        // would drop the tap outright — the empty-code verb would intermittently die.
-        // Seen this frame as just-pressed, the capture opens now and completes on the
-        // next frame's release.
-        let modifier = mouse.pressed(CHORD_MODIFIER_MOUSE)
-            || mouse.just_pressed(CHORD_MODIFIER_MOUSE)
+        let modifier = held_or_tapped(&mouse, CHORD_MODIFIER_MOUSE)
             || pads
                 .iter()
                 .any(|gp| gp.pressed(CHORD_MODIFIER_PAD) || gp.just_pressed(CHORD_MODIFIER_PAD));
@@ -243,6 +250,25 @@ mod glue {
             PreUpdate,
             capture_chords::<S>.after(bevy::input::InputSystems),
         );
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Pins the fix for the sub-frame modifier tap: press+release inside one frame
+        /// leaves `pressed` false while `just_pressed` is still set — a level-only
+        /// sample would drop the tap and the empty-code verb would intermittently die.
+        #[test]
+        fn a_sub_frame_modifier_tap_still_reads_as_down() {
+            let mut input = ButtonInput::<MouseButton>::default();
+            input.press(CHORD_MODIFIER_MOUSE);
+            input.release(CHORD_MODIFIER_MOUSE);
+            assert!(!input.pressed(CHORD_MODIFIER_MOUSE));
+            assert!(held_or_tapped(&input, CHORD_MODIFIER_MOUSE));
+            input.clear();
+            assert!(!held_or_tapped(&input, CHORD_MODIFIER_MOUSE));
+        }
     }
 }
 
