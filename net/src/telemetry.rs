@@ -204,6 +204,10 @@ pub struct TelemetrySender {
     shed_tx: mpsc::Sender<Envelope>,
     crit_tx: mpsc::UnboundedSender<Envelope>,
     game_id: [u8; 32],
+    /// The spawned [`sender_task`], awaited by [`close`](Self::close) so its iroh endpoint
+    /// closes before the runtime dies — an abort mid-await drops the endpoint without
+    /// `Endpoint::close` and iroh logs it at ERROR.
+    task: std::sync::Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl TelemetrySender {
@@ -213,12 +217,25 @@ impl TelemetrySender {
             .context("binding telemetry endpoint")?;
         let (shed_tx, shed_rx) = mpsc::channel(QUEUE_DEPTH);
         let (crit_tx, crit_rx) = mpsc::unbounded_channel();
-        tokio::spawn(sender_task(endpoint, collector, shed_rx, crit_rx));
+        let task = tokio::spawn(sender_task(endpoint, collector, shed_rx, crit_rx));
         Ok(Self {
             shed_tx,
             crit_tx,
             game_id,
+            task: std::sync::Arc::new(std::sync::Mutex::new(Some(task))),
         })
+    }
+
+    /// THE way to end a sender — never bare-drop one on a runtime about to die. Drops this
+    /// handle's channels (closing them once no clone survives) and awaits the I/O task, which
+    /// drains queued envelopes and `Endpoint::close`s. Bounded: a wedged link can't hang
+    /// teardown past the timeout.
+    pub async fn close(self) {
+        let task = self.task.lock().unwrap().take();
+        drop(self);
+        if let Some(task) = task {
+            let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+        }
     }
 
     pub fn send(&self, event: TelemetryEvent) {
@@ -534,6 +551,7 @@ mod tests {
                 shed_tx,
                 crit_tx,
                 game_id: [0u8; 32],
+                task: Default::default(),
             },
             shed_rx,
             crit_rx,
