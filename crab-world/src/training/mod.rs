@@ -119,6 +119,15 @@ pub(crate) fn replace_dir_atomically(
 /// Atomically swap the directories at `a` and `b` (same filesystem), with a
 /// rename-aside fallback (through the caller's `aside` path, so the caller's crash
 /// sweep can recover it) where the filesystem lacks `RENAME_EXCHANGE`.
+#[cfg(not(unix))]
+fn exchange_paths(a: &Path, b: &Path, aside: &Path) -> std::io::Result<()> {
+    std::fs::rename(b, aside)?;
+    std::fs::rename(a, b)?;
+    std::fs::rename(aside, a)?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn exchange_paths(a: &Path, b: &Path, aside: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let ac = std::ffi::CString::new(a.as_os_str().as_bytes())
