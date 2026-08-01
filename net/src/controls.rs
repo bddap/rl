@@ -4,13 +4,13 @@ use crab_world::controls::{Binding, ContextRow, ControlScheme, Glyph, KbBinding,
 pub struct GcrControls;
 
 /// GCR's chord table (rl#330) — the ONE list of code → command assignments; the owner
-/// tunes codes here in play. These are the surface's ONLY triggers for these commands:
-/// stage 2 deleted every direct binding they had (the one-route-per-action rule,
-/// enforced by `assert_scheme_well_formed`). The empty code (bare modifier tap) keeps
-/// the pad's tap-X-to-board verb: X can't stay a press-verb once it is the chord
-/// modifier (its press now opens a capture), so EnterExit moved to execute-on-release.
-/// Quit gets the longest code — leaving the round should take the most deliberate
-/// input, the chord system's replacement for the old hold-to-quit guard.
+/// tunes codes here in play. These commands have no direct bindings — one trigger
+/// route per action, enforced by `assert_scheme_well_formed`. The empty code (bare
+/// modifier tap) keeps the pad's tap-X-to-board verb: X can't stay a press-verb once
+/// it is the chord modifier (its press now opens a capture), so EnterExit rides
+/// execute-on-release. Quit's code is ≥2 taps longer than every other — one stray
+/// tap after any registered code can never end the round (the chord replacement for
+/// the old timed hold-to-quit guard; a couch kid mashing d-pad stays in the round).
 pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
     ChordEntry {
         code: &[],
@@ -33,7 +33,7 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         action: Action::Restart,
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Down],
+        code: &[ChordDir::Up, ChordDir::Up, ChordDir::Down, ChordDir::Down],
         action: Action::Quit,
     },
 ]);
@@ -571,25 +571,17 @@ mod tests {
         );
         assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Right]), Some(Action::Restart));
         assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Down]),
+            GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Up, ChordDir::Down, ChordDir::Down]),
             Some(Action::Quit)
         );
     }
 
-    /// Stage 2 (rl#330): the migrated command verbs are chord-ONLY — a surviving direct
-    /// binding would be a second trigger route, the exact drift the migration deletes.
-    /// (`assert_scheme_well_formed` enforces the rule generically; this pins WHICH
-    /// actions moved.) Quit deliberately wears the longest code: it replaced the old
-    /// hold-to-quit guard, so leaving the round must stay the hardest input to fat-finger.
+    /// Quit replaced the timed hold-to-quit guard, so it must stay the hardest command
+    /// to fat-finger: a stray extra tap after ANY registered code must never quit —
+    /// i.e. Quit's code is at least two taps longer than every other code. (Length,
+    /// not just prefix-freedom: one accidental repeat is the realistic slip.)
     #[test]
-    fn migrated_commands_have_no_direct_binding() {
-        for e in GCR_CHORDS.entries() {
-            assert!(
-                binding::<GcrControls>(e.action).is_none(),
-                "{:?} is chorded AND bound",
-                e.action
-            );
-        }
+    fn quit_code_survives_a_stray_tap_after_any_other_code() {
         let quit_len = GCR_CHORDS
             .entries()
             .iter()
@@ -601,8 +593,8 @@ mod tests {
             GCR_CHORDS
                 .entries()
                 .iter()
-                .all(|e| e.action == Action::Quit || e.code.len() < quit_len),
-            "Quit must have the strictly longest chord code"
+                .all(|e| e.action == Action::Quit || e.code.len() + 2 <= quit_len),
+            "Quit's code must be ≥2 taps longer than every other code"
         );
     }
 
