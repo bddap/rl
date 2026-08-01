@@ -162,9 +162,9 @@ pub(super) fn gather_input(
     *flight = fi;
 }
 
-/// Quit is a chord (rl#330) — its code is deliberately the table's longest, the chord
-/// system's replacement for the old timed pad hold: leaving the round stays the
-/// hardest input to hit by accident, on both devices through the one path.
+/// Quit is a chord (rl#330) — its code is ≥2 taps longer than every other (tested),
+/// the chord system's replacement for the old timed pad hold: no stray tap after
+/// another code can end the round, on both devices through the one path.
 pub(super) fn quit_game(
     chords: Res<crab_world::chord::Chords<controls::GcrControls>>,
     mut exit: MessageWriter<AppExit>,
