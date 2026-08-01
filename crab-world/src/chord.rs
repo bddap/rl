@@ -31,7 +31,10 @@ pub struct ChordEntry<A: 'static> {
 }
 
 /// The one data table mapping chord codes to commands. Code assignments are gameplay
-/// data the owner tunes — keep every entry in the surface's single registry const.
+/// data the owner tunes — keep every entry in the surface's single registry const,
+/// reached through [`crate::controls::ControlScheme::chords`] so the install sites and
+/// the well-formedness checks all read the same table.
+#[derive(Clone, Copy)]
 pub struct ChordRegistry<A: 'static>(&'static [ChordEntry<A>]);
 
 impl<A: Copy + PartialEq + Debug> ChordRegistry<A> {
@@ -168,26 +171,27 @@ mod glue {
         }
     }
 
-    /// A surface's live chord state: its registry, the capture, and the command the
-    /// just-finished code executed THIS frame (cleared next frame). Dispatch systems
+    /// A surface's live chord state: the capture plus the command the just-finished
+    /// code executed THIS frame (cleared next frame). The registry itself lives on the
+    /// scheme ([`ControlScheme::chords`]) — no copy here to drift. Dispatch systems
     /// read [`Chords::executed`]; they must be scheduled after [`capture_chords`],
     /// which [`install_chords`] guarantees by running the capture in `PreUpdate`.
     #[derive(Resource)]
     pub struct Chords<S: ControlScheme> {
-        registry: ChordRegistry<S::Action>,
         capture: ChordCapture,
         executed: Option<S::Action>,
     }
 
-    impl<S: ControlScheme> Chords<S> {
-        pub fn new(registry: ChordRegistry<S::Action>) -> Self {
+    impl<S: ControlScheme> Default for Chords<S> {
+        fn default() -> Self {
             Self {
-                registry,
                 capture: ChordCapture::default(),
                 executed: None,
             }
         }
+    }
 
+    impl<S: ControlScheme> Chords<S> {
         /// Did a chord execute `action` this frame?
         pub fn executed(&self, action: S::Action) -> bool {
             self.executed == Some(action)
@@ -233,7 +237,7 @@ mod glue {
             )
             .collect::<Vec<_>>();
         let code = chords.capture.step(modifier, taps);
-        chords.executed = code.and_then(|c| chords.registry.lookup(&c));
+        chords.executed = code.and_then(|c| S::chords().lookup(&c));
     }
 
     /// See [`ChordCapture::reset`] — schedule on the surface's round-entry transition
@@ -245,8 +249,10 @@ mod glue {
     }
 
     /// The one wiring of chord input onto an app: the resource plus the capture system.
-    pub fn install_chords<S: ControlScheme>(app: &mut App, registry: ChordRegistry<S::Action>) {
-        app.insert_resource(Chords::<S>::new(registry)).add_systems(
+    /// The registry comes from the scheme itself ([`ControlScheme::chords`]), so every
+    /// install site of a surface wires the same table by construction.
+    pub fn install_chords<S: ControlScheme>(app: &mut App) {
+        app.init_resource::<Chords<S>>().add_systems(
             PreUpdate,
             capture_chords::<S>.after(bevy::input::InputSystems),
         );

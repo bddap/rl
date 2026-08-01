@@ -82,6 +82,11 @@ impl ControlScheme for DemoControls {
         &DEMO_BINDINGS
     }
 
+    // Empty until the stage-3 migration (rl#330) moves the demo's discrete verbs here.
+    fn chords() -> crate::chord::ChordRegistry<DemoAction> {
+        crate::chord::ChordRegistry::new(&[])
+    }
+
     fn contexts() -> &'static [DemoContext] {
         &[DemoContext::Inspect]
     }

@@ -22,6 +22,14 @@ pub trait ControlScheme: 'static + Send + Sync {
 
     fn bindings() -> &'static [Binding<Self>];
 
+    /// The surface's chord-code registry (rl#330) — the one table of code → command
+    /// assignments, owned by the scheme so every install site and the well-formedness
+    /// checks read the same data. A chorded action must NOT also appear in
+    /// [`bindings`](ControlScheme::bindings): two live triggers for one command drift
+    /// (enforced by [`assert_scheme_well_formed`]). A surface without chords declares
+    /// an empty registry — explicitly, so the absence is a decision, not a default.
+    fn chords() -> crate::chord::ChordRegistry<Self::Action>;
+
     fn contexts() -> &'static [Self::Context];
 
     fn context_rows(ctx: Self::Context) -> &'static [ContextRow<Self>];
@@ -162,19 +170,37 @@ pub fn assert_scheme_well_formed<S: ControlScheme + ?Sized>(
     all_actions: &[S::Action],
     all_contexts: &[S::Context],
 ) {
+    S::chords().assert_well_formed();
     for &a in all_actions {
-        let n = S::bindings().iter().filter(|b| b.action == a).count();
-        assert_eq!(n, 1, "{a:?} has {n} bindings; want exactly 1");
-        let b = binding::<S>(a).expect("just checked exactly one binding exists");
-        assert!(
-            !b.glyphs(Device::KeyboardMouse).is_empty() || !b.glyphs(Device::Gamepad).is_empty(),
-            "{a:?} is bound on no device (would be invisible/unusable)"
+        let n_bind = S::bindings().iter().filter(|b| b.action == a).count();
+        let n_chord = S::chords()
+            .entries()
+            .iter()
+            .filter(|e| e.action == a)
+            .count();
+        // Exactly ONE trigger route per action (rl#330): a direct binding OR a chord
+        // code, never both and never two of either — a second live trigger for the
+        // same command is the drift the migration deletes.
+        assert_eq!(
+            n_bind + n_chord,
+            1,
+            "{a:?} has {n_bind} bindings and {n_chord} chord codes; want exactly one \
+             trigger route total"
         );
+        if n_bind == 1 {
+            let b = binding::<S>(a).expect("just checked the binding exists");
+            assert!(
+                !b.glyphs(Device::KeyboardMouse).is_empty()
+                    || !b.glyphs(Device::Gamepad).is_empty(),
+                "{a:?} is bound on no device (would be invisible/unusable)"
+            );
+        }
     }
     assert_eq!(
-        S::bindings().len(),
+        S::bindings().len() + S::chords().entries().len(),
         all_actions.len(),
-        "the binding table has rows for actions not in the exhaustive list (a stale/dup row)"
+        "the binding table or chord registry has rows for actions not in the exhaustive \
+         list (a stale/dup row)"
     );
     assert!(
         !all_contexts.is_empty(),
@@ -835,6 +861,9 @@ mod tests {
 
         fn bindings() -> &'static [Binding<Self>] {
             &[]
+        }
+        fn chords() -> crate::chord::ChordRegistry<()> {
+            crate::chord::ChordRegistry::new(&[])
         }
         fn contexts() -> &'static [TestCtx] {
             &[TestCtx::Foot, TestCtx::Plane]

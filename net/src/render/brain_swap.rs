@@ -14,20 +14,16 @@ use crate::crab_slot::CrabPolicies;
 use super::driver::GameState;
 
 pub(super) fn swap_brain(
-    keys: Res<ButtonInput<KeyCode>>,
-    pads: Query<&Gamepad>,
     chords: Res<crab_world::chord::Chords<GcrControls>>,
     ctx: Res<ActiveContext<GcrControls>>,
     state: Option<NonSend<GameState>>,
     policies: Option<NonSendMut<CrabPolicies>>,
 ) {
-    // On-foot only, matching the one FOOT_ROWS legend row — and R3 is the click of the
-    // stick that aims the ship / attitudes the plane, so a piloting hand must not be
-    // able to swap Sally by accident.
-    let pressed =
-        crab_world::controls::just_pressed::<GcrControls>(Action::SwapBrain, &keys, &pads)
-            || chords.executed(Action::SwapBrain);
-    if ctx.get() != GcrContext::OnFoot || !pressed {
+    // On-foot only: while piloting, a mistyped code must not be able to swap Sally.
+    // Context gating stays HERE, dispatcher-side (rl#330 stage-2 decision): the
+    // registry is pure code→command data, and which contexts allow a command is the
+    // dispatcher's business, same as the Playing gate on the view cycles.
+    if ctx.get() != GcrContext::OnFoot || !chords.executed(Action::SwapBrain) {
         return;
     }
     let Some(state) = state else {

@@ -9,9 +9,9 @@ use crab_world::vehicle::Vehicle;
 pub fn register(app: &mut App, initial: RenderMode) {
     // Everything render-mode is gated on Playing (rl#211): gizmos render through ANY camera —
     // the menu's Camera2d included — and the crab body deliberately survives round teardown, so
-    // ungated the cage draws over the post-disconnect menu; and pad East is ALSO menu Back, so
-    // ungated cycle input means dismissing that screen cycles the mode. Both callers hold the
-    // state: the windowed app inits it, the screenshot app boots pinned to Playing.
+    // ungated the cage draws over the post-disconnect menu; and the chord capture runs in every
+    // phase, so ungated cycle input means a code typed in the menu cycles the mode. Both callers
+    // hold the state: the windowed app inits it, the screenshot app boots pinned to Playing.
     crab_world::crab_view::register(app, initial, in_state(AppPhase::Playing));
     // Craft models ride the same registration seam so the windowed and screenshot apps
     // both get them (rl#260).
@@ -53,14 +53,10 @@ impl ViewKnob for crab_world::ground::GroundLook {
 }
 
 fn cycle_view<V: ViewKnob>(
-    keys: Res<ButtonInput<KeyCode>>,
-    pads: Query<&Gamepad>,
     chords: Res<crab_world::chord::Chords<controls::GcrControls>>,
     mut knob: ResMut<V>,
 ) {
-    if crab_world::controls::just_pressed::<controls::GcrControls>(V::ACTION, &keys, &pads)
-        || chords.executed(V::ACTION)
-    {
+    if chords.executed(V::ACTION) {
         *knob = crab_world::next_view_variant(*knob);
         info!(
             "{}: {}",
