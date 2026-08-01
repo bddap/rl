@@ -271,13 +271,16 @@ fn capture_when_settled(
     // shader time between shots — deterministic, replayable animation evidence.
     let since_settle = frame - cfg.settle;
     let every = every.max(1);
-    if since_settle % every != 0 {
+    if !since_settle.is_multiple_of(every) {
         return;
     }
     let shot = since_settle / every;
     let path = cfg.path.with_extension(format!("{shot:04}.png"));
     screenshot::save_target_to(&mut commands, &target, path.clone());
-    info!("fp screenshot: anim frame {shot}/{count} at render frame {frame} -> {}", path.display());
+    info!(
+        "fp screenshot: anim frame {shot}/{count} at render frame {frame} -> {}",
+        path.display()
+    );
     if shot + 1 >= count {
         screenshot::finish_capture(&mut progress);
     }
