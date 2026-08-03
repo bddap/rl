@@ -68,5 +68,5 @@ mod vehicle_view;
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use render_mode::RenderMode;
 pub use screenshot::{
-    PilotScript, ScreenshotConfig, build_net_screenshot_app, build_screenshot_app,
+    ChordScript, PilotScript, ScreenshotConfig, build_net_screenshot_app, build_screenshot_app,
 };
