@@ -525,6 +525,7 @@ fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Op
 }
 
 pub(super) fn drive_client_sim(world: &mut World) {
+    let sim_started = std::time::Instant::now();
     let armed = world
         .get_resource::<crate::crab_slot::NnCrabsArmed>()
         .is_some();
@@ -942,6 +943,15 @@ pub(super) fn drive_client_sim(world: &mut World) {
         frac: render_frac(state.accumulator, state.stalled),
     };
     world.insert_resource(clock);
+
+    // Feed the rl#331 perf readout/black box: this frame's whole-sim cost and how many
+    // fixed ticks ran (pinned at MAX_TICKS_PER_FRAME = the sim can't keep up with wall
+    // time — the death-spiral signature, distinct from a render/present stall).
+    *world.resource_mut::<crab_world::debug_overlay::SimFrameStats>() =
+        crab_world::debug_overlay::SimFrameStats {
+            ms: sim_started.elapsed().as_secs_f32() * 1000.0,
+            ticks: applied,
+        };
 }
 
 #[cfg(test)]
