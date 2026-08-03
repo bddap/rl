@@ -175,8 +175,8 @@ pub struct Boarding {
 
 #[derive(Clone, Copy)]
 pub struct PilotCommand {
-    /// Which craft to be (cycled by the player). A change while piloting morphs the body
-    /// in place ([`manage_vehicles`]).
+    /// Which craft to be (the player picks one per board code, rl#330). A change while
+    /// piloting morphs the body in place ([`manage_vehicles`]).
     pub kind: VehicleKind,
     /// Where the pilot's body was when this command was authored — read only on the
     /// spawn edge (a pilot with no body yet).
@@ -1075,7 +1075,7 @@ mod tests {
 
         set_cmd(&mut app, |c| c.kind = VehicleKind::Ship);
         app.update();
-        assert_eq!(count(&mut app), 1, "still one vehicle after a kind cycle");
+        assert_eq!(count(&mut app), 1, "still one vehicle after a kind switch");
         assert_eq!(
             app.world_mut()
                 .query::<&Vehicle>()
@@ -1083,7 +1083,7 @@ mod tests {
                 .unwrap()
                 .kind,
             VehicleKind::Ship,
-            "the body became the cycled kind",
+            "the body became the switched-to kind",
         );
 
         app.world_mut()
@@ -1292,10 +1292,10 @@ mod tests {
         );
     }
 
-    /// rl#258: a kind cycle morphs the SAME body in place — entity, pose and velocity all
+    /// rl#258: a kind switch morphs the SAME body in place — entity, pose and velocity all
     /// carry through; only the throttle lever and gravity scale become the new kind's.
     #[test]
-    fn kind_cycle_morphs_the_body_in_place() {
+    fn kind_switch_morphs_the_body_in_place() {
         let at = Vec3::new(1.0, 4.0, 2.0);
         let vel = Vec3::new(0.0, 0.0, 3.0);
         let (mut app, e) = app_with_vehicle(VehicleKind::Plane, at, vel);

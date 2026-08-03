@@ -557,8 +557,8 @@ pub(super) fn drive_client_sim(world: &mut World) {
             let mut vehicle = world.resource_mut::<LocalVehicle>();
             let next = match request {
                 // Boarding from foot needs the sim's leave; switching craft-to-craft
-                // doesn't (same as the old cycle). Re-requesting the current craft is
-                // a no-op — no pose-window reset mid-flight.
+                // doesn't. Re-requesting the current craft is a no-op — no
+                // pose-window reset mid-flight.
                 VehicleRequest::Board(kind)
                     if vehicle.kind() != Some(kind) && (vehicle.kind().is_some() || may_board) =>
                 {

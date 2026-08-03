@@ -55,8 +55,9 @@ impl<A: Copy + PartialEq + Debug> ChordRegistry<A> {
         self.0
     }
 
-    /// Panics on a duplicate code or one longer than [`MAX_CHORD_LEN`] (unreachable —
-    /// the capture poisons first). Call from the surface's scheme test.
+    /// Panics on a duplicate code, one longer than [`MAX_CHORD_LEN`] (unreachable —
+    /// the capture poisons first), or a blank/duplicate label (the menu and legend
+    /// would render indistinguishable lines). Call from the surface's scheme test.
     pub fn assert_well_formed(&self) {
         for (i, e) in self.0.iter().enumerate() {
             assert!(
@@ -64,11 +65,19 @@ impl<A: Copy + PartialEq + Debug> ChordRegistry<A> {
                 "code for {:?} is longer than MAX_CHORD_LEN ({MAX_CHORD_LEN}) — unenterable",
                 e.action
             );
+            assert!(!e.label.is_empty(), "{:?} has an empty label", e.action);
             for other in &self.0[i + 1..] {
                 assert!(
                     e.code != other.code,
                     "code {:?} is registered twice: {:?} and {:?}",
                     e.code,
+                    e.action,
+                    other.action
+                );
+                assert!(
+                    e.label != other.label,
+                    "label {:?} is used twice: {:?} and {:?}",
+                    e.label,
                     e.action,
                     other.action
                 );
@@ -403,6 +412,28 @@ mod glue {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The menu's kb glyphs must be the keys the capture actually reads: both
+        /// derive from [`dir_key`] (this test) or would silently drift from it.
+        #[test]
+        fn menu_kb_glyphs_match_the_code_entry_keys() {
+            for d in [
+                ChordDir::Up,
+                ChordDir::Down,
+                ChordDir::Left,
+                ChordDir::Right,
+            ] {
+                // "KeyW" → "W": the header line of a menu over an empty registry is
+                // exactly the typed prefix, one glyph here.
+                let key_letter = format!("{:?}", dir_key(d)).replace("Key", "");
+                let text = chord_menu_text(
+                    ChordRegistry::<()>::new(&[]),
+                    Some(&[d]),
+                    crate::controls::Device::KeyboardMouse,
+                );
+                assert_eq!(text.lines().next(), Some(key_letter.as_str()));
+            }
+        }
 
         /// Pins the fix for the sub-frame modifier tap: press+release inside one frame
         /// leaves `pressed` false while `just_pressed` is still set — a level-only

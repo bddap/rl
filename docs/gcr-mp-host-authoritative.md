@@ -116,9 +116,10 @@ wholesale.
   uniform.
 
 **Vehicle / plane mode is an input mode, not an SP fork** ([[rl-vehicles-plane-mode-required]]
-— a hard req). Today the pilot toggle is gated on `is_solo()` (`render/driver.rs:444`) — a
-parallel codepath. Under host-auth a vehicle is a client *input source* whose inputs the
-server simulates like any other; fold the `is_solo()` gate away so piloting works in MP too,
+— a hard req). Boarding rides `VehicleRequest` gated on the sim's `may_board()`
+(`render/driver.rs`, rl#330: one chord code per vehicle). Under host-auth a vehicle is a
+client *input source* whose inputs the server simulates like any other; keep that one gate
+on the one input path so piloting works in MP too,
 on the one path.
 
 **Why host-sends-pose, not clients-run-the-policy** (the one real fork in the design):
@@ -278,8 +279,8 @@ inputs up (`Tick`). A 2-process host+client runs host-authoritatively. **Test:**
 screenshot shows the posed crab + players.
 
 **3 — local-player prediction + reconciliation + fold the vehicle gate.** Predict the local
-foot player only (input ring + replay); remote players + crab interpolated. Fold the
-`is_solo()` vehicle toggle into the one input path so piloting works in MP. **Test:**
+foot player only (input ring + replay); remote players + crab interpolated. Keep the
+`VehicleRequest` boarding path (rl#330) on the one input path so piloting works in MP. **Test:**
 reconcile leaves no visible snap; a networked round can enter vehicle mode.
 
 **4 — mid-game join via snapshot transfer (the 509 fix).** Verify the asset-digest semantics

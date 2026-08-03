@@ -99,6 +99,23 @@ pub(crate) fn run(args: Args) -> Result<()> {
             .iter()
             .map(|spec| parse_chord_tap(spec))
             .collect::<Result<Vec<_>>>()?;
+        // The script's frame counter starts at 1 and the modifier must be down before
+        // a tap can buffer — a spec that can't fire must fail loud, not shoot a blank
+        // evidence frame.
+        if hold_at == 0 || taps.iter().any(|&(at, _)| at <= hold_at) {
+            anyhow::bail!("chord frames must be ≥1 and taps after --chord-hold-at");
+        }
+        if args.chord_release_at.is_some_and(|r| r <= hold_at) {
+            anyhow::bail!("--chord-release-at must be after --chord-hold-at");
+        }
+        let mut seen = std::collections::HashSet::new();
+        if let Some(dup) = taps.iter().find(|&&t| !seen.insert(t)) {
+            anyhow::bail!(
+                "duplicate chord tap {}:{:?} (one edge, one tap)",
+                dup.0,
+                dup.1
+            );
+        }
         app.insert_resource(render::ChordScript::new(
             hold_at,
             args.chord_release_at,
