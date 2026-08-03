@@ -15,34 +15,42 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
     ChordEntry {
         code: &[ChordDir::Up, ChordDir::Left],
         action: Action::BoardPlane,
+        label: "Enter plane",
     },
     ChordEntry {
         code: &[ChordDir::Up, ChordDir::Right],
         action: Action::BoardShip,
+        label: "Enter ship",
     },
     ChordEntry {
         code: &[ChordDir::Down, ChordDir::Down],
         action: Action::ExitVehicle,
+        label: "Exit to foot",
     },
     ChordEntry {
         code: &[ChordDir::Up],
         action: Action::CycleRenderMode,
+        label: "Render mode",
     },
     ChordEntry {
         code: &[ChordDir::Down],
         action: Action::CycleGroundLook,
+        label: "Ground look",
     },
     ChordEntry {
         code: &[ChordDir::Left],
         action: Action::SwapBrain,
+        label: "Swap brain",
     },
     ChordEntry {
         code: &[ChordDir::Right],
         action: Action::Restart,
+        label: "Restart round",
     },
     ChordEntry {
         code: &[ChordDir::Up, ChordDir::Up, ChordDir::Down, ChordDir::Down],
         action: Action::Quit,
+        label: "Quit round",
     },
 ]);
 

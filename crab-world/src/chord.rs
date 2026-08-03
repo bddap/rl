@@ -28,6 +28,9 @@ pub const MAX_CHORD_LEN: usize = 8;
 pub struct ChordEntry<A: 'static> {
     pub code: &'static [ChordDir],
     pub action: A,
+    /// The player-facing name — the held-modifier context menu and the controls
+    /// legend render it, so it lives with the code in the one table.
+    pub label: &'static str,
 }
 
 /// The one data table mapping chord codes to commands. Code assignments are gameplay
@@ -138,6 +141,62 @@ impl ChordCapture {
     pub fn reset(&mut self) {
         self.0 = CaptureState::Idle;
     }
+
+    /// The code typed so far in the live capture — the context menu filters on it.
+    /// `None` while idle AND while poisoned: an overflowed capture has no honest
+    /// prefix to filter by (the menu shows its cancel hint instead).
+    pub fn entered(&self) -> Option<&[ChordDir]> {
+        match &self.0 {
+            CaptureState::Capturing(buf) => Some(buf),
+            CaptureState::Idle | CaptureState::Poisoned => None,
+        }
+    }
+}
+
+/// The held-modifier context menu's text (rl#330 stage 3): every registry entry whose
+/// code starts with the typed prefix, one line each — the options filter down as the
+/// code is entered. Pure so the filtering is unit-testable headless; the render glue
+/// only decides visibility and pushes this into a Text node. `entered == None` means
+/// the capture overflowed ([`MAX_CHORD_LEN`]) — nothing can match, say so.
+pub fn chord_menu_text<A: Copy + PartialEq + Debug>(
+    registry: ChordRegistry<A>,
+    entered: Option<&[ChordDir]>,
+    device: crate::controls::Device,
+) -> String {
+    let dir = |d: ChordDir| match (device, d) {
+        (crate::controls::Device::Gamepad, ChordDir::Up) => "↑",
+        (crate::controls::Device::Gamepad, ChordDir::Down) => "↓",
+        (crate::controls::Device::Gamepad, ChordDir::Left) => "←",
+        (crate::controls::Device::Gamepad, ChordDir::Right) => "→",
+        (crate::controls::Device::KeyboardMouse, ChordDir::Up) => "W",
+        (crate::controls::Device::KeyboardMouse, ChordDir::Down) => "S",
+        (crate::controls::Device::KeyboardMouse, ChordDir::Left) => "A",
+        (crate::controls::Device::KeyboardMouse, ChordDir::Right) => "D",
+    };
+    let code_text = |code: &[ChordDir]| code.iter().copied().map(dir).collect::<String>();
+    let Some(prefix) = entered else {
+        return "code too long — release to cancel".to_string();
+    };
+    let mut out = if prefix.is_empty() {
+        "enter code".to_string()
+    } else {
+        code_text(prefix)
+    };
+    let mut any = false;
+    for e in registry
+        .entries()
+        .iter()
+        .filter(|e| e.code.starts_with(prefix))
+    {
+        any = true;
+        // ◄ marks the entry the release would execute right now.
+        let here = if e.code == prefix { " ◄" } else { "" };
+        out.push_str(&format!("\n{}  {}{here}", code_text(e.code), e.label));
+    }
+    if !any {
+        out.push_str("\nno match — release to cancel");
+    }
+    out
 }
 
 #[cfg(feature = "render")]
@@ -201,6 +260,72 @@ mod glue {
         pub fn capturing(&self) -> bool {
             self.capture.capturing()
         }
+
+        /// See [`ChordCapture::entered`].
+        pub fn entered(&self) -> Option<&[ChordDir]> {
+            self.capture.entered()
+        }
+    }
+
+    /// The held-modifier context menu (rl#330 stage 3): visible only while a capture
+    /// is live, its body is [`chord_menu_text`] — the options filter down per typed
+    /// prefix, on pad and kb/m alike (the capture is device-agnostic; only the glyphs
+    /// follow [`ActiveDevice`]).
+    #[derive(Component)]
+    pub struct ChordMenuRoot<S: ControlScheme>(std::marker::PhantomData<fn() -> S>);
+
+    fn spawn_chord_menu<S: ControlScheme>(mut commands: Commands) {
+        commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(24.0),
+                    top: Val::Percent(32.0),
+                    padding: UiRect::all(Val::Px(14.0)),
+                    display: Display::None,
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.82)),
+                ChordMenuRoot::<S>(std::marker::PhantomData),
+            ))
+            .with_children(|root| {
+                root.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font_size: 20.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.95, 0.95, 0.95)),
+                ));
+            });
+    }
+
+    fn update_chord_menu<S: ControlScheme>(
+        chords: Res<Chords<S>>,
+        device: Option<Res<crate::controls::ActiveDevice>>,
+        mut roots: Query<(&mut Node, &Children), With<ChordMenuRoot<S>>>,
+        mut texts: Query<&mut Text>,
+    ) {
+        // `Option` on the device: a surface may install chords without the controls
+        // overlay (which owns ActiveDevice); the menu then just keeps default glyphs.
+        let device = device.map(|d| d.get()).unwrap_or_default();
+        for (mut node, children) in &mut roots {
+            if !chords.capturing() {
+                if node.display != Display::None {
+                    node.display = Display::None;
+                }
+                continue;
+            }
+            node.display = Display::Flex;
+            let body = chord_menu_text(S::chords(), chords.entered(), device);
+            for &child in children {
+                if let Ok(mut text) = texts.get_mut(child)
+                    && text.0 != body
+                {
+                    text.0 = body.clone();
+                }
+            }
+        }
     }
 
     /// Level OR this-frame edge. Level-only sampling of the modifier drops a
@@ -252,10 +377,13 @@ mod glue {
     /// The registry comes from the scheme itself ([`ControlScheme::chords`]), so every
     /// install site of a surface wires the same table by construction.
     pub fn install_chords<S: ControlScheme>(app: &mut App) {
-        app.init_resource::<Chords<S>>().add_systems(
-            PreUpdate,
-            capture_chords::<S>.after(bevy::input::InputSystems),
-        );
+        app.init_resource::<Chords<S>>()
+            .add_systems(
+                PreUpdate,
+                capture_chords::<S>.after(bevy::input::InputSystems),
+            )
+            .add_systems(Startup, spawn_chord_menu::<S>)
+            .add_systems(Update, update_chord_menu::<S>);
     }
 
     #[cfg(test)]
@@ -299,14 +427,17 @@ mod tests {
         ChordEntry {
             code: &[],
             action: Cmd::TapVerb,
+            label: "Tap verb",
         },
         ChordEntry {
             code: &[Up],
             action: Cmd::One,
+            label: "One",
         },
         ChordEntry {
             code: &[Up, Down],
             action: Cmd::Two,
+            label: "Two",
         },
     ]);
 
@@ -403,16 +534,39 @@ mod tests {
     }
 
     #[test]
+    fn menu_filters_down_as_the_code_is_entered() {
+        use crate::controls::Device;
+        // Nothing typed yet: every option is on the table; the bare-tap verb is the
+        // one the release would execute (◄).
+        let all = chord_menu_text(REG, Some(&[]), Device::Gamepad);
+        assert_eq!(all, "enter code\n  Tap verb ◄\n↑  One\n↑↓  Two");
+        // One tap in: only the ↑-family remains, One is now live.
+        let up = chord_menu_text(REG, Some(&[Up]), Device::Gamepad);
+        assert_eq!(up, "↑\n↑  One ◄\n↑↓  Two");
+        // Keyboard glyphs mirror the same filtering (WASD is the kb code entry).
+        let up_kb = chord_menu_text(REG, Some(&[Up]), Device::KeyboardMouse);
+        assert_eq!(up_kb, "W\nW  One ◄\nWS  Two");
+        // A dead-end prefix says so instead of listing nothing.
+        let dead = chord_menu_text(REG, Some(&[Down]), Device::Gamepad);
+        assert_eq!(dead, "↓\nno match — release to cancel");
+        // A poisoned capture (entered = None) has no honest prefix to filter by.
+        let poisoned = chord_menu_text(REG, None, Device::Gamepad);
+        assert_eq!(poisoned, "code too long — release to cancel");
+    }
+
+    #[test]
     fn well_formedness_rejects_duplicates() {
         REG.assert_well_formed();
         let dup: ChordRegistry<Cmd> = ChordRegistry::new(&[
             ChordEntry {
                 code: &[Up],
                 action: Cmd::One,
+                label: "One",
             },
             ChordEntry {
                 code: &[Up],
                 action: Cmd::Two,
+                label: "Two",
             },
         ]);
         assert!(std::panic::catch_unwind(|| dup.assert_well_formed()).is_err());
