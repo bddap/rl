@@ -24,8 +24,9 @@ use bevy::shader::ShaderRef;
 /// with the procedural detail fragment on top.
 pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 
-/// One interchangeable ground look — the shipped one, the six rl#304 competition
-/// entries, and the rl#323 watershed unification — and the live selection: `GroundLook` is BOTH the
+/// One interchangeable ground look — the shipped one, the surviving rl#304
+/// competition entries, the rl#323 watershed unification, and the rl#329
+/// night-bloom parameter sets — and the live selection: `GroundLook` is BOTH the
 /// `--ground-look` value and the resource the in-game toggle cycles, the same
 /// shape [`crate::crab_view::RenderMode`] uses, so there is one field to write and
 /// no wrapper to keep in sync.
@@ -47,6 +48,10 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 /// - the hydrology bake at bindings 101 (texture, R wetness / G standing water),
 ///   102 (sampler), 103 (world-extent uniform) — optional to declare; watershed is
 ///   the consumer. World-mapped over the whole tile, so it cannot tile.
+/// - the look's aesthetic parameter row at binding 104 (`array<vec4f, 8>`, lanes
+///   documented on [`GroundLook::params`]) — optional to declare, REQUIRED for a
+///   shader several looks share: a variant is a param row, not a shader fork
+///   (the rl#333 seam). night_bloom is the consumer.
 ///
 /// Rules (issue requirements, not style):
 /// - entry point stays `fn fragment`. Only the FORWARD main pass draws these files
@@ -69,21 +74,22 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 pub enum GroundLook {
     #[default]
     Shipped,
-    CarvedStrata,
     NightBloom,
     PatternedGround,
     WindCombed,
     CrackedLoam,
     WetNocturne,
     Watershed,
-    // The wet-nocturne variation set (owner request 2026-07-31: "more variations
-    // of it including animated variations") — two palette regrades and three
-    // globals.time-animated takes, exploration for a taste call.
-    AmberNocturne,
-    VioletNocturne,
-    AuroraNocturne,
-    TwinkleNocturne,
-    PulseNocturne,
+    // The night-bloom parameter sets (owner request 2026-08-01: "more variants of
+    // what is now called night bloom. Parameterizing night bloom could go a long
+    // way"): ONE shader, distinct rows in [`GroundLook::params`] — taste
+    // candidates the owner judges in play. NightBloomAurora carries the rl#329
+    // aurora palette (the glowy green/violet water colors) forward.
+    NightBloomAurora,
+    NightBloomEmber,
+    NightBloomFrost,
+    NightBloomRose,
+    NightBloomFiligree,
 }
 
 /// The one place a look's shader UUID and its file sit together. Split across a
@@ -92,16 +98,18 @@ pub enum GroundLook {
 /// `load_internal_asset!` embeds via `include_str!` — the path must be a literal per
 /// look, so no loop over the variants can build the registration list.
 macro_rules! ground_looks {
-    ($($look:ident => $file:literal, $uuid:literal;)*) => {
+    ($($($look:ident)|+ => $file:literal, $uuid:literal;)*) => {
         impl GroundLook {
             /// The look's shader. A const UUID handle rather than a loaded path
             /// because [`MaterialExtension::specialize`] — the only place that can
             /// repoint a pipeline's fragment stage — gets no world access to
             /// resolve one. Valid only once [`GroundMaterialPlugin`] has registered
-            /// it, hence private.
+            /// it, hence private. Several looks may share one shader (a row with
+            /// `A | B | …`) — those are parameter sets over it, told apart by
+            /// [`GroundLook::params`].
             fn shader(self) -> Handle<Shader> {
                 match self {
-                    $(GroundLook::$look => uuid_handle!($uuid),)*
+                    $($(GroundLook::$look)|+ => uuid_handle!($uuid),)*
                 }
             }
         }
@@ -112,7 +120,7 @@ macro_rules! ground_looks {
         fn register_look_shaders(app: &mut App) {
             $(load_internal_asset!(
                 app,
-                GroundLook::$look.shader(),
+                uuid_handle!($uuid),
                 concat!("ground_looks/", $file, ".wgsl"),
                 Shader::from_wgsl
             );)*
@@ -122,18 +130,107 @@ macro_rules! ground_looks {
 
 ground_looks! {
     Shipped => "shipped", "9f2a7c14-3b6d-4e58-9a01-5c7d2e8f4b60";
-    CarvedStrata => "carved_strata", "1c4e8a92-77b5-4d03-8fa6-2e91b0c5d7a3";
-    NightBloom => "night_bloom", "6b0d3f57-92ac-41e8-b74d-0a3e5c81f296";
+    NightBloom | NightBloomAurora | NightBloomEmber | NightBloomFrost
+        | NightBloomRose | NightBloomFiligree => "night_bloom", "6b0d3f57-92ac-41e8-b74d-0a3e5c81f296";
     PatternedGround => "patterned_ground", "e83c1a06-5d4f-4b29-97e0-6c2b8d70a415";
     WindCombed => "wind_combed", "2d795be8-0c31-4a76-8b5e-91f4a03d6c27";
     CrackedLoam => "cracked_loam", "48a6f2d1-b90e-4c53-a812-7d05e9b34f6a";
     WetNocturne => "wet_nocturne", "7fe15b83-2a4c-49d0-91b6-c3820e5a7d14";
     Watershed => "watershed", "3a9d6c07-14be-4f82-a5c3-8e07b12d9f4b";
-    AmberNocturne => "amber_nocturne", "b8e51e77-e7f6-4d3d-8e16-f345893df738";
-    VioletNocturne => "violet_nocturne", "f95c76b2-b2a1-49bb-8a77-6fc05ea2bb3b";
-    AuroraNocturne => "aurora_nocturne", "f585dff1-020e-443d-b7a0-0e03c40c5f7f";
-    TwinkleNocturne => "twinkle_nocturne", "75f150e7-0580-460a-8e2f-a9ef8d52cc83";
-    PulseNocturne => "pulse_nocturne", "e8ac73c7-8606-48bb-9960-466c2caa44e8";
+}
+
+impl GroundLook {
+    /// The look's aesthetic parameter row for the `@binding(104)` uniform (the
+    /// rl#333 params seam): a variant of a shared shader is a row here, not a
+    /// shader fork. Zero for every look whose shader doesn't read 104. Exhaustive
+    /// over the enum, so a new variant without a row is a compile error.
+    ///
+    /// night_bloom.wgsl lanes:
+    /// - `[0]` xyz night tint (base-color multiplier), w ground darkening under glow
+    /// - `[1]` xyz vein color, w artery emissive intensity
+    /// - `[2]` xyz knot-flush color, w knot mix strength
+    /// - `[3]` xyz spore color, w spore emissive intensity
+    /// - `[4]` x capillary intensity, y spore rarity threshold (higher = sparser),
+    ///   z artery spacing (m), w capillary spacing (m)
+    /// - `[5]` x artery width, y artery core width, z capillary width (noise-space)
+    pub fn params(self) -> [Vec4; 8] {
+        let zero = [Vec4::ZERO; 8];
+        let row = |tint: [f32; 4], vein: [f32; 4], knot: [f32; 4], spore: [f32; 4], field: [f32; 4], widths: [f32; 3]| {
+            let mut p = zero;
+            p[0] = Vec4::from_array(tint);
+            p[1] = Vec4::from_array(vein);
+            p[2] = Vec4::from_array(knot);
+            p[3] = Vec4::from_array(spore);
+            p[4] = Vec4::from_array(field);
+            p[5] = Vec4::new(widths[0], widths[1], widths[2], 0.0);
+            p
+        };
+        match self {
+            Self::Shipped
+            | Self::PatternedGround
+            | Self::WindCombed
+            | Self::CrackedLoam
+            | Self::WetNocturne
+            | Self::Watershed => zero,
+            // The original night bloom, constants unchanged.
+            Self::NightBloom => row(
+                [0.70, 0.88, 0.98, 0.55],
+                [0.05, 0.85, 0.62, 2.2],
+                [0.75, 0.10, 0.55, 0.55],
+                [0.35, 0.85, 0.90, 1.4],
+                [1.0, 0.86, 180.0, 14.0],
+                [0.10, 0.035, 0.13],
+            ),
+            // The rl#329 aurora water palette (the liked glowy green/violet),
+            // carried onto the vein web: green rivers, violet knots.
+            Self::NightBloomAurora => row(
+                [0.74, 0.84, 1.02, 0.60],
+                [0.13, 1.00, 0.42, 2.4],
+                [0.55, 0.18, 0.95, 0.70],
+                [0.55, 0.95, 0.70, 1.2],
+                [1.0, 0.88, 200.0, 16.0],
+                [0.12, 0.04, 0.14],
+            ),
+            // Warm ember veins in dusk-brown ground, dense gold firefly spores.
+            Self::NightBloomEmber => row(
+                [0.88, 0.78, 0.66, 0.50],
+                [1.00, 0.45, 0.10, 2.0],
+                [0.85, 0.08, 0.05, 0.60],
+                [1.00, 0.80, 0.35, 1.6],
+                [1.0, 0.80, 150.0, 11.0],
+                [0.08, 0.03, 0.11],
+            ),
+            // Icy filaments: thin sparse pale-blue webs, dense white glitter,
+            // little wet-darkening — frost sitting ON the ground, not soaking it.
+            Self::NightBloomFrost => row(
+                [0.78, 0.90, 1.06, 0.25],
+                [0.55, 0.80, 1.00, 1.6],
+                [0.95, 0.98, 1.00, 0.40],
+                [0.90, 0.95, 1.00, 2.0],
+                [1.0, 0.75, 240.0, 18.0],
+                [0.07, 0.025, 0.09],
+            ),
+            // The classic palette inverted: rose-magenta web, teal knots.
+            Self::NightBloomRose => row(
+                [0.80, 0.72, 0.92, 0.55],
+                [0.95, 0.15, 0.55, 2.2],
+                [0.10, 0.85, 0.75, 0.50],
+                [1.00, 0.60, 0.80, 1.3],
+                [1.0, 0.86, 180.0, 14.0],
+                [0.10, 0.035, 0.13],
+            ),
+            // Structure as the differentiator: a 2×-denser, thinner, dimmer lace —
+            // capillary-forward, spores nearly absent.
+            Self::NightBloomFiligree => row(
+                [0.70, 0.88, 0.98, 0.45],
+                [0.10, 0.70, 0.85, 1.4],
+                [0.75, 0.10, 0.55, 0.45],
+                [0.35, 0.85, 0.90, 1.0],
+                [1.2, 0.93, 90.0, 7.0],
+                [0.06, 0.02, 0.08],
+            ),
+        }
+    }
 }
 
 /// Strength knobs for the shader's layers, one uniform so a taste iteration is a
@@ -156,6 +253,10 @@ pub struct GroundDetail {
     /// — the shader's world→uv scale. z, w unused.
     #[uniform(103)]
     pub moisture_extent: Vec4,
+    /// The look's aesthetic parameter row ([`GroundLook::params`]) — optional for
+    /// a shader to declare (`@binding(104)`); night_bloom is the consumer.
+    #[uniform(104)]
+    pub params: [Vec4; 8],
     /// Which look this material draws. Not a binding — it rides in the material to
     /// reach [`MaterialExtension::specialize`] as the pipeline key, so two ground
     /// materials share a pipeline iff they draw the same look and a swap is a
@@ -169,6 +270,7 @@ impl GroundDetail {
             strengths: Vec4::new(0.55, 0.35, 0.45, 0.6),
             moisture,
             moisture_extent: Vec4::new(extent.x, extent.y, 0.0, 0.0),
+            params: look.params(),
             look,
         }
     }
@@ -224,6 +326,7 @@ fn apply_ground_look(look: Res<GroundLook>, mut materials: ResMut<Assets<GroundM
     }
     for (_, material) in materials.iter_mut() {
         material.extension.look = *look;
+        material.extension.params = look.params();
     }
 }
 
@@ -282,15 +385,29 @@ impl Plugin for GroundMaterialPlugin {
 mod tests {
     use super::*;
 
-    /// A copy-pasted UUID would make two looks the same shader — the toggle would
-    /// still "work" and the player would just never see one of them.
+    /// A copy-pasted UUID or param row would make two looks render identically —
+    /// the toggle would still "work" and the player would just never see one of
+    /// them. Identity is (shader, params): looks may share a shader on purpose
+    /// (parameter sets), never a shader AND a row.
     #[test]
-    fn every_look_has_its_own_shader() {
+    fn every_look_renders_distinctly() {
         let all = <GroundLook as clap::ValueEnum>::value_variants();
-        let mut ids: Vec<_> = all.iter().map(|l| l.shader().id()).collect();
+        let mut ids: Vec<_> = all
+            .iter()
+            .map(|l| (l.shader().id(), l.params().map(|v| v.to_array().map(f32::to_bits))))
+            .collect();
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), all.len());
+    }
+
+    /// A parameterized look whose shader ignores binding 104 would collapse every
+    /// variant onto one rendering. Any look sharing its shader with another must
+    /// point at a file that declares the params binding.
+    #[test]
+    fn shared_shaders_read_the_params_binding() {
+        let night_bloom = include_str!("ground_looks/night_bloom.wgsl");
+        assert!(night_bloom.contains("@binding(104)"));
     }
 
     /// The runtime swap, end to end below the keybind: cycling the resource must
