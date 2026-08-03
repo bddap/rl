@@ -167,6 +167,7 @@ fn setup_arena_visuals(
     // the silhouette by construction.
     let moisture = images.add(crate::moisture::MoistureMap::bake(&terrain).image());
     commands.spawn((
+        crate::ground::GroundMesh,
         Mesh3d(meshes.add(terrain.mesh())),
         MeshMaterial3d(materials.add(GroundMaterial {
             base: StandardMaterial {

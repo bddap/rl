@@ -71,12 +71,22 @@ pub(crate) struct Args {
     /// Render frames between captured anim frames (60 = 1 s of shader time).
     #[arg(long, default_value_t = 6)]
     anim_every: u32,
+
+    /// Match seed — picks the run's spawn locale on the tile (rl#305), so evidence
+    /// shots can target a specific coordinate regime (e.g. the far-corner f32
+    /// precision band, rl#334).
+    #[arg(long, default_value_t = MATCH_SEED)]
+    seed: u64,
+    /// From this frame on, the local player walks a gentle arc — motion evidence
+    /// (rl#334: texture stability is only visible while the eye translates).
+    #[arg(long, value_name = "FRAME", value_parser = clap::value_parser!(u64).range(1..))]
+    walk_at: Option<u64>,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
     let me = PlayerId(0);
     let players: Vec<PlayerId> = (0..args.players.max(1)).map(PlayerId).collect();
-    let client = net::client::ClientSim::new(MATCH_SEED, &players, me);
+    let client = net::client::ClientSim::new(args.seed, &players, me);
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(args.cam_yaw, args.cam_pitch)
         .with_cam_height(args.cam_height)
@@ -92,6 +102,9 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let mut app = render::build_screenshot_app(client, cfg, nn_crab, boot_view, controls, pack);
     if args.debug_overlay {
         app.insert_resource(crab_world::debug_overlay::DebugOverlay { visible: true });
+    }
+    if let Some(walk_at) = args.walk_at {
+        app.insert_resource(render::PilotScript::new(Vec::new(), Some(walk_at)));
     }
     if let Some(hold_at) = args.chord_hold_at {
         let taps = args
