@@ -34,7 +34,8 @@ const RING_LEN: usize = 1800;
 /// and a real slideshow has no fast frames mixed in.
 const COLLAPSE_FRAME_MS: f32 = 100.0;
 const COLLAPSE_WINDOW: usize = 30;
-/// One dump per episode, not one per frame of it.
+/// At most one dump per minute — a long episode re-dumps with a fresher tail instead of
+/// writing every frame of it.
 const DUMP_COOLDOWN_SECS: f32 = 60.0;
 
 pub struct DebugOverlayPlugin {
@@ -52,20 +53,25 @@ pub struct DebugOverlay {
     pub visible: bool,
 }
 
-/// Last frame's sim cost, written by the surface's sim driver (GCR's `drive_client_sim`);
-/// stays zero on surfaces without one (rl-demo). `ticks` pinned at the driver's per-frame
-/// cap means the sim can't keep up with wall time — the death-spiral signature.
+/// This frame's sim cost, written by the surface's sim driver (GCR's `drive_client_sim`)
+/// and CONSUMED by [`record_sample`] — a frame the driver skips (menu, rl-demo) records
+/// zeros, never a stale value. `ticks` pinned at the driver's per-frame cap means the sim
+/// can't keep up with wall time — the death-spiral signature.
 #[derive(Resource, Default)]
 pub struct SimFrameStats {
     pub ms: f32,
     pub ticks: u32,
 }
 
-/// One frame in the ring. `t_secs` is `Time<Real>` elapsed — wall-clock anchoring comes
-/// from the dump filename (unix seconds at write, ≈ the last sample's moment).
+/// One frame in the ring. `t_secs` is `Time<Real>` elapsed (f64 — f32 quantizes to
+/// frame-scale after days of TV uptime); wall-clock anchoring comes from the dump
+/// filename (unix seconds at write, ≈ the last sample's moment). The sim columns and
+/// `frame_ms` can be offset by one row: the driver and overlay chains have no ordering
+/// edge, and `frame_ms` (the delta measured at frame start) is the PREVIOUS frame's
+/// cost anyway — irrelevant at collapse scale (30+ consecutive slow frames).
 #[derive(Clone, Copy)]
 pub struct PerfSample {
-    pub t_secs: f32,
+    pub t_secs: f64,
     pub frame_ms: f32,
     pub sim_ms: f32,
     pub sim_ticks: u32,
@@ -129,11 +135,16 @@ fn apply_visibility(
     };
 }
 
-fn record_sample(time: Res<Time<Real>>, sim: Res<SimFrameStats>, mut ring: ResMut<PerfRing>) {
+fn record_sample(
+    time: Res<Time<Real>>,
+    mut sim: ResMut<SimFrameStats>,
+    mut ring: ResMut<PerfRing>,
+) {
+    let sim = std::mem::take(&mut *sim);
     push_sample(
         &mut ring.0,
         PerfSample {
-            t_secs: time.elapsed_secs(),
+            t_secs: time.elapsed_secs_f64(),
             frame_ms: time.delta_secs() * 1000.0,
             sim_ms: sim.ms,
             sim_ticks: sim.ticks,
@@ -171,9 +182,6 @@ fn dump_csv(ring: &VecDeque<PerfSample>) -> String {
 }
 
 fn dump_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("RL_PERF_DUMP_DIR") {
-        return Some(dir.into());
-    }
     std::env::var("HOME")
         .ok()
         .map(|h| PathBuf::from(h).join(".local/state/rl/perf"))
@@ -191,7 +199,7 @@ fn dump_on_collapse(time: Res<Time<Real>>, ring: Res<PerfRing>, mut last_dump: L
     // dump into a per-frame write storm.
     *last_dump = Some(now);
     let Some(dir) = dump_dir() else {
-        warn!("perf collapse detected but no HOME or RL_PERF_DUMP_DIR — ring dump skipped");
+        warn!("perf collapse detected but no HOME — ring dump skipped");
         return;
     };
     let unix = std::time::SystemTime::now()
