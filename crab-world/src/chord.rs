@@ -162,11 +162,6 @@ impl ChordCapture {
     }
 }
 
-/// The held-modifier context menu's text (rl#330 stage 3): every registry entry whose
-/// code starts with the typed prefix, one line each — the options filter down as the
-/// code is entered. Pure so the filtering is unit-testable headless; the render glue
-/// only decides visibility and pushes this into a Text node. `entered == None` means
-/// the capture overflowed ([`MAX_CHORD_LEN`]) — nothing can match, say so.
 /// The one glyph text per code step — the context menu and the controls legend both
 /// render codes through it, so they can't drift. ASCII stand-ins for the d-pad, not
 /// ↑↓←→: bevy's default font is an ASCII subset and real arrows render as tofu boxes.
@@ -194,6 +189,11 @@ pub fn modifier_glyph(device: crate::controls::Device) -> crate::controls::Glyph
     }
 }
 
+/// The held-modifier context menu's text (rl#330 stage 3): every registry entry whose
+/// code starts with the typed prefix, one line each — the options filter down as the
+/// code is entered. Pure so the filtering is unit-testable headless; the render glue
+/// only decides visibility and pushes this into a Text node. `entered == None` means
+/// the capture overflowed ([`MAX_CHORD_LEN`]) — nothing can match, say so.
 pub fn chord_menu_text<A: Copy + PartialEq + Debug>(
     registry: ChordRegistry<A>,
     entered: Option<&[ChordDir]>,
@@ -278,6 +278,7 @@ mod glue {
     pub struct Chords<S: ControlScheme> {
         capture: ChordCapture,
         executed: Option<S::Action>,
+        code_entry: bool,
     }
 
     impl<S: ControlScheme> Default for Chords<S> {
@@ -285,6 +286,7 @@ mod glue {
             Self {
                 capture: ChordCapture::default(),
                 executed: None,
+                code_entry: false,
             }
         }
     }
@@ -298,6 +300,15 @@ mod glue {
         /// See [`ChordCapture::capturing`].
         pub fn capturing(&self) -> bool {
             self.capture.capturing()
+        }
+
+        /// Whether code entry touched THIS frame: the live capture OR its release
+        /// frame. Dispatchers sharing the code-entry inputs (WASD/d-pad movement,
+        /// joint picks) suppress on THIS, not [`Chords::capturing`] — release-frame
+        /// taps join the code (see [`ChordCapture::step`]) while `capturing` is
+        /// already false, so a capturing-gated reader double-fires that last tap.
+        pub fn typing(&self) -> bool {
+            self.code_entry
         }
 
         /// See [`ChordCapture::entered`].
@@ -400,7 +411,9 @@ mod glue {
                     .flat_map(|gp| gp.get_just_pressed().filter_map(|&b| pad_dir(b))),
             )
             .collect::<Vec<_>>();
+        let was_live = chords.capture.capturing();
         let code = chords.capture.step(modifier, taps);
+        chords.code_entry = was_live || chords.capture.capturing();
         chords.executed = code.and_then(|c| S::chords().lookup(&c));
     }
 
@@ -410,6 +423,7 @@ mod glue {
     pub fn reset_chords<S: ControlScheme>(mut chords: ResMut<Chords<S>>) {
         chords.capture.reset();
         chords.executed = None;
+        chords.code_entry = false;
     }
 
     /// The one wiring of chord input onto an app: the resource plus the capture system.
@@ -449,6 +463,22 @@ mod glue {
                 );
                 assert_eq!(text.lines().next(), Some(key_letter.as_str()));
             }
+        }
+
+        /// The modifier's INPUT constants and its legend GLYPH live apart (the glyph
+        /// must stay outside this render-gated glue for the headless legend) — this
+        /// is their drift alarm: retune the modifier and this fails until the glyph
+        /// follows.
+        #[test]
+        fn modifier_glyph_matches_the_modifier_inputs() {
+            use crate::controls::{Device, Glyph};
+            assert_eq!(CHORD_MODIFIER_PAD, GamepadButton::West);
+            assert_eq!(
+                modifier_glyph(Device::Gamepad),
+                Glyph::Icon("controls/xbox_button_x.png")
+            );
+            assert_eq!(CHORD_MODIFIER_MOUSE, MouseButton::Right);
+            assert_eq!(modifier_glyph(Device::KeyboardMouse), Glyph::Label("RMB"));
         }
 
         /// Pins the fix for the sub-frame modifier tap: press+release inside one frame
