@@ -16,7 +16,7 @@
 // ground STATE in one place.
 //
 //   STATES — a soft partition; a fragment is in exactly one
-//   slope                  →  exposed banded rock          carved_strata
+//   slope                  →  exposed banded rock
 //   moisture, dry end      →  cracked clay plates, cobble  cracked_loam
 //   moisture, wet end      →  soaked basins, puddles       wet_nocturne
 //   moisture, wettest+veg  →  bioluminescent vein webs     night_bloom

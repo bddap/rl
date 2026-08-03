@@ -121,9 +121,12 @@ fn fragment(
     // capillaries (params[4].w m, the on-foot/mid tier). Warp keeps them organic.
     let artery_l = params[4].z;
     let capil_l = params[4].w;
-    let wq = vnoise(p / (artery_l * 0.34), 71u);
+    // Warp/sub-octave scales ride the spacings at the classic 61/180 and 4.7/14
+    // ratios, so NightBloom's row keeps the original field (up to f32 rounding
+    // of the ratios) and every variant warps in proportion.
+    let wq = vnoise(p / (artery_l * (61.0 / 180.0)), 71u);
     let artery_n = vnoise(p / artery_l, 72u) + 0.35 * wq;
-    let capil_n = vnoise(p / capil_l, 73u) + 0.4 * vnoise(p / (capil_l / 3.0), 74u);
+    let capil_n = vnoise(p / capil_l, 73u) + 0.4 * vnoise(p / (capil_l * (4.7 / 14.0)), 74u);
     // Arteries stay unfaded (macro feature); capillaries fade out by footprint.
     let artery = vein(artery_n, params[5].x) * (0.4 + 0.6 * vein(artery_n, params[5].y));
     let capil = vein(capil_n, params[5].z) * footprint_fade(capil_l, fw);
