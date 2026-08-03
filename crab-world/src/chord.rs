@@ -163,11 +163,13 @@ pub fn chord_menu_text<A: Copy + PartialEq + Debug>(
     entered: Option<&[ChordDir]>,
     device: crate::controls::Device,
 ) -> String {
+    // ASCII stand-ins for the d-pad, not ↑↓←→: bevy's default font is an ASCII
+    // subset and real arrows render as tofu boxes.
     let dir = |d: ChordDir| match (device, d) {
-        (crate::controls::Device::Gamepad, ChordDir::Up) => "↑",
-        (crate::controls::Device::Gamepad, ChordDir::Down) => "↓",
-        (crate::controls::Device::Gamepad, ChordDir::Left) => "←",
-        (crate::controls::Device::Gamepad, ChordDir::Right) => "→",
+        (crate::controls::Device::Gamepad, ChordDir::Up) => "^",
+        (crate::controls::Device::Gamepad, ChordDir::Down) => "v",
+        (crate::controls::Device::Gamepad, ChordDir::Left) => "<",
+        (crate::controls::Device::Gamepad, ChordDir::Right) => ">",
         (crate::controls::Device::KeyboardMouse, ChordDir::Up) => "W",
         (crate::controls::Device::KeyboardMouse, ChordDir::Down) => "S",
         (crate::controls::Device::KeyboardMouse, ChordDir::Left) => "A",
@@ -175,7 +177,7 @@ pub fn chord_menu_text<A: Copy + PartialEq + Debug>(
     };
     let code_text = |code: &[ChordDir]| code.iter().copied().map(dir).collect::<String>();
     let Some(prefix) = entered else {
-        return "code too long — release to cancel".to_string();
+        return "code too long - release to cancel".to_string();
     };
     let mut out = if prefix.is_empty() {
         "enter code".to_string()
@@ -189,12 +191,12 @@ pub fn chord_menu_text<A: Copy + PartialEq + Debug>(
         .filter(|e| e.code.starts_with(prefix))
     {
         any = true;
-        // ◄ marks the entry the release would execute right now.
-        let here = if e.code == prefix { " ◄" } else { "" };
+        // * marks the entry the release would execute right now (ASCII, see above).
+        let here = if e.code == prefix { " *" } else { "" };
         out.push_str(&format!("\n{}  {}{here}", code_text(e.code), e.label));
     }
     if !any {
-        out.push_str("\nno match — release to cancel");
+        out.push_str("\nno match - release to cancel");
     }
     out
 }
@@ -220,14 +222,26 @@ mod glue {
         }
     }
 
-    fn key_dir(k: KeyCode) -> Option<ChordDir> {
-        match k {
-            KeyCode::KeyW => Some(ChordDir::Up),
-            KeyCode::KeyS => Some(ChordDir::Down),
-            KeyCode::KeyA => Some(ChordDir::Left),
-            KeyCode::KeyD => Some(ChordDir::Right),
-            _ => None,
+    /// The kb code-entry key for a direction — THE WASD↔dir map ([`key_dir`] is its
+    /// inverse); scripted evidence input synthesizes presses through it.
+    pub fn dir_key(d: ChordDir) -> KeyCode {
+        match d {
+            ChordDir::Up => KeyCode::KeyW,
+            ChordDir::Down => KeyCode::KeyS,
+            ChordDir::Left => KeyCode::KeyA,
+            ChordDir::Right => KeyCode::KeyD,
         }
+    }
+
+    fn key_dir(k: KeyCode) -> Option<ChordDir> {
+        [
+            ChordDir::Up,
+            ChordDir::Down,
+            ChordDir::Left,
+            ChordDir::Right,
+        ]
+        .into_iter()
+        .find(|&d| dir_key(d) == k)
     }
 
     /// A surface's live chord state: the capture plus the command the just-finished
@@ -408,7 +422,8 @@ mod glue {
 
 #[cfg(feature = "render")]
 pub use glue::{
-    CHORD_MODIFIER_MOUSE, CHORD_MODIFIER_PAD, Chords, capture_chords, install_chords, reset_chords,
+    CHORD_MODIFIER_MOUSE, CHORD_MODIFIER_PAD, Chords, capture_chords, dir_key, install_chords,
+    reset_chords,
 };
 
 #[cfg(test)]
@@ -537,21 +552,21 @@ mod tests {
     fn menu_filters_down_as_the_code_is_entered() {
         use crate::controls::Device;
         // Nothing typed yet: every option is on the table; the bare-tap verb is the
-        // one the release would execute (◄).
+        // one the release would execute (*).
         let all = chord_menu_text(REG, Some(&[]), Device::Gamepad);
-        assert_eq!(all, "enter code\n  Tap verb ◄\n↑  One\n↑↓  Two");
-        // One tap in: only the ↑-family remains, One is now live.
+        assert_eq!(all, "enter code\n  Tap verb *\n^  One\n^v  Two");
+        // One tap in: only the ^-family remains, One is now live.
         let up = chord_menu_text(REG, Some(&[Up]), Device::Gamepad);
-        assert_eq!(up, "↑\n↑  One ◄\n↑↓  Two");
+        assert_eq!(up, "^\n^  One *\n^v  Two");
         // Keyboard glyphs mirror the same filtering (WASD is the kb code entry).
         let up_kb = chord_menu_text(REG, Some(&[Up]), Device::KeyboardMouse);
-        assert_eq!(up_kb, "W\nW  One ◄\nWS  Two");
+        assert_eq!(up_kb, "W\nW  One *\nWS  Two");
         // A dead-end prefix says so instead of listing nothing.
         let dead = chord_menu_text(REG, Some(&[Down]), Device::Gamepad);
-        assert_eq!(dead, "↓\nno match — release to cancel");
+        assert_eq!(dead, "v\nno match - release to cancel");
         // A poisoned capture (entered = None) has no honest prefix to filter by.
         let poisoned = chord_menu_text(REG, None, Device::Gamepad);
-        assert_eq!(poisoned, "code too long — release to cancel");
+        assert_eq!(poisoned, "code too long - release to cancel");
     }
 
     #[test]

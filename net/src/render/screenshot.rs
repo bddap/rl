@@ -79,6 +79,12 @@ fn finish_offscreen_app(
 ) {
     crab_world::controls::install_overlay(app, &controls);
     crab_world::chord::install_chords::<GcrControls>(app);
+    app.add_systems(
+        PreUpdate,
+        drive_chord_script
+            .after(bevy::input::InputSystems)
+            .before(crab_world::chord::capture_chords::<GcrControls>),
+    );
     app.insert_resource(cfg)
         .init_resource::<ShotProgress>()
         .add_systems(Startup, (spawn_world, spawn_offscreen_camera))
@@ -121,6 +127,62 @@ impl PilotScript {
             toggle_at,
             walk_at,
             frame: 0,
+        }
+    }
+}
+
+/// Scripted chord entry for evidence shots (rl#330 stage 3): synthesizes the kb chord
+/// modifier hold (right mouse) and WASD code taps into the REAL `ButtonInput`
+/// resources, upstream of `capture_chords` — the shot exercises the live capture,
+/// menu-filtering, and dispatch path, not a UI fork.
+#[derive(Resource, Clone)]
+pub struct ChordScript {
+    hold_from: u64,
+    /// `None`: never released — the menu stays open into the shot.
+    release_at: Option<u64>,
+    /// (frame, direction) code taps; each key is pressed for exactly one frame.
+    taps: Vec<(u64, crab_world::chord::ChordDir)>,
+    frame: u64,
+}
+
+impl ChordScript {
+    pub fn new(
+        hold_from: u64,
+        release_at: Option<u64>,
+        taps: Vec<(u64, crab_world::chord::ChordDir)>,
+    ) -> Self {
+        Self {
+            hold_from,
+            release_at,
+            taps,
+            frame: 0,
+        }
+    }
+}
+
+fn drive_chord_script(
+    script: Option<ResMut<ChordScript>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    script.frame += 1;
+    let held =
+        script.frame >= script.hold_from && script.release_at.is_none_or(|r| script.frame < r);
+    if held {
+        // Idempotent while already pressed — just_pressed fires only on the edge.
+        mouse.press(crab_world::chord::CHORD_MODIFIER_MOUSE);
+    } else if mouse.pressed(crab_world::chord::CHORD_MODIFIER_MOUSE) {
+        mouse.release(crab_world::chord::CHORD_MODIFIER_MOUSE);
+    }
+    for &(at, dir) in &script.taps {
+        let key = crab_world::chord::dir_key(dir);
+        if script.frame == at {
+            keys.press(key);
+        } else if script.frame == at + 1 {
+            keys.release(key);
         }
     }
 }

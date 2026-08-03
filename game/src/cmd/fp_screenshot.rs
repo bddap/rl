@@ -51,6 +51,19 @@ pub(crate) struct Args {
     #[arg(long)]
     debug_overlay: bool,
 
+    /// Scripted chord entry (rl#330 evidence): hold the kb chord modifier
+    /// (right mouse) from this frame — the held-X context menu opens.
+    #[arg(long)]
+    chord_hold_at: Option<u64>,
+    /// Release the scripted chord modifier at this frame, executing the typed code.
+    /// Default: never — the menu stays open into the shot.
+    #[arg(long)]
+    chord_release_at: Option<u64>,
+    /// Scripted code taps while held: `frame:dir`, comma-separated, dir ∈ U|D|L|R
+    /// (e.g. `45:U,55:L`).
+    #[arg(long, value_delimiter = ',')]
+    chord_taps: Vec<String>,
+
     /// Capture this many frames as `<out-stem>.NNNN.png` instead of one shot —
     /// evidence clips for the animated ground looks (assemble with ffmpeg).
     #[arg(long)]
@@ -80,6 +93,35 @@ pub(crate) fn run(args: Args) -> Result<()> {
     if args.debug_overlay {
         app.insert_resource(crab_world::debug_overlay::DebugOverlay { visible: true });
     }
+    if let Some(hold_at) = args.chord_hold_at {
+        let taps = args
+            .chord_taps
+            .iter()
+            .map(|spec| parse_chord_tap(spec))
+            .collect::<Result<Vec<_>>>()?;
+        app.insert_resource(render::ChordScript::new(
+            hold_at,
+            args.chord_release_at,
+            taps,
+        ));
+    } else if !args.chord_taps.is_empty() || args.chord_release_at.is_some() {
+        anyhow::bail!("--chord-taps/--chord-release-at need --chord-hold-at");
+    }
     app.run();
     Ok(())
+}
+
+fn parse_chord_tap(spec: &str) -> Result<(u64, crab_world::chord::ChordDir)> {
+    use crab_world::chord::ChordDir;
+    let (frame, dir) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("chord tap {spec:?} is not frame:dir"))?;
+    let dir = match dir {
+        "U" => ChordDir::Up,
+        "D" => ChordDir::Down,
+        "L" => ChordDir::Left,
+        "R" => ChordDir::Right,
+        _ => anyhow::bail!("chord tap dir {dir:?} is not U|D|L|R"),
+    };
+    Ok((frame.parse()?, dir))
 }
