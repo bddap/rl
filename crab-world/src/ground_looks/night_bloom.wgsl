@@ -10,7 +10,9 @@
 //
 // One of the interchangeable looks in this directory; the contract every
 // file here keeps — inputs, binding 100, the `fragment` entry point — is
-// documented once on `GroundLook` in ground.rs.
+// documented once on `GroundLook` in ground.rs. Every night-bloom VARIANT is a
+// parameter row over this one shader (binding 104, rl#329/rl#333) — palette,
+// glow levels, vein spacing/width, spore density are all params, never forks.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -31,6 +33,9 @@
 
 // x: vein glow, y: macro patchiness, z: fine detail + spores, w: detail normal.
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> strengths: vec4<f32>;
+// The look's aesthetic parameter row — every night-bloom variant is a row over
+// this ONE shader. Lane meanings live on `GroundLook::params` in ground.rs.
+@group(#{MATERIAL_BIND_GROUP}) @binding(104) var<uniform> params: array<vec4<f32>, 8>;
 
 // Same integer-hash family as the Rust side's sky/terrain jitter (sky.rs hash3).
 fn hash2(p: vec2<i32>, seed: u32) -> u32 {
@@ -86,9 +91,9 @@ fn fragment(
     // things grow; mineral ground (scree/rock/snow) stays dark and quiet.
     let veg = clamp((rgb.g - max(rgb.r, rgb.b)) * 6.0, 0.0, 1.0);
 
-    // Cool the base a step toward blue-green night so the warm moon highlights
-    // and the cold glow both have somewhere to sit.
-    rgb *= vec3(0.70, 0.88, 0.98);
+    // Cool the base a step toward the variant's night tint so the warm moon
+    // highlights and the glow both have somewhere to sit.
+    rgb *= params[0].xyz;
 
     // Macro patchiness (hundreds of meters) — kept from the round-2 look but
     // biased cool/dark: dim mist-shadow patches instead of warm soil.
@@ -111,22 +116,24 @@ fn fragment(
     rgb *= 1.0 + 0.28 * strengths.z * fine_n;
 
     // ── The bloom ──────────────────────────────────────────────────────────
-    // Two dendritic vein tiers on warped noise zero-sets: arteries (~180 m
-    // spacing, visible as glowing river-webs from the plane) and capillaries
-    // (~14 m, the on-foot/mid tier). Warp keeps them organic.
-    let wq = vnoise(p / 61.0, 71u);
-    let artery_n = vnoise(p / 180.0, 72u) + 0.35 * wq;
-    let capil_n = vnoise(p / 14.0, 73u) + 0.4 * vnoise(p / 4.7, 74u);
+    // Two dendritic vein tiers on warped noise zero-sets: arteries (params[4].z
+    // meters spacing, visible as glowing river-webs from the plane) and
+    // capillaries (params[4].w m, the on-foot/mid tier). Warp keeps them organic.
+    let artery_l = params[4].z;
+    let capil_l = params[4].w;
+    let wq = vnoise(p / (artery_l * 0.34), 71u);
+    let artery_n = vnoise(p / artery_l, 72u) + 0.35 * wq;
+    let capil_n = vnoise(p / capil_l, 73u) + 0.4 * vnoise(p / (capil_l / 3.0), 74u);
     // Arteries stay unfaded (macro feature); capillaries fade out by footprint.
-    let artery = vein(artery_n, 0.10) * (0.4 + 0.6 * vein(artery_n, 0.035));
-    let capil = vein(capil_n, 0.13) * footprint_fade(14.0, fw);
-    // Spore speckle: sparse bright cells, on-foot only.
+    let artery = vein(artery_n, params[5].x) * (0.4 + 0.6 * vein(artery_n, params[5].y));
+    let capil = vein(capil_n, params[5].z) * footprint_fade(capil_l, fw);
+    // Spore speckle: bright cells rarer than the params[4].y threshold, on-foot only.
     var spore = 0.0;
     let spore_fade = footprint_fade(0.8, fw);
     if spore_fade > 0.001 {
         let cell = vec2<i32>(floor(p / 0.8));
         let r = rand01(hash2(cell, 75u));
-        if r > 0.86 {
+        if r > params[4].y {
             let inner = vnoise(p / 0.26, 76u);
             spore = smoothstep(0.2, 0.75, inner) * spore_fade;
         }
@@ -139,22 +146,21 @@ fn fragment(
     let capil_g = capil * glow_mask * 0.8;
     let spore_g = spore * glow_mask * strengths.z;
 
-    // Colors: cold teal for the web, a magenta flush where artery crests knot
-    // (second zero-set nearby), pale cyan spores.
-    let teal = vec3(0.05, 0.85, 0.62);
-    let magenta = vec3(0.75, 0.10, 0.55);
-    let cyan = vec3(0.35, 0.85, 0.90);
+    // Colors: the variant's vein color for the web, its knot flush where artery
+    // crests knot (second zero-set nearby), its spore color for the speckle.
     let knot = vein(vnoise(p / 43.0, 77u), 0.12);
-    let vein_col = mix(teal, magenta, 0.55 * knot);
+    let vein_col = mix(params[1].xyz, params[2].xyz, params[2].w * knot);
 
     // The glow: emissive light the moon doesn't own. Levels are chosen against
     // the pre-exposed night — arteries ~2× lit-ground luminance at their core,
-    // spores a quiet sparkle. Ground under the glow darkens slightly (wet soil),
-    // so the light reads as coming FROM the ground, not painted on it.
+    // spores a quiet sparkle. Ground under the glow darkens (wet soil, by the
+    // variant's params[0].w), so the light reads as coming FROM the ground, not
+    // painted on it.
     let glow_total = artery_g + capil_g;
-    rgb *= 1.0 - 0.55 * clamp(glow_total, 0.0, 1.0);
+    rgb *= 1.0 - params[0].w * clamp(glow_total, 0.0, 1.0);
     pbr_input.material.base_color = vec4(rgb, pbr_input.material.base_color.a);
-    let emissive = vein_col * (2.2 * artery_g + 1.0 * capil_g) + cyan * 1.4 * spore_g;
+    let emissive = vein_col * (params[1].w * artery_g + params[4].x * capil_g)
+        + params[3].xyz * params[3].w * spore_g;
     pbr_input.material.emissive = vec4(
         pbr_input.material.emissive.rgb + emissive,
         pbr_input.material.emissive.a,
