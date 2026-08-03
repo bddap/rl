@@ -59,6 +59,16 @@ pub fn build_windowed_app(
     // wiring of the overlay to drift.
     crab_world::controls::install_overlay::<GcrControls>(&mut app, &Default::default());
     crab_world::chord::install_chords::<GcrControls>(&mut app);
+    // Outside Playing every chord dispatcher is gated off, so a capture there could
+    // only pop the context menu and promise commands whose release does nothing —
+    // keep the capture Idle instead (right after it would have opened, so no Update
+    // reader ever sees a menu-phase capture).
+    app.add_systems(
+        PreUpdate,
+        crab_world::chord::reset_chords::<GcrControls>
+            .after(crab_world::chord::capture_chords::<GcrControls>)
+            .run_if(not(in_state(AppPhase::Playing))),
+    );
 
     app.init_non_send_resource::<PendingRound>()
         .add_systems(

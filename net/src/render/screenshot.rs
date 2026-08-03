@@ -109,11 +109,11 @@ fn finish_offscreen_app(
     super::render_mode::register(app, render_mode);
 }
 
-/// A scripted local pilot for the offscreen apps: press the E-cycle at the given frames and
-/// hold a constant forward drive while piloting. This drives the REAL input seams — the same
-/// `PendingInput`/`FlightInput` the keyboard writes, feeding the real intent-on-the-wire path —
-/// so a two-peer `net-screenshot` run is a live board/fly/cycle/exit verification (rl#191
-/// increment 4), not a code-path fork.
+/// A scripted local pilot for the offscreen apps: issue a vehicle request at the given
+/// frames and hold a constant forward drive while piloting. This drives the REAL input
+/// seams — the same `PendingInput`/`FlightInput` the keyboard writes, feeding the real
+/// intent-on-the-wire path — so a two-peer `net-screenshot` run is a live
+/// board/fly/switch/exit verification (rl#191 increment 4), not a code-path fork.
 #[derive(Resource, Clone)]
 pub struct PilotScript {
     toggle_at: Vec<u64>,
@@ -177,12 +177,18 @@ fn drive_chord_script(
     } else if mouse.pressed(crab_world::chord::CHORD_MODIFIER_MOUSE) {
         mouse.release(crab_world::chord::CHORD_MODIFIER_MOUSE);
     }
+    // Releases strictly before presses: for back-to-back same-key taps (frames N and
+    // N+1 — Quit's ^^vv shape) the N+1 press must land on a released key regardless
+    // of spec order, or bevy's idempotent press() yields no just_pressed edge and the
+    // capture silently holds a PREFIX of the typed code.
     for &(at, dir) in &script.taps {
-        let key = crab_world::chord::dir_key(dir);
+        if script.frame == at + 1 {
+            keys.release(crab_world::chord::dir_key(dir));
+        }
+    }
+    for &(at, dir) in &script.taps {
         if script.frame == at {
-            keys.press(key);
-        } else if script.frame == at + 1 {
-            keys.release(key);
+            keys.press(crab_world::chord::dir_key(dir));
         }
     }
 }

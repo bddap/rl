@@ -244,8 +244,9 @@ impl ControlScheme for GcrControls {
     }
 }
 
-// The command verbs (EnterExit, render/ground cycles, SwapBrain, Restart, Quit) have NO
-// rows here: they are chord codes in [`GCR_CHORDS`] and a second trigger route is a
+// The command verbs (the per-vehicle boards/exit, render/ground cycles, SwapBrain,
+// Restart, Quit) have NO rows here: they are chord codes in [`GCR_CHORDS`] and a
+// second trigger route is a
 // well-formedness error. What remains is analog/held state plus menu nav and the
 // hold-to-reveal legend — reads the chord system's execute-on-release can't express.
 pub const BINDINGS: [Binding<GcrControls>; 19] = [
