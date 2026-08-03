@@ -25,6 +25,19 @@ pub enum ChordDir {
 /// type, and a no-op is the self-correcting error (release, re-enter the code).
 pub const MAX_CHORD_LEN: usize = 8;
 
+/// Quit's code, shared by every surface (GCR and the demo) so it stays one muscle
+/// memory — and one constant, so a margin-driven change (each surface's tests require
+/// Quit ≥2 taps longer than its longest other code) can't land on one table and not
+/// the other.
+pub const QUIT_CODE: &[ChordDir] = &[
+    ChordDir::Up,
+    ChordDir::Up,
+    ChordDir::Down,
+    ChordDir::Down,
+    ChordDir::Left,
+    ChordDir::Right,
+];
+
 pub struct ChordEntry<A: 'static> {
     pub code: &'static [ChordDir],
     pub action: A,
@@ -327,10 +340,15 @@ mod glue {
     fn spawn_chord_menu<S: ControlScheme>(mut commands: Commands) {
         commands
             .spawn((
+                // Anchored high with a smallish font: the unfiltered list is the whole
+                // registry (22 lines in GCR after the stage-5 variant codes), and the
+                // LAST rows are the disruptive verbs (Restart/Quit) — clipping the
+                // bottom hides exactly the wrong lines. 24% + 22×19.2px + padding
+                // clears a 720p window with margin; 32%/20pt did not.
                 Node {
                     position_type: PositionType::Absolute,
                     right: Val::Px(24.0),
-                    top: Val::Percent(32.0),
+                    top: Val::Percent(24.0),
                     padding: UiRect::all(Val::Px(14.0)),
                     display: Display::None,
                     ..default()
@@ -342,7 +360,7 @@ mod glue {
                 root.spawn((
                     Text::new(""),
                     TextFont {
-                        font_size: 20.0,
+                        font_size: 16.0,
                         ..default()
                     },
                     TextColor(Color::srgb(0.95, 0.95, 0.95)),
