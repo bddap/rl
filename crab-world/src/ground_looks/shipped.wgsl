@@ -1,6 +1,7 @@
 // Procedural ground detail (bddap/rl#304) over the terrain mesh's vertex biome
-// tint. Everything is derived from WORLD-SPACE position — no sampled texture, so
-// no repeat period exists to spot from any altitude. Octaves are faded by their
+// tint. Everything is derived from the anchor-relative ground plane (in.uv,
+// rl#334) — no sampled texture, so no repeat period exists to spot from any
+// altitude. Octaves are faded by their
 // on-screen footprint (fwidth): the procedural analogue of mipmapping, so fine
 // detail exists on foot and at landing height (the rl#197 optic-flow duty the old
 // checker carried) but never shimmers from the plane.
@@ -76,7 +77,13 @@ fn fragment(
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
     let wp = in.world_position.xyz;
-    let p = wp.xz;
+    // Ground-plane meters, but ANCHOR-relative (in.uv = world xz − the round's
+    // locale origin, rl#334) rather than raw world xz: world_position is an f32
+    // varying, whose ~1-2 mm quantization at the tile's ±15 km corners is the fine
+    // octaves' own scale — the detail dissolved into speckle that boiled whenever
+    // the eye moved. The anchor is constant per round, so the pattern stays glued
+    // to the ground; it re-rolls only across rounds, where the locale moves anyway.
+    let p = in.uv;
     // Ground meters per pixel at this fragment — the octave-fade driver.
     let fw = max(max(fwidth(p.x), fwidth(p.y)), 1e-4);
 
@@ -107,9 +114,10 @@ fn fragment(
     // reads as an upscaled low-res texture the moment the camera gets closer than it
     // was tuned for. So descend by thirds from 2.6 m until the octave is subpixel
     // (footprint-faded to nothing), down to a 3.5 mm floor: finer than any standing
-    // eye can resolve (~2 mm ground per pixel on foot at 720p) yet coarse enough
-    // that the f32 ulp at the ±15 km map corners (~1 mm) never dominates a lattice
-    // cell. Distant ground exits after one test — fw alone decides, so the loop is
+    // eye can resolve (~2 mm ground per pixel on foot at 720p). The anchor-relative
+    // p (rl#334) is what makes a floor this fine tenable — raw world xz quantizes
+    // at ~1-2 mm out at the corners, a large fraction of such a lattice cell.
+    // Distant ground exits after one test — fw alone decides, so the loop is
     // quad-coherent and the near-fullscreen far ground pays nothing.
     // Each octave rotated 55.62° (90°/φ) from the last: value noise's lattice is
     // axis-aligned, and any octave landing near a multiple of 90° reads as a woven

@@ -17,6 +17,30 @@ pub(super) struct FpCamera;
 #[derive(Component)]
 pub(super) struct ExtractionPillar;
 
+/// Anchor the ground detail's UV frame on the round's locale (rl#334):
+/// world-frame f32 coordinates quantize at ~1-2 mm out at the rl#305 corners,
+/// which the fine detail octaves render as boiling speckle. The extraction point
+/// is the anchor rather than the spawn-frame origin because it is the one locale
+/// mark every peer holds host-authoritatively (it ships in the snapshot;
+/// `spawn_frame` is each sim's private draw, so a wire-joiner's disagrees with
+/// the host's by up to the whole tile) — and it sits within meters of the spawn
+/// line. Constant per round, so the pattern stays glued to the ground mid-round;
+/// a wire-joiner may render a frame or two on its placeholder extraction before
+/// the first snapshot lands — one extra UV rewrite and pattern re-pop,
+/// self-correcting at snapshot cadence. The `!=` guard is change-tick hygiene
+/// only; the rewrite itself is gated by
+/// [`crab_world::ground::apply_ground_anchor`]'s per-mesh value compare.
+pub(super) fn sync_ground_anchor(
+    state: NonSend<GameState>,
+    mut anchor: ResMut<crab_world::ground::GroundAnchor>,
+) {
+    let (x, z) = state.client.sim().extraction().pos().to_meters();
+    let locale = Vec2::new(x, z);
+    if anchor.0 != locale {
+        anchor.0 = locale;
+    }
+}
+
 /// The rendered ground height under a sim point (one frame since rl#298 stage 5: the
 /// world IS the sim in meters). Every sim entity stands ON this surface; on the flat
 /// grids it is exactly the old y = 0.

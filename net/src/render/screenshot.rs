@@ -6,6 +6,7 @@ use super::driver::{
 use super::input::gather_input;
 use super::scene::{
     FpCamera, apply_transforms, place_extraction_pillar, reconcile_avatars, spawn_world,
+    sync_ground_anchor,
 };
 use super::*;
 use crate::net_loop::NetDriver;
@@ -98,6 +99,7 @@ fn finish_offscreen_app(
                 reconcile_avatars,
                 apply_transforms,
                 place_extraction_pillar,
+                sync_ground_anchor.before(crab_world::ground::apply_ground_anchor),
                 apply_shot_cam_offset,
                 // Keeps the controls context live like the windowed app. A shot that PINNED
                 // a context is unaffected: ActiveContext::sync is a no-op while pinned.

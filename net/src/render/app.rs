@@ -5,6 +5,7 @@ use super::driver::{
 use super::input::{gather_input, grab_cursor, quit_game, release_cursor};
 use super::scene::{
     apply_transforms, place_extraction_pillar, reconcile_avatars, spawn_fp_camera, spawn_world,
+    sync_ground_anchor,
 };
 use super::*;
 
@@ -92,6 +93,7 @@ pub fn build_windowed_app(
                 reconcile_avatars,
                 apply_transforms,
                 place_extraction_pillar,
+                sync_ground_anchor.before(crab_world::ground::apply_ground_anchor),
             )
                 .chain()
                 .run_if(in_state(AppPhase::Playing)),

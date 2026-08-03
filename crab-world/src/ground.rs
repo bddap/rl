@@ -1,8 +1,9 @@
 //! The ground's look (bddap/rl#304): a procedural detail layer over the terrain
-//! mesh's macro biome tint. All detail is computed in the fragment shader from
-//! WORLD-SPACE position — no repeated texture anywhere in the ground path, so there
-//! is no tile period to spot at any play scale, and the mesh stays the collider's
-//! exact geometry (render matches physics; beauty is shading only).
+//! mesh's macro biome tint. All detail is computed in the fragment shader from the
+//! ground plane in anchor-relative meters ([`GroundAnchor`], rl#334) — no repeated
+//! texture anywhere in the ground path, so there is no tile period to spot at any
+//! play scale, and the mesh stays the collider's exact geometry (render matches
+//! physics; beauty is shading only).
 //!
 //! Every [`GroundLook`] is swappable at runtime and none of them can move physics or
 //! eval: the swap reaches only the fragment shader the ground pipeline is specialized
@@ -37,8 +38,13 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 /// Inputs (all set up by [`GroundMaterial`]):
 /// - `in: VertexOutput` (bevy_pbr forward io): `world_position` is true world space
 ///   in METERS, y up, terrain spans ~±15.3 km in xz; `world_normal` is the smooth
-///   geometric normal. The mesh carries NO UVs — derive everything from world
-///   position. The per-vertex biome tint (hypsometric bands, see terrain.rs
+///   geometric normal. `uv` is the ground plane in anchor-relative METERS
+///   (world xz − [`GroundAnchor`], rl#334) — derive ALL ground-plane detail from
+///   it, never from `world_position.xz`: the raw xz varying quantizes at ~1-2 mm out
+///   at the tile corners, the fine octaves' own scale, and the detail boils while
+///   the eye moves. `world_position.y` (coarse elevation bands) and tile-scale
+///   mappings like the moisture uv are immune and stay on `world_position`. The
+///   per-vertex biome tint (hypsometric bands, see terrain.rs
 ///   `biome`) arrives pre-multiplied into `pbr_input.material.base_color` via the
 ///   mesh COLOR attribute.
 /// - `strengths: vec4<f32>` at `@group(#{MATERIAL_BIND_GROUP}) @binding(100)` — the
@@ -354,6 +360,71 @@ fn apply_ground_look(look: Res<GroundLook>, mut materials: ResMut<Assets<GroundM
     }
 }
 
+/// The ground-plane origin, in world METERS xz, that the terrain mesh's UV channel
+/// is rebased on (rl#334). The looks compute their procedural detail from `in.uv`
+/// = world xz − this anchor: raw world xz reaches the fragment stage as an f32
+/// varying, which at the tile's ±15.3 km corners quantizes at ~1-2 mm — the fine
+/// octaves' own scale — so the detail reads as salt-and-pepper speckle that boils
+/// whenever the eye translates. Anchored near the action the coordinate stays
+/// small and precise. The game sets this to the round's extraction point (see
+/// `sync_ground_anchor` in net for why not the spawn frame; constant per round,
+/// so the pattern never pops mid-round — a new round is a teleport anyway);
+/// anything that never leaves the origin's neighbourhood can leave the zero
+/// default.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+pub struct GroundAnchor(pub Vec2);
+
+/// The terrain's rendered surface — the one mesh whose UVs [`apply_ground_anchor`]
+/// rebases. Requires [`AppliedGroundAnchor`] so a spawn site cannot register a
+/// ground mesh the rebase silently skips.
+#[derive(Component)]
+#[require(AppliedGroundAnchor)]
+pub struct GroundMesh;
+
+/// The anchor value a [`GroundMesh`]'s UVs were last written against — per-entity,
+/// so a mesh spawned AFTER an anchor change still converges (a `Res::is_changed`
+/// trigger would miss it). The zero default matches the UVs `terrain::mesh()`
+/// builds.
+#[derive(Component, Default)]
+pub struct AppliedGroundAnchor(Vec2);
+
+/// Rewrite a ground mesh's UVs to `vertex_xz − anchor` whenever its applied anchor
+/// is stale. ~2M vertices and a full re-upload, but it only runs on round-locale
+/// changes; the read/compute happens on the immutable borrow so `get_mut` — which
+/// flags the asset `Modified` — is touched exactly once, on the actual write.
+pub fn apply_ground_anchor(
+    anchor: Res<GroundAnchor>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut ground: Query<(&Mesh3d, &mut AppliedGroundAnchor), With<GroundMesh>>,
+) {
+    use bevy::mesh::VertexAttributeValues;
+    for (handle, mut applied) in &mut ground {
+        if applied.0 == anchor.0 {
+            continue;
+        }
+        // Not in Assets yet is a legitimate transient (retried next frame); a
+        // ground mesh WITHOUT Float32x3 positions is a wiring bug — terrain::mesh()
+        // is the one builder — and skipping it would leave stale UVs with zero
+        // diagnostics, so it panics instead.
+        let Some(mesh) = meshes.get(&handle.0) else {
+            continue;
+        };
+        let Some(VertexAttributeValues::Float32x3(pos)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            unreachable!("GroundMesh without Float32x3 positions — not terrain::mesh() output");
+        };
+        let uvs: Vec<[f32; 2]> = pos
+            .iter()
+            .map(|p| [p[0] - anchor.0.x, p[2] - anchor.0.y])
+            .collect();
+        meshes
+            .get_mut(&handle.0)
+            .expect("asset present on the immutable borrow above")
+            .insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        applied.0 = anchor.0;
+    }
+}
+
 /// The transient "Ground: <name>" readout.
 #[derive(Component)]
 struct GroundLookReadout(Timer);
@@ -400,8 +471,12 @@ impl Plugin for GroundMaterialPlugin {
         register_look_shaders(app);
         app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
             .insert_resource(self.initial)
+            .init_resource::<GroundAnchor>()
             .add_systems(Startup, spawn_look_readout)
-            .add_systems(Update, (apply_ground_look, update_look_readout));
+            .add_systems(
+                Update,
+                (apply_ground_look, apply_ground_anchor, update_look_readout),
+            );
     }
 }
 
@@ -459,6 +534,69 @@ mod tests {
         let extension = &materials.get(&handle).unwrap().extension;
         assert_eq!(extension.look, next);
         assert_eq!(extension.params, next.params());
+    }
+
+    /// The UV rebase end to end: an anchor write must land `vertex_xz − anchor` in
+    /// the ground mesh's UV channel, and a second run at the same anchor must not
+    /// touch the asset again (the rewrite is 2M vertices in production — it may
+    /// only run on locale changes).
+    #[test]
+    fn anchor_rebases_ground_uvs_once_per_change() {
+        use bevy::mesh::VertexAttributeValues;
+
+        let mut app = App::new();
+        app.add_plugins(bevy::asset::AssetPlugin::default())
+            .init_asset::<Mesh>()
+            .init_resource::<GroundAnchor>()
+            .add_systems(Update, apply_ground_anchor);
+        let mesh = Mesh::new(
+            bevy::mesh::PrimitiveTopology::TriangleList,
+            bevy::asset::RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![[10_000.0f32, 5.0, -8_000.0], [10_030.0, 6.0, -8_000.0]],
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0], [0.0, 0.0]]);
+        let handle = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+        // No explicit AppliedGroundAnchor: GroundMesh #[require]s it, and this
+        // spawn doubles as the check that the requirement actually fires.
+        app.world_mut().spawn((GroundMesh, Mesh3d(handle.clone())));
+
+        app.world_mut().resource_mut::<GroundAnchor>().0 = Vec2::new(10_000.0, -8_000.0);
+        app.update();
+        let uvs = |app: &App| match app
+            .world()
+            .resource::<Assets<Mesh>>()
+            .get(&handle)
+            .unwrap()
+            .attribute(Mesh::ATTRIBUTE_UV_0)
+            .unwrap()
+        {
+            VertexAttributeValues::Float32x2(v) => v.clone(),
+            other => panic!("uv channel is {other:?}"),
+        };
+        assert_eq!(uvs(&app), vec![[0.0, 0.0], [30.0, 0.0]]);
+
+        // Same anchor again: the guard must report the mesh as already applied —
+        // `get_mut` bumps the asset's change tick and re-uploads 2M vertices, so
+        // an unconditional rewrite would do that every frame.
+        let mut asset_events = Vec::new();
+        app.world_mut()
+            .resource_mut::<bevy::ecs::message::Messages<AssetEvent<Mesh>>>()
+            .clear();
+        app.update();
+        asset_events.extend(
+            app.world_mut()
+                .resource_mut::<bevy::ecs::message::Messages<AssetEvent<Mesh>>>()
+                .drain(),
+        );
+        assert!(
+            asset_events
+                .iter()
+                .all(|e| !matches!(e, AssetEvent::Modified { id } if *id == handle.id())),
+            "steady-state frame re-wrote the ground mesh: {asset_events:?}"
+        );
     }
 
     /// The toggle must reach every look and come home — a partial cycle would
