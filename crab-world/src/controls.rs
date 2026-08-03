@@ -478,7 +478,10 @@ mod overlay {
     #[derive(Component)]
     pub struct HintGlyphFor(Device);
 
-    const GLYPH_PX: f32 = 30.0;
+    // Sized so the biggest legend (GCR's 28-row foot context, rl#330 stage 5) wraps to
+    // TWO ≤Vh(70) columns at 1280x720 — 30px rows, 16 per column; at 30px chips it
+    // wrapped to three and the third ran off the panel.
+    const GLYPH_PX: f32 = 24.0;
 
     pub const PAD_STICK_DEADZONE: f32 = 0.15;
 
@@ -545,7 +548,7 @@ mod overlay {
                     flex_direction: FlexDirection::Column,
                     flex_wrap: FlexWrap::Wrap,
                     max_height: Val::Vh(70.0),
-                    row_gap: Val::Px(8.0),
+                    row_gap: Val::Px(6.0),
                     column_gap: Val::Px(32.0),
                     ..default()
                 },
@@ -571,7 +574,7 @@ mod overlay {
                         row.spawn((
                             Text::new(label),
                             TextFont {
-                                font_size: 20.0,
+                                font_size: 17.0,
                                 ..default()
                             },
                             TextColor(Color::srgb(0.95, 0.95, 0.95)),
