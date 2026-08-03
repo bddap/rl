@@ -136,7 +136,16 @@ fn drive_pilot_script(
     };
     script.frame += 1;
     if script.toggle_at.contains(&script.frame) {
-        pending.toggle_vehicle = true;
+        // The game has no cycle verb anymore (one board code per vehicle, rl#330) —
+        // the script keeps its historical foot→plane→ship→foot order locally so the
+        // `--pilot-toggle-at` CLI contract is unchanged.
+        use super::driver::VehicleRequest;
+        use crab_world::vehicle::VehicleKind;
+        pending.vehicle = Some(match vehicle.kind() {
+            None => VehicleRequest::Board(VehicleKind::Plane),
+            Some(VehicleKind::Plane) => VehicleRequest::Board(VehicleKind::Ship),
+            Some(VehicleKind::Ship) => VehicleRequest::Exit,
+        });
     }
     // While piloting, drive forward: plane throttle (wasd.y + rt), ship forward thrust + lift.
     // Runs after `gather_input` (which zeroes FlightInput off the absent devices), so the

@@ -316,7 +316,15 @@ pub(super) struct PendingInput {
     pub(super) yaw_delta: f32,
     pub(super) action: bool,
     pub(super) restart: bool,
-    pub(super) toggle_vehicle: bool,
+    pub(super) vehicle: Option<VehicleRequest>,
+}
+
+/// A chord-issued vehicle change (rl#330): each vehicle has its own board code and
+/// exit is a code of its own — there is no cycle verb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VehicleRequest {
+    Board(VehicleKind),
+    Exit,
 }
 
 #[derive(Resource, Default)]
@@ -486,26 +494,6 @@ impl LocalVehicle {
             poses.push(tick, p);
         }
     }
-
-    fn cycled(&self) -> Self {
-        match self {
-            Self::OnFoot => Self::Flying {
-                kind: VehicleKind::Plane,
-                poses: PoseWindow::default(),
-            },
-            Self::Flying {
-                kind: VehicleKind::Plane,
-                ..
-            } => Self::Flying {
-                kind: VehicleKind::Ship,
-                poses: PoseWindow::default(),
-            },
-            Self::Flying {
-                kind: VehicleKind::Ship,
-                ..
-            } => Self::OnFoot,
-        }
-    }
 }
 
 /// Read OUR OWN vehicle rigidbody's arena-frame pose (position + attitude) from the crab world,
@@ -555,8 +543,8 @@ pub(super) fn drive_client_sim(world: &mut World) {
     world.non_send_resource_mut::<GameState>().accumulator += delta;
 
     {
-        let toggle = std::mem::take(&mut world.resource_mut::<PendingInput>().toggle_vehicle);
-        if toggle {
+        let request = world.resource_mut::<PendingInput>().vehicle.take();
+        if let Some(request) = request {
             let may_board = {
                 let state = world.non_send_resource::<GameState>();
                 let me = state.client.me();
@@ -567,9 +555,22 @@ pub(super) fn drive_client_sim(world: &mut World) {
                     .is_some_and(|p| p.status().may_board())
             };
             let mut vehicle = world.resource_mut::<LocalVehicle>();
-            let boarding_from_foot = matches!(*vehicle, LocalVehicle::OnFoot);
-            if !boarding_from_foot || may_board {
-                let next = vehicle.cycled();
+            let next = match request {
+                // Boarding from foot needs the sim's leave; switching craft-to-craft
+                // doesn't (same as the old cycle). Re-requesting the current craft is
+                // a no-op — no pose-window reset mid-flight.
+                VehicleRequest::Board(kind)
+                    if vehicle.kind() != Some(kind) && (vehicle.kind().is_some() || may_board) =>
+                {
+                    Some(LocalVehicle::Flying {
+                        kind,
+                        poses: PoseWindow::default(),
+                    })
+                }
+                VehicleRequest::Exit if vehicle.kind().is_some() => Some(LocalVehicle::OnFoot),
+                _ => None,
+            };
+            if let Some(next) = next {
                 info!("vehicle: {:?} -> {:?}", vehicle.context(), next.context());
                 *vehicle = next;
             }

@@ -5,16 +5,24 @@ pub struct GcrControls;
 
 /// GCR's chord table (rl#330) — the ONE list of code → command assignments; the owner
 /// tunes codes here in play. These commands have no direct bindings — one trigger
-/// route per action, enforced by `assert_scheme_well_formed`. The empty code (bare
-/// modifier tap) keeps the pad's tap-X-to-board verb: X can't stay a press-verb once
-/// it is the chord modifier (its press now opens a capture), so EnterExit rides
-/// execute-on-release. Quit's code is ≥2 taps longer than every other — one stray
-/// tap after any registered code can never end the round (the chord replacement for
-/// the old timed hold-to-quit guard; a couch kid mashing d-pad stays in the round).
+/// route per action, enforced by `assert_scheme_well_formed`. A bare modifier tap
+/// (the empty code) is deliberately unassigned: the owner de-overloaded X — vehicle
+/// switching is a code per vehicle, not a tap verb (the ↑-family = the sky craft,
+/// ↓↓ = back to the ground). Quit's code is ≥2 taps longer than every other — one
+/// stray tap after any registered code can never end the round (the chord replacement
+/// for the old timed hold-to-quit guard; a couch kid mashing d-pad stays in the round).
 pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
     ChordEntry {
-        code: &[],
-        action: Action::EnterExit,
+        code: &[ChordDir::Up, ChordDir::Left],
+        action: Action::BoardPlane,
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Right],
+        action: Action::BoardShip,
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Down],
+        action: Action::ExitVehicle,
     },
     ChordEntry {
         code: &[ChordDir::Up],
@@ -59,7 +67,9 @@ pub enum Action {
     Extract,
     Restart,
     Quit,
-    EnterExit,
+    BoardPlane,
+    BoardShip,
+    ExitVehicle,
     CycleRenderMode,
     CycleGroundLook,
     SwapBrain,
@@ -517,7 +527,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 25] = [
+    const ALL_ACTIONS: [Action; 27] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -526,7 +536,9 @@ mod tests {
         Action::Extract,
         Action::Restart,
         Action::Quit,
-        Action::EnterExit,
+        Action::BoardPlane,
+        Action::BoardShip,
+        Action::ExitVehicle,
         Action::CycleRenderMode,
         Action::CycleGroundLook,
         Action::SwapBrain,
@@ -555,8 +567,20 @@ mod tests {
     #[test]
     fn chord_table_carries_every_migrated_command() {
         GCR_CHORDS.assert_well_formed();
-        // The empty code preserves tap-X boarding (X is the chord modifier now).
-        assert_eq!(GCR_CHORDS.lookup(&[]), Some(Action::EnterExit));
+        // The bare tap is unassigned (X de-overloaded): vehicles are codes, one each.
+        assert_eq!(GCR_CHORDS.lookup(&[]), None);
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Left]),
+            Some(Action::BoardPlane)
+        );
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Right]),
+            Some(Action::BoardShip)
+        );
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Down]),
+            Some(Action::ExitVehicle)
+        );
         assert_eq!(
             GCR_CHORDS.lookup(&[ChordDir::Up]),
             Some(Action::CycleRenderMode)
@@ -610,7 +634,9 @@ mod tests {
                 | Action::Extract
                 | Action::Restart
                 | Action::Quit
-                | Action::EnterExit
+                | Action::BoardPlane
+                | Action::BoardShip
+                | Action::ExitVehicle
                 | Action::CycleRenderMode
                 | Action::CycleGroundLook
                 | Action::SwapBrain
