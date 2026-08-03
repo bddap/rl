@@ -47,7 +47,16 @@ pub(crate) const DEMO_CHORDS: ChordRegistry<DemoAction> = ChordRegistry::new(&[
         label: "Manual control",
     },
     ChordEntry {
-        code: &[ChordDir::Up, ChordDir::Up, ChordDir::Down, ChordDir::Down],
+        // Matches GCR's Quit (one muscle memory across surfaces): GCR's grew to 6
+        // taps when its 3-tap variant codes landed (rl#330 stage 5), so this follows.
+        code: &[
+            ChordDir::Up,
+            ChordDir::Up,
+            ChordDir::Down,
+            ChordDir::Down,
+            ChordDir::Left,
+            ChordDir::Right,
+        ],
         action: DemoAction::Quit,
         label: "Quit",
     },
@@ -363,7 +372,7 @@ mod tests {
         );
         assert_eq!(DEMO_CHORDS.lookup(&[Down, Up]), Some(DemoAction::Manual));
         assert_eq!(
-            DEMO_CHORDS.lookup(&[Up, Up, Down, Down]),
+            DEMO_CHORDS.lookup(&[Up, Up, Down, Down, Left, Right]),
             Some(DemoAction::Quit)
         );
     }
