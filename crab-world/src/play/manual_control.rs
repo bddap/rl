@@ -2,10 +2,10 @@ use bevy::prelude::*;
 
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::CrabJointId;
-use crate::controls::just_pressed;
+use crate::chord::Chords;
 
 use super::controls::{
-    DemoAction, DemoControls, PICK_JOINT_NEXT_BUTTON, PICK_JOINT_PREV_BUTTON, torque_stick_y,
+    DemoControls, PICK_JOINT_NEXT_BUTTON, PICK_JOINT_PREV_BUTTON, torque_stick_y,
 };
 
 #[derive(Resource)]
@@ -18,8 +18,8 @@ pub(super) struct ManualControl {
 pub(super) struct ManualHud;
 
 pub(super) fn manual_control_step(
-    keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
+    chords: Res<Chords<DemoControls>>,
     mut manual: ResMut<ManualControl>,
     mut actions: ResMut<CrabActions>,
     mut hud: Query<(&mut Text, &mut Visibility), With<ManualHud>>,
@@ -27,25 +27,22 @@ pub(super) fn manual_control_step(
     let Some(gp) = gamepads.iter().next() else {
         return;
     };
-    // Dispatched from DEMO_BINDINGS like every tap verb (pad-only today — East, B/circle —
-    // NOT North: North already toggles the joint-telemetry graph (play::graph), so sharing
-    // it fired both on one press). The analog joint pick + torque below stay on the FIRST
-    // pad; the toggle accepts any pad like the other verbs.
-    if just_pressed::<DemoControls>(DemoAction::Manual, &keys, &gamepads) {
-        manual.active = !manual.active;
-        manual.selected = None;
-    }
-
+    // The mode TOGGLE is a chord, dispatched in `demo_controls` (Update — the chord edge
+    // is Update-rate). The analog joint pick + torque below stay on the FIRST pad. The
+    // D-pad is also chord-code entry: while a capture is live (pad X held), the taps are
+    // code, not joint picks.
     let n = CrabJointId::COUNT;
     let mut line = String::new();
     if manual.active {
-        if gp.just_pressed(PICK_JOINT_NEXT_BUTTON) {
-            manual.selected =
-                CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + 1) % n));
-        }
-        if gp.just_pressed(PICK_JOINT_PREV_BUTTON) {
-            manual.selected =
-                CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + n - 1) % n));
+        if !chords.capturing() {
+            if gp.just_pressed(PICK_JOINT_NEXT_BUTTON) {
+                manual.selected =
+                    CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + 1) % n));
+            }
+            if gp.just_pressed(PICK_JOINT_PREV_BUTTON) {
+                manual.selected =
+                    CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + n - 1) % n));
+            }
         }
         if actions.rest(0) {
             line = match manual.selected {

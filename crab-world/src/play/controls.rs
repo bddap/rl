@@ -1,10 +1,55 @@
 use bevy::prelude::*;
 
+use crate::chord::{ChordDir, ChordEntry, ChordRegistry};
 use crate::controls::{
     Binding, ContextRow, ControlInput, ControlScheme, Glyph, KbBinding, PadBinding,
 };
 
 pub struct DemoControls;
+
+/// The demo's chord table (rl#330 stage 4) — every discrete verb is a code; the owner
+/// tunes assignments here in play. Codes mirror [`crate::chord`]'s GCR conventions where
+/// the verbs match (^ render view, < swap brain, > for the reset-flavored verb, ^^vv
+/// quit — Quit stays ≥2 taps longer than every other code, so a stray tap after any
+/// registered code can't kill the demo). The bare tap (empty code) is unassigned, same
+/// as GCR's de-overloaded X.
+pub(crate) const DEMO_CHORDS: ChordRegistry<DemoAction> = ChordRegistry::new(&[
+    ChordEntry {
+        code: &[ChordDir::Up],
+        action: DemoAction::RenderView,
+        label: "Render view",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down],
+        action: DemoAction::Poke,
+        label: "Poke",
+    },
+    ChordEntry {
+        code: &[ChordDir::Left],
+        action: DemoAction::SwapBrain,
+        label: "Swap brain",
+    },
+    ChordEntry {
+        code: &[ChordDir::Right],
+        action: DemoAction::Rebuild,
+        label: "Rebuild crab",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down],
+        action: DemoAction::JointGraph,
+        label: "Joint graph",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Up],
+        action: DemoAction::Manual,
+        label: "Manual control",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Up, ChordDir::Down, ChordDir::Down],
+        action: DemoAction::Quit,
+        label: "Quit",
+    },
+]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DemoContext {
@@ -30,16 +75,9 @@ pub enum DemoAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DemoKey {
-    R,
-    B,
-    Space,
-    Escape,
     Tab,
     Arrows,
     ZoomKeys,
-    /// The render-view-cycle key (→ / right arrow).
-    RenderViewKey,
-    Graph,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,16 +93,6 @@ pub enum DemoPad {
     RightStick,
     RightTrigger,
     LeftTrigger,
-    South,
-    West,
-    East,
-    North,
-    Start,
-    /// D-pad Right (render-view cycle). Split from [`DemoPad::DpadUpDown`] so the discrete
-    /// verb resolves to its one button; both show the same D-pad glyph.
-    DpadRight,
-    /// D-pad Left (brain swap, rl#232) — same split as [`DemoPad::DpadRight`].
-    DpadLeft,
     /// D-pad Up/Down (joint pick in manual mode) — a directional pair, read directly in
     /// `manual_control`, so it resolves to no single button.
     DpadUpDown,
@@ -82,9 +110,8 @@ impl ControlScheme for DemoControls {
         &DEMO_BINDINGS
     }
 
-    // Empty until the stage-3 migration (rl#330) moves the demo's discrete verbs here.
-    fn chords() -> crate::chord::ChordRegistry<DemoAction> {
-        crate::chord::ChordRegistry::new(&[])
+    fn chords() -> ChordRegistry<DemoAction> {
+        DEMO_CHORDS
     }
 
     fn contexts() -> &'static [DemoContext] {
@@ -122,15 +149,9 @@ impl ControlScheme for DemoControls {
 
     fn key_glyph(key: DemoKey) -> Glyph {
         match key {
-            DemoKey::R => Glyph::Icon("controls/keyboard_r.png"),
-            DemoKey::B => Glyph::Label("B"),
-            DemoKey::Space => Glyph::Icon("controls/keyboard_space.png"),
-            DemoKey::Escape => Glyph::Icon("controls/keyboard_escape.png"),
             DemoKey::Tab => Glyph::Icon("controls/keyboard_tab.png"),
             DemoKey::Arrows => Glyph::Label("Arrows"),
             DemoKey::ZoomKeys => Glyph::Label("- / ="),
-            DemoKey::RenderViewKey => Glyph::Label("Right"),
-            DemoKey::Graph => Glyph::Label("G"),
         }
     }
 
@@ -139,16 +160,9 @@ impl ControlScheme for DemoControls {
             DemoPad::LeftStick => Glyph::Icon("controls/xbox_stick_l.png"),
             DemoPad::RightStick => Glyph::Icon("controls/xbox_stick_r.png"),
             DemoPad::RightTrigger => Glyph::Icon("controls/xbox_rt.png"),
-            DemoPad::South => Glyph::Icon("controls/xbox_button_a.png"),
-            DemoPad::North => Glyph::Icon("controls/xbox_button_y.png"),
-            DemoPad::Start => Glyph::Icon("controls/xbox_button_menu.png"),
-            DemoPad::DpadRight | DemoPad::DpadLeft | DemoPad::DpadUpDown => {
-                Glyph::Icon("controls/xbox_dpad.png")
-            }
+            DemoPad::DpadUpDown => Glyph::Icon("controls/xbox_dpad.png"),
             DemoPad::View => Glyph::Icon("controls/xbox_button_view.png"),
             DemoPad::LeftTrigger => Glyph::Label("LT"),
-            DemoPad::West => Glyph::Label("X"),
-            DemoPad::East => Glyph::Label("B"),
         }
     }
 
@@ -163,13 +177,7 @@ impl ControlScheme for DemoControls {
 impl ControlInput for DemoControls {
     fn key_codes(key: DemoKey) -> &'static [KeyCode] {
         match key {
-            DemoKey::R => &[KeyCode::KeyR],
-            DemoKey::B => &[KeyCode::KeyB],
-            DemoKey::Space => &[KeyCode::Space],
-            DemoKey::Escape => &[KeyCode::Escape],
             DemoKey::Tab => &[KeyCode::Tab],
-            DemoKey::RenderViewKey => &[KeyCode::ArrowRight],
-            DemoKey::Graph => &[KeyCode::KeyG],
             // Multi-key analog tokens (orbit's four keys, the zoom pair) — read directly
             // in `cameras::orbit_camera`, so they bind no discrete key here.
             DemoKey::Arrows | DemoKey::ZoomKeys => &[],
@@ -178,13 +186,6 @@ impl ControlInput for DemoControls {
 
     fn gamepad_button(pad: DemoPad) -> Option<GamepadButton> {
         match pad {
-            DemoPad::South => Some(GamepadButton::South),
-            DemoPad::West => Some(GamepadButton::West),
-            DemoPad::East => Some(GamepadButton::East),
-            DemoPad::North => Some(GamepadButton::North),
-            DemoPad::Start => Some(GamepadButton::Start),
-            DemoPad::DpadRight => Some(GamepadButton::DPadRight),
-            DemoPad::DpadLeft => Some(GamepadButton::DPadLeft),
             DemoPad::View => Some(GamepadButton::Select),
             // Analog/directional tokens (sticks, the zoom triggers, the joint-pick D-pad
             // pair) — read via their own axis/multi-button APIs in their systems.
@@ -197,15 +198,15 @@ impl ControlInput for DemoControls {
     }
 }
 
-/// THE demo binding table. The tap verbs DISPATCH from it (via
-/// [`crate::controls::just_pressed`]); only the analog rows (Orbit/Zoom in
+/// THE demo binding table — analog/held state only since the stage-4 migration
+/// (rl#330): every discrete verb is a chord code in [`DEMO_CHORDS`], and a second
+/// trigger route is a well-formedness error. The analog rows (Orbit/Zoom in
 /// `cameras::orbit_camera`, PickJoint/Torque in `manual_control`) are read directly and
-/// must match by hand — their concrete inputs are named right below the table.
-/// Reveal binding: hold Tab /
-/// hold pad View — both free in the demo's input set. Manual, PickJoint, and Torque are
-/// gamepad-only (no keyboard binding), so the keyboard legend omits them. Labels live in
-/// [`DEMO_ROWS`].
-pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 12] = [
+/// must match by hand — their concrete inputs are named right below the table. Reveal
+/// binding: hold Tab / hold pad View — a hold-to-show read the chord system's
+/// execute-on-release can't express. PickJoint and Torque are gamepad-only (no keyboard
+/// binding), so the keyboard legend omits them. Labels live in [`DEMO_ROWS`].
+pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 5] = [
     Binding {
         action: DemoAction::Orbit,
         keyboard: KbBinding::new(&[DemoKey::Arrows], &[DemoMouse::Drag]),
@@ -217,31 +218,6 @@ pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 12] = [
         pad: PadBinding::new(&[DemoPad::RightTrigger, DemoPad::LeftTrigger]),
     },
     Binding {
-        action: DemoAction::Rebuild,
-        keyboard: KbBinding::new(&[DemoKey::R], &[]),
-        pad: PadBinding::new(&[DemoPad::South]),
-    },
-    Binding {
-        action: DemoAction::Poke,
-        keyboard: KbBinding::new(&[DemoKey::Space], &[]),
-        pad: PadBinding::new(&[DemoPad::West]),
-    },
-    Binding {
-        action: DemoAction::RenderView,
-        keyboard: KbBinding::new(&[DemoKey::RenderViewKey], &[]),
-        pad: PadBinding::new(&[DemoPad::DpadRight]),
-    },
-    Binding {
-        action: DemoAction::JointGraph,
-        keyboard: KbBinding::new(&[DemoKey::Graph], &[]),
-        pad: PadBinding::new(&[DemoPad::North]),
-    },
-    Binding {
-        action: DemoAction::Manual,
-        keyboard: KbBinding::NONE,
-        pad: PadBinding::new(&[DemoPad::East]),
-    },
-    Binding {
         action: DemoAction::PickJoint,
         keyboard: KbBinding::NONE,
         pad: PadBinding::new(&[DemoPad::DpadUpDown]),
@@ -250,16 +226,6 @@ pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 12] = [
         action: DemoAction::Torque,
         keyboard: KbBinding::NONE,
         pad: PadBinding::new(&[DemoPad::RightStick]),
-    },
-    Binding {
-        action: DemoAction::SwapBrain,
-        keyboard: KbBinding::new(&[DemoKey::B], &[]),
-        pad: PadBinding::new(&[DemoPad::DpadLeft]),
-    },
-    Binding {
-        action: DemoAction::Quit,
-        keyboard: KbBinding::new(&[DemoKey::Escape], &[]),
-        pad: PadBinding::new(&[DemoPad::Start]),
     },
     Binding {
         action: DemoAction::RevealControls,
@@ -307,7 +273,10 @@ pub(super) fn torque_stick_y(gp: &Gamepad) -> f32 {
     gp.right_stick().y
 }
 
-pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 12] = [
+// Direct-bound rows only — the chorded verbs' legend rows come from [`DEMO_CHORDS`]
+// itself (labels live there, appended by `crate::controls::legend`), so the two can't
+// drift.
+pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 5] = [
     ContextRow {
         action: DemoAction::Orbit,
         label: "Orbit camera",
@@ -317,40 +286,12 @@ pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 12] = [
         label: "Zoom",
     },
     ContextRow {
-        action: DemoAction::Rebuild,
-        label: "Rebuild crab",
-    },
-    ContextRow {
-        action: DemoAction::Poke,
-        label: "Poke",
-    },
-    ContextRow {
-        action: DemoAction::RenderView,
-        label: "Render view (cycle)",
-    },
-    ContextRow {
-        action: DemoAction::JointGraph,
-        label: "Joint graph",
-    },
-    ContextRow {
-        action: DemoAction::Manual,
-        label: "Manual control",
-    },
-    ContextRow {
         action: DemoAction::PickJoint,
         label: "Pick joint (manual)",
     },
     ContextRow {
         action: DemoAction::Torque,
         label: "Joint torque (manual)",
-    },
-    ContextRow {
-        action: DemoAction::SwapBrain,
-        label: "Swap brain",
-    },
-    ContextRow {
-        action: DemoAction::Quit,
-        label: "Quit",
     },
     ContextRow {
         action: DemoAction::RevealControls,
@@ -397,6 +338,47 @@ mod tests {
         }
         assert!(ALL.iter().copied().all(classified));
         assert_scheme_well_formed::<DemoControls>(&ALL, &[DemoContext::Inspect]);
+    }
+
+    #[test]
+    fn chord_table_carries_every_migrated_command() {
+        use crate::chord::ChordDir::*;
+        DEMO_CHORDS.assert_well_formed();
+        // The bare tap is unassigned, same as GCR's de-overloaded X.
+        assert_eq!(DEMO_CHORDS.lookup(&[]), None);
+        assert_eq!(DEMO_CHORDS.lookup(&[Up]), Some(DemoAction::RenderView));
+        assert_eq!(DEMO_CHORDS.lookup(&[Down]), Some(DemoAction::Poke));
+        assert_eq!(DEMO_CHORDS.lookup(&[Left]), Some(DemoAction::SwapBrain));
+        assert_eq!(DEMO_CHORDS.lookup(&[Right]), Some(DemoAction::Rebuild));
+        assert_eq!(
+            DEMO_CHORDS.lookup(&[Up, Down]),
+            Some(DemoAction::JointGraph)
+        );
+        assert_eq!(DEMO_CHORDS.lookup(&[Down, Up]), Some(DemoAction::Manual));
+        assert_eq!(
+            DEMO_CHORDS.lookup(&[Up, Up, Down, Down]),
+            Some(DemoAction::Quit)
+        );
+    }
+
+    /// Same fat-finger bar as GCR's quit: a stray extra tap after ANY registered code
+    /// must never kill the demo — Quit's code is ≥2 taps longer than every other.
+    #[test]
+    fn quit_code_survives_a_stray_tap_after_any_other_code() {
+        let quit_len = DEMO_CHORDS
+            .entries()
+            .iter()
+            .find(|e| e.action == DemoAction::Quit)
+            .unwrap()
+            .code
+            .len();
+        assert!(
+            DEMO_CHORDS
+                .entries()
+                .iter()
+                .all(|e| e.action == DemoAction::Quit || e.code.len() + 2 <= quit_len),
+            "Quit's code must be ≥2 taps longer than every other code"
+        );
     }
 
     /// The tap verbs dispatch via [`crate::controls::just_pressed`], which drops binding

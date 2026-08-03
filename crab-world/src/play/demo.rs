@@ -9,9 +9,10 @@ use crate::bot::sensor::CrabTargets;
 use crate::bot::{CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown};
 use crate::training::targets::{random_episode_origin, seed_target};
 
-use crate::controls::just_pressed;
+use crate::chord::Chords;
 
 use super::controls::{DemoAction, DemoControls};
+use super::manual_control::ManualControl;
 
 #[derive(Resource, Default)]
 pub(super) struct DemoSettle(pub(super) u32);
@@ -77,8 +78,7 @@ fn demo_respawn(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn demo_controls(
-    keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    chords: Res<Chords<DemoControls>>,
     mut exit: MessageWriter<AppExit>,
     mut commands: Commands,
     assets: Res<CrabAssets>,
@@ -92,31 +92,30 @@ pub(super) fn demo_controls(
     mut render_mode: ResMut<crate::crab_view::RenderMode>,
     mut rng: ResMut<super::DemoRng>,
     mut policy: NonSendMut<crate::policy::Policy>,
+    mut manual: ResMut<ManualControl>,
 ) {
-    // The tap verbs dispatch from DEMO_BINDINGS, so they trigger on exactly the inputs the
-    // legend shows. RenderView (→ / D-pad Right) CYCLES the render view (mesh →
-    // mesh+colliders → colliders); the other arrow keys are the orbit camera — its
-    // right-yaw moved to the comma key so → isn't double-bound (mouse right-drag still
-    // orbits).
-    let just = |a| just_pressed::<DemoControls>(a, &keys, &gamepads);
-    let reset = just(DemoAction::Rebuild);
-    let poke = just(DemoAction::Poke);
-    let quit = just(DemoAction::Quit);
-    let cycle_view = just(DemoAction::RenderView);
-
-    if quit {
+    // Every discrete verb dispatches from DEMO_CHORDS (rl#330 stage 4), so it triggers
+    // on exactly the code the held-modifier menu and the legend show. The Manual toggle
+    // lives here rather than in `manual_control_step`: chord execution is a one-frame
+    // Update-rate edge, and a FixedUpdate reader would miss it on a fast frame or
+    // double-toggle on a slow one.
+    if chords.executed(DemoAction::Quit) {
         exit.write(AppExit::Success);
     }
-    if cycle_view {
+    if chords.executed(DemoAction::RenderView) {
         *render_mode = crate::next_view_variant(*render_mode);
         info!("demo render mode: {:?}", *render_mode);
     }
     // The swapped label reaches the screen through the every-frame `publish_brain_label`;
     // a failed swap keeps the current brain (the one swap path already logs it loudly).
-    if just(DemoAction::SwapBrain) {
+    if chords.executed(DemoAction::SwapBrain) {
         policy.cycle_brain();
     }
-    if reset {
+    if chords.executed(DemoAction::Manual) {
+        manual.active = !manual.active;
+        manual.selected = None;
+    }
+    if chords.executed(DemoAction::Rebuild) {
         demo_respawn(
             &mut commands,
             &assets,
@@ -129,7 +128,7 @@ pub(super) fn demo_controls(
             &mut rng.0,
         );
     }
-    if poke {
+    if chords.executed(DemoAction::Poke) {
         let rng = &mut rng.0;
         let dir =
             Vec3::new(rng.gen_range(-1.0..1.0), 0.25, rng.gen_range(-1.0..1.0)).normalize_or_zero();
