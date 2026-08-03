@@ -67,11 +67,19 @@ pub(super) fn gather_input(
     }
 
     let mut action = held(Action::Extract);
-    // Boarding and restart are chords (rl#330): X / right-click is the chord modifier,
-    // so boarding rides the empty code (a bare tap, firing on release) and restart its
-    // registered code — no direct key or button remains for either.
-    if chords.executed(Action::EnterExit) {
-        pending.toggle_vehicle = true;
+    // Vehicle switching and restart are chords (rl#330): one code per vehicle plus an
+    // exit code (X is de-overloaded — a bare tap does nothing), restart its own code —
+    // no direct key or button remains for any of them.
+    use super::driver::VehicleRequest;
+    use crab_world::vehicle::VehicleKind;
+    if chords.executed(Action::BoardPlane) {
+        pending.vehicle = Some(VehicleRequest::Board(VehicleKind::Plane));
+    }
+    if chords.executed(Action::BoardShip) {
+        pending.vehicle = Some(VehicleRequest::Board(VehicleKind::Ship));
+    }
+    if chords.executed(Action::ExitVehicle) {
+        pending.vehicle = Some(VehicleRequest::Exit);
     }
     if chords.executed(Action::Restart) {
         pending.restart = true;
