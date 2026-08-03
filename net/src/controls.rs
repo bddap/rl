@@ -203,6 +203,12 @@ impl ControlScheme for GcrControls {
         Action::RevealControls
     }
 
+    // The capture is reset outside Playing (render/app.rs) and the d-pad is the nav
+    // input there — the menu legend advertising dead codes would lie.
+    fn context_shows_chords(ctx: GcrContext) -> bool {
+        ctx != GcrContext::Menu
+    }
+
     fn key_glyph(key: Key) -> Glyph {
         Glyph::Icon(match key {
             Key::W => "controls/keyboard_w.png",
@@ -350,9 +356,9 @@ pub const BINDINGS: [Binding<GcrControls>; 19] = [
     },
 ];
 
-// The in-round row tables list only DIRECT-bound controls for now: the chorded command
-// verbs re-enter the legend in stage 4 (rl#330), rendered from [`GCR_CHORDS`] itself —
-// a row for an unbound action would either lie or panic today.
+// The in-round row tables list only DIRECT-bound controls: the chorded command verbs'
+// legend rows come from [`GCR_CHORDS`] itself (labels live there, appended by
+// `crab_world::controls::legend`), so the two can't drift.
 pub const FOOT_ROWS: [ContextRow<GcrControls>; 7] = [
     ContextRow {
         action: Action::MoveForward,
@@ -684,12 +690,51 @@ mod tests {
                 let lines = legend::<GcrControls>(ctx, device);
                 let rows = GcrControls::context_rows(ctx);
                 for line in &lines {
-                    let row = rows.iter().find(|r| r.label == line.label).unwrap();
+                    let Some(row) = rows.iter().find(|r| r.label == line.label) else {
+                        // Not a binding row: must be a chord row (checked below).
+                        assert!(
+                            GCR_CHORDS.entries().iter().any(|e| e.label == line.label),
+                            "legend line {:?} matches no row and no chord entry",
+                            line.label
+                        );
+                        continue;
+                    };
                     let b = binding::<GcrControls>(row.action).unwrap();
                     assert_eq!(line.glyphs, b.glyphs(device));
                     assert!(!line.glyphs.is_empty(), "{:?} shows no glyph", row.action);
                 }
             }
+        }
+    }
+
+    /// Stage 4 (rl#330): every in-round legend shows the chord verbs, rendered from
+    /// [`GCR_CHORDS`] itself — modifier glyph then one chip per code step; the menu
+    /// context shows none (the capture is reset there and the d-pad is nav).
+    #[test]
+    fn legend_renders_chord_rows_from_the_registry() {
+        use crab_world::chord::{dir_text, modifier_glyph};
+        for ctx in [GcrContext::OnFoot, GcrContext::Plane, GcrContext::Ship] {
+            for device in [Device::KeyboardMouse, Device::Gamepad] {
+                let lines = legend::<GcrControls>(ctx, device);
+                for e in GCR_CHORDS.entries() {
+                    let line = lines
+                        .iter()
+                        .find(|l| l.label == e.label)
+                        .unwrap_or_else(|| panic!("{ctx:?}/{device:?} omits {:?}", e.label));
+                    let mut want = vec![modifier_glyph(device)];
+                    want.extend(e.code.iter().map(|&d| Glyph::Label(dir_text(d, device))));
+                    assert_eq!(line.glyphs, want);
+                    assert!(!line.hold, "chord rows carry no Hold prefix");
+                }
+            }
+        }
+        let menu = legend::<GcrControls>(GcrContext::Menu, Device::Gamepad);
+        for e in GCR_CHORDS.entries() {
+            assert!(
+                !menu.iter().any(|l| l.label == e.label),
+                "menu legend advertises dead code {:?}",
+                e.label
+            );
         }
     }
 
