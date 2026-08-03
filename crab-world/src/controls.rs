@@ -45,13 +45,13 @@ pub trait ControlScheme: 'static + Send + Sync {
 
     fn reveal_action() -> Self::Action;
 
-    /// Whether `ctx`'s legend shows the chord-command rows (rl#330 stage 4). Default
-    /// yes; a context where the chord system is inert (GCR's menu — capture is reset
-    /// outside Playing, and the d-pad IS the nav input there) opts out so the legend
-    /// doesn't advertise dead codes.
-    fn context_shows_chords(_ctx: Self::Context) -> bool {
-        true
-    }
+    /// Whether `ctx`'s legend shows the chord-command rows (rl#330 stage 4). A context
+    /// where the chord system is inert (GCR's menu — the capture is reset outside
+    /// Playing, and the d-pad IS the nav input there) answers false so the legend
+    /// doesn't advertise dead codes. No default: this mirrors where the surface wires
+    /// `reset_chords`, which nothing can check — so each scheme states the claim
+    /// explicitly, same rule as the empty registry.
+    fn context_shows_chords(ctx: Self::Context) -> bool;
 
     fn key_glyph(key: Self::Key) -> Glyph;
     fn pad_glyph(pad: Self::Pad) -> Glyph;
@@ -935,6 +935,9 @@ mod tests {
             }
         }
         fn reveal_action() {}
+        fn context_shows_chords(_: TestCtx) -> bool {
+            true
+        }
         fn key_glyph(_: ()) -> Glyph {
             Glyph::Label("k")
         }

@@ -50,9 +50,10 @@ pub(super) fn gather_input(
     let dt = time.delta_secs();
 
     // While a chord is being typed (rl#330) the WASD keys and d-pad ARE the code entry,
-    // so their movement/flight readings go quiet for the span of the hold; the sticks
-    // stay live (analog is out of chord scope).
-    let typing = chords.capturing();
+    // so their movement/flight readings go quiet for the span of the hold — including
+    // the release frame (`typing`, not `capturing`: a release-frame tap joins the code
+    // and must not also blip movement); the sticks stay live (analog is out of scope).
+    let typing = chords.typing();
 
     let kc = controls::key_code_for;
     let held = |a| kc(a).is_some_and(|k| keys.pressed(k));

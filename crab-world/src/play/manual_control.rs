@@ -24,36 +24,41 @@ pub(super) fn manual_control_step(
     mut actions: ResMut<CrabActions>,
     mut hud: Query<(&mut Text, &mut Visibility), With<ManualHud>>,
 ) {
-    let Some(gp) = gamepads.iter().next() else {
-        return;
-    };
     // The mode TOGGLE is a chord, dispatched in `demo_controls` (Update — the chord edge
     // is Update-rate). The analog joint pick + torque below stay on the FIRST pad. The
-    // D-pad is also chord-code entry: while a capture is live (pad X held), the taps are
-    // code, not joint picks.
+    // D-pad is also chord-code entry: while `typing` (capture live OR its release frame,
+    // whose taps join the code), the taps are code, not joint picks.
     let n = CrabJointId::COUNT;
     let mut line = String::new();
     if manual.active {
-        if !chords.capturing() {
-            if gp.just_pressed(PICK_JOINT_NEXT_BUTTON) {
-                manual.selected =
-                    CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + 1) % n));
-            }
-            if gp.just_pressed(PICK_JOINT_PREV_BUTTON) {
-                manual.selected =
-                    CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + n - 1) % n));
-            }
-        }
-        if actions.rest(0) {
-            line = match manual.selected {
-                Some(id) => {
-                    let v = torque_stick_y(gp).clamp(-1.0, 1.0);
-                    // The rest(0) above proved env 0 is sized.
-                    let _ = actions.set_drive(0, id, v);
-                    format!("MANUAL · {id:?} {}/{n} · torque {v:+.2}", id.index() + 1)
+        if let Some(gp) = gamepads.iter().next() {
+            if !chords.typing() {
+                if gp.just_pressed(PICK_JOINT_NEXT_BUTTON) {
+                    manual.selected =
+                        CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + 1) % n));
                 }
-                None => "MANUAL · pick a joint (D-pad)".to_string(),
-            };
+                if gp.just_pressed(PICK_JOINT_PREV_BUTTON) {
+                    manual.selected = CrabJointId::from_index(
+                        manual.selected.map_or(0, |j| (j.index() + n - 1) % n),
+                    );
+                }
+            }
+            if actions.rest(0) {
+                line = match manual.selected {
+                    Some(id) => {
+                        let v = torque_stick_y(gp).clamp(-1.0, 1.0);
+                        // The rest(0) above proved env 0 is sized.
+                        let _ = actions.set_drive(0, id, v);
+                        format!("MANUAL · {id:?} {}/{n} · torque {v:+.2}", id.index() + 1)
+                    }
+                    None => "MANUAL · pick a joint (D-pad)".to_string(),
+                };
+            }
+        } else {
+            // The chord toggle is device-agnostic, so kb/m can switch manual mode on
+            // with no pad connected — the policy stops driving her, so say why she's
+            // limp instead of showing nothing (pick/torque are pad-only analog reads).
+            line = "MANUAL · needs a gamepad (re-enter the code to exit)".to_string();
         }
     }
     if let Ok((mut text, mut vis)) = hud.single_mut() {

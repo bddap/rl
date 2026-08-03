@@ -8,11 +8,13 @@ use crate::controls::{
 pub struct DemoControls;
 
 /// The demo's chord table (rl#330 stage 4) — every discrete verb is a code; the owner
-/// tunes assignments here in play. Codes mirror [`crate::chord`]'s GCR conventions where
-/// the verbs match (^ render view, < swap brain, > for the reset-flavored verb, ^^vv
-/// quit — Quit stays ≥2 taps longer than every other code, so a stray tap after any
-/// registered code can't kill the demo). The bare tap (empty code) is unassigned, same
-/// as GCR's de-overloaded X.
+/// tunes assignments here in play. Where a verb exists on both surfaces the code
+/// matches GCR's `GCR_CHORDS` (net/src/controls.rs): ^ render view, < swap brain, the
+/// right-tap for the reset-flavored verb (Restart there, Rebuild here), ^^vv quit —
+/// Quit stays ≥2 taps longer than every other code, so a stray tap after any
+/// registered code can't kill the demo. Demo-only verbs take the leftover space (v is
+/// Poke here, Ground look there). The bare tap (empty code) is unassigned, same as
+/// GCR's de-overloaded X.
 pub(crate) const DEMO_CHORDS: ChordRegistry<DemoAction> = ChordRegistry::new(&[
     ChordEntry {
         code: &[ChordDir::Up],
@@ -145,6 +147,11 @@ impl ControlScheme for DemoControls {
 
     fn reveal_action() -> DemoAction {
         DemoAction::RevealControls
+    }
+
+    // The demo never resets the capture — chords are live in its one context.
+    fn context_shows_chords(_ctx: DemoContext) -> bool {
+        true
     }
 
     fn key_glyph(key: DemoKey) -> Glyph {
