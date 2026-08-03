@@ -45,6 +45,14 @@ pub trait ControlScheme: 'static + Send + Sync {
 
     fn reveal_action() -> Self::Action;
 
+    /// Whether `ctx`'s legend shows the chord-command rows (rl#330 stage 4). Default
+    /// yes; a context where the chord system is inert (GCR's menu — capture is reset
+    /// outside Playing, and the d-pad IS the nav input there) opts out so the legend
+    /// doesn't advertise dead codes.
+    fn context_shows_chords(_ctx: Self::Context) -> bool {
+        true
+    }
+
     fn key_glyph(key: Self::Key) -> Glyph;
     fn pad_glyph(pad: Self::Pad) -> Glyph;
     fn mouse_glyph(mouse: Self::Mouse) -> Glyph;
@@ -143,7 +151,7 @@ pub struct LegendLine {
 }
 
 pub fn legend<S: ControlScheme + ?Sized>(ctx: S::Context, device: Device) -> Vec<LegendLine> {
-    S::context_rows(ctx)
+    let mut lines: Vec<LegendLine> = S::context_rows(ctx)
         .iter()
         .filter_map(|row| {
             let b = binding::<S>(row.action).expect(
@@ -159,7 +167,28 @@ pub fn legend<S: ControlScheme + ?Sized>(ctx: S::Context, device: Device) -> Vec
                 glyphs,
             })
         })
-        .collect()
+        .collect();
+    // The chord-command rows, straight from the registry (rl#330 stage 4): modifier
+    // glyph + one chip per code step, label from the entry — the same table the
+    // held-modifier menu executes from, so the legend can't lie about a code.
+    if S::context_shows_chords(ctx) {
+        lines.extend(S::chords().entries().iter().map(|e| {
+            LegendLine {
+                label: e.label,
+                // Not `hold: true` — that prefix belongs to the label ("Hold Controls");
+                // the modifier-then-taps grammar is carried by the glyph chips.
+                hold: false,
+                glyphs: std::iter::once(crate::chord::modifier_glyph(device))
+                    .chain(
+                        e.code
+                            .iter()
+                            .map(|&d| Glyph::Label(crate::chord::dir_text(d, device))),
+                    )
+                    .collect(),
+            }
+        }));
+    }
+    lines
 }
 
 pub fn reveal_glyph<S: ControlScheme + ?Sized>(device: Device) -> Option<Glyph> {
@@ -236,6 +265,16 @@ pub fn assert_scheme_well_formed<S: ControlScheme + ?Sized>(
             rows.iter().any(|r| r.action == S::reveal_action()),
             "context {ctx:?} omits the reveal control — the overlay couldn't be opened there"
         );
+        if S::context_shows_chords(ctx) {
+            for e in S::chords().entries() {
+                assert!(
+                    rows.iter().all(|r| r.label != e.label),
+                    "context {ctx:?} row label {:?} collides with a chord entry's — \
+                     the legend would show two indistinguishable lines",
+                    e.label
+                );
+            }
+        }
     }
     for device in [Device::KeyboardMouse, Device::Gamepad] {
         assert!(
@@ -247,15 +286,23 @@ pub fn assert_scheme_well_formed<S: ControlScheme + ?Sized>(
 
 pub fn icon_asset_paths<S: ControlScheme + ?Sized>() -> Vec<&'static str> {
     let mut paths = Vec::new();
+    let mut push = |glyph: Glyph| {
+        if let Glyph::Icon(p) = glyph
+            && !paths.contains(&p)
+        {
+            paths.push(p);
+        }
+    };
     for b in S::bindings() {
         for device in [Device::KeyboardMouse, Device::Gamepad] {
             for glyph in b.glyphs(device) {
-                if let Glyph::Icon(p) = glyph
-                    && !paths.contains(&p)
-                {
-                    paths.push(p);
-                }
+                push(glyph);
             }
+        }
+    }
+    if !S::chords().entries().is_empty() {
+        for device in [Device::KeyboardMouse, Device::Gamepad] {
+            push(crate::chord::modifier_glyph(device));
         }
     }
     paths

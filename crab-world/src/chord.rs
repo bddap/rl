@@ -167,14 +167,11 @@ impl ChordCapture {
 /// code is entered. Pure so the filtering is unit-testable headless; the render glue
 /// only decides visibility and pushes this into a Text node. `entered == None` means
 /// the capture overflowed ([`MAX_CHORD_LEN`]) — nothing can match, say so.
-pub fn chord_menu_text<A: Copy + PartialEq + Debug>(
-    registry: ChordRegistry<A>,
-    entered: Option<&[ChordDir]>,
-    device: crate::controls::Device,
-) -> String {
-    // ASCII stand-ins for the d-pad, not ↑↓←→: bevy's default font is an ASCII
-    // subset and real arrows render as tofu boxes.
-    let dir = |d: ChordDir| match (device, d) {
+/// The one glyph text per code step — the context menu and the controls legend both
+/// render codes through it, so they can't drift. ASCII stand-ins for the d-pad, not
+/// ↑↓←→: bevy's default font is an ASCII subset and real arrows render as tofu boxes.
+pub fn dir_text(d: ChordDir, device: crate::controls::Device) -> &'static str {
+    match (device, d) {
         (crate::controls::Device::Gamepad, ChordDir::Up) => "^",
         (crate::controls::Device::Gamepad, ChordDir::Down) => "v",
         (crate::controls::Device::Gamepad, ChordDir::Left) => "<",
@@ -183,7 +180,26 @@ pub fn chord_menu_text<A: Copy + PartialEq + Debug>(
         (crate::controls::Device::KeyboardMouse, ChordDir::Down) => "S",
         (crate::controls::Device::KeyboardMouse, ChordDir::Left) => "A",
         (crate::controls::Device::KeyboardMouse, ChordDir::Right) => "D",
-    };
+    }
+}
+
+/// The chord MODIFIER's legend glyph — X on pad, right-mouse-hold on kb/m (no mouse
+/// art in the asset set, so a text chip). One source for every scheme's chord rows.
+pub fn modifier_glyph(device: crate::controls::Device) -> crate::controls::Glyph {
+    match device {
+        crate::controls::Device::Gamepad => {
+            crate::controls::Glyph::Icon("controls/xbox_button_x.png")
+        }
+        crate::controls::Device::KeyboardMouse => crate::controls::Glyph::Label("RMB"),
+    }
+}
+
+pub fn chord_menu_text<A: Copy + PartialEq + Debug>(
+    registry: ChordRegistry<A>,
+    entered: Option<&[ChordDir]>,
+    device: crate::controls::Device,
+) -> String {
+    let dir = |d: ChordDir| dir_text(d, device);
     let code_text = |code: &[ChordDir]| code.iter().copied().map(dir).collect::<String>();
     let Some(prefix) = entered else {
         return "code too long - release to cancel".to_string();
