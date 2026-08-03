@@ -9,7 +9,7 @@ use bevy_rapier3d::prelude::*;
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabEnvId, CrabJoint, CrabJointId, joint_angle};
 
-use crate::controls::just_pressed;
+use crate::chord::Chords;
 
 use super::controls::{DemoAction, DemoControls};
 
@@ -105,13 +105,12 @@ fn setup_overlay(
 }
 
 fn toggle_graph(
-    keys: Res<ButtonInput<KeyCode>>,
-    pads: Query<&Gamepad>,
+    chords: Res<Chords<DemoControls>>,
     mut graph: ResMut<JointGraph>,
     mut ui: Query<&mut Visibility, With<GraphUi>>,
 ) {
-    // Dispatched from DEMO_BINDINGS (G / pad North), so the legend can't drift from the key.
-    if just_pressed::<DemoControls>(DemoAction::JointGraph, &keys, &pads) {
+    // Dispatched from DEMO_CHORDS, so the legend can't drift from the code.
+    if chords.executed(DemoAction::JointGraph) {
         graph.visible = !graph.visible;
         for mut v in ui.iter_mut() {
             *v = if graph.visible {
