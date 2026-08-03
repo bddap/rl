@@ -101,7 +101,12 @@ pub fn build_windowed_app(
         .add_systems(OnExit(AppPhase::Playing), (teardown_round, release_cursor))
         .add_systems(
             Update,
-            (grab_cursor, quit_game, super::brain_swap::swap_brain)
+            (
+                grab_cursor,
+                quit_game,
+                super::brain_swap::swap_brain,
+                toggle_debug_overlay,
+            )
                 .run_if(in_state(AppPhase::Playing)),
         )
         .add_systems(
@@ -247,4 +252,15 @@ pub(super) fn install_armed_nn_crab(
     // path that lays the env origins AT the sim spawns — here, pre-spawn, it
     // stashes the layout for `spawn_initial_crabs`.
     crate::crab_slot::restart_crabs_to_spawns(app.world_mut(), &crab_spawns);
+}
+
+/// The rl#326 F3 overlay, reachable from the controller: GCR runs on a TV where no
+/// keyboard is at hand when the game turns slideshow (rl#331).
+fn toggle_debug_overlay(
+    chords: Res<crab_world::chord::Chords<GcrControls>>,
+    mut overlay: ResMut<crab_world::debug_overlay::DebugOverlay>,
+) {
+    if chords.executed(controls::Action::ToggleDebugOverlay) {
+        overlay.visible = !overlay.visible;
+    }
 }

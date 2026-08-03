@@ -118,6 +118,11 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         label: "Restart round",
     },
     ChordEntry {
+        code: &[ChordDir::Left, ChordDir::Right],
+        action: Action::ToggleDebugOverlay,
+        label: "Perf overlay",
+    },
+    ChordEntry {
         code: crab_world::chord::QUIT_CODE,
         action: Action::Quit,
         label: "Quit round",
@@ -167,6 +172,9 @@ pub enum Action {
     GroundNightBloomRose,
     GroundNightBloomFiligree,
     SwapBrain,
+    /// The rl#326 debug overlay (fps / sim ms / frame graph), reachable without a
+    /// keyboard — the TV/couch slideshow-diagnosis affordance (rl#331).
+    ToggleDebugOverlay,
     RevealControls,
 
     PlaneAttitude,
@@ -628,7 +636,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 40] = [
+    const ALL_ACTIONS: [Action; 41] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -656,6 +664,7 @@ mod tests {
         Action::GroundNightBloomRose,
         Action::GroundNightBloomFiligree,
         Action::SwapBrain,
+        Action::ToggleDebugOverlay,
         Action::RevealControls,
         Action::PlaneAttitude,
         Action::PlaneThrottle,
@@ -741,6 +750,10 @@ mod tests {
         );
         assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Right]), Some(Action::Restart));
         assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Left, ChordDir::Right]),
+            Some(Action::ToggleDebugOverlay)
+        );
+        assert_eq!(
             GCR_CHORDS.lookup(&[
                 ChordDir::Up,
                 ChordDir::Up,
@@ -825,6 +838,7 @@ mod tests {
                 | Action::GroundNightBloomRose
                 | Action::GroundNightBloomFiligree
                 | Action::SwapBrain
+                | Action::ToggleDebugOverlay
                 | Action::RevealControls
                 | Action::PlaneAttitude
                 | Action::PlaneThrottle

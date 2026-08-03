@@ -1,9 +1,16 @@
-//! Developer debug overlay (rl#326): OFF by default, F3 toggles it at runtime. Deliberately
-//! outside the gameplay HUD/controls chrome — the clean-screen rule for normal play doesn't
-//! apply to it, but it must render NOTHING until toggled. Widgets so far: FPS counter +
-//! frame-time graph; new widgets are further children of the root column.
+//! Developer debug overlay (rl#326): OFF by default, F3 (or a surface's chord) toggles it
+//! at runtime. Deliberately outside the gameplay HUD/controls chrome — the clean-screen
+//! rule for normal play doesn't apply to it, but it must render NOTHING until toggled.
+//! Widgets so far: FPS counter + sim-time readout + frame-time graph; new widgets are
+//! further children of the root column.
+//!
+//! Also the perf black box (rl#331): every frame lands in a ring buffer, and a sustained
+//! fps collapse dumps the ring to disk as CSV — so a slideshow episode leaves data behind
+//! even when nobody had the overlay up.
 
 use std::collections::VecDeque;
+use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use bevy::prelude::*;
 
@@ -19,21 +26,56 @@ const FPS_TEXT_PERIOD_SECS: f32 = 0.25;
 const GOOD_MS: f32 = 17.0;
 const OK_MS: f32 = 33.4;
 
-pub struct DebugOverlayPlugin;
+/// Ring depth: ≈30 s of lead-up at 60 fps, minutes during a slideshow — enough to see
+/// the transition INTO the collapse, which is the diagnostic part.
+const RING_LEN: usize = 1800;
+/// Collapse = EVERY one of the last [`COLLAPSE_WINDOW`] frames at/over this. All-of, not
+/// mean-of: one multi-second hitch (asset load, window re-focus) must not trip a dump,
+/// and a real slideshow has no fast frames mixed in.
+const COLLAPSE_FRAME_MS: f32 = 100.0;
+const COLLAPSE_WINDOW: usize = 30;
+/// One dump per episode, not one per frame of it.
+const DUMP_COOLDOWN_SECS: f32 = 60.0;
+
+pub struct DebugOverlayPlugin {
+    /// Write the ring to disk when fps collapses. Off for offscreen surfaces — they
+    /// legitimately render slower than realtime (llvmpipe screenshots/video) and would
+    /// dump on every run.
+    pub collapse_dump: bool,
+}
 
 /// Toggle state as a resource (not just the root's `Visibility`) so surfaces without a
-/// keyboard — the fp-screenshot evidence path — can boot with the overlay on by
-/// overwriting it after app construction.
+/// keyboard — the fp-screenshot evidence path, GCR's chord toggle — can flip it from
+/// outside this module.
 #[derive(Resource, Default)]
 pub struct DebugOverlay {
     pub visible: bool,
 }
 
-/// Rolling wall-clock frame deltas; `Time<Real>` like [`crate::frame_telemetry`] — a
-/// paused game still renders frames. Recorded even while hidden, so toggling on shows
-/// the seconds that led up to the toggle instead of an empty graph.
+/// Last frame's sim cost, written by the surface's sim driver (GCR's `drive_client_sim`);
+/// stays zero on surfaces without one (rl-demo). `ticks` pinned at the driver's per-frame
+/// cap means the sim can't keep up with wall time — the death-spiral signature.
 #[derive(Resource, Default)]
-struct FrameSamples(VecDeque<f32>);
+pub struct SimFrameStats {
+    pub ms: f32,
+    pub ticks: u32,
+}
+
+/// One frame in the ring. `t_secs` is `Time<Real>` elapsed — wall-clock anchoring comes
+/// from the dump filename (unix seconds at write, ≈ the last sample's moment).
+#[derive(Clone, Copy)]
+pub struct PerfSample {
+    pub t_secs: f32,
+    pub frame_ms: f32,
+    pub sim_ms: f32,
+    pub sim_ticks: u32,
+}
+
+/// Rolling wall-clock frame records; `Time<Real>` like [`crate::frame_telemetry`] — a
+/// paused game still renders frames. Recorded even while hidden, so toggling on shows
+/// the seconds that led up to the toggle, and the collapse dump has its lead-up.
+#[derive(Resource, Default)]
+struct PerfRing(VecDeque<PerfSample>);
 
 #[derive(Component)]
 struct OverlayRoot;
@@ -48,7 +90,8 @@ struct GraphBar(usize);
 impl Plugin for DebugOverlayPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DebugOverlay>()
-            .init_resource::<FrameSamples>()
+            .init_resource::<PerfRing>()
+            .init_resource::<SimFrameStats>()
             .add_systems(Startup, spawn_overlay)
             .add_systems(
                 Update,
@@ -60,6 +103,9 @@ impl Plugin for DebugOverlayPlugin {
                 )
                     .chain(),
             );
+        if self.collapse_dump {
+            app.add_systems(Update, dump_on_collapse.after(record_sample));
+        }
     }
 }
 
@@ -83,11 +129,86 @@ fn apply_visibility(
     };
 }
 
-fn record_sample(time: Res<Time<Real>>, mut samples: ResMut<FrameSamples>) {
-    if samples.0.len() == GRAPH_COLS {
-        samples.0.pop_front();
+fn record_sample(time: Res<Time<Real>>, sim: Res<SimFrameStats>, mut ring: ResMut<PerfRing>) {
+    push_sample(
+        &mut ring.0,
+        PerfSample {
+            t_secs: time.elapsed_secs(),
+            frame_ms: time.delta_secs() * 1000.0,
+            sim_ms: sim.ms,
+            sim_ticks: sim.ticks,
+        },
+    );
+}
+
+fn push_sample(ring: &mut VecDeque<PerfSample>, sample: PerfSample) {
+    if ring.len() == RING_LEN {
+        ring.pop_front();
     }
-    samples.0.push_back(time.delta_secs());
+    ring.push_back(sample);
+}
+
+fn collapsed(ring: &VecDeque<PerfSample>) -> bool {
+    ring.len() >= COLLAPSE_WINDOW
+        && ring
+            .iter()
+            .rev()
+            .take(COLLAPSE_WINDOW)
+            .all(|s| s.frame_ms >= COLLAPSE_FRAME_MS)
+}
+
+fn dump_csv(ring: &VecDeque<PerfSample>) -> String {
+    let mut out = String::from("t_secs,frame_ms,sim_ms,sim_ticks\n");
+    for s in ring {
+        writeln!(
+            out,
+            "{:.3},{:.2},{:.2},{}",
+            s.t_secs, s.frame_ms, s.sim_ms, s.sim_ticks
+        )
+        .expect("String write is infallible");
+    }
+    out
+}
+
+fn dump_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("RL_PERF_DUMP_DIR") {
+        return Some(dir.into());
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".local/state/rl/perf"))
+}
+
+fn dump_on_collapse(time: Res<Time<Real>>, ring: Res<PerfRing>, mut last_dump: Local<Option<f32>>) {
+    if !collapsed(&ring.0) {
+        return;
+    }
+    let now = time.elapsed_secs();
+    if last_dump.is_some_and(|t| now - t < DUMP_COOLDOWN_SECS) {
+        return;
+    }
+    // Cooldown starts on the attempt, not on success — a broken disk must not turn the
+    // dump into a per-frame write storm.
+    *last_dump = Some(now);
+    let Some(dir) = dump_dir() else {
+        warn!("perf collapse detected but no HOME or RL_PERF_DUMP_DIR — ring dump skipped");
+        return;
+    };
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("perf-collapse-{unix}.csv"));
+    let written =
+        std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, dump_csv(&ring.0)));
+    match written {
+        Ok(()) => warn!(
+            "perf collapse: {} consecutive frames >= {COLLAPSE_FRAME_MS} ms — ring dumped to {}",
+            COLLAPSE_WINDOW,
+            path.display()
+        ),
+        Err(e) => warn!("perf collapse ring dump to {} failed: {e}", path.display()),
+    }
 }
 
 fn spawn_overlay(mut commands: Commands) {
@@ -140,7 +261,7 @@ fn spawn_overlay(mut commands: Commands) {
 }
 
 fn update_fps_text(
-    samples: Res<FrameSamples>,
+    ring: Res<PerfRing>,
     time: Res<Time<Real>>,
     mut acc: Local<f32>,
     mut text: Query<&mut Text, With<FpsText>>,
@@ -155,28 +276,36 @@ fn update_fps_text(
     };
     // Mean over the last ~second, not the last frame: one hitch shouldn't own the number
     // (the graph is where individual spikes show).
-    let window: Vec<f32> = samples.0.iter().rev().take(60).copied().collect();
-    let sum: f32 = window.iter().sum();
-    if window.is_empty() || sum <= 0.0 {
+    let window: Vec<&PerfSample> = ring.0.iter().rev().take(60).collect();
+    let frame_sum: f32 = window.iter().map(|s| s.frame_ms).sum();
+    if window.is_empty() || frame_sum <= 0.0 {
         return;
     }
-    let mean = sum / window.len() as f32;
-    **text = format!("{:.0} fps  {:.1} ms", 1.0 / mean, mean * 1000.0);
+    let n = window.len() as f32;
+    let frame_mean = frame_sum / n;
+    let sim_mean: f32 = window.iter().map(|s| s.sim_ms).sum::<f32>() / n;
+    let ticks = window.first().map_or(0, |s| s.sim_ticks);
+    **text = format!(
+        "{:.0} fps  {frame_mean:.1} ms | sim {sim_mean:.1} ms  {ticks} ticks",
+        1000.0 / frame_mean
+    );
 }
 
 fn update_graph(
-    samples: Res<FrameSamples>,
+    ring: Res<PerfRing>,
     mut bars: Query<(&GraphBar, &mut Node, &mut BackgroundColor)>,
 ) {
-    // Newest sample lands on the rightmost bar; a not-yet-full window leaves the left blank.
-    let pad = GRAPH_COLS.saturating_sub(samples.0.len());
+    // Newest sample lands on the rightmost bar; a not-yet-full window leaves the left
+    // blank. The graph shows the ring's newest GRAPH_COLS samples.
+    let skip = ring.0.len().saturating_sub(GRAPH_COLS);
+    let pad = GRAPH_COLS.saturating_sub(ring.0.len());
     for (bar, mut node, mut color) in &mut bars {
-        let Some(&dt) = bar.0.checked_sub(pad).and_then(|i| samples.0.get(i)) else {
+        let Some(s) = bar.0.checked_sub(pad).and_then(|i| ring.0.get(skip + i)) else {
             node.height = Val::Px(0.0);
             *color = BackgroundColor(Color::NONE);
             continue;
         };
-        let ms = dt * 1000.0;
+        let ms = s.frame_ms;
         node.height = Val::Px((ms / FULL_SCALE_MS * GRAPH_HEIGHT_PX).clamp(1.0, GRAPH_HEIGHT_PX));
         *color = BackgroundColor(if ms <= GOOD_MS {
             Color::srgb(0.4, 1.0, 0.55)
@@ -185,5 +314,72 @@ fn update_graph(
         } else {
             Color::srgb(1.0, 0.3, 0.25)
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(frame_ms: f32) -> PerfSample {
+        PerfSample {
+            t_secs: 0.0,
+            frame_ms,
+            sim_ms: 1.0,
+            sim_ticks: 2,
+        }
+    }
+
+    fn ring_of(frames: &[f32]) -> VecDeque<PerfSample> {
+        frames.iter().map(|&ms| sample(ms)).collect()
+    }
+
+    #[test]
+    fn collapse_needs_a_full_window_of_slow_frames() {
+        assert!(!collapsed(&ring_of(&[])));
+        assert!(
+            !collapsed(&ring_of(&[500.0; 29])),
+            "under-full ring never trips"
+        );
+        assert!(collapsed(&ring_of(&[COLLAPSE_FRAME_MS; 30])));
+        // Fast frames older than the window don't save a live collapse.
+        let mut mixed = vec![16.0; 100];
+        mixed.extend([250.0; 30]);
+        assert!(collapsed(&ring_of(&mixed)));
+    }
+
+    /// One multi-second hitch (asset load, focus regain) is not a slideshow: any fast
+    /// frame inside the window vetoes the dump.
+    #[test]
+    fn single_hitch_does_not_trip_a_dump() {
+        let mut frames = vec![16.0; 40];
+        frames.push(10_000.0);
+        frames.extend([16.0; 5]);
+        assert!(!collapsed(&ring_of(&frames)));
+    }
+
+    #[test]
+    fn ring_is_capped() {
+        let mut ring = VecDeque::new();
+        for i in 0..(RING_LEN + 10) {
+            push_sample(&mut ring, sample(i as f32));
+        }
+        assert_eq!(ring.len(), RING_LEN);
+        // Oldest dropped, newest kept.
+        assert_eq!(ring.back().unwrap().frame_ms, (RING_LEN + 9) as f32);
+    }
+
+    #[test]
+    fn csv_has_header_and_one_row_per_sample() {
+        let ring = VecDeque::from([PerfSample {
+            t_secs: 1.5,
+            frame_ms: 33.333,
+            sim_ms: 4.0,
+            sim_ticks: 8,
+        }]);
+        assert_eq!(
+            dump_csv(&ring),
+            "t_secs,frame_ms,sim_ms,sim_ticks\n1.500,33.33,4.00,8\n"
+        );
     }
 }

@@ -90,7 +90,9 @@ pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
             })
             .add(UiScalePlugin)
             .add(crate::frame_telemetry::FrameTelemetryPlugin)
-            .add(crate::debug_overlay::DebugOverlayPlugin),
+            .add(crate::debug_overlay::DebugOverlayPlugin {
+                collapse_dump: true,
+            }),
         None => plugins
             .set(WindowPlugin {
                 primary_window: None,
@@ -98,8 +100,11 @@ pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
                 ..default()
             })
             .disable::<bevy::winit::WinitPlugin>()
-            // Offscreen too, so the fp-screenshot evidence path can capture the overlay.
-            .add(crate::debug_overlay::DebugOverlayPlugin),
+            // Offscreen too, so the fp-screenshot evidence path can capture the overlay —
+            // but no collapse dump: offscreen renders are legitimately slower than realtime.
+            .add(crate::debug_overlay::DebugOverlayPlugin {
+                collapse_dump: false,
+            }),
     }
 }
 
