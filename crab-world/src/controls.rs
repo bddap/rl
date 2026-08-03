@@ -530,6 +530,12 @@ mod overlay {
     ) {
         parent
             .spawn((
+                // Wrap into extra columns against a viewport-relative height cap: the
+                // chord registry made legends long (28 rows in GCR's foot context after
+                // the rl#330 stage-5 variant codes), and a single column overflows the
+                // 92%-capped overlay — silently, since flex neither scrolls nor clips
+                // visibly. Vh, not Percent: the overlay parent is content-sized, so a
+                // percent max-height resolves to auto and never triggers the wrap.
                 Node {
                     display: if visible {
                         Display::Flex
@@ -537,7 +543,10 @@ mod overlay {
                         Display::None
                     },
                     flex_direction: FlexDirection::Column,
+                    flex_wrap: FlexWrap::Wrap,
+                    max_height: Val::Vh(70.0),
                     row_gap: Val::Px(8.0),
+                    column_gap: Val::Px(32.0),
                     ..default()
                 },
                 LegendColumn::<S> { ctx, device },

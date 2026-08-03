@@ -180,7 +180,7 @@ fn drive_chord_script(
         mouse.release(crab_world::chord::CHORD_MODIFIER_MOUSE);
     }
     // Releases strictly before presses: for back-to-back same-key taps (frames N and
-    // N+1 — Quit's ^^vv shape) the N+1 press must land on a released key regardless
+    // N+1 — Quit's ^^ opener) the N+1 press must land on a released key regardless
     // of spec order, or bevy's idempotent press() yields no just_pressed edge and the
     // capture silently holds a PREFIX of the typed code.
     for &(at, dir) in &script.taps {

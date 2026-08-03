@@ -9,12 +9,13 @@ pub struct GcrControls;
 /// (the empty code) is deliberately unassigned: the owner de-overloaded X — vehicle
 /// switching is a code per vehicle, not a tap verb (the ↑-family = the sky craft,
 /// ↓↓ = back to the ground). Every render/art variant is its own entry (stage 5,
-/// replacing the two Cycle* verbs): render modes under `^^`, ground looks under `v`
-/// (`v^` opens the night blooms), so the held-X menu filters to a family per tap.
-/// No ground code starts `vv` — an early release mid-look-code must never execute
-/// ExitVehicle. Quit's code is ≥2 taps longer than every other — one stray tap after
-/// any registered code can never end the round (the chord replacement for the old
-/// timed hold-to-quit guard; a couch kid mashing d-pad stays in the round).
+/// replacing the two Cycle* verbs): render modes under `^^`, ground looks under `v` —
+/// `v^` is ALL the night blooms (4 taps), `v<`/`v>` the other looks (3 taps) — so the
+/// held-X menu filters to one family per tap. No ground code starts `vv` — an early
+/// release mid-look-code must never execute ExitVehicle. Quit's code is ≥2 taps
+/// longer than every other — one stray tap after any registered code can never end
+/// the round (the chord replacement for the old timed hold-to-quit guard; a couch kid
+/// mashing d-pad stays in the round).
 pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
     ChordEntry {
         code: &[ChordDir::Up, ChordDir::Left],
@@ -47,62 +48,62 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         label: "Render: colliders",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Up],
+        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Up, ChordDir::Up],
         action: Action::GroundNightBloom,
-        label: "Ground: night bloom",
+        label: "Ground: bloom",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Down],
+        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Up, ChordDir::Down],
         action: Action::GroundNightBloomAurora,
         label: "Ground: bloom aurora",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Left],
+        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Up, ChordDir::Left],
         action: Action::GroundNightBloomEmber,
         label: "Ground: bloom ember",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Right],
+        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Up, ChordDir::Right],
         action: Action::GroundNightBloomFrost,
         label: "Ground: bloom frost",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Up],
+        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Down, ChordDir::Up],
         action: Action::GroundNightBloomRose,
         label: "Ground: bloom rose",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Down],
+        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Down, ChordDir::Down],
         action: Action::GroundNightBloomFiligree,
         label: "Ground: bloom filigree",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Left],
+        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Up],
         action: Action::GroundShipped,
         label: "Ground: shipped",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Right],
+        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Down],
         action: Action::GroundPatternedGround,
         label: "Ground: patterned",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Up],
+        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Left],
         action: Action::GroundWindCombed,
         label: "Ground: wind-combed",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Down],
+        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Right],
         action: Action::GroundCrackedLoam,
         label: "Ground: cracked loam",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Left],
+        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Up],
         action: Action::GroundWetNocturne,
         label: "Ground: wet nocturne",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Right],
+        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Down],
         action: Action::GroundWatershed,
         label: "Ground: watershed",
     },
@@ -117,14 +118,7 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         label: "Restart round",
     },
     ChordEntry {
-        code: &[
-            ChordDir::Up,
-            ChordDir::Up,
-            ChordDir::Down,
-            ChordDir::Down,
-            ChordDir::Left,
-            ChordDir::Right,
-        ],
+        code: crab_world::chord::QUIT_CODE,
         action: Action::Quit,
         label: "Quit round",
     },
@@ -717,19 +711,30 @@ mod tests {
             GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Up, ChordDir::Left]),
             Some(Action::RenderColliders)
         );
-        // Ground looks are the v-family, night blooms behind v^.
+        // Ground looks are the v-family: v^ is all the night blooms, v</v> the rest.
         assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Up, ChordDir::Up]),
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Up, ChordDir::Up, ChordDir::Up]),
             Some(Action::GroundNightBloom)
         );
         assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Left, ChordDir::Left]),
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Up, ChordDir::Down, ChordDir::Down]),
+            Some(Action::GroundNightBloomFiligree)
+        );
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Left, ChordDir::Up]),
             Some(Action::GroundShipped)
         );
         assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Right, ChordDir::Right]),
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Right, ChordDir::Down]),
             Some(Action::GroundWatershed)
         );
+        // The v^ family is EXACTLY the night blooms — a non-bloom slipped under v^
+        // (or a bloom outside it) breaks the menu's family grouping.
+        for e in GCR_CHORDS.entries() {
+            let is_bloom_code = e.code.starts_with(&[ChordDir::Down, ChordDir::Up]);
+            let is_bloom_label = e.label.starts_with("Ground: bloom");
+            assert_eq!(is_bloom_code, is_bloom_label, "{:?} misfiled", e.action);
+        }
         assert_eq!(
             GCR_CHORDS.lookup(&[ChordDir::Left]),
             Some(Action::SwapBrain)

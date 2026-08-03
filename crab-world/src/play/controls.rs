@@ -9,12 +9,13 @@ pub struct DemoControls;
 
 /// The demo's chord table (rl#330 stage 4) — every discrete verb is a code; the owner
 /// tunes assignments here in play. Where a verb exists on both surfaces the code
-/// matches GCR's `GCR_CHORDS` (net/src/controls.rs): ^ render view, < swap brain, the
-/// right-tap for the reset-flavored verb (Restart there, Rebuild here), ^^vv quit —
-/// Quit stays ≥2 taps longer than every other code, so a stray tap after any
-/// registered code can't kill the demo. Demo-only verbs take the leftover space (v is
-/// Poke here, Ground look there). The bare tap (empty code) is unassigned, same as
-/// GCR's de-overloaded X.
+/// matches GCR's `GCR_CHORDS` (net/src/controls.rs): < swap brain, the right-tap for
+/// the reset-flavored verb (Restart there, Rebuild here), [`crate::chord::QUIT_CODE`]
+/// quit — Quit stays ≥2 taps longer than every other code, so a stray tap after any
+/// registered code can't kill the demo. The 1-tap ^/v are demo-only spellings (GCR
+/// left them unassigned as its family roots when its per-variant codes landed, stage
+/// 5): ^ cycles the demo's render view, v is Poke. The bare tap (empty code) is
+/// unassigned, same as GCR's de-overloaded X.
 pub(crate) const DEMO_CHORDS: ChordRegistry<DemoAction> = ChordRegistry::new(&[
     ChordEntry {
         code: &[ChordDir::Up],
@@ -47,16 +48,7 @@ pub(crate) const DEMO_CHORDS: ChordRegistry<DemoAction> = ChordRegistry::new(&[
         label: "Manual control",
     },
     ChordEntry {
-        // Matches GCR's Quit (one muscle memory across surfaces): GCR's grew to 6
-        // taps when its 3-tap variant codes landed (rl#330 stage 5), so this follows.
-        code: &[
-            ChordDir::Up,
-            ChordDir::Up,
-            ChordDir::Down,
-            ChordDir::Down,
-            ChordDir::Left,
-            ChordDir::Right,
-        ],
+        code: crate::chord::QUIT_CODE,
         action: DemoAction::Quit,
         label: "Quit",
     },
