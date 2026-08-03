@@ -8,9 +8,13 @@ pub struct GcrControls;
 /// route per action, enforced by `assert_scheme_well_formed`. A bare modifier tap
 /// (the empty code) is deliberately unassigned: the owner de-overloaded X — vehicle
 /// switching is a code per vehicle, not a tap verb (the ↑-family = the sky craft,
-/// ↓↓ = back to the ground). Quit's code is ≥2 taps longer than every other — one
-/// stray tap after any registered code can never end the round (the chord replacement
-/// for the old timed hold-to-quit guard; a couch kid mashing d-pad stays in the round).
+/// ↓↓ = back to the ground). Every render/art variant is its own entry (stage 5,
+/// replacing the two Cycle* verbs): render modes under `^^`, ground looks under `v`
+/// (`v^` opens the night blooms), so the held-X menu filters to a family per tap.
+/// No ground code starts `vv` — an early release mid-look-code must never execute
+/// ExitVehicle. Quit's code is ≥2 taps longer than every other — one stray tap after
+/// any registered code can never end the round (the chord replacement for the old
+/// timed hold-to-quit guard; a couch kid mashing d-pad stays in the round).
 pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
     ChordEntry {
         code: &[ChordDir::Up, ChordDir::Left],
@@ -28,14 +32,79 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         label: "Exit to foot",
     },
     ChordEntry {
-        code: &[ChordDir::Up],
-        action: Action::CycleRenderMode,
-        label: "Render mode",
+        code: &[ChordDir::Up, ChordDir::Up, ChordDir::Up],
+        action: Action::RenderMesh,
+        label: "Render: mesh",
     },
     ChordEntry {
-        code: &[ChordDir::Down],
-        action: Action::CycleGroundLook,
-        label: "Ground look",
+        code: &[ChordDir::Up, ChordDir::Up, ChordDir::Down],
+        action: Action::RenderMeshColliders,
+        label: "Render: mesh+colliders",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Up, ChordDir::Left],
+        action: Action::RenderColliders,
+        label: "Render: colliders",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Up],
+        action: Action::GroundNightBloom,
+        label: "Ground: night bloom",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Down],
+        action: Action::GroundNightBloomAurora,
+        label: "Ground: bloom aurora",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Left],
+        action: Action::GroundNightBloomEmber,
+        label: "Ground: bloom ember",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Up, ChordDir::Right],
+        action: Action::GroundNightBloomFrost,
+        label: "Ground: bloom frost",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Up],
+        action: Action::GroundNightBloomRose,
+        label: "Ground: bloom rose",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Down],
+        action: Action::GroundNightBloomFiligree,
+        label: "Ground: bloom filigree",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Left],
+        action: Action::GroundShipped,
+        label: "Ground: shipped",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Left, ChordDir::Right],
+        action: Action::GroundPatternedGround,
+        label: "Ground: patterned",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Up],
+        action: Action::GroundWindCombed,
+        label: "Ground: wind-combed",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Down],
+        action: Action::GroundCrackedLoam,
+        label: "Ground: cracked loam",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Left],
+        action: Action::GroundWetNocturne,
+        label: "Ground: wet nocturne",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Right],
+        action: Action::GroundWatershed,
+        label: "Ground: watershed",
     },
     ChordEntry {
         code: &[ChordDir::Left],
@@ -48,7 +117,14 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         label: "Restart round",
     },
     ChordEntry {
-        code: &[ChordDir::Up, ChordDir::Up, ChordDir::Down, ChordDir::Down],
+        code: &[
+            ChordDir::Up,
+            ChordDir::Up,
+            ChordDir::Down,
+            ChordDir::Down,
+            ChordDir::Left,
+            ChordDir::Right,
+        ],
         action: Action::Quit,
         label: "Quit round",
     },
@@ -78,8 +154,24 @@ pub enum Action {
     BoardPlane,
     BoardShip,
     ExitVehicle,
-    CycleRenderMode,
-    CycleGroundLook,
+    // One action per render/art variant (rl#330 stage 5) — direct selection, no Cycle
+    // verbs. The render-gated `ViewKnob::action` maps match these exhaustively, so a
+    // new `RenderMode`/`GroundLook` variant without an action is a compile error there.
+    RenderMesh,
+    RenderMeshColliders,
+    RenderColliders,
+    GroundShipped,
+    GroundNightBloom,
+    GroundPatternedGround,
+    GroundWindCombed,
+    GroundCrackedLoam,
+    GroundWetNocturne,
+    GroundWatershed,
+    GroundNightBloomAurora,
+    GroundNightBloomEmber,
+    GroundNightBloomFrost,
+    GroundNightBloomRose,
+    GroundNightBloomFiligree,
     SwapBrain,
     RevealControls,
 
@@ -542,7 +634,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 27] = [
+    const ALL_ACTIONS: [Action; 40] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -554,8 +646,21 @@ mod tests {
         Action::BoardPlane,
         Action::BoardShip,
         Action::ExitVehicle,
-        Action::CycleRenderMode,
-        Action::CycleGroundLook,
+        Action::RenderMesh,
+        Action::RenderMeshColliders,
+        Action::RenderColliders,
+        Action::GroundShipped,
+        Action::GroundNightBloom,
+        Action::GroundPatternedGround,
+        Action::GroundWindCombed,
+        Action::GroundCrackedLoam,
+        Action::GroundWetNocturne,
+        Action::GroundWatershed,
+        Action::GroundNightBloomAurora,
+        Action::GroundNightBloomEmber,
+        Action::GroundNightBloomFrost,
+        Action::GroundNightBloomRose,
+        Action::GroundNightBloomFiligree,
         Action::SwapBrain,
         Action::RevealControls,
         Action::PlaneAttitude,
@@ -596,13 +701,34 @@ mod tests {
             GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Down]),
             Some(Action::ExitVehicle)
         );
+        // Render modes are the ^^-family; the freed 1-tap ^ and v are deliberately
+        // unassigned (family roots, not verbs).
+        assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Up]), None);
+        assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Down]), None);
         assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Up]),
-            Some(Action::CycleRenderMode)
+            GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Up, ChordDir::Up]),
+            Some(Action::RenderMesh)
         );
         assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Down]),
-            Some(Action::CycleGroundLook)
+            GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Up, ChordDir::Down]),
+            Some(Action::RenderMeshColliders)
+        );
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Up, ChordDir::Left]),
+            Some(Action::RenderColliders)
+        );
+        // Ground looks are the v-family, night blooms behind v^.
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Up, ChordDir::Up]),
+            Some(Action::GroundNightBloom)
+        );
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Left, ChordDir::Left]),
+            Some(Action::GroundShipped)
+        );
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Right, ChordDir::Right]),
+            Some(Action::GroundWatershed)
         );
         assert_eq!(
             GCR_CHORDS.lookup(&[ChordDir::Left]),
@@ -610,9 +736,35 @@ mod tests {
         );
         assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Right]), Some(Action::Restart));
         assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Up, ChordDir::Down, ChordDir::Down]),
+            GCR_CHORDS.lookup(&[
+                ChordDir::Up,
+                ChordDir::Up,
+                ChordDir::Down,
+                ChordDir::Down,
+                ChordDir::Left,
+                ChordDir::Right
+            ]),
             Some(Action::Quit)
         );
+    }
+
+    /// No ground-look code may start with ExitVehicle's `vv`: releasing one tap early
+    /// mid-look-code would otherwise dismount the player over an art tweak.
+    #[test]
+    fn no_ground_code_hides_behind_exit_vehicle() {
+        let exit = GCR_CHORDS
+            .entries()
+            .iter()
+            .find(|e| e.action == Action::ExitVehicle)
+            .unwrap()
+            .code;
+        for e in GCR_CHORDS.entries() {
+            assert!(
+                e.action == Action::ExitVehicle || !e.code.starts_with(exit),
+                "{:?}'s code starts with ExitVehicle's",
+                e.action
+            );
+        }
     }
 
     /// Quit replaced the timed hold-to-quit guard, so it must stay the hardest command
@@ -652,8 +804,21 @@ mod tests {
                 | Action::BoardPlane
                 | Action::BoardShip
                 | Action::ExitVehicle
-                | Action::CycleRenderMode
-                | Action::CycleGroundLook
+                | Action::RenderMesh
+                | Action::RenderMeshColliders
+                | Action::RenderColliders
+                | Action::GroundShipped
+                | Action::GroundNightBloom
+                | Action::GroundPatternedGround
+                | Action::GroundWindCombed
+                | Action::GroundCrackedLoam
+                | Action::GroundWetNocturne
+                | Action::GroundWatershed
+                | Action::GroundNightBloomAurora
+                | Action::GroundNightBloomEmber
+                | Action::GroundNightBloomFrost
+                | Action::GroundNightBloomRose
+                | Action::GroundNightBloomFiligree
                 | Action::SwapBrain
                 | Action::RevealControls
                 | Action::PlaneAttitude

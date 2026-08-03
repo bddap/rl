@@ -137,6 +137,12 @@ pub struct BootView {
 pub trait CyclableView: clap::ValueEnum + PartialEq + Copy {}
 impl<T: clap::ValueEnum + PartialEq + Copy> CyclableView for T {}
 
+/// Every state of a view knob, in clap declaration order — for callers without a clap
+/// dependency (`net`'s per-variant chord dispatch, rl#330 stage 5).
+pub fn view_variants<T: CyclableView>() -> &'static [T] {
+    T::value_variants()
+}
+
 /// Advance a view knob one step, wrapping. The cycle order is clap's declaration
 /// order — the very list the knob's flag accepts — so a knob has ONE set of states
 /// and no hand-written `next` to forget a variant in.

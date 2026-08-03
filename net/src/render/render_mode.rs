@@ -19,8 +19,8 @@ pub fn register(app: &mut App, initial: RenderMode) {
     app.add_systems(
         Update,
         (
-            cycle_view::<RenderMode>.run_if(in_state(AppPhase::Playing)),
-            cycle_view::<crab_world::ground::GroundLook>.run_if(in_state(AppPhase::Playing)),
+            select_view::<RenderMode>.run_if(in_state(AppPhase::Playing)),
+            select_view::<crab_world::ground::GroundLook>.run_if(in_state(AppPhase::Playing)),
             manage_silhouette_visibility,
         ),
     );
@@ -32,37 +32,61 @@ pub fn register(app: &mut App, initial: RenderMode) {
     );
 }
 
-/// A view knob the player walks with one button: a `clap` value enum that is ALSO the
-/// live resource, so the states its flag accepts and the states the button reaches are
-/// one list. Both knobs are pure dressing — neither reaches simulated state, so cycling
-/// mid-round changes nothing an eval or a peer would see.
-trait ViewKnob: Resource + crab_world::CyclableView {
-    const ACTION: Action;
+/// A view knob the player sets by chord code — one code per variant (rl#330 stage 5),
+/// no cycle verb: a `clap` value enum that is ALSO the live resource, so the states its
+/// flag accepts and the states a code reaches are one list. Both knobs are pure
+/// dressing — neither reaches simulated state, so switching mid-round changes nothing
+/// an eval or a peer would see.
+pub(crate) trait ViewKnob: Resource + crab_world::CyclableView {
     /// How the knob names itself in the log line.
     const LOG_LABEL: &'static str;
+    /// The variant's chord action. Exhaustive by construction: a new variant with no
+    /// action — and hence no code in `GCR_CHORDS` — is a compile error here, and the
+    /// registry-coverage test below catches an action left out of the table.
+    fn action(self) -> Action;
 }
 
 impl ViewKnob for RenderMode {
-    const ACTION: Action = Action::CycleRenderMode;
     const LOG_LABEL: &'static str = "render mode";
+    fn action(self) -> Action {
+        match self {
+            RenderMode::Mesh => Action::RenderMesh,
+            RenderMode::MeshColliders => Action::RenderMeshColliders,
+            RenderMode::Colliders => Action::RenderColliders,
+        }
+    }
 }
 
 impl ViewKnob for crab_world::ground::GroundLook {
-    const ACTION: Action = Action::CycleGroundLook;
     const LOG_LABEL: &'static str = "ground look";
+    fn action(self) -> Action {
+        use crab_world::ground::GroundLook::*;
+        match self {
+            Shipped => Action::GroundShipped,
+            NightBloom => Action::GroundNightBloom,
+            PatternedGround => Action::GroundPatternedGround,
+            WindCombed => Action::GroundWindCombed,
+            CrackedLoam => Action::GroundCrackedLoam,
+            WetNocturne => Action::GroundWetNocturne,
+            Watershed => Action::GroundWatershed,
+            NightBloomAurora => Action::GroundNightBloomAurora,
+            NightBloomEmber => Action::GroundNightBloomEmber,
+            NightBloomFrost => Action::GroundNightBloomFrost,
+            NightBloomRose => Action::GroundNightBloomRose,
+            NightBloomFiligree => Action::GroundNightBloomFiligree,
+        }
+    }
 }
 
-fn cycle_view<V: ViewKnob>(
+fn select_view<V: ViewKnob>(
     chords: Res<crab_world::chord::Chords<controls::GcrControls>>,
     mut knob: ResMut<V>,
 ) {
-    if chords.executed(V::ACTION) {
-        *knob = crab_world::next_view_variant(*knob);
-        info!(
-            "{}: {}",
-            V::LOG_LABEL,
-            crab_world::view_variant_name(&*knob)
-        );
+    for &v in crab_world::view_variants::<V>() {
+        if chords.executed(v.action()) {
+            *knob = v;
+            info!("{}: {}", V::LOG_LABEL, crab_world::view_variant_name(&v));
+        }
     }
 }
 
@@ -122,5 +146,49 @@ fn draw_vehicle_collider_wireframe(
             world,
             COLLIDER_WIREFRAME_COLOR,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every render/art variant is reachable by a chord code (rl#330 stage 5): the
+    /// `ViewKnob::action` match makes a NEW variant a compile error, and this closes
+    /// the other half — its action must actually sit in [`controls::GCR_CHORDS`].
+    #[test]
+    fn every_view_variant_has_a_chord_code() {
+        fn assert_covered<V: ViewKnob>() {
+            for &v in crab_world::view_variants::<V>() {
+                assert!(
+                    controls::GCR_CHORDS
+                        .entries()
+                        .iter()
+                        .any(|e| e.action == v.action()),
+                    "{} variant {} has no chord entry",
+                    V::LOG_LABEL,
+                    crab_world::view_variant_name(&v)
+                );
+            }
+        }
+        assert_covered::<RenderMode>();
+        assert_covered::<crab_world::ground::GroundLook>();
+    }
+
+    /// The variant→action maps must stay injective — two variants sharing an action
+    /// would make one code set whichever variant iterates last, silently.
+    #[test]
+    fn view_variant_actions_are_distinct() {
+        fn actions<V: ViewKnob>() -> Vec<Action> {
+            crab_world::view_variants::<V>()
+                .iter()
+                .map(|&v| v.action())
+                .collect()
+        }
+        let mut all = actions::<RenderMode>();
+        all.extend(actions::<crab_world::ground::GroundLook>());
+        for (i, a) in all.iter().enumerate() {
+            assert!(!all[i + 1..].contains(a), "action {a:?} mapped twice");
+        }
     }
 }
