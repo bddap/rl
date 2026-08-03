@@ -125,6 +125,25 @@ macro_rules! ground_looks {
                 Shader::from_wgsl
             );)*
         }
+
+        /// A shader several looks share MUST read the params row (binding 104) —
+        /// otherwise every variant on it collapses onto one rendering while
+        /// `every_look_renders_distinctly` stays green (params differ Rust-side
+        /// regardless). Generated from the rows so a future family collapse is
+        /// guarded the day it lands, not when someone remembers to add a test.
+        #[cfg(test)]
+        #[test]
+        fn shared_shaders_read_the_params_binding() {
+            $(
+                if [$(stringify!($look)),+].len() > 1 {
+                    assert!(
+                        include_str!(concat!("ground_looks/", $file, ".wgsl"))
+                            .contains("@binding(104)"),
+                        concat!($file, ".wgsl is shared by several looks but never reads params")
+                    );
+                }
+            )*
+        }
     };
 }
 
@@ -155,7 +174,12 @@ impl GroundLook {
     /// - `[5]` x artery width, y artery core width, z capillary width (noise-space)
     pub fn params(self) -> [Vec4; 8] {
         let zero = [Vec4::ZERO; 8];
-        let row = |tint: [f32; 4], vein: [f32; 4], knot: [f32; 4], spore: [f32; 4], field: [f32; 4], widths: [f32; 3]| {
+        let row = |tint: [f32; 4],
+                   vein: [f32; 4],
+                   knot: [f32; 4],
+                   spore: [f32; 4],
+                   field: [f32; 4],
+                   widths: [f32; 3]| {
             let mut p = zero;
             p[0] = Vec4::from_array(tint);
             p[1] = Vec4::from_array(vein);
@@ -394,20 +418,16 @@ mod tests {
         let all = <GroundLook as clap::ValueEnum>::value_variants();
         let mut ids: Vec<_> = all
             .iter()
-            .map(|l| (l.shader().id(), l.params().map(|v| v.to_array().map(f32::to_bits))))
+            .map(|l| {
+                (
+                    l.shader().id(),
+                    l.params().map(|v| v.to_array().map(f32::to_bits)),
+                )
+            })
             .collect();
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), all.len());
-    }
-
-    /// A parameterized look whose shader ignores binding 104 would collapse every
-    /// variant onto one rendering. Any look sharing its shader with another must
-    /// point at a file that declares the params binding.
-    #[test]
-    fn shared_shaders_read_the_params_binding() {
-        let night_bloom = include_str!("ground_looks/night_bloom.wgsl");
-        assert!(night_bloom.contains("@binding(104)"));
     }
 
     /// The runtime swap, end to end below the keybind: cycling the resource must
@@ -436,7 +456,9 @@ mod tests {
         app.update();
 
         let materials = app.world().resource::<Assets<GroundMaterial>>();
-        assert_eq!(materials.get(&handle).unwrap().extension.look, next);
+        let extension = &materials.get(&handle).unwrap().extension;
+        assert_eq!(extension.look, next);
+        assert_eq!(extension.params, next.params());
     }
 
     /// The toggle must reach every look and come home — a partial cycle would
