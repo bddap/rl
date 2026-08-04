@@ -1,4 +1,5 @@
 pub mod actuator;
+pub mod aero;
 pub mod arch;
 pub mod body;
 pub mod collider_check;
@@ -288,7 +289,13 @@ impl Plugin for BotPlugin {
                     .run_if(pose_sentinel::visuals_on),
             )
             .add_systems(FixedUpdate, sensor::build_observation.in_set(BotSet::Sense))
-            .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act));
+            .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act))
+            .add_systems(
+                FixedUpdate,
+                aero::apply_air_drag
+                    .after(BotSet::Act)
+                    .before(PhysicsSet::SyncBackend),
+            );
 
         #[cfg(feature = "render")]
         if app
