@@ -10,7 +10,6 @@ struct MergedRollout {
     rollouts: Vec<RolloutBuffer>,
     samples: u64,
     ticks: u64,
-    panics: u32,
     /// Threads that REFUSED their horizon because the snapshot failed to load (bddap/rl#177),
     /// pooled this iter; surfaced on the log so a recurring load failure can't hide.
     snapshot_load_failures: u32,
@@ -60,11 +59,13 @@ fn persist_checkpoint(state: &TrainingState, gpu_learner: &crate::training::gpu:
 
 /// Phase 2 — roll one synchronous horizon across all threads: send each its request,
 /// then collect every result. This is the barrier — the update waits for the slowest.
-/// A closed channel means a thread's OS thread died building/warming a world (not a
-/// caught roll panic, which returns `Panicked`); that is unrecoverable, so abort loud
-/// and let crab-train's restart loop resume from the checkpoint.
+/// A closed channel means the thread panicked mid-roll — above all a
+/// physics-integrity violation (rl#343/rl#346: no catch, no rebuild) — or died
+/// building its world. Either way the run is over: abort loud, with the thread's own
+/// panic message just above in the log naming the engine bug to fix.
 fn dispatch_horizon(threads: &[RolloutThread], request: &RollRequest) -> Vec<RollOutcome> {
-    const DIED: &str = "rollout thread died (could not rebuild its world); resume from checkpoint";
+    const DIED: &str =
+        "rollout thread panicked (see its message above); the run hard-fails (rl#343/rl#346)";
     for t in threads {
         t.request_tx.send(request.clone()).expect(DIED);
     }
@@ -77,14 +78,12 @@ fn dispatch_horizon(threads: &[RolloutThread], request: &RollRequest) -> Vec<Rol
 /// Phase 3 — reduce the threads' outcomes into the learner's master state and one
 /// [`MergedRollout`]: fold each `Rolled` thread's DISJOINT increment into the master
 /// (counting each sample once, since the master holds the baseline), record its
-/// rewards, and pool its buffers + aggregates. A `Panicked` thread contributes nothing
-/// — no merge, no buffers — so a wedged thread can't corrupt the master.
+/// rewards, and pool its buffers + aggregates.
 fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> MergedRollout {
     let mut merged = MergedRollout {
         rollouts: Vec::new(),
         samples: 0,
         ticks: 0,
-        panics: 0,
         snapshot_load_failures: 0,
         drift: (0.0, 0),
         reach: (0, 0),
@@ -119,7 +118,6 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
                     merged.rollouts.push(buf);
                 }
             }
-            RollOutcome::Panicked => merged.panics += 1,
             RollOutcome::SnapshotLoadFailed => merged.snapshot_load_failures += 1,
         }
     }
@@ -145,7 +143,6 @@ struct IterReport<'a> {
     drift: (f64, u64),
     reach: (u64, u64),
     metrics: &'a crate::training::algorithm::PpoMetrics,
-    panics: u32,
     /// Threads that refused their horizon on a snapshot load failure this iter (bddap/rl#177).
     snapshot_load_failures: u32,
     /// Progress-term drops this iter — non-physical deltas the reward zeroed (bddap/rl#175).
@@ -155,7 +152,7 @@ struct IterReport<'a> {
 }
 
 /// Phase 4 (reporting) — emit the one steady-state learner log line. Derives the means
-/// and notes (drift, reach fraction, GPU split, panic recoveries) from the raw counts
+/// and notes (drift, reach fraction, GPU split) from the raw counts
 /// so the iteration body carries no formatting.
 fn log_iteration(r: &IterReport) {
     let drift = if r.drift.1 > 0 {
@@ -168,11 +165,6 @@ fn log_iteration(r: &IterReport) {
         format!("{:.2}", reached as f64 / finished as f64)
     } else {
         "-".to_string()
-    };
-    let panic_note = if r.panics > 0 {
-        format!(" | {} thread(s) recovered from a panic this iter", r.panics)
-    } else {
-        String::new()
     };
     // Surfaced only when nonzero — both are 0 on a healthy iter, so the line stays quiet until a
     // fault actually occurs (rl#177 load refusals, rl#175 progress-zeroing).
@@ -224,7 +216,7 @@ fn log_iteration(r: &IterReport) {
         ..
     } = *r;
     eprintln!(
-        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | reach {reach_note} over {finished} ep | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{panic_note}{load_fail_note}{glitch_note}{nonfinite_returns_note}{nonfinite_obs_note}",
+        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | reach {reach_note} over {finished} ep | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{load_fail_note}{glitch_note}{nonfinite_returns_note}{nonfinite_obs_note}",
         metrics.policy_loss,
         metrics.value_loss,
         metrics.entropy,
@@ -513,7 +505,6 @@ pub fn run_learner(
             drift: merged.drift,
             reach: merged.reach,
             metrics: &metrics,
-            panics: merged.panics,
             snapshot_load_failures: merged.snapshot_load_failures,
             glitch_drops: merged.glitch_drops,
             nonfinite_obs: merged.nonfinite_obs,
@@ -571,13 +562,12 @@ mod tests {
     use super::super::tests::{empty_normalizer_increment, scratch_config};
 
     /// The reduction must ATTRIBUTE each outcome correctly: a `SnapshotLoadFailed` refusal
-    /// (bddap/rl#177) and a `Panicked` thread each contribute NO samples/buffers and are counted
-    /// in their OWN tally, while a `Rolled` thread's aggregates — including the progress-glitch
-    /// count (bddap/rl#175) — flow through. This is the property that keeps a refused/wedged
-    /// horizon from masquerading as honest data. App-free: `merge_rollouts` over hand-built
-    /// outcomes, no rollout thread or GPU.
+    /// (bddap/rl#177) contributes NO samples/buffers and is counted in its own tally, while a
+    /// `Rolled` thread's aggregates — including the progress-glitch count (bddap/rl#175) — flow
+    /// through. This is the property that keeps a refused horizon from masquerading as honest
+    /// data. App-free: `merge_rollouts` over hand-built outcomes, no rollout thread or GPU.
     #[test]
-    fn merge_rollouts_attributes_refusals_panics_and_glitches() {
+    fn merge_rollouts_attributes_refusals_and_glitches() {
         let (config, dir) = scratch_config("merge_attr", 2);
         let mut state = TrainingState::new(&config, None);
 
@@ -605,23 +595,15 @@ mod tests {
                 ticks: 64,
             },
             RollOutcome::SnapshotLoadFailed,
-            RollOutcome::Panicked,
         ];
         let merged = merge_rollouts(&mut state, results);
 
-        assert_eq!(
-            merged.snapshot_load_failures, 1,
-            "the refusal is counted, distinct from a panic"
+        assert_eq!(merged.snapshot_load_failures, 1, "the refusal is counted");
+        assert_eq!(merged.samples, 0, "a refusal contributes no samples");
+        assert!(
+            merged.rollouts.is_empty(),
+            "a refusal contributes no buffer"
         );
-        assert_eq!(
-            merged.panics, 1,
-            "the panic is counted, distinct from a refusal"
-        );
-        assert_eq!(
-            merged.samples, 0,
-            "neither a refusal nor a panic contributes samples"
-        );
-        assert!(merged.rollouts.is_empty(), "neither contributes a buffer");
         assert_eq!(
             merged.glitch_drops, 3,
             "the Rolled thread's progress-glitch count flows through"

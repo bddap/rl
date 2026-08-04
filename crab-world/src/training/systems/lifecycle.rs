@@ -28,19 +28,43 @@ fn classify_step_end(grabbed: bool, over_cap: bool) -> StepEnd {
 /// deleted `fell` terminal both hid the bug and made dying the dominant cold-start
 /// strategy (rl#342 finding #1). No penalty, no recovery, by owner directive: fix the
 /// engine bug the state points at.
-fn assert_physics_integrity(env: usize, tick: u64, ep_step: u32, height: f32, max_speed: f32) {
-    let blowing_up = max_speed > 100.0 || !height.is_finite();
+fn assert_physics_integrity(
+    env: usize,
+    tick: u64,
+    ep_step: u32,
+    height: f32,
+    ms: &super::step::MaxPartSpeed,
+    drives: &[f32; ACTION_SIZE],
+) {
+    let blowing_up = ms.speed > 100.0 || !height.is_finite();
     if blowing_up || !(0.02..=50.0).contains(&height) {
         let tripped = if blowing_up {
             "blowing up (part speed > 100 m/s or non-finite pose)"
         } else {
             "carapace height outside [0.02, 50] m"
         };
+        let part = ms
+            .part
+            .map_or("Carapace".to_string(), |id| format!("{id:?}"));
+        let fast: Vec<String> = ms
+            .fast_parts
+            .iter()
+            .map(|(id, lin, ang)| {
+                let name = id.map_or("Carapace".to_string(), |id| format!("{id:?}"));
+                format!("{name} lin {lin:.1} ang {ang:.1}")
+            })
+            .collect();
         panic!(
             "physics-integrity violation in training (rl#343): env {env} tick {tick} \
-             episode-step {ep_step}: {tripped} — height {height} m, max part speed \
-             {max_speed} m/s. Training does not recover from a broken physics state; \
-             fix the engine bug instead of respawning over it."
+             episode-step {ep_step}: {tripped} — height {height} m, fastest part \
+             {part} at lin {} m/s ang {} rad/s (bound tests lin.max(ang/3) = {} m/s), \
+             all parts past 50: [{}], drive row {drives:?}. Training does not recover \
+             from a broken physics state; fix the engine bug instead of respawning \
+             over it.",
+            ms.lin,
+            ms.ang,
+            ms.speed,
+            fast.join("; "),
         );
     }
 }
@@ -142,7 +166,8 @@ impl TrainingState {
                     self.total_steps,
                     self.envs[e].steps,
                     height,
-                    body.max_speeds[e],
+                    &body.max_speeds[e],
+                    &inputs.drives[e],
                 );
                 let d_now = carapace_target_dist(body, targets, e);
                 let over_cap = self.envs[e].steps > MAX_EPISODE_TICKS;
@@ -393,7 +418,7 @@ mod tests {
             poses: vec![Some((1.0, 1.0))],
             carapace_pos: vec![Some(Vec3::ZERO)],
             drifts: vec![None],
-            max_speeds: vec![0.0],
+            max_speeds: vec![super::step::MaxPartSpeed::default()],
         };
         let inputs = StepInputs {
             body: &body,
@@ -442,7 +467,7 @@ mod tests {
             poses: vec![Some((1.0, 1.0))],
             carapace_pos: vec![Some(Vec3::ZERO)],
             drifts: vec![None],
-            max_speeds: vec![0.0],
+            max_speeds: vec![super::step::MaxPartSpeed::default()],
         };
         let inputs = StepInputs {
             body: &body,
