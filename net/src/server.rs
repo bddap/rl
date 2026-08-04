@@ -91,6 +91,10 @@ pub struct Admission {
     pub pid: PlayerId,
     pub effective_tick: u64,
     pub roster: Vec<PlayerId>,
+    /// The host's own [`crate::SyncStamp`], echoed to the joiner so IT can compute its
+    /// round verdict with the one arbiter ([`crate::SyncVerdict::between`]) instead of
+    /// assuming all-true (rl#336).
+    pub host_stamp: crate::SyncStamp,
 }
 
 /// The joiner's world identity, verbatim — the same [`crate::SyncStamp`] shape the
@@ -106,6 +110,9 @@ pub enum AdmissionRefusal {
     BodyMismatch { host: u64, joiner: u64 },
     PlantMismatch { host: u64, joiner: u64 },
     CrabCountMismatch { host: u8, joiner: u8 },
+    /// The roster is at [`crate::membership::MAX_MEMBERS`] — the capacity gate that
+    /// keeps unbounded dialers from exhausting the [`PlayerId`] space (rl#336).
+    MatchFull,
 }
 
 impl std::fmt::Display for AdmissionRefusal {
@@ -127,6 +134,9 @@ impl std::fmt::Display for AdmissionRefusal {
                 "crab-count mismatch (host serves {host}, joiner renders {joiner}) — the joiner \
                  would show the wrong number of crabs; launch it with the host's binding list"
             ),
+            AdmissionRefusal::MatchFull => {
+                write!(f, "the match is full — the host's roster is at capacity")
+            }
         }
     }
 }
@@ -161,30 +171,38 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-pub fn may_admit_joiner(host: crate::SyncStamp, req: &JoinRequest) -> Result<(), AdmissionRefusal> {
-    // Destructure so a new stamp axis is a compile error at THIS gate — the joiner's
+/// The mid-game admission gate. Identity axes are judged by the ONE shared-asset arbiter,
+/// [`crate::SyncVerdict::between`] (rl#336 — formation's `sync_verdict` derives from the
+/// same function, so admitting a joiner formation would refuse is impossible); capacity is
+/// gated here too, so unbounded dialers can never exhaust the [`PlayerId`] space (the
+/// `lowest_free_pid` panic path).
+pub fn may_admit_joiner(
+    host: crate::SyncStamp,
+    req: &JoinRequest,
+    roster_len: usize,
+) -> Result<(), AdmissionRefusal> {
+    if roster_len >= crate::membership::MAX_MEMBERS {
+        return Err(AdmissionRefusal::MatchFull);
+    }
+    // Destructure the verdict so a new axis is a compile error at THIS gate — the joiner's
     // post-admission verdict (net_loop) trusts that admission compared every axis.
-    let crate::SyncStamp {
-        body_digest,
-        plant_digest,
-        crab_count,
-    } = req.stamp;
-    if body_digest != host.body_digest {
+    let crate::SyncVerdict { body, crabs, plant } = crate::SyncVerdict::between(host, req.stamp);
+    if !body {
         return Err(AdmissionRefusal::BodyMismatch {
             host: host.body_digest,
-            joiner: body_digest,
+            joiner: req.stamp.body_digest,
         });
     }
-    if plant_digest != host.plant_digest {
+    if !plant {
         return Err(AdmissionRefusal::PlantMismatch {
             host: host.plant_digest,
-            joiner: plant_digest,
+            joiner: req.stamp.plant_digest,
         });
     }
-    if crab_count != 0 && crab_count != host.crab_count {
+    if !crabs {
         return Err(AdmissionRefusal::CrabCountMismatch {
             host: host.crab_count,
-            joiner: crab_count,
+            joiner: req.stamp.crab_count,
         });
     }
     Ok(())
@@ -544,7 +562,7 @@ impl Server {
         self.roster.current()
     }
 
-    pub fn admit(&mut self) -> Admission {
+    pub fn admit(&mut self, host_stamp: crate::SyncStamp) -> Admission {
         let pid = self.lowest_free_pid();
         // Past the assemble cursor by JOIN_LEAD, but always strictly after any change already
         // scheduled (two joins admitted before a tick assembles would otherwise collide on the
@@ -559,6 +577,7 @@ impl Server {
             pid,
             effective_tick,
             roster: self.roster.at(effective_tick).to_vec(),
+            host_stamp,
         }
     }
 
@@ -594,7 +613,7 @@ impl Server {
         (0..=u8::MAX)
             .map(PlayerId)
             .find(|p| !in_use.contains(p))
-            .expect("couch-scale: a free PlayerId always exists")
+            .expect("may_admit_joiner's MatchFull gate keeps the roster under the pid space")
     }
 
     /// Queue inputs that arrived before this server started serving (a fast client sending
@@ -722,7 +741,7 @@ mod tests {
             s.advance(tickmsg(t, 0.0));
             step_ready(&mut s);
         }
-        let adm = s.admit();
+        let adm = s.admit(crate::SyncStamp::ZERO);
         assert_eq!(adm.pid, p1, "the departed pid is reused");
         assert!(
             !s.pilot_intents().contains_key(&p1),
@@ -1241,7 +1260,7 @@ mod tests {
             );
         }
         assert_eq!(
-            s.admit().pid,
+            s.admit(crate::SyncStamp::ZERO).pid,
             PlayerId(1),
             "the departed id is free for the next joiner"
         );
@@ -1286,7 +1305,7 @@ mod tests {
     #[test]
     fn admit_allocates_lowest_free_id_without_renumbering() {
         let mut s = srv(42, &ids(2));
-        let a = s.admit();
+        let a = s.admit(crate::SyncStamp::ZERO);
         assert_eq!(a.pid, PlayerId(2), "the lowest id not already in use");
         assert_eq!(a.roster, vec![PlayerId(0), PlayerId(1), PlayerId(2)]);
         assert!(
@@ -1301,7 +1320,7 @@ mod tests {
         // A second admit before any tick assembles still gets a distinct, strictly-later
         // effective tick (the append-only invariant) and the next free id — the incumbents are
         // never renumbered.
-        let b = s.admit();
+        let b = s.admit(crate::SyncStamp::ZERO);
         assert_eq!(b.pid, PlayerId(3));
         assert!(
             b.effective_tick > a.effective_tick,
@@ -1315,7 +1334,7 @@ mod tests {
     #[test]
     fn joiner_inputs_queue_until_the_effective_tick() {
         let mut s = srv(42, &ids(1));
-        let adm = s.admit();
+        let adm = s.admit(crate::SyncStamp::ZERO);
         // The joiner starts issuing at its effective tick (`ClientSim::join_at`) the moment its
         // welcome lands — these arrive while the host is still assembling pre-join ticks.
         s.record_remote(
@@ -1520,7 +1539,7 @@ mod tests {
             // Admit ONE joiner mid-round: the server schedules its roster change at
             // `effective_tick`, and from then its stream is consumed each tick.
             if i == JOIN_AT {
-                let adm = server.admit();
+                let adm = server.admit(crate::SyncStamp::ZERO);
                 joiner = Some((adm.pid, adm.effective_tick, adm.effective_tick));
             }
             if let Some((jpid, _, next_issue)) = joiner.as_mut() {
@@ -1610,17 +1629,17 @@ mod tests {
             },
         };
         assert_eq!(
-            may_admit_joiner(host, &req(ha, hp, 2)),
+            may_admit_joiner(host, &req(ha, hp, 2), 2),
             Ok(()),
             "the host admits a matching joiner"
         );
         assert_eq!(
-            may_admit_joiner(host, &req(ha, hp, 0)),
+            may_admit_joiner(host, &req(ha, hp, 0), 2),
             Ok(()),
             "a headless joiner (rig count 0) renders nothing — always count-admissible"
         );
         assert_eq!(
-            may_admit_joiner(host, &req(ha ^ 1, hp, 2)),
+            may_admit_joiner(host, &req(ha ^ 1, hp, 2), 2),
             Err(AdmissionRefusal::BodyMismatch {
                 host: ha,
                 joiner: ha ^ 1
@@ -1628,7 +1647,7 @@ mod tests {
             "a different Sally/colliders is refused"
         );
         assert_eq!(
-            may_admit_joiner(host, &req(ha, hp ^ 1, 2)),
+            may_admit_joiner(host, &req(ha, hp ^ 1, 2), 2),
             Err(AdmissionRefusal::PlantMismatch {
                 host: hp,
                 joiner: hp ^ 1
@@ -1637,7 +1656,7 @@ mod tests {
              different world than the poses it adopts, rl#286)"
         );
         assert_eq!(
-            may_admit_joiner(host, &req(ha, hp, 1)),
+            may_admit_joiner(host, &req(ha, hp, 1), 2),
             Err(AdmissionRefusal::CrabCountMismatch { host: 2, joiner: 1 }),
             "a rendering joiner with the wrong rig count is refused (it would show the wrong \
              number of crabs)"

@@ -58,8 +58,10 @@ pub(crate) fn run(args: Args) -> Result<()> {
         MATCH_SEED,
         args.discover_secs,
         args.expect,
-        dial,
-        None,
+        net_loop::DialTargets {
+            host: dial,
+            collector: None,
+        },
         None,
         net::SyncStamp::local(1),
     )?;

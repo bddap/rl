@@ -39,6 +39,24 @@ pub struct SyncVerdict {
     pub plant: bool,
 }
 
+impl SyncVerdict {
+    /// THE shared-asset arbiter (rl#336): judge a peer's stamp against the host's, one
+    /// axis per field. Formation ([`membership::Membership::sync_verdict`]) and mid-game
+    /// admission ([`server::may_admit_joiner`]) both derive from this, so the two gates
+    /// cannot diverge — a joiner a host would refuse is exactly a peer formation would
+    /// not arm with. A zero digest is an UNSET axis and never passes; a crab-less host
+    /// (`crab_count` 0) never passes the crabs axis; a crab-less PEER (a viewer) defers
+    /// to the host's count.
+    pub fn between(host: SyncStamp, peer: SyncStamp) -> SyncVerdict {
+        SyncVerdict {
+            body: host.body_digest != 0 && peer.body_digest == host.body_digest,
+            crabs: host.crab_count >= 1
+                && (peer.crab_count == 0 || peer.crab_count == host.crab_count),
+            plant: host.plant_digest != 0 && peer.plant_digest == host.plant_digest,
+        }
+    }
+}
+
 pub fn may_arm_crabs(sync: Option<SyncVerdict>) -> bool {
     // Destructure so a new verdict axis is a compile error here, not a silently
     // un-gated bool.

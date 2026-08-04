@@ -271,13 +271,16 @@ impl Codec for Admission {
     type Bytes = Vec<u8>;
 
     fn encode(&self) -> Vec<u8> {
-        let mut b = Vec::with_capacity(1 + 8 + 2 + self.roster.len());
+        let mut b = Vec::with_capacity(1 + 8 + 2 + self.roster.len() + 17);
         b.push(self.pid.0);
         b.extend_from_slice(&self.effective_tick.to_le_bytes());
         b.extend_from_slice(&(self.roster.len() as u16).to_le_bytes());
         for pid in &self.roster {
             b.push(pid.0);
         }
+        b.extend_from_slice(&self.host_stamp.body_digest.to_le_bytes());
+        b.extend_from_slice(&self.host_stamp.plant_digest.to_le_bytes());
+        b.push(self.host_stamp.crab_count);
         b
     }
 
@@ -291,11 +294,21 @@ impl Codec for Admission {
         for _ in 0..n {
             roster.push(PlayerId(take(&mut r, 1, "roster pid")?[0]));
         }
+        let body_digest =
+            u64::from_le_bytes(take(&mut r, 8, "host body_digest")?.try_into().unwrap());
+        let plant_digest =
+            u64::from_le_bytes(take(&mut r, 8, "host plant_digest")?.try_into().unwrap());
+        let crab_count = take(&mut r, 1, "host crab_count")?[0];
         anyhow::ensure!(r.is_empty(), "welcome frame has {} trailing bytes", r.len());
         Ok(Admission {
             pid,
             effective_tick,
             roster,
+            host_stamp: crate::SyncStamp {
+                body_digest,
+                plant_digest,
+                crab_count,
+            },
         })
     }
 }
@@ -323,6 +336,7 @@ impl Codec for Refusal {
                 b.extend_from_slice(&joiner.to_le_bytes());
                 b
             }
+            Refusal::Admission(AdmissionRefusal::MatchFull) => vec![5],
         }
     }
 
@@ -345,6 +359,7 @@ impl Codec for Refusal {
                     take(&mut r, 8, "joiner plant digest")?.try_into().unwrap(),
                 ),
             }),
+            5 => Refusal::Admission(AdmissionRefusal::MatchFull),
             x => anyhow::bail!("unknown refusal tag {x:#x}"),
         };
         anyhow::ensure!(r.is_empty(), "refuse frame has {} trailing bytes", r.len());
@@ -1334,6 +1349,11 @@ mod tests {
                 pid: PlayerId(2),
                 effective_tick: 1_234_567,
                 roster,
+                host_stamp: crate::SyncStamp {
+                    body_digest: 0xA1B2_C3D4,
+                    plant_digest: 0x5E6F_7081,
+                    crab_count: 3,
+                },
             };
             assert_eq!(
                 Admission::decode(Admission::encode(&adm).as_ref()).unwrap(),
@@ -1344,6 +1364,7 @@ mod tests {
             pid: PlayerId(0),
             effective_tick: 7,
             roster: vec![PlayerId(0), PlayerId(1)],
+            host_stamp: crate::SyncStamp::ZERO,
         });
         body.pop();
         assert!(Admission::decode(&body).is_err());
