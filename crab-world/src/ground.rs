@@ -26,8 +26,9 @@ use bevy::shader::ShaderRef;
 pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 
 /// One interchangeable ground look — the shipped one, the surviving rl#304
-/// competition entries, the rl#323 watershed unification, and the rl#329
-/// night-bloom parameter sets — and the live selection: `GroundLook` is BOTH the
+/// competition entries, the rl#323 watershed unification (Designs A/B/C as
+/// parameter sets over one shader), and the rl#329 night-bloom parameter sets —
+/// and the live selection: `GroundLook` is BOTH the
 /// `--ground-look` value and the resource the in-game toggle cycles, the same
 /// shape [`crate::crab_view::RenderMode`] uses, so there is one field to write and
 /// no wrapper to keep in sync.
@@ -57,7 +58,7 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 /// - the look's aesthetic parameter row at binding 104 (`array<vec4f, 8>`, lanes
 ///   documented on [`GroundLook::params`]) — optional to declare, REQUIRED for a
 ///   shader several looks share: a variant is a param row, not a shader fork
-///   (the rl#333 seam). night_bloom is the consumer.
+///   (the rl#333 seam). night_bloom and watershed are the consumers.
 ///
 /// Rules (issue requirements, not style):
 /// - entry point stays `fn fragment`. Only the FORWARD main pass draws these files
@@ -86,6 +87,14 @@ pub enum GroundLook {
     CrackedLoam,
     WetNocturne,
     Watershed,
+    // rl#323's two alternative designs over the SAME watershed shader (rows in
+    // [`GroundLook::params`], the rl#333 seam — a design is a param set, never a
+    // fork). Naturalist = Design B: A minus the bloom (no emissive anywhere) and
+    // minus fable-3's province hue — the safe subset. WatershedNocturne = Design C:
+    // wet + bloom + comb with zero Voronoi and value-only strata — the
+    // fiction-forward subset. All three cycle under G / L3; the owner picks in play.
+    WatershedNaturalist,
+    WatershedNocturne,
     // The night-bloom parameter sets (owner request 2026-08-01: "more variants of
     // what is now called night bloom. Parameterizing night bloom could go a long
     // way"): ONE shader, distinct rows in [`GroundLook::params`] — taste
@@ -161,7 +170,8 @@ ground_looks! {
     WindCombed => "wind_combed", "2d795be8-0c31-4a76-8b5e-91f4a03d6c27";
     CrackedLoam => "cracked_loam", "48a6f2d1-b90e-4c53-a812-7d05e9b34f6a";
     WetNocturne => "wet_nocturne", "7fe15b83-2a4c-49d0-91b6-c3820e5a7d14";
-    Watershed => "watershed", "3a9d6c07-14be-4f82-a5c3-8e07b12d9f4b";
+    Watershed | WatershedNaturalist | WatershedNocturne
+        => "watershed", "3a9d6c07-14be-4f82-a5c3-8e07b12d9f4b";
 }
 
 impl GroundLook {
@@ -178,6 +188,14 @@ impl GroundLook {
     /// - `[4]` x capillary intensity, y spore rarity threshold (higher = sparser),
     ///   z artery spacing (m), w capillary spacing (m)
     /// - `[5]` x artery width, y artery core width, z capillary width (noise-space)
+    ///
+    /// watershed.wgsl lanes (`[0]` only — the rl#323 design axes):
+    /// - `[0]` x bloom gain (fable-2's emissive web; 0 = no emissive anywhere),
+    ///   y cellular structure (provinces + plates + cobble) — a GATE (> 0.5), not
+    ///   a gain: off skips every Voronoi call,
+    ///   z strata chroma (1 = full carved-strata palette, 0 = value-only),
+    ///   w province hue tilt (fable-3's per-plate identity; inert when y is off —
+    ///   the hue lives on the province cells)
     pub fn params(self) -> [Vec4; 8] {
         let zero = [Vec4::ZERO; 8];
         let row = |tint: [f32; 4],
@@ -195,13 +213,27 @@ impl GroundLook {
             p[5] = Vec4::new(widths[0], widths[1], widths[2], 0.0);
             p
         };
+        let wshed = |bloom: f32, cellular: f32, chroma: f32, hue: f32| {
+            let mut p = zero;
+            p[0] = Vec4::new(bloom, cellular, chroma, hue);
+            p
+        };
         match self {
             Self::Shipped
             | Self::PatternedGround
             | Self::WindCombed
             | Self::CrackedLoam
-            | Self::WetNocturne
-            | Self::Watershed => zero,
+            | Self::WetNocturne => zero,
+            // rl#323 Design A — every axis on. All-ones is load-bearing: the
+            // shader multiplies/gates on these lanes, so this row renders
+            // bit-identically to the pre-params watershed.
+            Self::Watershed => wshed(1.0, 1.0, 1.0, 1.0),
+            // Design B, NATURALIST — A minus fable-2 (bloom) and fable-3
+            // (province hue): no emissive anywhere, no change to the fiction.
+            Self::WatershedNaturalist => wshed(0.0, 1.0, 1.0, 0.0),
+            // Design C, NOCTURNE BLOOM — wet + bloom + comb; both cellular
+            // languages dropped (zero Voronoi) and the strata value-only.
+            Self::WatershedNocturne => wshed(1.0, 0.0, 0.0, 0.0),
             // The original night bloom, constants unchanged.
             Self::NightBloom => row(
                 [0.70, 0.88, 0.98, 0.55],
@@ -284,7 +316,8 @@ pub struct GroundDetail {
     #[uniform(103)]
     pub moisture_extent: Vec4,
     /// The look's aesthetic parameter row ([`GroundLook::params`]) — optional for
-    /// a shader to declare (`@binding(104)`); night_bloom is the consumer.
+    /// a shader to declare (`@binding(104)`); night_bloom and watershed are the
+    /// consumers.
     #[uniform(104)]
     pub params: [Vec4; 8],
     /// Which look this material draws. Not a binding — it rides in the material to

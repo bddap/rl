@@ -75,6 +75,13 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var moisture_smp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var<uniform> moisture_extent: vec4<f32>;
 
+// The look's parameter row (the rl#333 seam) — the rl#323 design axes, so
+// Designs B (naturalist) and C (nocturne) are rows over this one shader, never
+// forks of it. Lane meanings live on `GroundLook::params` (ground.rs).
+// Watershed's own row is all-ones: every use below multiplies or gates on a
+// lane, so Design A renders bit-identically to the pre-params shader.
+@group(#{MATERIAL_BIND_GROUP}) @binding(104) var<uniform> params: array<vec4<f32>, 8>;
+
 // Same integer-hash family as the Rust side's sky/terrain jitter (sky.rs hash3).
 fn hash2(p: vec2<i32>, seed: u32) -> u32 {
     var h = bitcast<u32>(p.x) * 0x8da6b343u ^ bitcast<u32>(p.y) * 0xd8163841u ^ seed * 0xcb1ab31fu;
@@ -195,6 +202,13 @@ fn fragment(
     // rather than a fraction of it.
     let S = strengths / vec4(0.55, 0.35, 0.45, 0.6);
 
+    // The design axes (header comment above): uniform, so every gate below is
+    // uniform control flow and a disabled language costs nothing.
+    let bloom_gain = params[0].x;
+    let cellular = params[0].y;
+    let strata_chroma = params[0].z;
+    let hue_tilt = params[0].w;
+
     // ── The shared field stack ─────────────────────────────────────────────
     let n_geo = normalize(in.world_normal);
     let steep = 1.0 - n_geo.y;
@@ -263,11 +277,18 @@ fn fragment(
 
     // Polygonal geology provinces (420 m) — the faint patchwork-from-altitude
     // read. Per-cell tone and hue washed with plain noise so borders never look
-    // vector-hard. This is the one place fable-3's per-plate identity lives.
-    let pv = voronoi(p / 420.0, 100u);
-    let prov = rand01(hash2(pv.id, 101u)) - 0.5;
-    let prov_hue = rand01(hash2(pv.id, 102u)) - 0.5;
-    let m_tone = mix(vnoise(p / 260.0, 103u), prov * 1.6, 0.6) * S.x;
+    // vector-hard. This is the one place fable-3's per-plate identity lives —
+    // `hue_tilt` is its own axis (Design B keeps the provinces, drops the hue),
+    // and with `cellular` off the macro tone falls back to the plain noise wash.
+    var m_tone = vnoise(p / 260.0, 103u);
+    var prov_hue = 0.0;
+    if cellular > 0.5 {
+        let pv = voronoi(p / 420.0, 100u);
+        let prov = rand01(hash2(pv.id, 101u)) - 0.5;
+        prov_hue = (rand01(hash2(pv.id, 102u)) - 0.5) * hue_tilt;
+        m_tone = mix(m_tone, prov * 1.6, 0.6);
+    }
+    m_tone *= S.x;
     rgb *= 1.0 + 0.18 * m_tone;
     rgb *= vec3(1.0 + 0.08 * prov_hue * S.x, 1.0, 1.0 - 0.08 * prov_hue * S.x);
 
@@ -295,6 +316,13 @@ fn fragment(
             + vnoise(p / 47.0, 65u) * 1.8;
         let band_t = (wp.y + warp + (p.x + p.y) * 0.012) / 88.0;
         var strata_rgb = strata_color(band_t);
+        // Design C: fable-1 reduced to value-only banding — the layers stay
+        // legible, the one non-green palette stops arguing with the cool grade.
+        strata_rgb = mix(
+            vec3(dot(strata_rgb, vec3(0.2126, 0.7152, 0.0722))),
+            strata_rgb,
+            strata_chroma,
+        );
         // Sub-layers inside each color band: the "close enough to count them" tier.
         let sub = vnoise(vec2(band_t * 32.0, (p.x - p.y) * 0.02), 66u);
         strata_rgb *= 1.0 + 0.28 * sub * footprint_fade(11.0, fw_y);
@@ -316,8 +344,11 @@ fn fragment(
         rough = mix(rough, 0.95, rock_w * 0.5);
     }
 
-    // ── STATE: dry soil — cracked plates, cobble, and combed growth ────────
-    if dry_w > 0.003 {
+    // ── STATE: dry soil — cracked plates and cobble ────────────────────────
+    // The whole structural (Voronoi) tier sits behind `cellular`: Design C's dry
+    // ground is dust, grain, and comb only — "zero Voronoi" is its cost story as
+    // much as its look.
+    if dry_w > 0.003 && cellular > 0.5 {
         // Plates (8 m), domain-warped so no grid ever reads. Seam width grows
         // with dryness: hairlines under turf, crevices in bare clay.
         let bare = dry_w * (1.0 - turf) * (1.0 - snow);
@@ -355,7 +386,10 @@ fn fragment(
                 grad -= (vec2(fx, fz) - cv.f1) / step * 0.05 * w_n;
             }
         }
-        // Dry ground drinks light: pale dust, high roughness.
+    }
+    // Dry ground drinks light: pale dust, high roughness. Outside the cellular
+    // gate — a dry slope reads dry in every design, structured or not.
+    if dry_w > 0.003 {
         rgb *= mix(vec3(1.0), vec3(1.16, 1.11, 1.03), dry_w * 0.42 * S.x);
         rough = mix(rough, 1.0, dry_w * 0.6 * S.x);
     }
@@ -410,7 +444,8 @@ fn fragment(
     // change of fiction into the payoff of the hydrology: life lights up where
     // the water collects. The veins share the moisture field's own domain warp
     // (`pm`), so the webs meander along the basins instead of across them.
-    let bloom_w = clamp(wet_w * veg * smoothstep(0.45, 0.85, moist) * (1.0 - pud), 0.0, 1.0) * S.x;
+    let bloom_w = clamp(wet_w * veg * smoothstep(0.45, 0.85, moist) * (1.0 - pud), 0.0, 1.0)
+        * S.x * bloom_gain;
     if bloom_w > 0.003 {
         let artery_n = vnoise(pm / 180.0, 72u) + 0.35 * vnoise(pm / 61.0, 71u);
         let capil_n = vnoise(pm / 14.0, 73u) + 0.4 * vnoise(p / 4.7, 74u);

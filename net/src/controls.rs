@@ -108,6 +108,16 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         label: "Ground: watershed",
     },
     ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Left],
+        action: Action::GroundWatershedNaturalist,
+        label: "Ground: naturalist",
+    },
+    ChordEntry {
+        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Right],
+        action: Action::GroundWatershedNocturne,
+        label: "Ground: nocturne",
+    },
+    ChordEntry {
         code: &[ChordDir::Left],
         action: Action::SwapBrain,
         label: "Swap brain",
@@ -166,6 +176,8 @@ pub enum Action {
     GroundCrackedLoam,
     GroundWetNocturne,
     GroundWatershed,
+    GroundWatershedNaturalist,
+    GroundWatershedNocturne,
     GroundNightBloomAurora,
     GroundNightBloomEmber,
     GroundNightBloomFrost,
@@ -636,7 +648,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 41] = [
+    const ALL_ACTIONS: [Action; 43] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -658,6 +670,8 @@ mod tests {
         Action::GroundCrackedLoam,
         Action::GroundWetNocturne,
         Action::GroundWatershed,
+        Action::GroundWatershedNaturalist,
+        Action::GroundWatershedNocturne,
         Action::GroundNightBloomAurora,
         Action::GroundNightBloomEmber,
         Action::GroundNightBloomFrost,
@@ -736,6 +750,14 @@ mod tests {
         assert_eq!(
             GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Right, ChordDir::Down]),
             Some(Action::GroundWatershed)
+        );
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Right, ChordDir::Left]),
+            Some(Action::GroundWatershedNaturalist)
+        );
+        assert_eq!(
+            GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Right, ChordDir::Right]),
+            Some(Action::GroundWatershedNocturne)
         );
         // The v^ family is EXACTLY the night blooms — a non-bloom slipped under v^
         // (or a bloom outside it) breaks the menu's family grouping.
@@ -832,6 +854,8 @@ mod tests {
                 | Action::GroundCrackedLoam
                 | Action::GroundWetNocturne
                 | Action::GroundWatershed
+                | Action::GroundWatershedNaturalist
+                | Action::GroundWatershedNocturne
                 | Action::GroundNightBloomAurora
                 | Action::GroundNightBloomEmber
                 | Action::GroundNightBloomFrost

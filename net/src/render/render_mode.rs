@@ -69,6 +69,8 @@ impl ViewKnob for crab_world::ground::GroundLook {
             CrackedLoam => Action::GroundCrackedLoam,
             WetNocturne => Action::GroundWetNocturne,
             Watershed => Action::GroundWatershed,
+            WatershedNaturalist => Action::GroundWatershedNaturalist,
+            WatershedNocturne => Action::GroundWatershedNocturne,
             NightBloomAurora => Action::GroundNightBloomAurora,
             NightBloomEmber => Action::GroundNightBloomEmber,
             NightBloomFrost => Action::GroundNightBloomFrost,
