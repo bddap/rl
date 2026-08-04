@@ -40,6 +40,11 @@ fn round_resource<R: Resource + Default>(world: &mut World, scope: &mut Vec<fn(&
 }
 
 fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) {
+    assert!(
+        world.get_resource::<RoundScope>().is_none(),
+        "install_round over a live round — teardown_round must run first, or the \
+         previous scope's teardowns would be silently dropped"
+    );
     let mut scope: Vec<fn(&mut World)> = Vec::new();
     let prev = SimSnapshot::capture(&client);
     world.insert_non_send_resource(GameState {
@@ -623,7 +628,7 @@ fn apply_vehicle_request(world: &mut World) {
 /// Assemble this tick's [`LocalControl`] from the pending foot input (drained: the yaw
 /// delta, action, and restart taps are consumed here, once per tick) and, piloting, the
 /// flight input mapped through [`flight_control`].
-fn local_control(world: &mut World) -> LocalControl {
+fn take_local_control(world: &mut World) -> LocalControl {
     let foot_input = {
         let mut pending = world.resource_mut::<PendingInput>();
         let look_axis = (pending.yaw_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
@@ -1019,7 +1024,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
         world.non_send_resource_mut::<GameState>().accumulator -= TICK_DT;
         applied += 1;
 
-        let local = local_control(world);
+        let local = take_local_control(world);
         let sim_input = local.sim_input();
         let tick = exchange_tick(world, role, &local);
         if let Some(art) = tick.articulation {

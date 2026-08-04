@@ -218,6 +218,8 @@ impl Membership {
         } else {
             self.peers.get(&host).and_then(|v| v.stamp)
         };
+        // Digest axes ONLY — the crabs axis is host-centric and judged separately below;
+        // passing `|v| v.crabs` here would silently compute the wrong semantics.
         let across_peers = |axis: fn(crate::SyncVerdict) -> bool| {
             axis(crate::SyncVerdict::between(self.local, self.local))
                 && self.peers.values().all(|v| {

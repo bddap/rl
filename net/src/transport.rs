@@ -35,7 +35,10 @@ use crate::snapshot::CoreSnapshot;
 // v21: articulation vehicle poses carry a 3-byte thrust command (rl#308 — exhaust
 // plumes track thrust on every peer); a pre-rl#308 peer would mis-frame the vehicle
 // list.
-pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/21";
+// v22: Welcome carries the host's 17-byte SyncStamp (rl#336 — the joiner computes its
+// sync verdict with the one arbiter) and Refusal gained the MatchFull tag; a v21 peer
+// would reject the widened Welcome and the unknown tag.
+pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/22";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
 
@@ -1130,6 +1133,7 @@ mod tests {
                 host: 0x7e44_a100_0bad_5eed,
                 joiner: 0x7e44_a100_0bad_5eee,
             }),
+            Refusal::Admission(AdmissionRefusal::MatchFull),
             Refusal::Departed,
             Refusal::Forming,
         ] {
