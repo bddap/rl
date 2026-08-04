@@ -333,6 +333,12 @@ pub struct BearingReport {
     /// (seating) rescues are policy-independent and don't count here — they re-seat
     /// the drop, `initial_dist` re-baselines, and the fault logs loudly.
     pub rescues: u32,
+    /// The plant exploded this pair's episode: the carapace crossed
+    /// [`PLANT_POSITION_BOUND_M`] or went non-finite unhealed (bddap/rl#315). The
+    /// fold forfeits the pair like a rescue and the episode was cut at detection —
+    /// the raw distances describe the truncated run. Unlike `rescues` this also
+    /// condemns the eval via [`EvalReport::plant_unbounded`].
+    pub unbounded: bool,
     /// Best prefix pace toward the target (arena m/s): max over active ticks past
     /// [`PACE_WINDOW_MIN_S`] of progress-so-far / time-so-far. The max is taken right
     /// when she arrives at the ball, so parking there for the rest of the episode
@@ -414,6 +420,11 @@ impl PairSweep {
         self.pairs.iter().filter(|p| p.rescued()).count()
     }
 
+    /// Whether any pair's episode exploded ([`BearingReport::unbounded`]).
+    pub fn plant_unbounded(&self) -> bool {
+        self.pairs.iter().any(|p| p.unbounded)
+    }
+
     /// How many pairs reached the ball (claw-tip touch).
     pub fn reached_count(&self) -> usize {
         self.pairs.iter().filter(|p| p.reached).count()
@@ -482,6 +493,11 @@ impl CompassSweep {
         self.per_bearing.iter().filter(|b| b.reached).count()
     }
 
+    /// Whether any episode in this compass exploded ([`BearingReport::unbounded`]).
+    pub fn plant_unbounded(&self) -> bool {
+        self.per_bearing.iter().any(|b| b.unbounded)
+    }
+
     /// The BEST bearing's sustained pace (arena m/s) — her full charge. Max, not min:
     /// the speed guard asks how fast she really is (spawn safety cares about her top
     /// pace), while dead bearings are the headline gate's problem.
@@ -526,6 +542,17 @@ impl EvalReport {
     /// never folded in.
     pub fn progress_m(&self) -> f32 {
         self.far.mean_progress_m()
+    }
+
+    /// Whether ANY episode of the whole eval — far pairs, close probe, pace probe —
+    /// exploded ([`PLANT_POSITION_BOUND_M`]). One unbounded episode condemns the
+    /// eval: the numbers still print (the exploded pairs forfeited), but
+    /// `rl-train eval` hard-fails on this, gate mode or not, and the keep-best gate
+    /// refuses the candidate — an exploding plant is a plant bug, never a policy
+    /// score (bddap/rl#315). Distinct from `rescues` (occasionally-legitimate
+    /// tunneling faults, forfeit + warn only): a body 10 km out is injected energy.
+    pub fn plant_unbounded(&self) -> bool {
+        self.far.plant_unbounded() || self.close.plant_unbounded() || self.pace.plant_unbounded()
     }
 
     /// Sally's measured charge speed in body-heights/s — the pace probe's best
@@ -640,6 +667,19 @@ struct EvalConfig {
     pace_probe: bool,
 }
 
+/// Hard ceiling on any legitimate carapace EXCURSION from its own spawn (m) — from
+/// the pair's start, not the arena origin: the rl#341 sunflower starts legitimately
+/// sit up to ~15 km out, while a real episode wanders at most target distance +
+/// meters around its start. A plant that injects energy — the rl#315 rigid-contact
+/// revert saw bodies at 1e7–1e12 m — blows through this within ticks. The rescue
+/// path can't see this class: a flung body stays finite and above terrain, so
+/// `rescue_lost_crabs` never fires, the blown-up state steps ~10× slower (this
+/// explosion surfaced as 30-min release unit timeouts), and the running-min
+/// `closest_dist` updates on the way PAST the ball — an explosion could inflate a
+/// score. Crossing the bound (or a raw non-finite position) latches
+/// [`PairState::unbounded`] (bddap/rl#315).
+pub const PLANT_POSITION_BOUND_M: f32 = 10_000.0;
+
 /// One pair's accumulators. The rl#310 sign pin and the walker test exercise the
 /// same fold [`run_pairs`] ships by constructing this directly.
 #[derive(Default, Clone)]
@@ -655,6 +695,13 @@ struct PairState {
     work_sum: f64,
     best_pace_m_per_s: f32,
     rescues: u32,
+    /// Latched when this pair's carapace crosses [`PLANT_POSITION_BOUND_M`] or goes
+    /// non-finite before the rescue could heal it — the plant exploded.
+    /// Measurement freezes at detection, [`run_pairs`] cuts the episode, and the
+    /// fold forfeits the pair like a rescue — but unlike a rescue (occasionally
+    /// legitimate tunneling, forfeit + warn) this condemns the whole eval:
+    /// [`EvalReport::plant_unbounded`] hard-fails `rl-train eval` (bddap/rl#315).
+    unbounded: bool,
 }
 
 #[derive(Resource)]
@@ -809,6 +856,15 @@ pub fn run_eval(
             report.far.rescued_pairs(),
         );
     }
+    if report.plant_unbounded() {
+        tracing::error!(
+            "plant UNBOUNDED (bddap/rl#315): a carapace strayed more than \
+             {PLANT_POSITION_BOUND_M} m from its spawn (or went non-finite unhealed) \
+             — the plant is injecting energy; exploded episodes were cut and \
+             forfeited, the wire carries plant_unbounded=true, and every gate must \
+             treat this eval as a hard fault"
+        );
+    }
     Ok(report)
 }
 
@@ -945,15 +1001,23 @@ fn run_pairs(
     let settle_ticks = RESET_GRACE_TICKS as u64;
     let max_updates = settle_ticks + active_ticks + 64;
     let mut updates = 0u64;
-    while active_torque_ticks(&app) < active_ticks && updates < max_updates {
+    // The unbounded check cuts an exploded world at detection (bddap/rl#315): its
+    // numbers are already forfeit, and the blown-up state steps ~10× slower —
+    // finishing the episode is what turned a release-gate eval into a unit-timeout
+    // hang. Cutting the whole batch is fine: one unbounded pair condemns the eval.
+    while active_torque_ticks(&app) < active_ticks
+        && updates < max_updates
+        && !any_pair_unbounded(&app)
+    {
         app.update();
         updates += 1;
     }
     // The pump must be 1:1 update:FixedUpdate (bot::headless pins Time<Fixed> to
     // PHYSICS_DT explicitly) — a broken ratio would silently truncate every episode
-    // at the max_updates backstop instead (rl#341 S3-1), so refuse loud.
+    // at the max_updates backstop instead (rl#341 S3-1), so refuse loud. An
+    // unbounded cut is the sanctioned early exit.
     assert!(
-        active_torque_ticks(&app) == active_ticks,
+        any_pair_unbounded(&app) || active_torque_ticks(&app) == active_ticks,
         "episode ended at {}/{} active ticks after {updates} updates — the \
          update:FixedUpdate pump broke (rl#341 S3-1)",
         active_torque_ticks(&app),
@@ -965,9 +1029,10 @@ fn run_pairs(
         .get_resource::<EvalState>()
         .expect("eval state present");
     // A start the settle window never measured is a spawn wiring bug, not a slow
-    // policy — it would fold to a policy-independent 0 (rl#341 S3-2).
+    // policy — it would fold to a policy-independent 0 (rl#341 S3-2). An unbounded
+    // cut during settling legitimately leaves pairs unmeasured.
     assert!(
-        state.pairs.iter().all(|p| p.initial_dist > 0.0),
+        state.pairs.iter().any(|p| p.unbounded) || state.pairs.iter().all(|p| p.initial_dist > 0.0),
         "a pair saw no finite carapace during settling — spawn wiring bug (rl#341 S3-2)"
     );
     pairs
@@ -985,8 +1050,8 @@ impl PairState {
     /// pair's progress and pace FORFEIT to 0 (S1-1 — the teleport back to origin
     /// makes the trajectory not-a-chase; the raw distances stay for diagnosis).
     fn report(&self, bearing_rad: f32, start_xz: Vec2, active_ticks: u64) -> BearingReport {
-        let rescued = self.rescues > 0;
-        let progress_m = if rescued {
+        let forfeited = self.rescues > 0 || self.unbounded;
+        let progress_m = if forfeited {
             0.0
         } else {
             (self.initial_dist - self.closest_dist).max(0.0)
@@ -1010,10 +1075,15 @@ impl PairState {
             closest_distance_m: self.closest_dist,
             final_distance_m: self.last_dist,
             closest_tip_distance_m: closest_tip,
-            reached: !rescued && tip_touch(closest_tip),
+            reached: !forfeited && tip_touch(closest_tip),
             active_ticks,
             rescues: self.rescues,
-            sustained_pace_m_per_s: if rescued { 0.0 } else { self.best_pace_m_per_s },
+            unbounded: self.unbounded,
+            sustained_pace_m_per_s: if forfeited {
+                0.0
+            } else {
+                self.best_pace_m_per_s
+            },
         }
     }
 }
@@ -1023,6 +1093,12 @@ fn active_torque_ticks(app: &App) -> u64 {
         .get_resource::<EvalState>()
         .map(|s| s.torque_ticks)
         .unwrap_or(0)
+}
+
+fn any_pair_unbounded(app: &App) -> bool {
+    app.world()
+        .get_resource::<EvalState>()
+        .is_some_and(|s| s.pairs.iter().any(|p| p.unbounded))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1090,6 +1166,19 @@ fn eval_step(
     let elapsed_s = state.torque_ticks as f32 / crate::physics::PHYSICS_HZ as f32;
     for (env, t) in carapace_q.iter() {
         let i = env.0;
+        // The unbounded latch (bddap/rl#315), on the RAW position's excursion from
+        // this pair's own spawn, then a per-pair measurement freeze: past detection
+        // the flung state would keep updating the running-min `closest_dist` (and
+        // pace) on its way PAST the ball — an explosion must never inflate a score.
+        if (!t.translation.is_finite()
+            || t.translation.distance(spawns.origin(i)) > PLANT_POSITION_BOUND_M)
+            && let Some(p) = state.pairs.get_mut(i)
+        {
+            p.unbounded = true;
+        }
+        if state.pairs.get(i).is_some_and(|p| p.unbounded) {
+            continue;
+        }
         let Some(cpos) = Some(t.translation).filter(|p| p.is_finite()) else {
             continue;
         };
@@ -1122,6 +1211,9 @@ fn eval_step(
     // policy never earned.
     if !settling {
         for i in 0..n {
+            if state.pairs[i].unbounded {
+                continue;
+            }
             let Some(target) = state.pairs[i].real_target else {
                 continue;
             };
@@ -1213,6 +1305,15 @@ fn pace_recenter(
     else {
         return;
     };
+    // Latch on the PRE-shift excursion (bddap/rl#315): this system runs before
+    // `eval_step`, so a grounded runaway would otherwise be teleported back inside
+    // the bound every tick and the explosion never observed. Post-recenter the
+    // carapace sits within ~one recenter band of its spawn, so what this sees is
+    // one tick's actual travel — ample at explosion speeds.
+    if carapace.distance(spawns.origin(0)) > PLANT_POSITION_BOUND_M {
+        state.pairs[0].unbounded = true;
+        return;
+    }
     let Some(delta) = recenter_delta(spawns.origin(0), carapace, &terrain) else {
         return;
     };
@@ -1278,6 +1379,7 @@ mod tests {
             reached: false,
             active_ticks: DEFAULT_EVAL_TICKS,
             rescues: 0,
+            unbounded: false,
             sustained_pace_m_per_s: 0.0,
         }
     }
@@ -1461,6 +1563,32 @@ mod tests {
             ..state
         };
         assert_eq!(clean.report(0.0, Vec2::ZERO, 1500).progress_m, 12.0);
+    }
+
+    /// rl#315 pin: an unbounded pair forfeits exactly like a rescued one — a flung
+    /// crab's running-min `closest_dist` from its flight past the ball must never
+    /// score — and the flag survives into the report for the eval-condemning
+    /// aggregate ([`EvalReport::plant_unbounded`]).
+    #[test]
+    fn unbounded_pair_forfeits_and_condemns() {
+        let state = PairState {
+            initial_dist: 24.0,
+            closest_dist: 0.5, // "closed" on the ball mid-flight…
+            last_dist: 9_999_999.0,
+            best_pace_m_per_s: 800.0,
+            unbounded: true, // …while exploding past the position bound
+            ..Default::default()
+        };
+        let b = state.report(0.0, Vec2::ZERO, 1500);
+        assert!(b.unbounded);
+        assert_eq!(b.progress_m, 0.0, "unbounded progress forfeits");
+        assert_eq!(b.sustained_pace_m_per_s, 0.0, "unbounded pace forfeits");
+        assert!(!b.reached, "an exploded episode cannot count a strike");
+        let sweep = PairSweep {
+            target_distance_m: DEFAULT_TARGET_DISTANCE_M,
+            pairs: vec![b],
+        };
+        assert!(sweep.plant_unbounded());
     }
 
     /// The mean-pair fold (owner 08-03): headline = flat mean over pairs; the min
