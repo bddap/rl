@@ -11,6 +11,5 @@ path = "src/main.rs"
 [dependencies]
 crab-world = { path = "../crab-world", features = ["render"] }
 bevy.workspace = true
-bevy_rapier3d.workspace = true
 clap.workspace = true
 otel = { path = "../otel" }

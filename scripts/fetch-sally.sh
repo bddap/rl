@@ -16,4 +16,4 @@ dest="${BEVY_ASSET_ROOT:-$(dirname "$manifest")}/assets"
 mkdir -p "$dest"
 gh release download "$tag" -R "$repo" -p sally.glb -D "$dest" --clobber
 echo "fetched sally.glb -> $dest"
-echo "run with: cargo run --release -p rl-demo -- --demo"
+echo "run with: cargo run --release -p rl-demo -- demo"
