@@ -99,6 +99,15 @@ pub const EVAL_PAIRS: usize = EVAL_BEARINGS * EVAL_STARTS_PER_HEADING;
 /// gate logs at error level and protects the incumbent.
 const START_CANDIDATES_MAX: usize = 4096;
 
+/// Candidates per full-disc coverage cycle: the sunflower radius is normalized by
+/// THIS, not by the whole [`START_CANDIDATES_MAX`] budget — normalizing by the
+/// budget put every consumed start inside the innermost ~1% of the interior
+/// (measured: all 32 within ~1.6 km of tile centre on the ±15 km tile), and coupled
+/// the spatial spread to the rejection rate. One cycle (2× [`EVAL_PAIRS`]) spans
+/// sqrt-spaced radii out to the full interior; later cycles revisit the same radii
+/// at fresh golden angles, so a rough terrain widens the SEARCH, never the reach.
+const START_COVERAGE_CANDIDATES: usize = 64;
+
 /// One far-sweep episode assignment: drive toward a ball `bearing_rad` off +X from a
 /// surface spawn at `start_xz`.
 #[derive(Debug, Clone, Copy)]
@@ -133,8 +142,10 @@ fn eval_pairs(
             grid.extent_z(),
         ));
     }
-    // Golden-angle sunflower: uniform areal density over the interior disc, no two
-    // candidates coincident, deterministic.
+    // Golden-angle sunflower, full-disc coverage per [`START_COVERAGE_CANDIDATES`]
+    // cycle: sqrt-spaced radii × golden angles — uniform areal density within a
+    // cycle, no two candidates coincident (cross-cycle angles never realign),
+    // deterministic.
     let golden = std::f32::consts::TAU * (1.0 - 0.618_034);
     let bearings: Vec<f32> = eval_bearings().collect();
     let mut pairs = Vec::with_capacity(EVAL_PAIRS);
@@ -152,7 +163,8 @@ fn eval_pairs(
                     bearing_rad.to_degrees(),
                 ));
             }
-            let r = radius * (k as f32 / START_CANDIDATES_MAX as f32).sqrt();
+            let cycle_k = (k - 1) % START_COVERAGE_CANDIDATES + 1;
+            let r = radius * (cycle_k as f32 / START_COVERAGE_CANDIDATES as f32).sqrt();
             let start_xz = r * Vec2::from_angle(k as f32 * golden);
             if bearing_progressable(grid, start_xz, bearing_rad, far_distance_m) {
                 pairs.push(EvalPair {
@@ -293,7 +305,6 @@ pub struct BearingReport {
     pub start_xz: Vec2,
     pub progress_m: f32,
     pub total_torque: f32,
-    pub mean_torque_per_tick: f32,
     /// Mean commanded |torque| per tick as a fraction of the rig's total drive ceiling
     /// (rl#279) — in [0, 1] by construction (each joint's drive is clamped to its own
     /// ceiling). Effort observability only: never folded into the headline, never
@@ -314,11 +325,13 @@ pub struct BearingReport {
     pub reached: bool,
     pub active_ticks: u64,
     /// How many times `rescue_lost_crabs` teleported this pair's crab back to its
-    /// origin mid-episode (non-finite pose, through-terrain, buried). A rescue
-    /// invalidates the trajectory as a chase, so the fold FORFEITS the pair's
-    /// `progress_m` and pace to 0 (bddap/rl#341 S1-1: a crab that exploded at 12 m
-    /// used to keep the 12 m and get promoted, silently) — the distances stay as
-    /// measured for diagnosis, and the tally rides the wire.
+    /// origin during the ACTIVE window (non-finite pose, through-terrain, buried).
+    /// A rescue invalidates the trajectory as a chase, so the fold FORFEITS the
+    /// pair's `progress_m` and pace to 0 (bddap/rl#341 S1-1: a crab that exploded at
+    /// 12 m used to keep the 12 m and get promoted, silently) — the distances stay
+    /// as measured for diagnosis, and the tally rides the wire. Settle-window
+    /// (seating) rescues are policy-independent and don't count here — they re-seat
+    /// the drop, `initial_dist` re-baselines, and the fault logs loudly.
     pub rescues: u32,
     /// Best prefix pace toward the target (arena m/s): max over active ticks past
     /// [`PACE_WINDOW_MIN_S`] of progress-so-far / time-so-far. The max is taken right
@@ -369,16 +382,19 @@ impl PairSweep {
     /// (owner 08-03). Every scored ray is geometrically progressable BY CONSTRUCTION
     /// ([`eval_pairs`]) and a rescued pair contributes a forfeited 0, so a low mean
     /// is a policy that didn't walk — never terrain that couldn't be walked, and
-    /// never an explosion laundered into progress.
+    /// never an explosion laundered into progress. `pairs` is non-empty from
+    /// [`run_eval`] by construction; an empty sweep's NaN mean is REFUSED by every
+    /// consumer (`Progress::new`, the monitor's numeric guard) — the loud
+    /// self-correcting error, deliberately not a plausible silent 0 (review round 1).
     pub fn mean_progress_m(&self) -> f32 {
-        self.pairs.iter().map(|p| p.progress_m).sum::<f32>() / self.pairs.len().max(1) as f32
+        self.pairs.iter().map(|p| p.progress_m).sum::<f32>() / self.pairs.len() as f32
     }
 
     /// Mean SIGNED net progress (rl#310 in aggregate): unlike the zero-floored mean,
     /// this goes negative when pairs actively flee, so parked-vs-retreating stays
     /// decomposable after the fold.
     pub fn mean_net_progress_m(&self) -> f32 {
-        self.pairs.iter().map(|p| p.net_progress_m()).sum::<f32>() / self.pairs.len().max(1) as f32
+        self.pairs.iter().map(|p| p.net_progress_m()).sum::<f32>() / self.pairs.len() as f32
     }
 
     /// The WORST pair — the tail statistic reported beside the mean so a directional
@@ -405,14 +421,14 @@ impl PairSweep {
 
     /// Mean torque saturation over the pairs (rl#279) — effort observability.
     pub fn mean_saturation(&self) -> f32 {
-        self.pairs.iter().map(|p| p.saturation).sum::<f32>() / self.pairs.len().max(1) as f32
+        self.pairs.iter().map(|p| p.saturation).sum::<f32>() / self.pairs.len() as f32
     }
 
     /// Mean total commanded |torque| over the pairs — the wire's `total_torque=`
     /// under the mean-pair schema (the monitor requires the key; a single worst
     /// episode's torque has no referent under an average).
     pub fn mean_total_torque(&self) -> f32 {
-        self.pairs.iter().map(|p| p.total_torque).sum::<f32>() / self.pairs.len().max(1) as f32
+        self.pairs.iter().map(|p| p.total_torque).sum::<f32>() / self.pairs.len() as f32
     }
 
     /// Mean cost of transport over the pairs that measured one (rl#279) — `None`
@@ -563,18 +579,36 @@ impl EvalReport {
 }
 
 /// The keep-best sidecar's instrument fingerprint: everything the DEFAULT eval's
-/// number depends on besides the brain — the bake bytes, the amplitude, the episode
-/// geometry, the progressability bar, and the sample size. Stamped into the progress
-/// sidecar beside the bar; a bar whose fingerprint no longer matches was earned on a
-/// different instrument and is re-baselined instead of silently wedging promotion
-/// (rl#341 S1-4: a re-bake or grade nudge used to freeze `beats` forever at warn
-/// level).
+/// number depends on besides the brain. Stamped into the progress sidecar beside the
+/// bar; a bar whose fingerprint no longer matches was earned on a different
+/// instrument and is re-baselined instead of silently wedging promotion (rl#341
+/// S1-4: a re-bake or grade nudge used to freeze `beats` forever at warn level).
+/// `starts=` digests the DERIVED default pair set — a pure function of the bake, the
+/// sampler constants, the compass split, the progressability bar, and the far
+/// distance — so every upstream knob is covered at once; enumerating knobs
+/// individually missed some (review round 1: `BAND_MAX_M`, the candidate budget, and
+/// an [`EVAL_BEARINGS`]×[`EVAL_STARTS_PER_HEADING`] re-split all moved the start set
+/// under an unchanged fingerprint). `bake=` stays beside it: two bakes could
+/// conceivably seat identical starts yet differ under the swept rays.
 pub fn instrument_fingerprint() -> String {
+    let mut starts = crate::fnv::Fnv::new();
+    // An underivable pair set leaves the offset basis — a "cannot derive"
+    // fingerprint distinct from every real one, so it too forces a re-baseline.
+    if let Ok(pairs) = eval_pairs(
+        &crate::terrain::TerrainGrid::gcr(),
+        DEFAULT_TARGET_DISTANCE_M,
+    ) {
+        for p in &pairs {
+            starts.write(&p.start_xz.x.to_le_bytes());
+            starts.write(&p.start_xz.y.to_le_bytes());
+            starts.write(&p.bearing_rad.to_le_bytes());
+        }
+    }
     format!(
         "bake={:016x} amplitude=1 distance_m={DEFAULT_TARGET_DISTANCE_M} \
-         ticks={DEFAULT_EVAL_TICKS} grade={MAX_PROGRESSABLE_GRADE} pairs={EVAL_PAIRS} \
-         settle={RESET_GRACE_TICKS}",
+         ticks={DEFAULT_EVAL_TICKS} settle={RESET_GRACE_TICKS} starts={:016x}",
         crate::terrain::gcr_bake_digest(),
+        starts.finish(),
     )
 }
 
@@ -970,7 +1004,6 @@ impl PairState {
             start_xz,
             progress_m,
             total_torque: self.torque_sum as f32,
-            mean_torque_per_tick,
             saturation: mean_torque_per_tick / total_drive_torque_ceiling(),
             work_j: self.work_sum as f32,
             initial_distance_m: self.initial_dist,
@@ -1030,9 +1063,15 @@ fn eval_step(
     let settling = state.tick < cfg.settle_ticks;
 
     // Rescue tally (rl#341 S1-1): rescue_lost_crabs runs before Sense, so this
-    // tick's teleports are visible here; the fold forfeits any rescued pair.
+    // tick's teleports are visible here; the fold forfeits any rescued pair. Only
+    // ACTIVE-window rescues count — a settle-window (seating) rescue is
+    // policy-independent (the policy hasn't acted yet), the teleport re-seats the
+    // drop and `initial_dist` re-baselines every settling tick, and the fault still
+    // logs loudly via `CrabRescueIsFault`; forfeiting it would drag a
+    // policy-independent 0 into the mean (review round 1). The reader still drains
+    // every tick so settle-window messages can't spill into the active window.
     for msg in rescued.read() {
-        if let Some(p) = state.pairs.get_mut(msg.env) {
+        if !settling && let Some(p) = state.pairs.get_mut(msg.env) {
             p.rescues += 1;
         }
     }
@@ -1230,7 +1269,6 @@ mod tests {
             start_xz: Vec2::ZERO,
             progress_m: 0.0,
             total_torque: 0.0,
-            mean_torque_per_tick: 0.0,
             saturation: 0.0,
             work_j: 0.0,
             initial_distance_m: distance,
@@ -1583,6 +1621,14 @@ mod tests {
                 );
             }
         }
+        // Spread: the coverage-cycle draw must reach the tile interior, not cluster
+        // at the centre (review round 1: budget-normalized radii put all 32 starts
+        // within ~1.6 km). Structural bound: 32 accepted pairs consume k ≥ 8
+        // somewhere, and k=8 already sits ~5.3 km out on this tile.
+        assert!(
+            pairs.iter().any(|p| p.start_xz.length() > 5000.0),
+            "starts cluster at the tile centre"
+        );
         let again = eval_pairs(&g, DEFAULT_TARGET_DISTANCE_M).expect("still derives");
         for (a, b) in pairs.iter().zip(again.iter()) {
             assert_eq!(a.start_xz, b.start_xz, "same bake ⇒ same pairs");
@@ -1737,7 +1783,6 @@ mod tests {
                 b.total_torque, 0.0,
                 "the rest pose applies no joint torque, so total_torque must be exactly 0"
             );
-            assert_eq!(b.mean_torque_per_tick, 0.0);
             assert_eq!(b.saturation, 0.0, "zero drive saturates nothing");
             assert_eq!(b.work_j, 0.0, "zero torque does zero mechanical work");
             // Passive slump CAN clear the J/m floor (~0.55 m on some bodies) —

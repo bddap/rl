@@ -26,7 +26,8 @@
 //!   its compass shape and baselines; its keys are unchanged from v1).
 //! - `EVAL_RESULT schema=2 progress_m= net_progress_m= min_pair_m= min_pair_deg=
 //!   total_torque= target_m= reached= reached_count= pairs= rescued_pairs= ticks=
-//!   policy_loaded= saturation_mean= amplitude= bake= plant=` — the HEADLINE, last.
+//!   settle= policy_loaded= saturation_mean= amplitude= bake= plant=` — the
+//!   HEADLINE, last.
 //!   `progress_m` is the MEAN over the far pairs of zero-floored best-approach
 //!   progress (owner 08-03; v1's median-of-min is retired — `schema=2` marks the
 //!   ruler change for any long-run series). `net_progress_m`/`total_torque`/
@@ -37,7 +38,9 @@
 //!   requires the key). Provenance rides with the data (rl#341 S2-3): `amplitude=`
 //!   (the terrain relief scalar), `bake=` (the terrain artifact digest, hex), and
 //!   `plant=` (the constructed plant digest, hex — a fallback-body eval is
-//!   distinguishable, S3-4). When measurable it appends ` j_per_m_mean=` and the
+//!   distinguishable, S3-4). `settle=` is the settle window in ticks — the one ruler
+//!   knob no other key witnessed (it re-bases `initial_dist`, hence every historical
+//!   `progress_m`, review round 1). When measurable it appends ` j_per_m_mean=` and the
 //!   rl#266 charge keys `charge_heights_per_s= charge_pinned= charge_drift_frac=
 //!   charge_drifted= charge_target_m=`; when the charge guard SHOULD have measured
 //!   and could not it appends ` charge_unmeasurable=true` instead (rl#341 S2-4 — the
@@ -89,7 +92,7 @@ impl EvalReport {
             out,
             "EVAL_RESULT schema=2 progress_m={:.4} net_progress_m={:.4} min_pair_m={:.4} \
              min_pair_deg={:.0} total_torque={:.2} target_m={:.2} reached={} \
-             reached_count={} pairs={} rescued_pairs={} ticks={} policy_loaded={} \
+             reached_count={} pairs={} rescued_pairs={} ticks={} settle={} policy_loaded={} \
              saturation_mean={:.4} amplitude={:.4} bake={:016x} plant={:016x}",
             self.far.mean_progress_m(),
             self.far.mean_net_progress_m(),
@@ -102,6 +105,7 @@ impl EvalReport {
             self.far.pairs.len(),
             self.far.rescued_pairs(),
             min_pair.active_ticks,
+            crate::bot::RESET_GRACE_TICKS,
             self.policy_loaded,
             self.far.mean_saturation(),
             self.terrain_amplitude,
@@ -180,7 +184,6 @@ mod tests {
             start_xz: Vec2::new(100.0 * i as f32, 50.0 - 50.0 * i as f32),
             progress_m: 1.0 + i as f32,
             total_torque: 10.0,
-            mean_torque_per_tick: 0.5,
             saturation: 0.25,
             // 2 J per metre closed at every bearing, so pair and mean J/m agree.
             work_j: 2.0 * (1.0 + i as f32),
@@ -239,7 +242,8 @@ mod tests {
             "EVAL_RESULT schema=2 progress_m={expect_mean:.4} net_progress_m=0.5000 \
              min_pair_m=1.0000 min_pair_deg=0 total_torque=10.00 target_m=24.00 \
              reached=false reached_count=0 pairs={EVAL_PAIRS} rescued_pairs=0 ticks=200 \
-             policy_loaded=true saturation_mean=0.2500 amplitude=1.0000"
+             settle={} policy_loaded=true saturation_mean=0.2500 amplitude=1.0000",
+            crate::bot::RESET_GRACE_TICKS,
         );
         assert!(
             headline.starts_with(&expect_prefix),

@@ -78,13 +78,14 @@ const BEST_FILES: &[BestFile] = &[
 /// How often to spend one chase-eval scoring the live checkpoint. Periodic rather than
 /// reach-triggered: a trigger derived from near-heavy TRAIN episodes is blind to
 /// far-approach movement in either direction — exactly the divergence that let a
-/// 6.92 m brain displace the 8.93 m one (bddap/rl#233). The compass eval runs one
-/// episode per bearing at the far distance PER LOCALE (rl#293: the far compass runs
-/// 3×), the close-probe compass, plus the short rl#280 pace-probe compass — roughly
-/// 2× the pre-locale spend, so the period stretches with it to keep eval spend in
-/// the same ~15-20% band of training wall-clock (rollout threads idle while the
-/// learner-thread eval runs). Promotion latency is the trade, and keep-best is a
-/// ratchet — a later eval still catches any brain an earlier tick missed.
+/// 6.92 m brain displace the 8.93 m one (bddap/rl#233). The far sweep runs
+/// `EVAL_PAIRS` full-length episodes BATCHED (≤16 envs per world, rl#341 — total
+/// episode spend ~4/3 of the retired 3-locale compass at a fraction of the world
+/// builds), plus the close-probe compass and the short rl#280 pace-probe compass;
+/// the period keeps eval spend in the same ~15-20% band of training wall-clock
+/// (rollout threads idle while the learner-thread eval runs). Promotion latency is
+/// the trade, and keep-best is a ratchet — a later eval still catches any brain an
+/// earlier tick missed.
 const EVAL_PERIOD: Duration = Duration::from_secs(3600);
 
 /// Meters of chase progress a candidate must add over the incumbent to displace it.
@@ -412,7 +413,6 @@ mod tests {
             start_xz: bevy::math::Vec2::ZERO,
             progress_m,
             total_torque: 0.0,
-            mean_torque_per_tick: 0.0,
             saturation: 0.0,
             work_j: 0.0,
             initial_distance_m: DEFAULT_TARGET_DISTANCE_M,
