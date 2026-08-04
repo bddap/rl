@@ -9182,7 +9182,7 @@ checksum = "973443cf09a9c8656b574a866ab68dfa19f0867d0340648c7d2f6a71b8a8ea68"
 [[package]]
 name = "rapier3d"
 version = "0.32.0"
-source = "git+https://github.com/bddap-bot/rapier?rev=31f60c1725102b1f4983fc87645123a21658333d#31f60c1725102b1f4983fc87645123a21658333d"
+source = "git+https://github.com/bddap-bot/rapier?rev=6624551227535fecbc367f2ea03b5509f2aaa05f#6624551227535fecbc367f2ea03b5509f2aaa05f"
 dependencies = [
  "approx",
  "arrayvec",
@@ -12180,7 +12180,7 @@ dependencies = [
  "ndk-sys 0.6.0+11769913",
  "objc",
  "once_cell",
- "ordered-float 4.6.0",
+ "ordered-float 5.1.0",
  "parking_lot",
  "portable-atomic",
  "portable-atomic-util",

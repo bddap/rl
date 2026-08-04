@@ -323,6 +323,11 @@ pub fn constructed_plant_digest() -> u64 {
         h.write(&id.friction_cap().to_bits().to_le_bytes());
         h.write(&id.drive_damping().to_bits().to_le_bytes());
     }
+    // The damper MECHANISM changed in rl#347 (capped impulse-joint motor → uncapped
+    // implicit multibody dof damping) with identical coefficients, so the values
+    // above can't tell the two plants apart; the tag makes a version-skewed MP pair
+    // refuse to arm instead of simulating different worlds.
+    h.write(b"rl#347 multibody-dof flail brake");
     h.finish()
 }
 
@@ -337,7 +342,8 @@ pub fn plant_provenance() -> String {
         ),
     };
     let damper = format!(
-        "rl#315 viscous joint damper, free rate {LEG_FREE_RATE} rad/s legs / {CLAW_FREE_RATE} claws"
+        "rl#315 viscous joint damper (multibody-dof since rl#347), free rate \
+         {LEG_FREE_RATE} rad/s legs / {CLAW_FREE_RATE} claws"
     );
     let arena = format!(
         "arena {} (canonical since rl#293)",
@@ -485,9 +491,11 @@ impl CrabJointId {
         }
     }
 
-    /// The rl#315 damper's viscous coefficient (N·m·s/rad), sized so full drive
-    /// torque balances damping at [`Self::free_rate`]. Applied by the damper
-    /// impulse joint (`spawn::rig_joints`, which also caps it).
+    /// The rl#315 flail brake's viscous coefficient (N·m·s/rad), sized so full
+    /// drive torque balances damping at [`Self::free_rate`]. Applied as per-dof
+    /// multibody joint damping (`spawn::set_flail_damping` — implicit and uncapped
+    /// since rl#347; the old capped impulse-joint damper was the whip's energy
+    /// source).
     pub fn drive_damping(&self) -> f32 {
         self.drive_torque_ceiling() / self.free_rate()
     }

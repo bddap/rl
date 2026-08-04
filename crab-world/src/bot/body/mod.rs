@@ -21,6 +21,7 @@ pub use joint_id::{
 };
 
 pub(crate) use spawn::random_spawn_rotation;
+pub(in crate::bot) use spawn::set_flail_damping;
 pub use spawn::{LIMIT_SOFTNESS, SPAWN_HEIGHT, spawn_crab};
 
 #[cfg(feature = "render")]
