@@ -482,7 +482,9 @@ fn connect_and_form_inner(
         Formation::Alone => {
             rt.block_on(close_session(&session, telemetry));
             if let Some(e) = dial_failed {
-                return Err(e.context("could not reach the host you asked to join, and LAN discovery found no one"));
+                return Err(e.context(
+                    "could not reach the host you asked to join, and LAN discovery found no one",
+                ));
             }
             return Ok(MatchResult::Alone);
         }

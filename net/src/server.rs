@@ -107,9 +107,18 @@ pub struct JoinRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRefusal {
-    BodyMismatch { host: u64, joiner: u64 },
-    PlantMismatch { host: u64, joiner: u64 },
-    CrabCountMismatch { host: u8, joiner: u8 },
+    BodyMismatch {
+        host: u64,
+        joiner: u64,
+    },
+    PlantMismatch {
+        host: u64,
+        joiner: u64,
+    },
+    CrabCountMismatch {
+        host: u8,
+        joiner: u8,
+    },
     /// The roster is at [`crate::membership::MAX_MEMBERS`] — the capacity gate that
     /// keeps unbounded dialers from exhausting the [`PlayerId`] space (rl#336).
     MatchFull,
