@@ -77,6 +77,14 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_secs_f32(crate::physics::PHYSICS_DT),
     ));
+    // Pin the fixed-schedule timestep to the SAME duration explicitly: the 1:1
+    // update:FixedUpdate pump every headless measurement counts on used to rest on
+    // PHYSICS_HZ coinciding with bevy's DEFAULT_TIMESTEP (both 15625 µs) — a
+    // PHYSICS_HZ change or a bevy default change would have silently truncated every
+    // eval episode ~34% short at the update budget instead (rl#341 S3-1).
+    app.insert_resource(Time::<Fixed>::from_duration(Duration::from_secs_f32(
+        crate::physics::PHYSICS_DT,
+    )));
 
     app.insert_resource(cfg.visuals)
         .insert_resource(NumEnvs(cfg.num_envs))

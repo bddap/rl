@@ -183,6 +183,34 @@ impl TerrainGrid {
         .clone()
     }
 
+    /// The committed GCR bake with its relief scaled by ONE well-defined scalar
+    /// (rl#341/owner 08-03): every datum-shifted height is multiplied by `amplitude`,
+    /// so relief scales about the tile-centre datum (the centre sample stays y=0 and
+    /// spawns near the origin stay near y=0 at every amplitude). `1.0` returns the
+    /// canonical singleton BIT-IDENTICALLY — no silent arena change on the default
+    /// path. This is a runtime relief scalar, distinct from the bake pipeline's
+    /// `--fbm-amplitude-m` (a detail-octave knob that mutates samples and needs a GPU
+    /// re-bake); the eval takes THIS one. Headless-measurement knob only: the render
+    /// path's biome stops are keyed on absolute datum-shifted metres, so rendering a
+    /// scaled grid would repaint biomes as a side effect — nothing render-side calls
+    /// this. Non-finite or negative amplitudes refuse loudly.
+    pub fn gcr_with_amplitude(amplitude: f32) -> Result<Arc<Self>, String> {
+        if !(amplitude.is_finite() && amplitude >= 0.0) {
+            return Err(format!(
+                "terrain amplitude must be a finite non-negative scalar, got {amplitude}"
+            ));
+        }
+        if amplitude == 1.0 {
+            return Ok(Self::gcr());
+        }
+        let mut grid = Self::parse(GCR_TERRAIN_BYTES).expect("committed artifact parses");
+        for h in &mut grid.heights {
+            *h *= amplitude;
+        }
+        grid.relief *= amplitude;
+        Ok(Arc::new(grid))
+    }
+
     /// Full world-x span (grid columns).
     pub fn extent_x(&self) -> f32 {
         (self.cols - 1) as f32 * self.cell
@@ -547,6 +575,37 @@ mod tests {
     fn relief_is_zero_flat_and_full_span_on_gcr() {
         assert_eq!(TerrainGrid::flat(10.0).relief(), 0.0);
         assert_eq!(TerrainGrid::gcr().relief(), (4508 - 295) as f32);
+    }
+
+    /// The rl#341 amplitude scalar: 1.0 is the canonical singleton bit-identically
+    /// (the same Arc — no silent arena change on the default path); any other value
+    /// scales every datum-shifted height about the tile-centre datum; degenerate
+    /// scalars refuse loudly.
+    #[test]
+    fn gcr_amplitude_scales_relief_about_the_datum() {
+        let canonical = TerrainGrid::gcr();
+        let identity = TerrainGrid::gcr_with_amplitude(1.0).unwrap();
+        assert!(Arc::ptr_eq(&canonical, &identity), "1.0 IS the singleton");
+
+        let doubled = TerrainGrid::gcr_with_amplitude(2.0).unwrap();
+        assert_eq!(doubled.relief(), 2.0 * canonical.relief());
+        assert_eq!(doubled.at(512, 512), 0.0, "the datum stays y=0");
+        for (x, z) in [(4800.0, -3600.0), (-6400.0, 5200.0), (123.0, 456.0)] {
+            assert!(
+                (doubled.height(x, z) - 2.0 * canonical.height(x, z)).abs() < 1e-3,
+                "height at ({x},{z}) scales by exactly the amplitude"
+            );
+        }
+
+        let flattened = TerrainGrid::gcr_with_amplitude(0.0).unwrap();
+        assert_eq!(flattened.relief(), 0.0, "amplitude 0 is a plane");
+
+        for bad in [f32::NAN, f32::INFINITY, -1.0] {
+            assert!(
+                TerrainGrid::gcr_with_amplitude(bad).is_err(),
+                "{bad} must refuse"
+            );
+        }
     }
 
     /// The biome tint contract the taste loop leans on: banded colors with

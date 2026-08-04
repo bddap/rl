@@ -25,6 +25,18 @@
       "why": "the pinned dev environment — every mapped suite below runs inside it, so a break fails those commands loudly"
     },
     {
+      "paths": ["crab-world/src/eval.rs", "crab-world/src/eval/**", "crab-world/src/training/best.rs", "crab-world/src/bot/headless.rs", "crab-world/src/terrain.rs"],
+      "tests": [
+        "nix-shell --run 'cargo fmt --check'",
+        "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
+        "nix-shell --run 'cargo build --release -p rl-train'",
+        "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
+        "nix-shell --run 'cargo test -q -- --test-threads=2'",
+        "nix-shell --run 'cargo test -q -p crab-world --release --lib rest_pose_has_zero_torque_and_no_progress -- --ignored --exact eval::tests::rest_pose_has_zero_torque_and_no_progress --test-threads=1'"
+      ],
+      "why": "the chase-eval measurement seam (rl#341 S2-5): the physical path — run_eval through real batched bevy+rapier worlds, the fold, every guard — had ZERO executed coverage because its only end-to-end test is #[ignore]d (too heavy for every workspace change). First-match-wins shadows the general rust rule, so this rule carries the full landing matrix PLUS the --ignored end-to-end run (release, ~1 min after kache-warm compile); a regression in the settle/active split, the running min, the rescue forfeit, or the batched env wiring now fails a landing that touches the seam"
+    },
+    {
       "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".cargo/config.toml", "**/*.wgsl", "crab-world/assets/**", "crab-world/tests/data/**"],
       "tests": [
         "nix-shell --run 'cargo fmt --check'",
