@@ -1,3 +1,8 @@
+//! The windowed round driver: installs and tears down a round's world state through
+//! the one round-scope registry, paces the fixed-tick loop ([`drive_client_sim`]),
+//! bridges local input to the sim and the crab world's vehicles, and writes the
+//! frame's [`RenderClock`] — THE clock every pose sampler reads.
+
 use super::app::{ArmedRound, NnCrabStackInstalled};
 use super::input::{CameraPitch, CameraYaw};
 use super::pose::{Pose, PoseWindow};
@@ -18,7 +23,24 @@ pub(super) fn insert_core(app: &mut App, client: ClientSim, coord: Box<Coordinat
     install_round(app.world_mut(), client, coord);
 }
 
+/// Everything round-scoped, torn down by [`teardown_round`]. The thunks are registered
+/// AT INSTALL, each adjacent to the state it scopes — one list, so install and teardown
+/// can no longer be hand-maintained parallel lists that must deliberately not match:
+/// rl#211, rl#258, and rl#274/rl#303 were each a stale survivor someone forgot to add
+/// to the teardown twin, point-patched there; the registry deletes the twin (rl#336).
+#[derive(Resource, Default)]
+struct RoundScope(Vec<fn(&mut World)>);
+
+/// Insert a freshly-defaulted round resource and register its teardown in the same
+/// breath: reset to default at round end, so nothing stale survives into the menu or
+/// under an ungated system until the next install.
+fn round_resource<R: Resource + Default>(world: &mut World, scope: &mut Vec<fn(&mut World)>) {
+    world.insert_resource(R::default());
+    scope.push(|w| w.insert_resource(R::default()));
+}
+
 fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) {
+    let mut scope: Vec<fn(&mut World)> = Vec::new();
     let prev = SimSnapshot::capture(&client);
     world.insert_non_send_resource(GameState {
         client,
@@ -32,15 +54,56 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
         stalled: false,
         logged_statuses: BTreeMap::new(),
     });
-    world.insert_resource(PendingInput::default());
-    world.insert_resource(FlightInput::default());
-    world.insert_resource(CameraPitch::default());
-    world.insert_resource(CameraYaw::default());
-    world.insert_resource(LocalVehicle::default());
-    world.insert_resource(RenderClock::default());
-    world.insert_resource(super::articulation::RemoteVehicle::default());
-    world.insert_resource(super::articulation::CrabPartWindows::default());
-    world.insert_resource(crab_world::bot::skin::CrabRenderPose::default());
+    scope.push(|w| {
+        w.remove_non_send_resource::<GameState>();
+    });
+    round_resource::<PendingInput>(world, &mut scope);
+    round_resource::<FlightInput>(world, &mut scope);
+    round_resource::<CameraPitch>(world, &mut scope);
+    round_resource::<CameraYaw>(world, &mut scope);
+    round_resource::<LocalVehicle>(world, &mut scope);
+    round_resource::<RenderClock>(world, &mut scope);
+    round_resource::<super::articulation::RemoteVehicle>(world, &mut scope);
+    round_resource::<super::articulation::CrabPartWindows>(world, &mut scope);
+    round_resource::<crab_world::bot::skin::CrabRenderPose>(world, &mut scope);
+
+    // Round state MADE elsewhere during arm/play, not inserted here — its teardown still
+    // lives in this one registry:
+    scope.push(|w| {
+        w.remove_resource::<crate::crab_slot::NnCrabsArmed>();
+    });
+    // Un-label the crab bodies that persist across rounds: labels are round state (the host
+    // republishes on the next arm; a client re-adopts from the next round's articulation),
+    // and a survivor here would float brain labels over the menu (the rl#211 class).
+    scope.push(|w| {
+        if let Some(mut labels) = w.get_resource_mut::<crab_world::crab_view::CrabBrainLabels>() {
+            labels.0.clear();
+        }
+    });
+    scope.push(|w| {
+        if let Some(mut ctrl) = w.get_resource_mut::<VehicleControls>() {
+            ctrl.0.clear();
+        }
+    });
+    // Craft bodies are round state like the controls that spawned them: FixedUpdate is
+    // parked outside Playing, so a survivor would sit at its stale pose until the next
+    // round's first pump — and a board landing on that round's first tick would match it
+    // there instead of transforming at the walker (rl#258).
+    scope.push(|w| {
+        let crafts: Vec<Entity> = w
+            .query_filtered::<Entity, With<Vehicle>>()
+            .iter(w)
+            .collect();
+        for e in crafts {
+            w.despawn(e);
+        }
+    });
+    // A survivor would suppress (or mis-measure) the next round's remote-craft
+    // appeared/moved edges.
+    scope.push(|w| {
+        w.remove_resource::<super::articulation::RemoteCraftWatch>();
+    });
+    world.insert_resource(RoundScope(scope));
 }
 
 #[derive(Default)]
@@ -77,39 +140,11 @@ pub(super) fn ensure_round_installed(world: &mut World) {
 }
 
 pub(super) fn teardown_round(world: &mut World) {
-    world.remove_non_send_resource::<GameState>();
-    world.remove_resource::<crate::crab_slot::NnCrabsArmed>();
-    // Un-label the crab bodies that persist across rounds: labels are round state (the host
-    // republishes on the next arm; a client re-adopts from the next round's articulation),
-    // and a survivor here would float brain labels over the menu (the rl#211 class).
-    if let Some(mut labels) = world.get_resource_mut::<crab_world::crab_view::CrabBrainLabels>() {
-        labels.0.clear();
-    }
-    if let Some(mut ctrl) = world.get_resource_mut::<VehicleControls>() {
-        ctrl.0.clear();
-    }
-    // Craft bodies are round state like the controls that spawned them: FixedUpdate is
-    // parked outside Playing, so a survivor would sit at its stale pose until the next
-    // round's first pump — and a board landing on that round's first tick would match it
-    // there instead of transforming at the walker (rl#258).
-    let crafts: Vec<Entity> = world
-        .query_filtered::<Entity, With<Vehicle>>()
-        .iter(world)
-        .collect();
-    for e in crafts {
-        world.despawn(e);
-    }
-    // Round state like the labels above: a survivor would suppress (or mis-measure) the next
-    // round's remote-craft appeared/moved edges.
-    world.remove_resource::<super::articulation::RemoteCraftWatch>();
-    // Round state like the labels: the sampler is Playing-gated, so a stale sampled pose
-    // would otherwise sit under `drive_bones` (ungated) until the next round's install
-    // replaces these — the rl#211 stale-survivor class, cleared at the boundary instead.
-    if let Some(mut windows) = world.get_resource_mut::<super::articulation::CrabPartWindows>() {
-        *windows = Default::default();
-    }
-    if let Some(mut sampled) = world.get_resource_mut::<crab_world::bot::skin::CrabRenderPose>() {
-        sampled.0.clear();
+    let Some(RoundScope(scope)) = world.remove_resource::<RoundScope>() else {
+        return;
+    };
+    for teardown in scope {
+        teardown(world);
     }
 }
 
@@ -167,13 +202,13 @@ fn pilot_of(pid: PlayerId) -> PilotId {
 
 /// The sim↔world correspondence, both directions (rl#258; one frame since rl#298
 /// stage 5 — the world's coordinates ARE the sim's meters): a sim point stands ON the
-/// ground, so its world y is the surface height at that spot — a boarding on a
-/// mountainside authors its craft at the walker's real elevation (rl#281 stage 6; on
-/// the flat grids the height is exactly 0). `world_to_sim` is planar (drops y), so
-/// the two stay inverses.
+/// ground via [`crab_world::terrain::TerrainGrid::place`] — THE spawn-on-surface
+/// primitive, not a reimplementation — so a boarding on a mountainside authors its
+/// craft at the walker's real elevation (rl#281 stage 6; on the flat grids the height
+/// is exactly 0). `world_to_sim` is planar (drops y), so the two stay inverses.
 fn sim_to_world(pos: crate::sim::Pos, terrain: &crab_world::terrain::TerrainGrid) -> Vec3 {
     let (x, z) = pos.to_meters();
-    Vec3::new(x, terrain.height(x, z), z)
+    terrain.place(Vec2::new(x, z), 0.0)
 }
 
 fn world_to_sim(world: Vec3) -> crate::sim::Pos {
@@ -345,13 +380,30 @@ const PLANE_TURN_COORDINATION: f32 = 0.3;
 pub(super) const VEHICLE_STICK_SENS: f32 = 0.5;
 
 #[derive(Debug, Default, PartialEq)]
-pub(super) struct FlightControl {
+pub(super) struct PlaneControl {
     pub throttle_trim: f32,
+    pub pitch: f32,
+    pub roll: f32,
+    pub yaw: f32,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct ShipControl {
     pub thrust: Vec3,
     pub pitch: f32,
     pub roll: f32,
     pub yaw: f32,
     pub match_velocity: bool,
+}
+
+/// Per-kind control surfaces — an enum, not a field union with the kind held apart, so
+/// a control no kind can fly (a plane matching velocity, a ship trimming throttle) is
+/// unrepresentable (rl#336). [`PilotIntent`] stays the wire-side union; the two meet
+/// only in [`LocalControl::pilot_intent`].
+#[derive(Debug, PartialEq)]
+pub(super) enum FlightControl {
+    Plane(PlaneControl),
+    Ship(ShipControl),
 }
 
 pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightControl {
@@ -363,14 +415,12 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
             let rudder = (fi.lb as i32 - fi.rb as i32) as f32 - fi.wasd.x;
             let yaw = clamp(rudder + PLANE_TURN_COORDINATION * roll);
             let throttle_trim = clamp(fi.rt - fi.lt + fi.wasd.y);
-            FlightControl {
+            FlightControl::Plane(PlaneControl {
                 throttle_trim,
-                thrust: Vec3::ZERO,
                 pitch,
                 roll,
                 yaw,
-                match_velocity: false,
-            }
+            })
         }
         VehicleKind::Ship => {
             let thrust = Vec3::new(
@@ -381,14 +431,13 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
             let pitch = clamp(fi.right.y * VEHICLE_STICK_SENS - fi.mouse.y);
             let yaw = clamp(-(fi.right.x * VEHICLE_STICK_SENS + fi.mouse.x));
             let roll = clamp((fi.lb as i32 - fi.rb as i32) as f32);
-            FlightControl {
-                throttle_trim: 0.0,
+            FlightControl::Ship(ShipControl {
                 thrust,
                 pitch,
                 roll,
                 yaw,
                 match_velocity: fi.match_vel,
-            }
+            })
         }
     }
 }
@@ -396,7 +445,6 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
 enum LocalControl {
     OnFoot(Input),
     Piloting {
-        kind: VehicleKind,
         control: FlightControl,
         /// This tick's foot input — only its pilot-surviving parts
         /// ([`Input::pilot_masked`]) reach the sim while the craft flies on `control`.
@@ -413,28 +461,40 @@ impl LocalControl {
     }
 
     fn pilot_intent(&self) -> Option<PilotIntent> {
-        match self {
-            LocalControl::OnFoot(_) => None,
-            LocalControl::Piloting { kind, control, .. } => {
-                let FlightControl {
-                    throttle_trim,
-                    thrust,
-                    pitch,
-                    roll,
-                    yaw,
-                    match_velocity,
-                } = *control;
-                Some(PilotIntent {
-                    kind: *kind,
-                    throttle_trim,
-                    thrust: thrust.to_array(),
-                    pitch,
-                    roll,
-                    yaw,
-                    match_velocity,
-                })
-            }
-        }
+        let LocalControl::Piloting { control, .. } = self else {
+            return None;
+        };
+        Some(match control {
+            FlightControl::Plane(PlaneControl {
+                throttle_trim,
+                pitch,
+                roll,
+                yaw,
+            }) => PilotIntent {
+                kind: VehicleKind::Plane,
+                throttle_trim: *throttle_trim,
+                thrust: [0.0; 3],
+                pitch: *pitch,
+                roll: *roll,
+                yaw: *yaw,
+                match_velocity: false,
+            },
+            FlightControl::Ship(ShipControl {
+                thrust,
+                pitch,
+                roll,
+                yaw,
+                match_velocity,
+            }) => PilotIntent {
+                kind: VehicleKind::Ship,
+                throttle_trim: 0.0,
+                thrust: thrust.to_array(),
+                pitch: *pitch,
+                roll: *roll,
+                yaw: *yaw,
+                match_velocity: *match_velocity,
+            },
+        })
     }
 }
 
@@ -496,11 +556,11 @@ impl LocalVehicle {
     }
 }
 
-/// Read OUR OWN vehicle rigidbody's arena-frame pose (position + attitude) from the crab world,
-/// or `None` if none is spawned (on foot, or the frame a freshly-boarded body hasn't appeared
-/// yet). At most one body per pilot — `manage_vehicles` enforces it. Keyed by pilot because the
-/// host's world will also carry REMOTE pilots' crafts (rl#191): the cockpit camera must fly from
-/// ours alone. The renderer shifts this arena pose to the crab's render spot in `cockpit_camera`.
+/// Read OUR OWN vehicle rigidbody's world-frame pose (position + attitude) from the crab
+/// world, or `None` if none is spawned (on foot, or the frame a freshly-boarded body
+/// hasn't appeared yet). At most one body per pilot — `manage_vehicles` enforces it.
+/// Keyed by pilot because the host's world will also carry REMOTE pilots' crafts
+/// (rl#191): the cockpit camera must fly from ours alone.
 fn read_vehicle_pose(world: &mut World, me: PilotId) -> Option<Pose> {
     let mut q = world.query::<(&Transform, &Vehicle)>();
     q.iter(world)
@@ -511,12 +571,13 @@ fn read_vehicle_pose(world: &mut World, me: PilotId) -> Option<Pose> {
         })
 }
 
-/// The remote-client twin of [`read_vehicle_pose`]: our own craft's arena-frame pose out of an
-/// adopted articulation. The host simulates the craft; its pose comes back per-pilot on the
-/// wire. `None` keeps the cockpit camera off while the pose ring is empty — usually the
-/// request→grant window, but also a silent HOST REFUSAL (`file_intent` saw
-/// [`crate::sim::PlayerStatus::may_board`] false; the client can't tell the two apart) and
-/// the unarmed round (no articulation at all). Either way the camera simply holds off.
+/// The remote-client twin of [`read_vehicle_pose`]: our own craft's world-frame pose out
+/// of an adopted articulation. The host simulates the craft; its pose comes back
+/// per-pilot on the wire. `None` keeps the cockpit camera off while the pose ring is
+/// empty — usually the request→grant window, but also a silent HOST REFUSAL
+/// (`file_intent` saw [`crate::sim::PlayerStatus::may_board`] false; the client can't
+/// tell the two apart) and the unarmed round (no articulation at all). Either way the
+/// camera simply holds off.
 fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Option<Pose> {
     art.vehicles.iter().find(|v| v.pilot == me.0).map(|v| Pose {
         pos: Vec3::from_array(v.pos),
@@ -524,381 +585,365 @@ fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Op
     })
 }
 
-pub(super) fn drive_client_sim(world: &mut World) {
-    let sim_started = std::time::Instant::now();
-    let armed = world
-        .get_resource::<crate::crab_slot::NnCrabsArmed>()
-        .is_some();
-
-    let role = PeerRole::of(world.non_send_resource::<GameState>());
-    let me = local_pilot(world.non_send_resource::<GameState>());
-
-    let delta = world.resource::<Time>().delta().as_secs_f64();
-
-    let (tel, roster_len) = {
-        let state = world.non_send_resource::<GameState>();
-        let tel = state.coord.telemetry().cloned();
-        (tel, state.client.sim().players().count())
+/// Apply a chord-issued [`VehicleRequest`], if one is pending: boarding from foot needs
+/// the sim's leave, switching craft-to-craft doesn't, and re-requesting the current
+/// craft is a no-op (no pose-window reset mid-flight).
+fn apply_vehicle_request(world: &mut World) {
+    let Some(request) = world.resource_mut::<PendingInput>().vehicle.take() else {
+        return;
     };
+    let may_board = {
+        let state = world.non_send_resource::<GameState>();
+        let me = state.client.me();
+        state
+            .client
+            .sim()
+            .player(me)
+            .is_some_and(|p| p.status().may_board())
+    };
+    let mut vehicle = world.resource_mut::<LocalVehicle>();
+    let next = match request {
+        VehicleRequest::Board(kind)
+            if vehicle.kind() != Some(kind) && (vehicle.kind().is_some() || may_board) =>
+        {
+            Some(LocalVehicle::Flying {
+                kind,
+                poses: PoseWindow::default(),
+            })
+        }
+        VehicleRequest::Exit if vehicle.kind().is_some() => Some(LocalVehicle::OnFoot),
+        _ => None,
+    };
+    if let Some(next) = next {
+        info!("vehicle: {:?} -> {:?}", vehicle.context(), next.context());
+        *vehicle = next;
+    }
+}
 
-    world.non_send_resource_mut::<GameState>().accumulator += delta;
+/// Assemble this tick's [`LocalControl`] from the pending foot input (drained: the yaw
+/// delta, action, and restart taps are consumed here, once per tick) and, piloting, the
+/// flight input mapped through [`flight_control`].
+fn local_control(world: &mut World) -> LocalControl {
+    let foot_input = {
+        let mut pending = world.resource_mut::<PendingInput>();
+        let look_axis = (pending.yaw_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
+        let btns = (if pending.action { buttons::ACTION } else { 0 })
+            | (if pending.restart { buttons::RESTART } else { 0 });
+        let input = Input::new(pending.strafe, pending.forward, look_axis, btns);
+        pending.yaw_delta = 0.0;
+        pending.action = false;
+        pending.restart = false;
+        input
+    };
+    match world.resource::<LocalVehicle>().kind() {
+        None => LocalControl::OnFoot(foot_input),
+        Some(kind) => LocalControl::Piloting {
+            control: flight_control(kind, world.resource::<FlightInput>()),
+            foot: foot_input,
+        },
+    }
+}
 
+/// What one [`Coordinator::exchange`] round-trip produced for the rest of the frame.
+struct TickOutcome {
+    /// The tick this input was ISSUED as — the telemetry stamp. On a remote client this
+    /// differs from `client.next_tick()` (the snapshot-apply cursor) by the transit lag.
+    issue_tick: u64,
+    /// The adopt-arm articulation to publish this tick (remote client only).
+    articulation: Option<crate::articulation::CrabArticulation>,
+    server_down: Option<crate::net_loop::ServerDown>,
+}
+
+/// Submit the local input and run this tick's coordinator exchange. On the remote-adopt
+/// arm, also pace the jitter buffer and adopt what it releases (capturing `prev` for
+/// interpolation and reconciling the local prediction).
+fn exchange_tick(world: &mut World, role: PeerRole, local: &LocalControl) -> TickOutcome {
+    let scripted_pack: Option<Input> = world.get_resource::<ScriptedPackInput>().map(|r| r.0);
+    let mut state = world.non_send_resource_mut::<GameState>();
+    // Plain `&mut GameState` (not `Mut`) so the adopt closure below can borrow the
+    // `reported_outcome` field disjointly from the `client` it runs against.
+    let state = &mut *state;
+    let me = state.client.me();
+    let msg = state
+        .client
+        .submit_local_input(local.sim_input(), local.pilot_intent());
+    let issue_tick = msg.issue_tick;
+    if let Some(bot) = scripted_pack
+        && let Some(server) = state.coord.server_mut()
     {
-        let request = world.resource_mut::<PendingInput>().vehicle.take();
-        if let Some(request) = request {
-            let may_board = {
-                let state = world.non_send_resource::<GameState>();
-                let me = state.client.me();
-                state
-                    .client
-                    .sim()
-                    .player(me)
-                    .is_some_and(|p| p.status().may_board())
-            };
-            let mut vehicle = world.resource_mut::<LocalVehicle>();
-            let next = match request {
-                // Boarding from foot needs the sim's leave; switching craft-to-craft
-                // doesn't. Re-requesting the current craft is a no-op — no
-                // pose-window reset mid-flight.
-                VehicleRequest::Board(kind)
-                    if vehicle.kind() != Some(kind) && (vehicle.kind().is_some() || may_board) =>
+        let others: Vec<PlayerId> = server
+            .roster()
+            .iter()
+            .copied()
+            .filter(|&p| p != me)
+            .collect();
+        for pid in others {
+            server.record_remote(
+                pid,
+                TickMsg {
+                    issue_tick: msg.issue_tick,
+                    input: bot,
+                    pilot: None,
+                },
+            );
+        }
+    }
+    let mut server_down = None;
+    let exch: Exchanged = match state.coord.exchange(msg) {
+        Ok(exch) => exch,
+        Err(down) => {
+            server_down = Some(down);
+            Exchanged::default()
+        }
+    };
+    let mut articulation = None;
+    match role {
+        PeerRole::ServerAuth => {}
+        PeerRole::RemoteAdopt => {
+            state.snap_buf.extend(exch.snapshots);
+            state.art_buf.extend(exch.articulations);
+            let take = jitter_take(state.snap_buf.len());
+            state.stalled = take == 0;
+            if take > 0 {
+                state.prev = SimSnapshot::capture(&state.client);
+                let reported_outcome = &mut state.reported_outcome;
+                let snaps: Vec<_> = state.snap_buf.drain(..take).collect();
+                state.client.adopt_snapshots(snaps, |c| {
+                    if c.sim().outcome() == Outcome::Ongoing {
+                        *reported_outcome = false;
+                    }
+                });
+                state.client.reconcile_local_prediction();
+                let adopted_tick = state.client.next_tick();
+                while state
+                    .art_buf
+                    .front()
+                    .is_some_and(|a| a.tick <= adopted_tick)
                 {
-                    Some(LocalVehicle::Flying {
-                        kind,
-                        poses: PoseWindow::default(),
-                    })
+                    articulation = state.art_buf.pop_front();
                 }
-                VehicleRequest::Exit if vehicle.kind().is_some() => Some(LocalVehicle::OnFoot),
-                _ => None,
-            };
-            if let Some(next) = next {
-                info!("vehicle: {:?} -> {:?}", vehicle.context(), next.context());
-                *vehicle = next;
             }
         }
     }
+    TickOutcome {
+        issue_tick,
+        articulation,
+        server_down,
+    }
+}
 
-    let mut applied = 0u32;
+/// Publish an adopted articulation to the render surfaces: crab poses, remote craft
+/// models, and — if OUR craft's pose just crossed the wire — the cockpit window.
+fn adopt_wire_articulation(
+    world: &mut World,
+    art: &crate::articulation::CrabArticulation,
+    me: PilotId,
+) {
+    crate::render::articulation::adopt(world, art);
+    super::articulation::publish_remote_vehicles(world, art.tick, &art.vehicles, me);
+    if let Some(p) = own_wire_pose(art, me) {
+        let mut vehicle = world.resource_mut::<LocalVehicle>();
+        if matches!(&*vehicle, LocalVehicle::Flying { poses, .. } if poses.is_empty()) {
+            // The request→grant edge (rl#191): the host accepted our intent and our
+            // craft's first pose just crossed the wire — the cockpit camera engages.
+            info!("cockpit engaged: own craft pose arrived on the wire");
+        }
+        vehicle.update_pose(art.tick, p);
+    }
+}
+
+/// (Host) Bridge every pilot's intent into a [`PilotCommand`] for the crab world's
+/// vehicle systems, anchored at each walker's [`boarding_of`] state this tick.
+fn publish_pilot_commands(world: &mut World) {
+    if world.get_resource::<VehicleControls>().is_none() {
+        return;
+    }
+    let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
+    let entries: BTreeMap<PilotId, PilotCommand> = {
+        let state = world.non_send_resource::<GameState>();
+        let server = state.coord.server().expect("server_auth ⇒ a server");
+        server
+            .pilot_intents()
+            .iter()
+            .filter_map(|(&pid, intent)| {
+                // No sim player (a departure racing its roster shrink) ⇒ no walker
+                // to transform — the intent simply files no command this tick.
+                let now = server.sim().player(pid)?;
+                let prev = state.prev.players.get(&pid).copied().unwrap_or(now);
+                let boarding = boarding_of(now, prev, &terrain);
+                Some((pilot_of(pid), intent.to_command(boarding)))
+            })
+            .collect()
+    };
+    world.resource_mut::<VehicleControls>().0 = entries;
+}
+
+/// (Host) Drain every server tick this frame's exchange made ready: pump the crab
+/// world, step the authoritative sim, broadcast the snapshot + articulation, and mirror
+/// the step into our own client. Host-paced: `exchange` assembled one tick per issued
+/// local input, so this drains exactly what this frame issued (a remote can delay
+/// nothing — rl#195).
+fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
     loop {
         {
             let state = world.non_send_resource::<GameState>();
-            if state.accumulator < TICK_DT || applied >= MAX_TICKS_PER_FRAME {
+            if !state
+                .server()
+                .expect("server_auth ⇒ a server")
+                .next_tick_ready()
+            {
                 break;
             }
         }
-        world.non_send_resource_mut::<GameState>().accumulator -= TICK_DT;
-        applied += 1;
-
-        let foot_input = {
-            let mut pending = world.resource_mut::<PendingInput>();
-            let look_axis = (pending.yaw_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
-            let btns = (if pending.action { buttons::ACTION } else { 0 })
-                | (if pending.restart { buttons::RESTART } else { 0 });
-            let input = Input::new(pending.strafe, pending.forward, look_axis, btns);
-            pending.yaw_delta = 0.0;
-            pending.action = false;
-            pending.restart = false;
-            input
-        };
-
-        let local = match world.resource::<LocalVehicle>().kind() {
-            None => LocalControl::OnFoot(foot_input),
-            Some(kind) => LocalControl::Piloting {
-                kind,
-                control: flight_control(kind, world.resource::<FlightInput>()),
-                foot: foot_input,
-            },
-        };
-        let sim_input = local.sim_input();
-        let pilot_intent = local.pilot_intent();
-
-        let scripted_pack: Option<Input> = world.get_resource::<ScriptedPackInput>().map(|r| r.0);
-        let mut pending_art: Option<crate::articulation::CrabArticulation> = None;
-        let mut server_down: Option<crate::net_loop::ServerDown> = None;
-        let issue_tick = {
+        {
             let mut state = world.non_send_resource_mut::<GameState>();
-            // Plain `&mut GameState` (not `Mut`) so the adopt closure below can borrow the
-            // `reported_outcome` field disjointly from the `client` it runs against.
-            let state = &mut *state;
-            let me = state.client.me();
-            let msg = state.client.submit_local_input(sim_input, pilot_intent);
-            // The tick this input was ISSUED as — the telemetry stamp. On a remote client this
-            // differs from `client.next_tick()` (the snapshot-apply cursor) by the transit lag.
-            let issue_tick = msg.issue_tick;
-            if let Some(bot) = scripted_pack
-                && let Some(server) = state.coord.server_mut()
-            {
-                let others: Vec<PlayerId> = server
-                    .roster()
-                    .iter()
-                    .copied()
-                    .filter(|&p| p != me)
-                    .collect();
-                for pid in others {
-                    server.record_remote(
-                        pid,
-                        TickMsg {
-                            issue_tick: msg.issue_tick,
-                            input: bot,
-                            pilot: None,
-                        },
-                    );
-                }
-            }
-            let exch: Exchanged = match state.coord.exchange(msg) {
-                Ok(exch) => exch,
-                Err(down) => {
-                    server_down = Some(down);
-                    Exchanged::default()
-                }
-            };
-            match role {
-                PeerRole::ServerAuth => {}
-                PeerRole::RemoteAdopt => {
-                    state.snap_buf.extend(exch.snapshots);
-                    state.art_buf.extend(exch.articulations);
-                    let take = jitter_take(state.snap_buf.len());
-                    state.stalled = take == 0;
-                    if take > 0 {
-                        state.prev = SimSnapshot::capture(&state.client);
-                        let reported_outcome = &mut state.reported_outcome;
-                        let snaps: Vec<_> = state.snap_buf.drain(..take).collect();
-                        state.client.adopt_snapshots(snaps, |c| {
-                            if c.sim().outcome() == Outcome::Ongoing {
-                                *reported_outcome = false;
-                            }
-                        });
-                        state.client.reconcile_local_prediction();
-                        let adopted_tick = state.client.next_tick();
-                        while state
-                            .art_buf
-                            .front()
-                            .is_some_and(|a| a.tick <= adopted_tick)
-                        {
-                            pending_art = state.art_buf.pop_front();
-                        }
-                    }
-                }
-            }
-            issue_tick
+            state.prev = SimSnapshot::capture(&state.client);
+        }
+
+        let inputs = {
+            let state = world.non_send_resource::<GameState>();
+            crate::crab_slot::slot_inputs(state.server().expect("server_auth ⇒ a server").sim())
         };
-        if let Some(art) = pending_art {
-            crate::render::articulation::adopt(world, &art);
+        let (crab_poses, shadows) = if armed {
+            let poses = crate::crab_slot::pump_crab_slot(world, &inputs);
+            if let Some(p) = read_vehicle_pose(world, me) {
+                world
+                    .resource_mut::<LocalVehicle>()
+                    .update_pose(inputs.stepping_into, p);
+            }
+            (poses, pilot_shadows(world))
+        } else {
+            // The one unarmed host: the crab-less screenshot path
+            // (fp-screenshot without a checkpoint) — no crab world to read,
+            // so the sim's crabs hold their spawn poses, clawless. Poses stay
+            // mandatory; this is a diagnostics surface, not a served round.
+            (inputs.fallback.clone(), BTreeMap::new())
+        };
+        let (bytes, restarted) = {
+            let mut state = world.non_send_resource_mut::<GameState>();
+            let stepped = state
+                .server_mut()
+                .expect("server_auth ⇒ a server")
+                .step_next(&crab_poses, shadows);
+            (stepped.snapshot, stepped.restarted)
+        };
+        let snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
+            .expect("the authoritative server's snapshot must decode");
+        let articulation = armed.then(|| crate::render::articulation::capture(world, snap.tick));
+        {
+            let state = world.non_send_resource::<GameState>();
+            state.coord.broadcast_step(&snap, articulation.as_ref());
+        }
+        if let Some(art) = &articulation {
+            // The host renders its OWN Sally through the same windows a client
+            // adopts (rl#274) — one interpolation mechanism on both arms.
+            super::articulation::feed_crab_part_windows(world, art);
             super::articulation::publish_remote_vehicles(world, art.tick, &art.vehicles, me);
-            if let Some(p) = own_wire_pose(&art, me) {
-                let mut vehicle = world.resource_mut::<LocalVehicle>();
-                if matches!(&*vehicle, LocalVehicle::Flying { poses, .. } if poses.is_empty()) {
-                    // The request→grant edge (rl#191): the host accepted our intent and our
-                    // craft's first pose just crossed the wire — the cockpit camera engages.
-                    info!("cockpit engaged: own craft pose arrived on the wire");
-                }
-                vehicle.update_pose(art.tick, p);
-            }
         }
-        if let Some(down) = server_down {
-            end_round_server_down(world, down, tel.as_ref());
-            return;
+        {
+            let mut state = world.non_send_resource_mut::<GameState>();
+            // Same per-tick latch clear as the adopt arm: an Ongoing tick means the
+            // round is (or just became, via RESTART) live, so the next decision must
+            // report even if this frame's unbounded catch-up drain also re-decides it.
+            if snap.outcome == Outcome::Ongoing {
+                state.reported_outcome = false;
+            }
+            state.client.apply_core_snapshot(snap);
         }
-
-        if role == PeerRole::ServerAuth && world.get_resource::<VehicleControls>().is_some() {
-            let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
-            let entries: BTreeMap<PilotId, PilotCommand> = {
-                let state = world.non_send_resource::<GameState>();
-                let server = state.coord.server().expect("server_auth ⇒ a server");
-                server
-                    .pilot_intents()
-                    .iter()
-                    .filter_map(|(&pid, intent)| {
-                        // No sim player (a departure racing its roster shrink) ⇒ no walker
-                        // to transform — the intent simply files no command this tick.
-                        let now = server.sim().player(pid)?;
-                        let prev = state.prev.players.get(&pid).copied().unwrap_or(now);
-                        let boarding = boarding_of(now, prev, &terrain);
-                        Some((pilot_of(pid), intent.to_command(boarding)))
-                    })
-                    .collect()
-            };
-            world.resource_mut::<VehicleControls>().0 = entries;
-        }
-
-        loop {
-            if role == PeerRole::RemoteAdopt {
-                break;
-            }
-            // Ready? Host-paced: `exchange` assembled one tick per issued local input, so this
-            // drains exactly what this frame issued (a remote can delay nothing — rl#195).
-            {
-                let state = world.non_send_resource::<GameState>();
-                if !state
-                    .server()
-                    .expect("server_auth ⇒ a server")
-                    .next_tick_ready()
-                {
-                    break;
-                }
-            }
-            {
-                let mut state = world.non_send_resource_mut::<GameState>();
-                state.prev = SimSnapshot::capture(&state.client);
-            }
-
-            {
-                let inputs = {
-                    let state = world.non_send_resource::<GameState>();
-                    crate::crab_slot::slot_inputs(
-                        state.server().expect("server_auth ⇒ a server").sim(),
-                    )
-                };
-                let (crab_poses, shadows) = if armed {
-                    let poses = crate::crab_slot::pump_crab_slot(world, &inputs);
-                    if let Some(p) = read_vehicle_pose(world, me) {
-                        world
-                            .resource_mut::<LocalVehicle>()
-                            .update_pose(inputs.stepping_into, p);
-                    }
-                    (poses, pilot_shadows(world))
-                } else {
-                    // The one unarmed host: the crab-less screenshot path
-                    // (fp-screenshot without a checkpoint) — no crab world to read,
-                    // so the sim's crabs hold their spawn poses, clawless. Poses stay
-                    // mandatory; this is a diagnostics surface, not a served round.
-                    (inputs.fallback.clone(), BTreeMap::new())
-                };
-                let (bytes, restarted) = {
-                    let mut state = world.non_send_resource_mut::<GameState>();
-                    let stepped = state
-                        .server_mut()
-                        .expect("server_auth ⇒ a server")
-                        .step_next(&crab_poses, shadows);
-                    (stepped.snapshot, stepped.restarted)
-                };
-                let snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
-                    .expect("the authoritative server's snapshot must decode");
-                let articulation =
-                    armed.then(|| crate::render::articulation::capture(world, snap.tick));
-                {
-                    let state = world.non_send_resource::<GameState>();
-                    state.coord.broadcast_step(&snap, articulation.as_ref());
-                }
-                if let Some(art) = &articulation {
-                    // The host renders its OWN Sally through the same windows a client
-                    // adopts (rl#274) — one interpolation mechanism on both arms.
-                    super::articulation::feed_crab_part_windows(world, art);
-                    super::articulation::publish_remote_vehicles(
-                        world,
-                        art.tick,
-                        &art.vehicles,
-                        me,
-                    );
-                }
-                {
-                    let mut state = world.non_send_resource_mut::<GameState>();
-                    // Same per-tick latch clear as the adopt arm: an Ongoing tick means the
-                    // round is (or just became, via RESTART) live, so the next decision must
-                    // report even if this frame's unbounded catch-up drain also re-decides it.
-                    if snap.outcome == Outcome::Ongoing {
-                        state.reported_outcome = false;
-                    }
-                    state.client.apply_core_snapshot(snap);
-                }
-                if restarted && armed {
-                    let spawns: Vec<crate::sim::Pos> = world
-                        .non_send_resource::<GameState>()
-                        .server()
-                        .expect("server_auth ⇒ a server")
-                        .sim()
-                        .crabs()
-                        .iter()
-                        .map(|c| c.pos())
-                        .collect();
-                    crate::crab_slot::restart_crabs_to_spawns(world, &spawns);
-                }
-            }
-        }
-
-        if let Some(t) = &tel {
-            let due = {
-                let mut state = world.non_send_resource_mut::<GameState>();
-                let due = state.client.sim().tick() >= state.next_tel_tick;
-                if due {
-                    state.next_tel_tick = next_sample_tick(state.client.sim().tick());
-                    t.send(TelemetryEvent::tick(state.client.sim(), roster_len));
-                    t.send(TelemetryEvent::input(issue_tick, sim_input));
-                }
-                due
-            };
-            // Aggregated rescue surface: drain the window's `rescue_lost_crabs`
-            // tally into per-window Fault events carrying the count + last offending body,
-            // so a frame-by-frame blowup shows on the hub feed as a filtered per-window
-            // count instead of a per-step flood. One event PER REASON — a legitimate
-            // hard-hit tunneling rescue (rl#283) reported as "going non-finite" would be a
-            // false rl#137 alarm. A stable solo Sally never enters this branch (both
-            // counters stay 0) — a nonzero count IS the alarm.
-            if due
-                && let Some(mut stats) = world.get_resource_mut::<crab_world::bot::RescueStats>()
-                && (stats.since_nonfinite > 0
-                    || stats.since_below_terrain > 0
-                    || stats.since_buried > 0)
-            {
-                let (nf, bt, bu) = (
-                    stats.since_nonfinite,
-                    stats.since_below_terrain,
-                    stats.since_buried,
-                );
-                // `last_body` is reason-blind, so name it only when one reason fired —
-                // else the rl#137 event could name a below-terrain offender or vice versa.
-                let last = match stats.last_body {
-                    Some(b) if [nf, bt, bu].iter().filter(|&&n| n > 0).count() == 1 => {
-                        format!(" (last offender: {b})")
-                    }
-                    _ => String::new(),
-                };
-                stats.since_nonfinite = 0;
-                stats.since_below_terrain = 0;
-                stats.since_buried = 0;
-                if nf > 0 {
-                    t.send(TelemetryEvent::Fault {
-                        msg: format!(
-                            "crab rescue: {nf} non-finite respawn(s) this telemetry \
-                             window{last} — armed Sally is going non-finite (rl#137)"
-                        ),
-                    });
-                }
-                if bt > 0 {
-                    t.send(TelemetryEvent::Fault {
-                        msg: format!(
-                            "crab rescue: {bt} below-terrain respawn(s) this telemetry \
-                             window{last} — fell below the terrain surface, tunneled or \
-                             off the tile edge (rl#283 y-floor)"
-                        ),
-                    });
-                }
-                if bu > 0 {
-                    t.send(TelemetryEvent::Fault {
-                        msg: format!(
-                            "crab rescue: {bu} buried-carapace respawn(s) this telemetry \
-                             window{last} — carapace pinned under the one-sided \
-                             heightfield sheet (rl#303)"
-                        ),
-                    });
-                }
-            }
+        if restarted && armed {
+            let spawns: Vec<crate::sim::Pos> = world
+                .non_send_resource::<GameState>()
+                .server()
+                .expect("server_auth ⇒ a server")
+                .sim()
+                .crabs()
+                .iter()
+                .map(|c| c.pos())
+                .collect();
+            crate::crab_slot::restart_crabs_to_spawns(world, &spawns);
         }
     }
+}
 
-    // Chronic input-starvation surface (rl#213): reports appear at most once per second per
-    // player, so once per frame — after the tick drain — is plenty. A remote-adopt client has
-    // no server and drains nothing.
-    crate::telemetry::surface_starvation(
-        world.non_send_resource_mut::<GameState>().server_mut(),
-        tel.as_ref(),
-    );
-
-    if applied == MAX_TICKS_PER_FRAME {
+/// Emit the per-tick telemetry sample when the tick counter crosses the boundary, and —
+/// on a sampling tick — drain the crab-rescue counters into per-window Fault events.
+fn sample_telemetry(
+    world: &mut World,
+    t: &crate::telemetry::TelemetrySender,
+    roster_len: usize,
+    issue_tick: u64,
+    sim_input: Input,
+) {
+    let due = {
         let mut state = world.non_send_resource_mut::<GameState>();
-        state.accumulator = state.accumulator.min(TICK_DT);
+        let due = state.client.sim().tick() >= state.next_tel_tick;
+        if due {
+            state.next_tel_tick = next_sample_tick(state.client.sim().tick());
+            t.send(TelemetryEvent::tick(state.client.sim(), roster_len));
+            t.send(TelemetryEvent::input(issue_tick, sim_input));
+        }
+        due
+    };
+    // Aggregated rescue surface: drain the window's `rescue_lost_crabs`
+    // tally into per-window Fault events carrying the count + last offending body,
+    // so a frame-by-frame blowup shows on the hub feed as a filtered per-window
+    // count instead of a per-step flood. One event PER REASON — a legitimate
+    // hard-hit tunneling rescue (rl#283) reported as "going non-finite" would be a
+    // false rl#137 alarm. A stable solo Sally never enters this branch (both
+    // counters stay 0) — a nonzero count IS the alarm.
+    if due
+        && let Some(mut stats) = world.get_resource_mut::<crab_world::bot::RescueStats>()
+        && (stats.since_nonfinite > 0 || stats.since_below_terrain > 0 || stats.since_buried > 0)
+    {
+        let (nf, bt, bu) = (
+            stats.since_nonfinite,
+            stats.since_below_terrain,
+            stats.since_buried,
+        );
+        // `last_body` is reason-blind, so name it only when one reason fired —
+        // else the rl#137 event could name a below-terrain offender or vice versa.
+        let last = match stats.last_body {
+            Some(b) if [nf, bt, bu].iter().filter(|&&n| n > 0).count() == 1 => {
+                format!(" (last offender: {b})")
+            }
+            _ => String::new(),
+        };
+        stats.since_nonfinite = 0;
+        stats.since_below_terrain = 0;
+        stats.since_buried = 0;
+        if nf > 0 {
+            t.send(TelemetryEvent::Fault {
+                msg: format!(
+                    "crab rescue: {nf} non-finite respawn(s) this telemetry \
+                     window{last} — armed Sally is going non-finite (rl#137)"
+                ),
+            });
+        }
+        if bt > 0 {
+            t.send(TelemetryEvent::Fault {
+                msg: format!(
+                    "crab rescue: {bt} below-terrain respawn(s) this telemetry \
+                     window{last} — fell below the terrain surface, tunneled or \
+                     off the tile edge (rl#283 y-floor)"
+                ),
+            });
+        }
+        if bu > 0 {
+            t.send(TelemetryEvent::Fault {
+                msg: format!(
+                    "crab rescue: {bu} buried-carapace respawn(s) this telemetry \
+                     window{last} — carapace pinned under the one-sided \
+                     heightfield sheet (rl#303)"
+                ),
+            });
+        }
     }
+}
 
+/// Log each player's status edge exactly once per transition, on every peer, and report
+/// the round's decided outcome once per decision (the latch clears per Ongoing tick in
+/// the drain arms — a RESTART revives a decided round, rl#204).
+fn log_round_edges(world: &mut World, tel: Option<&crate::telemetry::TelemetrySender>) {
     let mut state = world.non_send_resource_mut::<GameState>();
     let state = &mut *state;
     for (pid, p) in state.client.sim().players() {
@@ -934,13 +979,88 @@ pub(super) fn drive_client_sim(world: &mut World) {
     if !state.reported_outcome && outcome != Outcome::Ongoing {
         state.reported_outcome = true;
         info!("round decided: {outcome:?}");
-        if let Some(t) = &tel {
+        if let Some(t) = tel {
             t.send(TelemetryEvent::round_decided(state.client.sim()));
         }
     }
-    let clock = RenderClock {
-        tick: state.client.sim().tick(),
-        frac: render_frac(state.accumulator, state.stalled),
+}
+
+/// The per-frame fixed-tick driver: accumulate render time, then per crossed tick
+/// assemble local control, exchange it through the [`Coordinator`], and run the
+/// role's arm — the host pumps + steps + broadcasts ([`pump_host_ticks`]); a remote
+/// client adopts what [`exchange_tick`]'s jitter buffer released. Ends by writing the
+/// frame's [`RenderClock`] and perf stats.
+pub(super) fn drive_client_sim(world: &mut World) {
+    let sim_started = std::time::Instant::now();
+    let armed = world
+        .get_resource::<crate::crab_slot::NnCrabsArmed>()
+        .is_some();
+    let role = PeerRole::of(world.non_send_resource::<GameState>());
+    let me = local_pilot(world.non_send_resource::<GameState>());
+    let delta = world.resource::<Time>().delta().as_secs_f64();
+    let (tel, roster_len) = {
+        let state = world.non_send_resource::<GameState>();
+        let tel = state.coord.telemetry().cloned();
+        (tel, state.client.sim().players().count())
+    };
+
+    world.non_send_resource_mut::<GameState>().accumulator += delta;
+
+    apply_vehicle_request(world);
+
+    let mut applied = 0u32;
+    loop {
+        {
+            let state = world.non_send_resource::<GameState>();
+            if state.accumulator < TICK_DT || applied >= MAX_TICKS_PER_FRAME {
+                break;
+            }
+        }
+        world.non_send_resource_mut::<GameState>().accumulator -= TICK_DT;
+        applied += 1;
+
+        let local = local_control(world);
+        let sim_input = local.sim_input();
+        let tick = exchange_tick(world, role, &local);
+        if let Some(art) = tick.articulation {
+            adopt_wire_articulation(world, &art, me);
+        }
+        if let Some(down) = tick.server_down {
+            end_round_server_down(world, down, tel.as_ref());
+            return;
+        }
+
+        if role == PeerRole::ServerAuth {
+            publish_pilot_commands(world);
+            pump_host_ticks(world, me, armed);
+        }
+
+        if let Some(t) = &tel {
+            sample_telemetry(world, t, roster_len, tick.issue_tick, sim_input);
+        }
+    }
+
+    // Chronic input-starvation surface (rl#213): reports appear at most once per second per
+    // player, so once per frame — after the tick drain — is plenty. A remote-adopt client has
+    // no server and drains nothing.
+    crate::telemetry::surface_starvation(
+        world.non_send_resource_mut::<GameState>().server_mut(),
+        tel.as_ref(),
+    );
+
+    if applied == MAX_TICKS_PER_FRAME {
+        let mut state = world.non_send_resource_mut::<GameState>();
+        state.accumulator = state.accumulator.min(TICK_DT);
+    }
+
+    log_round_edges(world, tel.as_ref());
+
+    let clock = {
+        let state = world.non_send_resource::<GameState>();
+        RenderClock {
+            tick: state.client.sim().tick(),
+            frac: render_frac(state.accumulator, state.stalled),
+        }
     };
     world.insert_resource(clock);
 
@@ -957,10 +1077,10 @@ pub(super) fn drive_client_sim(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::{
-        FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, jitter_take, render_frac,
+        FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, PlaneControl, jitter_take,
+        render_frac,
     };
     use crate::sim::{Input, buttons};
-    use crab_world::vehicle::VehicleKind;
 
     #[test]
     fn piloting_feeds_the_sim_a_neutral_foot_input_except_restart() {
@@ -971,15 +1091,12 @@ mod tests {
             "on foot the real walker input drives the sim unchanged"
         );
         let flying = |foot| LocalControl::Piloting {
-            kind: VehicleKind::Plane,
-            control: FlightControl {
+            control: FlightControl::Plane(PlaneControl {
                 throttle_trim: 1.0,
                 pitch: 1.0,
                 roll: -1.0,
                 yaw: 1.0,
-                match_velocity: true,
-                ..Default::default()
-            },
+            }),
             foot,
         };
         assert_eq!(
