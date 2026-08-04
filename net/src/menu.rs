@@ -102,8 +102,10 @@ fn spawn_formation(
         let result = net_loop::connect_and_form_lobby(
             seed,
             NET_EXPECT,
-            join,
-            telemetry,
+            net_loop::DialTargets {
+                host: join,
+                collector: telemetry,
+            },
             Some(bound_tx),
             LobbyControl {
                 role,

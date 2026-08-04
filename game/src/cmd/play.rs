@@ -46,8 +46,10 @@ pub(crate) fn run(args: Args) -> Result<()> {
             seed,
             args.discover_secs,
             args.expect,
-            dial,
-            args.telemetry,
+            net_loop::DialTargets {
+                host: dial,
+                collector: args.telemetry,
+            },
             None,
             net::SyncStamp::local(nn_crabs.len() as u8),
         )?;

@@ -48,10 +48,7 @@ fn menu_handoff_installs_the_chosen_round() {
         .expect("ensure_round_installed must build GameState from the parked round");
     assert_eq!(gs.client.me(), crate::sim::PlayerId(0), "solo player id 0");
     assert!(
-        matches!(
-            *gs.coord,
-            crate::net_loop::Coordinator::Server { net: None, .. }
-        ),
+        !gs.coord.is_remote_client() && gs.coord.server().is_some(),
         "a solo handoff installs a solo (internal-server) coordinator"
     );
     assert!(

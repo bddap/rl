@@ -14,7 +14,7 @@ const STABLE_FOR: Duration = Duration::from_millis(1500);
 
 pub const JOIN_WINDOW: Duration = Duration::from_secs(20);
 
-const MAX_MEMBERS: usize = u8::MAX as usize + 1;
+pub(crate) const MAX_MEMBERS: usize = u8::MAX as usize + 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Beat {
@@ -204,30 +204,32 @@ impl Membership {
         }
     }
 
+    /// The formation-side shared-asset verdict, every axis judged by the ONE arbiter,
+    /// [`crate::SyncVerdict::between`] (rl#336 — mid-game admission derives from the same
+    /// function, so the two gates cannot diverge). The digest axes are pairwise (every
+    /// peer must match OUR digests, ourselves included, so an unset local digest never
+    /// passes); the crabs axis is host-centric (the host serves the crab world, so OUR
+    /// count is judged against ITS — an unverified host, relay beat or no stamp yet,
+    /// never arms).
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
         let host = host_of(&self.live_set());
-        let host_crabs = if host == self.me {
-            Some(self.local.crab_count)
+        let host_stamp = if host == self.me {
+            Some(self.local)
         } else {
-            self.peers
-                .get(&host)
-                .and_then(|v| v.stamp)
-                .map(|s| s.crab_count)
+            self.peers.get(&host).and_then(|v| v.stamp)
+        };
+        let across_peers = |axis: fn(crate::SyncVerdict) -> bool| {
+            axis(crate::SyncVerdict::between(self.local, self.local))
+                && self.peers.values().all(|v| {
+                    v.stamp
+                        .is_some_and(|s| axis(crate::SyncVerdict::between(self.local, s)))
+                })
         };
         crate::SyncVerdict {
-            body: self.local.body_digest != 0
-                && self.peers.values().all(|v| {
-                    v.stamp
-                        .is_some_and(|s| s.body_digest == self.local.body_digest)
-                }),
-            crabs: host_crabs.is_some_and(|h| {
-                h >= 1 && (self.local.crab_count == 0 || self.local.crab_count == h)
-            }),
-            plant: self.local.plant_digest != 0
-                && self.peers.values().all(|v| {
-                    v.stamp
-                        .is_some_and(|s| s.plant_digest == self.local.plant_digest)
-                }),
+            body: across_peers(|v| v.body),
+            crabs: host_stamp
+                .is_some_and(|h| crate::SyncVerdict::between(h, self.local).crabs),
+            plant: across_peers(|v| v.plant),
         }
     }
 
