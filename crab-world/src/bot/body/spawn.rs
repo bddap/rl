@@ -185,7 +185,7 @@ pub fn spawn_crab(
         let id = link
             .actuated
             .expect("locked links are skipped before spawn");
-        let (joint, damper) = rig_joints(id, link.axis_local, link.anchor1);
+        let joint = rig_joint(id, link.axis_local, link.anchor1);
         let mut ec = commands.spawn((
             CrabBodyPart,
             CrabEnvId(env),
@@ -195,7 +195,6 @@ pub fn spawn_crab(
             groups,
             ColliderMassProperties::Density(link.density),
             MultibodyJoint::new(parent_ent, joint),
-            ImpulseJoint::new(parent_ent, damper),
             place(here),
             CrabRestPose(place(here)),
             Velocity::default(),
@@ -217,27 +216,24 @@ pub fn spawn_crab(
     carapace
 }
 
-/// How far past a joint's own drive ceiling its damper may brake (bddap/rl#315).
-/// Below [`CrabJointId::free_rate`] the cap never engages (the line is `c·ω ≤`
-/// ceiling there); a whip the chain's momentum carries PAST the free rate may
-/// brake harder than the joint's own drive could push — drag can exceed muscle.
-const DAMPER_BRAKE_HEADROOM: f32 = 2.0;
-
-/// The two joints of one articulation, built from one frame so the damper can
-/// never damp about a different axis than the hinge it rides (bddap/rl#315):
+/// The one joint of an articulation (bddap/rl#347 — was two in rl#315): the
+/// MULTIBODY revolute carries kinematics, soft limits, and a pure-stiction
+/// friction motor (it pins resting poses against slow gravity creep — rl#318's
+/// zero-input slope hold). The rl#315 viscous flail brake (`-c·ω`, c sized so full
+/// drive balances drag at [`CrabJointId::free_rate`]) is NOT a second joint: it is
+/// per-dof damping set on the multibody itself ([`set_flail_damping`]), folded
+/// into the augmented mass — implicit, unconditionally dissipative.
 ///
-/// - The MULTIBODY revolute: kinematics, limits, and a pure-stiction friction
-///   motor (it pins resting poses against slow gravity creep — rl#318's
-///   zero-input slope hold).
-/// - The IMPULSE damper: constrains NO axes, only an AngX motor `-c·ω` capped at
-///   [`DAMPER_BRAKE_HEADROOM`]× the drive ceiling — the viscous drag that bounds
-///   flail speed to [`CrabJointId::free_rate`].
-///
-/// Two joints because each offers ONE motor line (`clamp(c·ω, cap)`) and the
-/// coulomb floor a resting pose needs and the viscous slope that bounds flail
-/// speed have different slopes; the damper is an impulse joint because the
-/// multibody tree allows one joint per link.
-fn rig_joints(id: CrabJointId, axis: Vec3, anchor1: Vec3) -> (TypedJoint, TypedJoint) {
+/// rl#315 rode the brake on a parallel ImpulseJoint velocity motor because the
+/// multibody joint offers one motor line and stiction uses it. That construct was
+/// the rl#347 energy source: an iterative velocity-motor constraint sharing dofs
+/// with the reduced-coordinate multibody it constrains can rail against its
+/// impulse bounds and inject its full cap — ~1500 rad/s in a tick on the
+/// near-massless distal claw pair. The multibody damping replacement drops the
+/// old headroom-capped drag (2× the drive ceiling) for uncapped viscous drag: identical
+/// below 2× the free rate, strictly MORE braking past it, and it can only remove
+/// energy.
+fn rig_joint(id: CrabJointId, axis: Vec3, anchor1: Vec3) -> TypedJoint {
     let [lo, hi] = id.limits();
     let mut revolute = no_adjacent_contacts(
         RevoluteJointBuilder::new(axis)
@@ -250,21 +246,36 @@ fn rig_joints(id: CrabJointId, axis: Vec3, anchor1: Vec3) -> (TypedJoint, TypedJ
     );
     let generic: &mut GenericJoint = revolute.as_mut();
     generic.raw.softness = LIMIT_SOFTNESS;
+    revolute
+}
 
-    let damper = GenericJointBuilder::new(JointAxesMask::empty())
-        .local_axis1(axis)
-        .local_axis2(axis)
-        .local_anchor1(anchor1)
-        .local_anchor2(Vec3::ZERO)
-        .motor_velocity(JointAxis::AngX, 0.0, id.drive_damping())
-        .motor_max_force(
-            JointAxis::AngX,
-            DAMPER_BRAKE_HEADROOM * id.drive_torque_ceiling(),
-        )
-        .motor_model(JointAxis::AngX, MotorModel::ForceBased)
-        .build();
-
-    (revolute, TypedJoint::GenericJoint(damper))
+/// Arms the rl#315 flail brake on every newly-created crab articulation: sets the
+/// multibody's per-dof viscous damping to [`CrabJointId::drive_damping`] the tick
+/// rapier materializes the joint (respawns re-run it via `Added`). Until it runs,
+/// the joint sits one tick on rapier's default 0.1 N·m·s/rad — inert.
+pub(in crate::bot) fn set_flail_damping(
+    new: Query<(&RapierMultibodyJointHandle, &CrabJoint), Added<RapierMultibodyJointHandle>>,
+    mut ctx: Query<&mut bevy_rapier3d::plugin::context::RapierContextJoints>,
+) {
+    if new.is_empty() {
+        return;
+    }
+    let mut joints = ctx
+        .single_mut()
+        .expect("exactly one rapier context per crab world");
+    for (handle, joint) in new.iter() {
+        match joints.multibody_joints.get_mut(handle.0) {
+            Some((multibody, link_id)) => {
+                multibody.set_joint_damping(link_id, joint.id.drive_damping());
+            }
+            // A miss would leave the joint on rapier's 0.1 default — a silently
+            // weaker flail brake, so it must announce itself.
+            None => error!(
+                "flail brake NOT armed on {:?}: multibody joint handle is stale (rl#347)",
+                joint.id
+            ),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -2,6 +2,8 @@ pub mod actuator;
 pub mod aero;
 pub mod arch;
 pub mod body;
+#[cfg(test)]
+mod claw_whip_test;
 pub mod collider_check;
 pub mod headless;
 pub mod physics_digest;
@@ -287,6 +289,12 @@ impl Plugin for BotPlugin {
                 pose_sentinel::assert_body_transforms_rapier_owned
                     .in_set(PoseSentinelSet)
                     .run_if(pose_sentinel::visuals_on),
+            )
+            .add_systems(
+                FixedUpdate,
+                body::set_flail_damping
+                    .after(PhysicsSet::SyncBackend)
+                    .before(PhysicsSet::StepSimulation),
             )
             .add_systems(FixedUpdate, sensor::build_observation.in_set(BotSet::Sense))
             .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act))
