@@ -384,6 +384,104 @@ fn report(n_colliders: usize, findings: &[Finding]) -> super::AuditVerdict {
     super::AuditVerdict::failed(!illegal.is_empty())
 }
 
+/// Live per-tick flavour of the audit, for the demo's `--contact-audit` flag: every
+/// 64th tick, log the deepest crab self-intersections and crab-vs-terrain
+/// penetrations past [`FIGHT_MIN_DEPTH`]. Same depth ruler as the rest-pose audit
+/// above — one scanner family, one threshold (rl#335).
+pub fn live_contact_audit(
+    sim: Query<&RapierContextSimulation>,
+    cols: Query<&RapierContextColliders>,
+    parts: Query<(Option<&CrabJoint>, Has<CrabCarapace>), With<CrabBodyPart>>,
+    terrain: Res<crate::terrain::Terrain>,
+    mut tick: Local<u32>,
+) {
+    *tick += 1;
+    if *tick % 64 != 2 {
+        return;
+    }
+    let (Ok(sim), Ok(cols)) = (sim.single(), cols.single()) else {
+        return;
+    };
+    let name = |p: (Option<&CrabJoint>, bool)| {
+        p.0.map(|j| format!("{:?}", j.id))
+            .unwrap_or_else(|| "Carapace".to_string())
+    };
+    let mut worst: Vec<(f32, String, String)> = Vec::new();
+    let mut terr: Vec<(f32, String)> = Vec::new();
+    for pair in sim.narrow_phase.contact_pairs() {
+        let (Some(e1), Some(e2)) = (
+            cols.collider_entity(pair.collider1),
+            cols.collider_entity(pair.collider2),
+        ) else {
+            continue;
+        };
+        let mut depth = 0.0f32;
+        for m in &pair.manifolds {
+            for pt in &m.points {
+                depth = depth.max(-pt.dist);
+            }
+        }
+        if depth <= FIGHT_MIN_DEPTH {
+            continue;
+        }
+        match (parts.get(e1), parts.get(e2)) {
+            (Ok(p1), Ok(p2)) => worst.push((depth, name(p1), name(p2))),
+            // A part against the heightfield is the arena floor; other mixed pairs
+            // (ball, vehicle) aren't this audit's business.
+            (Ok(p), Err(_)) | (Err(_), Ok(p)) => {
+                let ground = [pair.collider1, pair.collider2].into_iter().any(|h| {
+                    cols.colliders
+                        .get(h)
+                        .is_some_and(|c| c.shape().as_heightfield().is_some())
+                });
+                if ground {
+                    terr.push((depth, name(p)));
+                }
+            }
+            _ => {}
+        }
+    }
+    let by_depth = |a: &f32, b: &f32| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal);
+    worst.sort_by(|a, b| by_depth(&a.0, &b.0));
+    terr.sort_by(|a, b| by_depth(&a.0, &b.0));
+    // Contacts only exist near the surface — a part that tunneled fully below the
+    // heightfield has NO manifold. Catch those geometrically: lowest collider point
+    // vs the sampled ground height under the part's center (exact on flat cells,
+    // ~slope*extent error on inclines — fine for a >5mm audit).
+    let mut clear: Vec<(f32, String)> = Vec::new();
+    for (handle, co) in cols.colliders.iter() {
+        let Some(e) = cols.collider_entity(handle) else {
+            continue;
+        };
+        let Ok(p) = parts.get(e) else {
+            continue;
+        };
+        let t = co.translation();
+        clear.push((co.compute_aabb().mins.y - terrain.height(t.x, t.z), name(p)));
+    }
+    clear.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let (min_clear, min_part) = clear
+        .first()
+        .map(|(c, p)| (*c, p.as_str()))
+        .unwrap_or((f32::INFINITY, "-"));
+    println!(
+        "AUDIT tick {}: {} crab-crab pairs >{:.0}mm, {} crab-terrain contacts >{:.0}mm; min-clearance {:.0}mm {}",
+        *tick,
+        worst.len(),
+        FIGHT_MIN_DEPTH * 1000.0,
+        terr.len(),
+        FIGHT_MIN_DEPTH * 1000.0,
+        min_clear * 1000.0,
+        min_part,
+    );
+    for (d, a, b) in worst.iter().take(6) {
+        println!("  {:>4.0}mm {a} vs {b}", d * 1000.0);
+    }
+    for (d, p) in terr.iter().take(6) {
+        println!("  {:>4.0}mm {p} vs terrain", d * 1000.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
