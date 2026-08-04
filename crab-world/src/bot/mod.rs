@@ -344,6 +344,7 @@ pub struct RescueStats {
 pub struct CrabRescued {
     pub env: usize,
     pub body: RescueBody,
+    pub reason: RescueReason,
 }
 
 /// How far below the local terrain surface a part must sink before the y-floor rescue
@@ -366,8 +367,8 @@ const CARAPACE_BURIED_RESCUE_M: f32 = 0.05;
 /// (rl#299 measured ~30 ms spring recovery); a full second of it is the trap.
 const CARAPACE_BURIED_RESCUE_TICKS: u32 = 60;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RescueReason {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RescueReason {
     /// NaN/inf pose — a physics-correctness fault (rl#137): error + debug-panic when
     /// armed. Wins over the other reasons when one env shows several.
     NonFinite,
@@ -548,7 +549,7 @@ pub fn rescue_lost_crabs(
         }
     }
 
-    for (&env, &(body, ..)) in &sick {
+    for (&env, &(body, _, _, reason)) in &sick {
         let origin = spawns.origin(env);
         respawn_crab(
             &mut commands,
@@ -561,7 +562,7 @@ pub fn rescue_lost_crabs(
             origin,
             env,
         );
-        rescued.write(CrabRescued { env, body });
+        rescued.write(CrabRescued { env, body, reason });
     }
 }
 

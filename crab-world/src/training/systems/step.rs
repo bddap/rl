@@ -54,7 +54,6 @@ pub(super) struct StepInputs<'a> {
     pub(super) values: &'a [NormalizedValue],
     pub(super) log_probs: &'a [f32],
     pub(super) efforts: &'a [f32],
-    pub(super) rescued_envs: &'a [usize],
 }
 
 fn normalize_observations(
@@ -237,7 +236,22 @@ pub(crate) fn brain_step(
     mut rescued: MessageReader<CrabRescued>,
 ) {
     let n = training.envs.len();
-    let rescued_envs: Vec<usize> = rescued.read().map(|m| m.env).collect();
+    // rl#343: a rescue is the engine confessing it lost a crab (rl#137 non-finite /
+    // rl#283 tunneled / rl#303 buried). Training hard-fails on it — the deleted
+    // finalize-as-Terminal path silently traded an engine bug for a free respawn.
+    if let Some(m) = rescued.read().next() {
+        panic!(
+            "physics-integrity violation in training (rl#343): rescue_lost_crabs \
+             respawned env {} at tick {} (episode-step {}) — {:?} at `{}`. Training \
+             does not recover from a broken physics state; fix the engine bug instead \
+             of respawning over it.",
+            m.env,
+            training.total_steps,
+            training.envs.get(m.env).map_or(0, |ep| ep.steps),
+            m.reason,
+            m.body,
+        );
+    }
     if obs.rows().len() != n || actions.len() != n {
         return;
     }
@@ -292,7 +306,6 @@ pub(crate) fn brain_step(
         values: &values,
         log_probs: &log_probs,
         efforts: &efforts,
-        rescued_envs: &rescued_envs,
     };
     training.finalize_transitions(&inputs, &mut targets, &spawns, &terrain);
 
@@ -322,8 +335,6 @@ mod tests {
     use crate::training::algorithm::{StepEnd, Transition};
     use crate::training::reward::GRAB_REWARD;
     use bevy::ecs::system::RunSystemOnce;
-
-    use super::super::lifecycle::reset_crab;
 
     /// Env 0's target-local obs channels after a Sense pass over one hand-built
     /// carapace — read through the named-slot view, exactly what the policy steers by.
@@ -406,13 +417,6 @@ mod tests {
         build_rollout_app(0, &config, crate::bot::arch::ArchId::DEFAULT)
     }
 
-    fn body_part_entities(app: &mut App) -> std::collections::HashSet<Entity> {
-        let mut q = app
-            .world_mut()
-            .query_filtered::<Entity, With<CrabBodyPart>>();
-        q.iter(app.world()).collect()
-    }
-
     #[test]
     fn same_seed_reproduces_the_rollout_trajectory() {
         const SEED: u64 = 0x00D3_7E2A;
@@ -433,12 +437,13 @@ mod tests {
                 .set(initial_brain.clone());
             for t in 0..TICKS {
                 if t == FORCE_RESET_AT {
-                    let mut q = app
-                        .world_mut()
-                        .query_filtered::<&mut Transform, With<CrabCarapace>>();
-                    if let Ok(mut tr) = q.single_mut(app.world_mut()) {
-                        tr.translation.y = -1.0;
-                    }
+                    // Force an episode boundary mid-trajectory (over-cap truncation,
+                    // rl#343 — an underground teleport would hard-fail the run) so the
+                    // respawn/reset path is inside the same-seed contract.
+                    app.world_mut()
+                        .non_send_resource_mut::<TrainingState>()
+                        .envs[0]
+                        .steps = super::super::lifecycle::MAX_EPISODE_TICKS + 1;
                 }
                 app.update();
             }
@@ -489,10 +494,17 @@ mod tests {
         assert!(differs, "a different seed must change the trajectory");
     }
 
+    /// rl#343: a rescue reaching the training loop is a physics-integrity violation —
+    /// brain_step hard-fails with the state instead of finalizing the episode and
+    /// letting the free respawn hide the engine bug.
     #[test]
-    fn rescued_env_respawns_exactly_once() {
+    #[should_panic(
+        expected = "physics-integrity violation in training (rl#343): rescue_lost_crabs \
+                    respawned env 0"
+    )]
+    fn a_rescue_hard_fails_training() {
         let checkpoint_dir =
-            std::env::temp_dir().join(format!("rl_test_rescue_once_{}", std::process::id()));
+            std::env::temp_dir().join(format!("rl_test_rescue_panics_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&checkpoint_dir);
         let mut app = headless_training_app(&checkpoint_dir, 0x1234);
 
@@ -505,12 +517,7 @@ mod tests {
                 matches!(st.envs[0].phase, EnvPhase::Recording),
                 "settle grace elapsed and no reset pending — env is recording"
             );
-            assert!(st.envs[0].steps > 0, "episode should have recorded steps");
         }
-        let episodes_before = app
-            .world()
-            .non_send_resource::<TrainingState>()
-            .episode_count;
 
         {
             let mut q = app
@@ -523,49 +530,10 @@ mod tests {
         app.world_mut()
             .run_system_once(crate::bot::rescue_lost_crabs)
             .expect("rescue system");
-        let rescued_set = body_part_entities(&mut app);
-        assert!(
-            rescued_set.iter().all(|&e| {
-                app.world()
-                    .get::<Transform>(e)
-                    .is_some_and(|t| t.translation.is_finite())
-            }),
-            "rescue must leave a finite crab"
-        );
-
         app.world_mut()
             .run_system_once(crate::bot::sensor::build_observation)
             .expect("build observation");
-        app.world_mut()
-            .run_system_once(brain_step)
-            .expect("brain_step");
-
-        {
-            let st = app.world().non_send_resource::<TrainingState>();
-            assert!(
-                matches!(st.envs[0].phase, EnvPhase::Settling { grace } if grace == RESET_GRACE_TICKS),
-                "rescue path takes the settle grace itself (Settling, not AwaitingRespawn) — \
-                 being in Settling and not AwaitingRespawn is what stops reset_crab respawning again"
-            );
-            assert_eq!(
-                st.episode_count,
-                episodes_before + 1,
-                "the rescue must still terminate the episode for training"
-            );
-        }
-
-        app.world_mut()
-            .run_system_once(reset_crab)
-            .expect("reset_crab");
-
-        let after_set = body_part_entities(&mut app);
-        assert_eq!(
-            after_set, rescued_set,
-            "rescued env was respawned twice in one tick (issue #16): reset_crab \
-             replaced the rescue's crab instead of leaving it alone"
-        );
-
-        let _ = std::fs::remove_dir_all(&checkpoint_dir);
+        let _ = app.world_mut().run_system_once(brain_step);
     }
 
     #[test]
@@ -657,13 +625,13 @@ mod tests {
             .expect("brain_step A");
         let act_a = app.world().resource::<CrabActions>().rows()[0];
 
-        {
-            let mut q = app
-                .world_mut()
-                .query_filtered::<&mut Transform, With<CrabCarapace>>();
-            let mut t = q.single_mut(app.world_mut()).expect("carapace");
-            t.translation.y = -1.0;
-        }
+        // End the episode at tick B via over-cap truncation (rl#343 — the old
+        // underground teleport would hard-fail the run, and the pairing pin below is
+        // about pending mechanics, not the terminal kind).
+        app.world_mut()
+            .non_send_resource_mut::<TrainingState>()
+            .envs[0]
+            .steps = super::super::lifecycle::MAX_EPISODE_TICKS + 1;
 
         let transitions_before = app.world().non_send_resource::<TrainingState>().rollouts[0].len();
 
@@ -688,8 +656,8 @@ mod tests {
         );
         assert_eq!(
             last.end,
-            StepEnd::Terminal,
-            "the sub-floor height read at tick B must terminate the transition"
+            StepEnd::Truncated,
+            "the over-cap read at tick B must end the transition"
         );
         assert_ne!(
             act_a, act_b,
@@ -697,9 +665,9 @@ mod tests {
         );
         assert_eq!(
             last.action, act_a,
-            "the terminal height (read at tick B) is paired with act_a — the tick-A \
-             action whose physics result that height is — not tick B's action; this \
-             is the one-tick phase the fix restores (issue #15)"
+            "the ending state (read at tick B) is paired with act_a — the tick-A \
+             action whose physics result it is — not tick B's action; this is the \
+             one-tick phase the fix restores (issue #15)"
         );
         assert!(
             st.envs[0].pending.is_none(),

@@ -13,8 +13,8 @@ use super::step::{BodyState, StepInputs};
 
 pub const MAX_EPISODE_TICKS: u32 = 1500;
 
-fn classify_step_end(grabbed: bool, fell: bool, over_cap: bool) -> StepEnd {
-    if grabbed || fell {
+fn classify_step_end(grabbed: bool, over_cap: bool) -> StepEnd {
+    if grabbed {
         StepEnd::Terminal
     } else if over_cap {
         StepEnd::Truncated
@@ -23,11 +23,26 @@ fn classify_step_end(grabbed: bool, fell: bool, over_cap: bool) -> StepEnd {
     }
 }
 
-struct PostStepPose {
-    height: f32,
-    max_speed: f32,
-    d_now: Option<f32>,
-    min_tip_dist: Option<f32>,
+/// rl#343: a pose outside physical bounds is an ENGINE bug, not crab behavior — the
+/// run hard-fails with the state instead of ending the episode and respawning. The
+/// deleted `fell` terminal both hid the bug and made dying the dominant cold-start
+/// strategy (rl#342 finding #1). No penalty, no recovery, by owner directive: fix the
+/// engine bug the state points at.
+fn assert_physics_integrity(env: usize, tick: u64, ep_step: u32, height: f32, max_speed: f32) {
+    let blowing_up = max_speed > 100.0 || !height.is_finite();
+    if blowing_up || !(0.02..=50.0).contains(&height) {
+        let tripped = if blowing_up {
+            "blowing up (part speed > 100 m/s or non-finite pose)"
+        } else {
+            "carapace height outside [0.02, 50] m"
+        };
+        panic!(
+            "physics-integrity violation in training (rl#343): env {env} tick {tick} \
+             episode-step {ep_step}: {tripped} — height {height} m, max part speed \
+             {max_speed} m/s. Training does not recover from a broken physics state; \
+             fix the engine bug instead of respawning over it."
+        );
+    }
 }
 
 struct StepFinalize {
@@ -38,50 +53,29 @@ struct StepFinalize {
 
 fn finalize_pending_step(
     pending: &Pending,
-    pose: PostStepPose,
+    d_now: Option<f32>,
+    min_tip_dist: Option<f32>,
     over_cap: bool,
-    rescued: bool,
     effort_weight: f32,
 ) -> StepFinalize {
-    let PostStepPose {
-        height,
-        max_speed,
-        d_now,
-        min_tip_dist,
-    } = pose;
-    let transition = |reward: f32, end: StepEnd| Transition {
-        obs: pending.obs,
-        action: pending.action,
-        reward,
-        value: pending.value,
-        log_prob: pending.log_prob,
-        end,
-    };
-
-    if rescued {
-        return StepFinalize {
-            transition: transition(
-                compute_reward(None, pending.effort, effort_weight),
-                StepEnd::Terminal,
-            ),
-            ended: true,
-            progress_glitch: false,
-        };
-    }
-
     let distance_closed = pending.target_dist.zip(d_now).map(|(prev, now)| prev - now);
     let progress_glitch = is_progress_glitch(distance_closed);
     let mut reward = compute_reward(distance_closed, pending.effort, effort_weight);
 
-    let blowing_up = max_speed > 100.0 || !height.is_finite();
-    let fell = !(0.02..=50.0).contains(&height) || blowing_up;
     let grabbed = min_tip_dist.is_some_and(tip_touch);
     if grabbed {
         reward += GRAB_REWARD;
     }
-    let end = classify_step_end(grabbed, fell, over_cap);
+    let end = classify_step_end(grabbed, over_cap);
     StepFinalize {
-        transition: transition(reward, end),
+        transition: Transition {
+            obs: pending.obs,
+            action: pending.action,
+            reward,
+            value: pending.value,
+            log_prob: pending.log_prob,
+            end,
+        },
         ended: end.ends_segment(),
         progress_glitch,
     }
@@ -128,7 +122,6 @@ impl TrainingState {
     ) {
         let body = inputs.body;
         let min_tip_dists = inputs.min_tip_dists;
-        let rescued_envs = inputs.rescued_envs;
         #[allow(clippy::needless_range_loop)]
         for e in 0..self.envs.len() {
             if matches!(self.envs[e].phase, EnvPhase::Settling { .. }) || body.poses[e].is_none() {
@@ -144,19 +137,20 @@ impl TrainingState {
 
             let episode_ended = if let Some(pending) = self.envs[e].pending.take() {
                 let (height, _upright) = body.poses[e].expect("poses[e].is_none() handled above");
+                assert_physics_integrity(
+                    e,
+                    self.total_steps,
+                    self.envs[e].steps,
+                    height,
+                    body.max_speeds[e],
+                );
                 let d_now = carapace_target_dist(body, targets, e);
                 let over_cap = self.envs[e].steps > MAX_EPISODE_TICKS;
-                let rescued = rescued_envs.contains(&e);
                 let fin = finalize_pending_step(
                     &pending,
-                    PostStepPose {
-                        height,
-                        max_speed: body.max_speeds[e],
-                        d_now,
-                        min_tip_dist: min_tip_dists[e],
-                    },
+                    d_now,
+                    min_tip_dists[e],
                     over_cap,
-                    rescued,
                     self.effort_weight,
                 );
                 if fin.progress_glitch {
@@ -189,13 +183,7 @@ impl TrainingState {
                 let ep_reward = ep.reward;
                 let reached = ep.min_tip_dist.is_some_and(tip_touch);
                 self.envs[e] = EnvEpisode {
-                    phase: if rescued_envs.contains(&e) {
-                        EnvPhase::Settling {
-                            grace: RESET_GRACE_TICKS,
-                        }
-                    } else {
-                        EnvPhase::AwaitingRespawn
-                    },
+                    phase: EnvPhase::AwaitingRespawn,
                     ..EnvEpisode::default()
                 };
 
@@ -344,14 +332,13 @@ mod tests {
 
     #[test]
     fn classify_step_end_terminal_vs_truncation() {
-        assert_eq!(classify_step_end(true, false, false), StepEnd::Terminal);
-        assert_eq!(classify_step_end(true, false, true), StepEnd::Terminal);
-        assert_eq!(classify_step_end(false, true, false), StepEnd::Terminal);
-        assert_eq!(classify_step_end(false, false, true), StepEnd::Truncated);
-        assert_eq!(classify_step_end(false, false, false), StepEnd::Continues);
-        assert!(classify_step_end(true, false, false).ends_segment());
-        assert!(classify_step_end(false, false, true).ends_segment());
-        assert!(!classify_step_end(false, false, false).ends_segment());
+        assert_eq!(classify_step_end(true, false), StepEnd::Terminal);
+        assert_eq!(classify_step_end(true, true), StepEnd::Terminal);
+        assert_eq!(classify_step_end(false, true), StepEnd::Truncated);
+        assert_eq!(classify_step_end(false, false), StepEnd::Continues);
+        assert!(classify_step_end(true, false).ends_segment());
+        assert!(classify_step_end(false, true).ends_segment());
+        assert!(!classify_step_end(false, false).ends_segment());
     }
 
     #[test]
@@ -416,7 +403,6 @@ mod tests {
             values: &[NormalizedValue(0.0)],
             log_probs: &[0.0],
             efforts: &[0.0],
-            rescued_envs: &[],
         };
         ts.finalize_transitions(&inputs, &mut targets, &spawns, &flat());
 
@@ -445,6 +431,8 @@ mod tests {
             effort: 0.0,
             target_dist: None,
         });
+        // An over-cap truncation ends the episode without needing a whole physics run.
+        ts.envs[0].steps = MAX_EPISODE_TICKS + 1;
 
         let mut targets = CrabTargets::default();
         targets.resize(1);
@@ -464,8 +452,6 @@ mod tests {
             values: &[NormalizedValue(0.0)],
             log_probs: &[0.0],
             efforts: &[0.0],
-            // A rescue ends the episode without needing a whole physics run.
-            rescued_envs: &[0],
         };
         ts.finalize_transitions(&inputs, &mut targets, &spawns, &flat());
 
@@ -488,44 +474,12 @@ mod tests {
             effort,
             target_dist,
         };
-        const ALIVE_H: f32 = 1.0;
-        const CALM: f32 = 1.0;
         let far_tip = Some(REACH_RADIUS * 4.0);
-        let pose = |close: Option<f32>, tip: Option<f32>| PostStepPose {
-            height: ALIVE_H,
-            max_speed: CALM,
-            d_now: close,
-            min_tip_dist: tip,
-        };
-
-        let r = finalize_pending_step(
-            &pend(0.7, Some(1.0)),
-            PostStepPose {
-                height: f32::NAN,
-                max_speed: 1e9,
-                d_now: Some(0.0),
-                min_tip_dist: Some(0.0),
-            },
-            true,
-            true,
-            EFFORT_WEIGHT_DEFAULT,
-        );
-        assert_eq!(r.transition.end, StepEnd::Terminal);
-        assert!(r.ended);
-        assert!(
-            !r.progress_glitch,
-            "the rescue's None progress is not a glitch"
-        );
-        assert_eq!(
-            r.transition.reward.to_bits(),
-            compute_reward(None, 0.7, EFFORT_WEIGHT_DEFAULT).to_bits(),
-            "a rescued step earns only the effort tax (no progress/grab credit)"
-        );
 
         let r = finalize_pending_step(
             &pend(0.0, Some(1.25)),
-            pose(Some(1.0), far_tip),
-            false,
+            Some(1.0),
+            far_tip,
             false,
             EFFORT_WEIGHT_DEFAULT,
         );
@@ -538,8 +492,8 @@ mod tests {
 
         let r = finalize_pending_step(
             &pend(0.0, Some(1.0)),
-            pose(Some(1.0), Some(0.0)),
-            false,
+            Some(1.0),
+            Some(0.0),
             false,
             EFFORT_WEIGHT_DEFAULT,
         );
@@ -555,29 +509,10 @@ mod tests {
         );
 
         let r = finalize_pending_step(
-            &pend(0.0, None),
-            PostStepPose {
-                height: 0.0,
-                max_speed: CALM,
-                d_now: None,
-                min_tip_dist: far_tip,
-            },
-            false,
-            false,
-            EFFORT_WEIGHT_DEFAULT,
-        );
-        assert_eq!(
-            r.transition.end,
-            StepEnd::Terminal,
-            "a sub-floor height is a fall terminal"
-        );
-        assert!(r.ended);
-
-        let r = finalize_pending_step(
             &pend(0.0, Some(1.0)),
-            pose(Some(1.0), far_tip),
+            Some(1.0),
+            far_tip,
             true,
-            false,
             EFFORT_WEIGHT_DEFAULT,
         );
         assert_eq!(r.transition.end, StepEnd::Truncated);
@@ -585,8 +520,8 @@ mod tests {
 
         let r = finalize_pending_step(
             &pend(0.0, Some(2.0)),
-            pose(Some(0.0), far_tip),
-            false,
+            Some(0.0),
+            far_tip,
             false,
             EFFORT_WEIGHT_DEFAULT,
         );
@@ -599,5 +534,27 @@ mod tests {
             compute_reward(None, 0.0, EFFORT_WEIGHT_DEFAULT).to_bits(),
             "the glitched progress is dropped to zero (effort tax only)"
         );
+    }
+
+    /// rl#343: a broken physics state in training panics with the diagnostics (env,
+    /// tick, pose, what tripped) instead of scoring a terminal and respawning.
+    #[test]
+    #[should_panic(
+        expected = "physics-integrity violation in training (rl#343): env 0 tick 0 \
+                    episode-step 3: carapace height outside [0.02, 50] m"
+    )]
+    fn a_sub_floor_height_hard_fails_training() {
+        assert_physics_integrity(0, 0, 3, 0.0, 1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "blowing up (part speed > 100 m/s or non-finite pose)")]
+    fn a_blowup_hard_fails_training() {
+        assert_physics_integrity(0, 0, 0, f32::NAN, 1e9);
+    }
+
+    #[test]
+    fn a_live_crab_passes_the_integrity_check() {
+        assert_physics_integrity(0, 0, 0, 1.0, 5.0);
     }
 }
