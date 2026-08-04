@@ -328,6 +328,7 @@ pub struct SoakReport {
     pub max_above_ground: f32,
     pub max_abs_vy: f32,
     pub max_up_vy: f32,
+    pub max_power_w: f32,
     pub teleports: u64,
     /// Zero-contact stretches ≥ 16 ticks (0.25 s): how often and how long she is
     /// genuinely airborne — the owner-visible "flight" look even when every
@@ -388,6 +389,7 @@ pub fn run_flight_soak(
         max_above_ground: f32::NEG_INFINITY,
         max_abs_vy: 0.0,
         max_up_vy: 0.0,
+        max_power_w: 0.0,
         teleports: 0,
         airborne_stretches: 0,
         longest_airborne_ticks: 0,
@@ -455,6 +457,32 @@ pub fn run_flight_soak(
         };
         let above = pos.y - terrain.height(pos.x, pos.z);
         let energy = crab_mech_energy(world);
+        // Gross actuator power, exactly the eval accumulator's observable (rl#279):
+        // commanded torque × the sensor's measured hinge rate, Σ over joints.
+        let power_w = {
+            let mut q = world.query::<(&crab_world::bot::body::CrabJoint, &CrabEnvId)>();
+            let joints: Vec<crab_world::bot::body::CrabJointId> = q
+                .iter(world)
+                .filter(|(_, env)| env.0 == 0)
+                .map(|(j, _)| j.id)
+                .collect();
+            let actions = world.resource::<crab_world::bot::actuator::CrabActions>();
+            let obs = world.resource::<crab_world::bot::sensor::CrabObservation>();
+            match obs.env(0) {
+                Some(view) => joints
+                    .iter()
+                    .filter_map(|id| {
+                        actions.drive(0, *id).map(|d| {
+                            (crab_world::bot::actuator::applied_torque(*id, d)
+                                * view.joint_rate(*id))
+                            .abs()
+                        })
+                    })
+                    .sum(),
+                None => f32::NAN,
+            }
+        };
+        report.max_power_w = report.max_power_w.max(power_w);
 
         report.max_above_ground = report.max_above_ground.max(above);
         report.max_abs_vy = report.max_abs_vy.max(linvel.y.abs());
@@ -567,7 +595,7 @@ pub fn run_flight_soak(
         if progress_every > 0 && tick.is_multiple_of(progress_every) {
             println!(
                 "sally-soak: tick {tick}/{ticks} — above={above:.3} m speed={:.3} m/s \
-                 E={energy:.1} J contacts={contacts} max_above={:.3} max|vy|={:.3} \
+                 E={energy:.1} J P={power_w:.0} W contacts={contacts} max_above={:.3} max|vy|={:.3} \
                  events={} teleports={}",
                 linvel.length(),
                 report.max_above_ground,
