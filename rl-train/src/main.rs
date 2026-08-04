@@ -73,24 +73,40 @@ struct EvalArgs {
     #[command(flatten)]
     checkpoint: CheckpointArgs,
 
-    /// Physics ticks to run the policy for PER COMPASS BEARING (after a short settle
-    /// drop each). The default is [`crab_world::eval::DEFAULT_EVAL_TICKS`] — the one
-    /// place the chase-eval episode is defined, shared with the trainer's keep-best
-    /// gate (bddap/rl#233); the bearing compass is [`crab_world::eval::EVAL_BEARINGS`]
-    /// (bddap/rl#239).
-    #[arg(long, default_value_t = crab_world::eval::DEFAULT_EVAL_TICKS)]
+    /// Physics ticks to run the policy for PER (heading, start) PAIR (after a short
+    /// settle drop each). The default is [`crab_world::eval::DEFAULT_EVAL_TICKS`] —
+    /// the one place the chase-eval episode is defined, shared with the trainer's
+    /// keep-best gate (bddap/rl#233). 0 would read a default-constructed episode as
+    /// a plausible hard zero, so it refuses at parse (rl#341 S1-3).
+    #[arg(long, default_value_t = crab_world::eval::DEFAULT_EVAL_TICKS,
+          value_parser = clap::value_parser!(u64).range(1..))]
     ticks: u64,
 
-    #[arg(long)]
+    /// DIAGNOSTIC: far-ball distance in metres, a finite in-band length (validated —
+    /// NaN/∞/negative/out-of-band used to panic, hang, or silently rescale the gate,
+    /// rl#341 S1-3). Non-default values also move the deterministic start set (starts
+    /// are drawn progressable at THIS distance) — the wire's `target_m=` and
+    /// provenance keys record it. Refused in gate mode.
+    #[arg(long, value_parser = parse_distance)]
     distance: Option<f32>,
 
+    /// Terrain relief amplitude: scales the committed bake's datum-shifted heights by
+    /// this ONE scalar (1 = the canonical bake bit-identically; 0 = a plane). The
+    /// whole eval — start derivation, episodes, probes — runs on the scaled grid
+    /// (owner 08-03 / rl#341). Ground too rough to seat progressable starts refuses
+    /// loudly. Refused in gate mode (the gate judges the pinned instrument).
+    #[arg(long, default_value_t = 1.0, value_parser = parse_amplitude)]
+    terrain_amplitude: f32,
+
     /// Gate mode: exit nonzero (after printing `EVAL_RESULT`) unless a real policy
-    /// loaded AND it closed at least this many meters toward the target. Binds the
+    /// loaded AND its mean pair progress is at least this many meters. Binds the
     /// pass/fail verdict to THIS eval — the one chase metric shared with the demo and
     /// GCR — so a release/promotion gate delegates here instead of growing a second
-    /// behavior probe that drifts (bddap/bothouse#134). Without the flag, a missing
-    /// checkpoint stays the legitimate exit-0 zero-action baseline the training
-    /// monitor plots.
+    /// behavior probe that drifts (bddap/bothouse#134). Demands the PINNED instrument
+    /// (default ticks/distance/amplitude): a resized episode or rescaled arena would
+    /// silently rescale the bar it enforces (rl#341 S1-3). Without the flag, a
+    /// missing checkpoint stays the legitimate exit-0 zero-action baseline the
+    /// training monitor plots.
     #[arg(long)]
     min_progress: Option<f32>,
 
@@ -106,6 +122,26 @@ struct EvalArgs {
 /// error already names the unknown arch and lists the known ones.
 fn parse_arch(s: &str) -> Result<bot::arch::ArchId, String> {
     bot::arch::ArchId::try_from(s.to_string())
+}
+
+/// clap value-parser for `--distance`: the eval owns its own domain
+/// ([`crab_world::eval::validate_target_distance`], rl#341 S1-3).
+fn parse_distance(s: &str) -> Result<f32, String> {
+    let d: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    crab_world::eval::validate_target_distance(d)
+}
+
+/// clap value-parser for `--terrain-amplitude`: same domain the grid constructor
+/// enforces ([`crab_world::terrain::TerrainGrid::gcr_with_amplitude`]).
+fn parse_amplitude(s: &str) -> Result<f32, String> {
+    let a: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if a.is_finite() && a >= 0.0 {
+        Ok(a)
+    } else {
+        Err(format!(
+            "terrain amplitude must be a finite non-negative scalar, got {a}"
+        ))
+    }
 }
 
 /// The bddap/rl#214 body preflight, MANDATORY for every mode that builds a crab world
@@ -163,6 +199,21 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 
 fn eval(e: EvalArgs) -> Result<ExitCode, String> {
     let body_gate = canonical_body("eval", e.allow_fallback_body)?;
+    // Gate mode judges the PINNED instrument only (rl#341 S1-3): a shorter episode,
+    // a nearer ball, or a flattened arena would silently rescale the bar — e.g.
+    // `--distance 1 --min-progress 0.3` passed a 24 m-chase gate on a 0.3 m twitch.
+    if e.min_progress.is_some()
+        && (e.ticks != crab_world::eval::DEFAULT_EVAL_TICKS
+            || e.distance.is_some()
+            || e.terrain_amplitude != 1.0)
+    {
+        return Err(
+            "--min-progress judges the pinned instrument; drop --ticks/--distance/\
+             --terrain-amplitude (a resized episode or rescaled arena would silently \
+             rescale the gate)"
+                .to_string(),
+        );
+    }
     let distance = e
         .distance
         .unwrap_or(crab_world::eval::DEFAULT_TARGET_DISTANCE_M);
@@ -170,8 +221,14 @@ fn eval(e: EvalArgs) -> Result<ExitCode, String> {
     // (the daemon greps that prefix; wrong-body baseline numbers plotted as training
     // progress would be the eval-side rl#214). Absent stays the legitimate
     // zero-action baseline below.
-    let r = crab_world::eval::run_eval(body_gate, &e.checkpoint.checkpoint_dir, e.ticks, distance)
-        .map_err(|refusal| format!("eval: {refusal}"))?;
+    let r = crab_world::eval::run_eval(
+        body_gate,
+        &e.checkpoint.checkpoint_dir,
+        e.ticks,
+        distance,
+        e.terrain_amplitude,
+    )
+    .map_err(|refusal| format!("eval: {refusal}"))?;
     // The wire lines and their schema live with the report type (rl#270).
     print!("{}", r.wire_report());
     if !r.policy_loaded {
@@ -194,18 +251,23 @@ fn eval(e: EvalArgs) -> Result<ExitCode, String> {
             return Ok(ExitCode::FAILURE);
         }
         if r.progress_m() < min {
+            let min_pair = r.far.min_pair();
             eprintln!(
-                "eval: FAIL — policy closed {:.4} m toward the {:.2} m target at its \
-                 worst bearing ({:.0}°, median locale), below the required \
-                 --min-progress {min} m (dead/collapsed policy, or a dead bearing)",
+                "eval: FAIL — policy closed a mean {:.4} m toward the {:.2} m target \
+                 over {} (heading, start) pairs (worst pair {:.4} m @ {:.0}°, {} \
+                 rescued), below the required --min-progress {min} m (dead/collapsed \
+                 policy, or a dead heading dragging the mean)",
                 r.progress_m(),
-                r.median_far().target_distance_m,
-                r.median_far().worst().bearing_rad.to_degrees()
+                r.far.target_distance_m,
+                r.far.pairs.len(),
+                min_pair.progress_m,
+                min_pair.bearing_rad.to_degrees(),
+                r.far.rescued_pairs(),
             );
             return Ok(ExitCode::FAILURE);
         }
         println!(
-            "eval: PASS — median-locale worst-bearing progress {:.4} m ≥ --min-progress {min} m",
+            "eval: PASS — mean pair progress {:.4} m ≥ --min-progress {min} m",
             r.progress_m()
         );
     }

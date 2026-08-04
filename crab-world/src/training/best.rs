@@ -12,20 +12,32 @@ use crate::mesh_fallback::BodyGate;
 
 const BEST_SUBDIR: &str = "best";
 
-/// The median-locale min-over-bearings chase-progress bar (rl#239/rl#293). The
-/// sidecar name IS the metric version: a `best/` stamped under a retired metric
-/// carries none of THIS sidecar, so the score-incumbent-first machinery re-baselines
-/// it under the current eval before any candidate is considered — never a new-metric
-/// candidate judged against an old-metric bar. Versioned `.terrain24` at the rl#293
-/// flip: the far ball moved 9→24 m and the headline became median-over-locales, so a
-/// pre-flip bar (physically capped near 9 m) must not gate 24 m-scale candidates.
-const PROGRESS_SIDECAR: &str = "min_progress.terrain24.txt";
+/// The mean-pair chase-progress bar (rl#239/rl#293/rl#341). The sidecar name IS the
+/// metric version: a `best/` stamped under a retired metric carries none of THIS
+/// sidecar, so the score-incumbent-first machinery re-baselines it under the current
+/// eval before any candidate is considered — never a new-metric candidate judged
+/// against an old-metric bar. `mean_progress` at the rl#341 flip: the headline
+/// became the MEAN over (heading, start) pairs (owner 08-03), so a min/median-era
+/// bar (structurally lower) must not gate mean-scale candidates. The file's second
+/// line is the [`crate::eval::instrument_fingerprint`] — everything the number
+/// depends on besides the brain — and a stamped bar whose fingerprint no longer
+/// matches is re-baselined the same way (rl#341 S1-4: a re-bake or grade nudge used
+/// to wedge promotion forever at warn level, because the bar was earned on ground
+/// that no longer exists).
+const PROGRESS_SIDECAR: &str = "mean_progress.terrain24.txt";
 
 /// Sidecars of retired metrics — `reach.txt` (pre-#233 reach-keyed gate),
-/// `progress.txt` (the +X-only chase eval, rl#239), and `min_progress.txt` (the 9 m
-/// single-locale bar retired by the rl#293 terrain flip) — removed whenever the bar
-/// is (re)stamped so a `best/` never carries two competing scores.
-const LEGACY_SIDECARS: &[&str] = &["reach.txt", "progress.txt", "min_progress.txt"];
+/// `progress.txt` (the +X-only chase eval, rl#239), `min_progress.txt` (the 9 m
+/// single-locale bar retired by the rl#293 terrain flip), and
+/// `min_progress.terrain24.txt` (the median-locale min-over-bearings bar retired by
+/// the rl#341 mean-pair flip) — removed whenever the bar is (re)stamped so a `best/`
+/// never carries two competing scores.
+const LEGACY_SIDECARS: &[&str] = &[
+    "reach.txt",
+    "progress.txt",
+    "min_progress.txt",
+    "min_progress.terrain24.txt",
+];
 
 struct BestFile {
     name: &'static str,
@@ -96,9 +108,24 @@ impl Progress {
         self.0 > other.0 + PROGRESS_MARGIN_M
     }
 
+    /// Read a stamped bar, honoring it ONLY when the sidecar's fingerprint line
+    /// matches the live instrument (rl#341 S1-4): a bar earned under a different
+    /// bake/amplitude/geometry is not comparable, and returning `None` here routes
+    /// through the same score-incumbent-first re-baseline a retired metric takes.
     fn load(path: &Path) -> Option<Self> {
         let text = std::fs::read_to_string(path).ok()?;
-        Progress::new(text.split_whitespace().next()?.parse().ok()?)
+        let mut lines = text.lines();
+        let bar = Progress::new(lines.next()?.split_whitespace().next()?.parse().ok()?)?;
+        let fingerprint = lines.next().unwrap_or("");
+        if fingerprint != crate::eval::instrument_fingerprint() {
+            warn!(
+                "[best] progress sidecar fingerprint mismatch — bar was earned on a \
+                 different instrument (bake/amplitude/geometry changed); re-baselining \
+                 the incumbent (rl#341 S1-4). stamped: {fingerprint:?}"
+            );
+            return None;
+        }
+        Some(bar)
     }
 }
 
@@ -135,6 +162,7 @@ impl BestKeeper {
                     dir,
                     DEFAULT_EVAL_TICKS,
                     DEFAULT_TARGET_DISTANCE_M,
+                    1.0,
                 )
             }),
         )
@@ -205,8 +233,12 @@ impl BestKeeper {
 
         let report = match self.eval_dir(&self.checkpoint_dir.clone()) {
             Ok(r) => r,
+            // error!, not warn!: a permanently-failing eval (panicking bake, refused
+            // start derivation) freezes promotion for the life of the run — that must
+            // surface on fleet-error, not scroll by at warn level every period
+            // (rl#341 S1-4).
             Err(e) => {
-                warn!("[best] chase-eval of candidate failed: {e} — keeping previous best");
+                error!("[best] chase-eval of candidate failed: {e} — keeping previous best");
                 return true;
             }
         };
@@ -232,22 +264,30 @@ impl BestKeeper {
             .unwrap_or_else(|| "none".to_string());
         // The close-probe numbers ride every candidate log line so train.log carries a
         // periodic close-range time series (the rl#250 flip's upside readout, rl#252);
-        // they never feed the promotion decision. The far per-bearing vector rides too
-        // (rl#276): the min headline collapses a one-bearing hole into an ambiguous
-        // scalar — the vector names the failing bearing the moment it opens.
+        // they never feed the promotion decision. The far per-heading means and tail
+        // statistics ride too (rl#276/rl#341): the mean headline collapses a
+        // directional hole into an ambiguous scalar — the heading profile, the worst
+        // pair, and the rescue tally name the failure mode the moment it opens.
         let close = format!(
             "close probe min {:.3} m, reached {}/{}",
             report.close.worst().progress_m,
             report.close.reached_count(),
             crate::eval::EVAL_BEARINGS
         );
-        // Median locale's compass (rl#293) — the one the headline min collapsed.
-        let far = format!("far bearings {}", report.median_far().progress_line());
+        let min_pair = report.far.min_pair();
+        let far = format!(
+            "far headings {} | min pair {:.3} m @ {:.0}° | reached {}/{} | rescued {}",
+            report.far.progress_line(),
+            min_pair.progress_m,
+            min_pair.bearing_rad.to_degrees(),
+            report.far.reached_count(),
+            report.far.pairs.len(),
+            report.far.rescued_pairs(),
+        );
         if !beats {
             info!(
-                "[best] chase-eval: min-bearing progress {:.3} m (reached={}) vs bar {bar} — keeping incumbent | {far} | {close}",
+                "[best] chase-eval: mean-pair progress {:.3} m vs bar {bar} — keeping incumbent | {far} | {close}",
                 candidate.get(),
-                report.reached()
             );
             return true;
         }
@@ -255,11 +295,10 @@ impl BestKeeper {
         match self.snapshot(candidate) {
             Ok(()) => {
                 info!(
-                    "[best] new best snapshot → {}/{BEST_SUBDIR} | min-bearing chase progress {:.3} m \
-                     (reached={}) beats {bar} | {far} | {close}",
+                    "[best] new best snapshot → {}/{BEST_SUBDIR} | mean-pair chase progress {:.3} m \
+                     beats {bar} | {far} | {close}",
                     self.checkpoint_dir.display(),
                     candidate.get(),
-                    report.reached()
                 );
                 self.best = Some(candidate);
             }
@@ -303,9 +342,10 @@ impl BestKeeper {
             return false;
         }
         info!(
-            "[best] incumbent best/ scored: min-bearing chase progress {:.3} m (reached={}) — bar established",
+            "[best] incumbent best/ scored: mean-pair chase progress {:.3} m (reached {}/{}) — bar established",
             progress.get(),
-            report.reached()
+            report.far.reached_count(),
+            report.far.pairs.len(),
         );
         self.best = Some(progress);
         true
@@ -342,9 +382,16 @@ fn write_progress_sidecar(best_dir: &Path, progress: Progress) -> std::io::Resul
     for legacy in LEGACY_SIDECARS {
         let _ = std::fs::remove_file(best_dir.join(legacy));
     }
+    // Line 2 is the instrument fingerprint (rl#341 S1-4) — `Progress::load` refuses a
+    // bar whose fingerprint no longer matches, forcing a re-baseline.
     super::atomic_write(
         &best_dir.join(PROGRESS_SIDECAR),
-        format!("{}\n", progress.get()).as_bytes(),
+        format!(
+            "{}\n{}\n",
+            progress.get(),
+            crate::eval::instrument_fingerprint()
+        )
+        .as_bytes(),
     )
 }
 
@@ -362,6 +409,7 @@ mod tests {
     fn report(progress_m: f32, policy_loaded: bool) -> EvalReport {
         let bearing = crate::eval::BearingReport {
             bearing_rad: 0.0,
+            start_xz: bevy::math::Vec2::ZERO,
             progress_m,
             total_torque: 0.0,
             mean_torque_per_tick: 0.0,
@@ -373,6 +421,7 @@ mod tests {
             closest_tip_distance_m: f32::INFINITY,
             reached: false,
             active_ticks: DEFAULT_EVAL_TICKS,
+            rescues: 0,
             sustained_pace_m_per_s: 0.0,
         };
         // The close probe is scripted to beat every bar in the suite (100 m — canned
@@ -390,10 +439,11 @@ mod tests {
         };
         EvalReport {
             policy_loaded,
-            far: [crate::eval::CompassSweep {
+            terrain_amplitude: 1.0,
+            far: crate::eval::PairSweep {
                 target_distance_m: DEFAULT_TARGET_DISTANCE_M,
-                per_bearing: [bearing; crate::eval::EVAL_BEARINGS],
-            }; crate::eval::EVAL_LOCALES],
+                pairs: vec![bearing; crate::eval::EVAL_PAIRS],
+            },
             close: crate::eval::CompassSweep {
                 target_distance_m: crate::eval::CLOSE_PROBE_DISTANCE_M,
                 per_bearing: [close_bearing; crate::eval::EVAL_BEARINGS],
@@ -564,8 +614,10 @@ mod tests {
             std::fs::read(best_dir.join("brain.bin")).unwrap(),
             b"brain-893"
         );
+        // 1e-4, not 1e-6: the bar is now a MEAN over EVAL_PAIRS f32 pairs, so the
+        // canned 8.93 accumulates a few ulp of summation error.
         let bar = Progress::load(&best_dir.join(PROGRESS_SIDECAR)).unwrap();
-        assert!((bar.get() - 8.93).abs() < 1e-6);
+        assert!((bar.get() - 8.93).abs() < 1e-4);
         for legacy in LEGACY_SIDECARS {
             assert!(
                 !best_dir.join(legacy).exists(),
@@ -641,6 +693,34 @@ mod tests {
             b"brain-v1",
             "resumed bar must reject a post-restart regression"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rl#341 S1-4: a stamped bar whose instrument fingerprint no longer matches
+    /// (re-bake, amplitude change, geometry nudge) is NOT honored — the incumbent is
+    /// re-scored under the live instrument instead of promotion wedging forever
+    /// against an incomparable bar.
+    #[test]
+    fn stale_fingerprint_rebaselines_the_incumbent() {
+        let dir = scratch_ckpt("fingerprint");
+        let score = Rc::new(RefCell::new(Ok(report(7.0, true))));
+        let mut k1 = scripted_keeper(&dir, score.clone(), Rc::default());
+        k1.maybe_snapshot(); // seeds best/ with a properly-fingerprinted bar
+
+        // Forge a sidecar stamped under a different instrument.
+        std::fs::write(
+            dir.join(BEST_SUBDIR).join(PROGRESS_SIDECAR),
+            "7\nbake=0000000000000000 amplitude=1 distance_m=24 ticks=1 grade=0.1 pairs=1 settle=1\n",
+        )
+        .unwrap();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut k2 = scripted_keeper(&dir, score, calls.clone());
+        assert!(k2.best.is_none(), "a mismatched fingerprint carries no bar");
+        k2.maybe_snapshot();
+        assert!(calls.borrow()[0], "incumbent re-scored FIRST");
+        let bar = Progress::load(&dir.join(BEST_SUBDIR).join(PROGRESS_SIDECAR))
+            .expect("re-stamped bar carries the live fingerprint");
+        assert!((bar.get() - 7.0).abs() < 1e-6, "bar re-established");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

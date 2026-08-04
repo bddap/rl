@@ -20,6 +20,10 @@ fn manifest_carries_the_full_landing_matrix() {
         "cargo build --release -p rl-train",
         "cargo build --release -p rl-demo -p game -p rl-update-ui",
         "cargo test -q -- --test-threads=2",
+        // The eval seam's end-to-end physical run (rl#341 S2-5) — the one executed
+        // test of run_eval's real worlds; dropping it re-opens the untested
+        // measurement path.
+        "cargo test -q -p crab-world --release --lib rest_pose_has_zero_torque_and_no_progress",
     ] {
         assert!(
             manifest.contains(cmd),
