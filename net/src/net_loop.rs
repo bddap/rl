@@ -90,32 +90,6 @@ pub async fn close_session(session: &Session, telemetry: Option<TelemetrySender>
 }
 
 impl NetDriver {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        rt: tokio::runtime::Runtime,
-        session: Session,
-        me: PlayerId,
-        server_eid: EndpointId,
-        early: Vec<PeerMsg>,
-        id_map: BTreeMap<EndpointId, PlayerId>,
-        telemetry: Option<TelemetrySender>,
-        sync: crate::SyncVerdict,
-        stamp: crate::SyncStamp,
-    ) -> Self {
-        NetDriver {
-            rt,
-            session,
-            me,
-            server_eid,
-            early,
-            id_map,
-            departed: Default::default(),
-            telemetry,
-            sync,
-            stamp,
-        }
-    }
-
     /// The live-telemetry handle, if this client is streaming to a collector (`None` when
     /// launched without `--telemetry`).
     pub fn telemetry(&self) -> Option<&TelemetrySender> {
@@ -532,17 +506,18 @@ fn connect_and_form_inner(
     let client = ClientSim::new(seed, &all_ids, frozen.me);
     let server_eid = server_endpoint(&frozen.id_map);
     let early = early_peer_msgs(&frozen);
-    let driver = NetDriver::new(
+    let driver = NetDriver {
         rt,
         session,
-        frozen.me,
+        me: frozen.me,
         server_eid,
         early,
-        frozen.id_map,
+        id_map: frozen.id_map,
+        departed: Default::default(),
         telemetry,
-        frozen.sync,
+        sync: frozen.sync,
         stamp,
-    );
+    };
     Ok(MatchResult::Joined(Box::new((client, driver))))
 }
 
@@ -638,7 +613,14 @@ pub fn connect_and_join(
             // `Sim::spawn_joining_player`); the adopted snapshot supersedes (module doc).
             let client = ClientSim::join_at(seed, &adm.roster, me, adm.effective_tick);
             let my_eid = session.endpoint_id();
-            debug_assert!(
+            // Hard checks, not debug_asserts: the Admission came off the WIRE, so a
+            // malicious/buggy host could otherwise hand us pid 0 and flip this joiner
+            // into hosting the round it meant to join (NetDriver::is_host keys on it).
+            anyhow::ensure!(
+                me != PlayerId(0),
+                "host admitted us as PlayerId(0) — refusing to become the host of a round we joined"
+            );
+            anyhow::ensure!(
                 adm.roster.contains(&PlayerId(0)),
                 "the host (PlayerId 0) must be in the roster we were admitted into"
             );
@@ -650,17 +632,18 @@ pub fn connect_and_join(
             // admitted joiner's verdict is all-true by construction, computed rather than
             // assumed.
             let sync = crate::SyncVerdict::between(adm.host_stamp, stamp);
-            let driver = NetDriver::new(
+            let driver = NetDriver {
                 rt,
                 session,
                 me,
-                host,
-                Vec::new(),
+                server_eid: host,
+                early: Vec::new(),
                 id_map,
+                departed: Default::default(),
                 telemetry,
                 sync,
                 stamp,
-            );
+            };
             Ok(JoinResult::Joined(Box::new((client, driver))))
         }
     }

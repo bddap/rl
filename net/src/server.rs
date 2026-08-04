@@ -118,6 +118,24 @@ pub enum AdmissionRefusal {
 impl std::fmt::Display for AdmissionRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // The zero-valued arms below aren't mismatches at all: a zero digest/count is
+            // an UNSET axis on the HOST — the strict arbiter (rl#336,
+            // [`crate::SyncVerdict::between`]) refuses it outright, and the message must
+            // say that rather than claim two equal zeros "mismatch".
+            AdmissionRefusal::BodyMismatch { host: 0, joiner: _ } => write!(
+                f,
+                "the host has no usable body digest (no model loaded) — its round is a \
+                 diagnostic surface, not joinable"
+            ),
+            AdmissionRefusal::PlantMismatch { host: 0, joiner: _ } => write!(
+                f,
+                "the host has no plant digest (no arena/bake adopted) — its round is a \
+                 diagnostic surface, not joinable"
+            ),
+            AdmissionRefusal::CrabCountMismatch { host: 0, joiner: _ } => write!(
+                f,
+                "the host serves no crabs (unarmed/diagnostic round) — not joinable"
+            ),
             AdmissionRefusal::BodyMismatch { host, joiner } => write!(
                 f,
                 "body digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — a different sally.glb, a different baked collider table, or binaries straddling a digest-formula change (rl#20)"
