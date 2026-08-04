@@ -5,12 +5,12 @@
 //! further children of the root column.
 //!
 //! Also the perf black box (rl#331): every frame lands in a ring buffer, and a sustained
-//! fps collapse dumps the ring to disk as CSV — so a slideshow episode leaves data behind
-//! even when nobody had the overlay up.
+//! fps collapse emits the ring as a structured field on the collapse `warn!` itself — one
+//! record over the process' OTLP log pipe, so a slideshow episode leaves data at the fleet
+//! sink even when nobody had the overlay up, with nothing to fetch off the device.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::path::PathBuf;
 
 use bevy::prelude::*;
 
@@ -34,14 +34,14 @@ const RING_LEN: usize = 1800;
 /// and a real slideshow has no fast frames mixed in.
 const COLLAPSE_FRAME_MS: f32 = 100.0;
 const COLLAPSE_WINDOW: usize = 30;
-/// At most one dump per minute — a long episode re-dumps with a fresher tail instead of
-/// writing every frame of it.
+/// At most one dump per minute — a long episode re-emits with a fresher tail instead of
+/// shipping every frame of it.
 const DUMP_COOLDOWN_SECS: f32 = 60.0;
 
 pub struct DebugOverlayPlugin {
-    /// Write the ring to disk when fps collapses. Off for offscreen surfaces — they
-    /// legitimately render slower than realtime (llvmpipe screenshots/video) and would
-    /// dump on every run.
+    /// Emit the ring over telemetry when fps collapses. Off for offscreen surfaces —
+    /// they legitimately render slower than realtime (llvmpipe screenshots/video) and
+    /// would dump on every run.
     pub collapse_dump: bool,
 }
 
@@ -64,8 +64,8 @@ pub struct SimFrameStats {
 }
 
 /// One frame in the ring. `t_secs` is `Time<Real>` elapsed (f64 — f32 quantizes to
-/// frame-scale after days of TV uptime); wall-clock anchoring comes from the dump
-/// filename (unix seconds at write, ≈ the last sample's moment). The sim columns and
+/// frame-scale after days of TV uptime); wall-clock anchoring comes from the emitted
+/// log record's own timestamp (≈ the last sample's moment). The sim columns and
 /// `frame_ms` can be offset by one row: the driver and overlay chains have no ordering
 /// edge, and `frame_ms` (the delta measured at frame start) is the PREVIOUS frame's
 /// cost anyway — irrelevant at collapse scale (30+ consecutive slow frames).
@@ -168,7 +168,10 @@ fn collapsed(ring: &VecDeque<PerfSample>) -> bool {
             .all(|s| s.frame_ms >= COLLAPSE_FRAME_MS)
 }
 
-fn dump_csv(ring: &VecDeque<PerfSample>) -> String {
+/// The ring, serialized for the log record's `samples_csv` attribute: header + one row
+/// per sample. CSV-in-a-field, not CSV-on-disk — densest self-describing shape for
+/// 1800 rows (~45 KB, well inside one OTLP/HTTP log record).
+fn ring_csv(ring: &VecDeque<PerfSample>) -> String {
     let mut out = String::from("t_secs,frame_ms,sim_ms,sim_ticks\n");
     for s in ring {
         writeln!(
@@ -181,12 +184,6 @@ fn dump_csv(ring: &VecDeque<PerfSample>) -> String {
     out
 }
 
-fn dump_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".local/state/rl/perf"))
-}
-
 fn dump_on_collapse(time: Res<Time<Real>>, ring: Res<PerfRing>, mut last_dump: Local<Option<f32>>) {
     if !collapsed(&ring.0) {
         return;
@@ -195,28 +192,17 @@ fn dump_on_collapse(time: Res<Time<Real>>, ring: Res<PerfRing>, mut last_dump: L
     if last_dump.is_some_and(|t| now - t < DUMP_COOLDOWN_SECS) {
         return;
     }
-    // Cooldown starts on the attempt, not on success — a broken disk must not turn the
-    // dump into a per-frame write storm.
     *last_dump = Some(now);
-    let Some(dir) = dump_dir() else {
-        warn!("perf collapse detected but no HOME — ring dump skipped");
-        return;
-    };
-    let unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let path = dir.join(format!("perf-collapse-{unix}.csv"));
-    let written =
-        std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, dump_csv(&ring.0)));
-    match written {
-        Ok(()) => warn!(
-            "perf collapse: {} consecutive frames >= {COLLAPSE_FRAME_MS} ms — ring dumped to {}",
-            COLLAPSE_WINDOW,
-            path.display()
-        ),
-        Err(e) => warn!("perf collapse ring dump to {} failed: {e}", path.display()),
-    }
+    // The alert and the data are ONE record: the ring rides the collapse warn! as a
+    // structured attribute over the process' OTLP log pipe (rl#331 — no second
+    // transport, no local file to fetch). Without an OTLP endpoint this still lands
+    // on stderr via the fmt layer, attribute included.
+    warn!(
+        samples_csv = %ring_csv(&ring.0),
+        "perf collapse: {} consecutive frames >= {COLLAPSE_FRAME_MS} ms — {} ring samples attached",
+        COLLAPSE_WINDOW,
+        ring.0.len()
+    );
 }
 
 fn spawn_overlay(mut commands: Commands) {
@@ -386,7 +372,7 @@ mod tests {
             sim_ticks: 8,
         }]);
         assert_eq!(
-            dump_csv(&ring),
+            ring_csv(&ring),
             "t_secs,frame_ms,sim_ms,sim_ticks\n1.500,33.33,4.00,8\n"
         );
     }
