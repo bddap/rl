@@ -369,10 +369,9 @@ pub(super) fn apply_transforms(
             Visibility::Visible
         };
         if now.status() == PlayerStatus::Downed {
-            *tf = Transform::from_translation(place(pos, PLAYER_RADIUS))
-                .with_rotation(
-                    Quat::from_rotation_y(yaw) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-                );
+            *tf = Transform::from_translation(place(pos, PLAYER_RADIUS)).with_rotation(
+                Quat::from_rotation_y(yaw) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            );
         }
     }
 
@@ -383,8 +382,8 @@ pub(super) fn apply_transforms(
         let crab_prev = state.prev.crabs.get(avatar.0).copied().unwrap_or(crab_now);
         let pos = lerp_pos(crab_prev.pos(), crab_now.pos(), alpha);
         let yaw = lerp_yaw(crab_prev.yaw(), crab_now.yaw(), alpha);
-        *tf = Transform::from_translation(place(pos, 0.0))
-            .with_rotation(Quat::from_rotation_y(yaw));
+        *tf =
+            Transform::from_translation(place(pos, 0.0)).with_rotation(Quat::from_rotation_y(yaw));
     }
 
     if let Ok(mut cam) = cam_q.single_mut() {

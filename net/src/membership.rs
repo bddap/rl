@@ -229,8 +229,7 @@ impl Membership {
         };
         crate::SyncVerdict {
             body: across_peers(|v| v.body),
-            crabs: host_stamp
-                .is_some_and(|h| crate::SyncVerdict::between(h, self.local).crabs),
+            crabs: host_stamp.is_some_and(|h| crate::SyncVerdict::between(h, self.local).crabs),
             plant: across_peers(|v| v.plant),
         }
     }
