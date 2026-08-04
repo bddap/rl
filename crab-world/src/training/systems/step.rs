@@ -43,8 +43,30 @@ pub(super) struct BodyState {
     pub(super) poses: Vec<Option<(f32, f32)>>,
     pub(super) carapace_pos: Vec<Option<Vec3>>,
     pub(super) drifts: Vec<Option<f32>>,
-    pub(super) max_speeds: Vec<f32>,
+    pub(super) max_speeds: Vec<MaxPartSpeed>,
 }
+
+/// The fastest part per env this tick, with enough identity to indict one joint
+/// and separate a linear spike from an angular one when the rl#343 integrity
+/// check trips (rl#346).
+#[derive(Clone, Default)]
+pub(super) struct MaxPartSpeed {
+    /// The bound the integrity check tests: `lin.max(ang / 3)`.
+    pub(super) speed: f32,
+    pub(super) lin: f32,
+    pub(super) ang: f32,
+    /// `None` = the carapace.
+    pub(super) part: Option<crate::bot::body::CrabJointId>,
+    /// Every part past [`DETAIL_SPEED`] this tick — the whole-body picture the
+    /// violation panic prints, distinguishing one whipping link from a
+    /// tumbling assembly. Empty on a healthy tick, so the hot loop never
+    /// allocates.
+    pub(super) fast_parts: Vec<(Option<crate::bot::body::CrabJointId>, f32, f32)>,
+}
+
+/// Soft threshold (in bound units, `lin.max(ang / 3)`) past which a part joins
+/// the diagnostic detail — half the 100 m/s violation bound.
+const DETAIL_SPEED: f32 = 50.0;
 
 pub(super) struct StepInputs<'a> {
     pub(super) body: &'a BodyState,
@@ -154,7 +176,14 @@ fn gather_body_state(
     spawns: &CrabSpawns,
     terrain: &crate::terrain::TerrainGrid,
     carapace_q: &Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
-    parts_q: &Query<(&CrabEnvId, &bevy_rapier3d::prelude::Velocity), With<CrabBodyPart>>,
+    parts_q: &Query<
+        (
+            &CrabEnvId,
+            &bevy_rapier3d::prelude::Velocity,
+            Option<&crate::bot::body::CrabJoint>,
+        ),
+        With<CrabBodyPart>,
+    >,
 ) -> BodyState {
     let mut poses: Vec<Option<(f32, f32)>> = vec![None; n];
     let mut carapace_pos: Vec<Option<Vec3>> = vec![None; n];
@@ -176,8 +205,8 @@ fn gather_body_state(
             *d = Some(planar_dist(transform.translation, origin));
         }
     }
-    let mut max_speeds: Vec<f32> = vec![0.0; n];
-    for (env, vel) in parts_q.iter() {
+    let mut max_speeds: Vec<MaxPartSpeed> = vec![MaxPartSpeed::default(); n];
+    for (env, vel, joint) in parts_q.iter() {
         if let Some(m) = max_speeds.get_mut(env.0) {
             let lin = vel.linear.length();
             let ang = vel.angular.length();
@@ -186,7 +215,15 @@ fn gather_body_state(
             } else {
                 f32::INFINITY
             };
-            *m = m.max(s);
+            if s > DETAIL_SPEED {
+                m.fast_parts.push((joint.map(|j| j.id), lin, ang));
+            }
+            if s > m.speed {
+                m.speed = s;
+                m.lin = lin;
+                m.ang = ang;
+                m.part = joint.map(|j| j.id);
+            }
         }
     }
     BodyState {
@@ -230,7 +267,14 @@ pub(crate) fn brain_step(
     spawns: Res<CrabSpawns>,
     terrain: Res<crate::terrain::Terrain>,
     carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
-    parts_q: Query<(&CrabEnvId, &bevy_rapier3d::prelude::Velocity), With<CrabBodyPart>>,
+    parts_q: Query<
+        (
+            &CrabEnvId,
+            &bevy_rapier3d::prelude::Velocity,
+            Option<&crate::bot::body::CrabJoint>,
+        ),
+        With<CrabBodyPart>,
+    >,
     claw_tips_q: Query<(&CrabEnvId, &Transform), With<CrabClawTip>>,
     mut exit: MessageWriter<AppExit>,
     mut rescued: MessageReader<CrabRescued>,

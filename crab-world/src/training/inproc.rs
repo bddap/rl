@@ -142,7 +142,6 @@ enum RollOutcome {
         output: Box<HorizonOutput>,
         ticks: u64,
     },
-    Panicked,
     SnapshotLoadFailed,
 }
 
@@ -243,36 +242,14 @@ fn rollout_thread_main(
     let mut app = build_rollout_app(id, &config, arch);
     warm_up_app(&mut app);
 
+    // No catch_unwind here, by owner directive (rl#346, extending rl#343): a roll
+    // panic — above all a physics-integrity violation — unwinds this thread, the
+    // learner's recv on the closed channel fails, and the RUN dies loud. Silently
+    // rebuilding the world and continuing is the recovery class rl#343 bans.
     while let Ok(req) = request_rx.recv() {
-        let result = roll_with_recovery(
-            &mut app,
-            |a| roll_one_horizon(a, &req, horizon),
-            || {
-                eprintln!(
-                    "[rollout-{id}] env panicked mid-roll (likely a solver NaN); \
-                     rebuilding this thread's world, run continues"
-                );
-                let mut fresh = build_rollout_app(id, &config, arch);
-                warm_up_app(&mut fresh);
-                fresh
-            },
-        );
+        let result = roll_one_horizon(&mut app, &req, horizon);
         if result_tx.send(result).is_err() {
             break;
-        }
-    }
-}
-
-fn roll_with_recovery(
-    app: &mut App,
-    roll: impl FnOnce(&mut App) -> RollOutcome,
-    rebuild: impl FnOnce() -> App,
-) -> RollOutcome {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| roll(app))) {
-        Ok(r) => r,
-        Err(_) => {
-            *app = rebuild();
-            RollOutcome::Panicked
         }
     }
 }
@@ -515,52 +492,6 @@ mod tests {
         ])
         .expect("parse scratch TrainConfig");
         (config, dir)
-    }
-
-    #[test]
-    fn panicking_roll_is_isolated_and_run_continues() {
-        let mut app = App::new();
-        let rebuilt = std::cell::Cell::new(false);
-
-        let r1 = roll_with_recovery(
-            &mut app,
-            |_app| panic!("simulated env blowup mid-roll"),
-            || {
-                rebuilt.set(true);
-                App::new()
-            },
-        );
-        assert!(
-            matches!(r1, RollOutcome::Panicked),
-            "a panicking roll must report Panicked (no samples are even representable)"
-        );
-        assert!(
-            rebuilt.get(),
-            "the App must have been rebuilt after the panic"
-        );
-
-        let r2 = roll_with_recovery(
-            &mut app,
-            |_app| RollOutcome::Rolled {
-                output: Box::new(HorizonOutput {
-                    envs: vec![RolloutBuffer::new()],
-                    increment: empty_normalizer_increment(),
-                    rewards: vec![1.5],
-                    drift: (0.0, 0),
-                    reach: (0, 0),
-                    reach_by_bearing: [(0, 0); crate::eval::EVAL_BEARINGS],
-                    glitch_drops: 0,
-                    nonfinite_obs: 0,
-                }),
-                ticks: 64,
-            },
-            || panic!("rebuild must NOT run on a successful roll"),
-        );
-        let RollOutcome::Rolled { output, ticks } = r2 else {
-            panic!("the recovered roll must succeed (Rolled), got Panicked");
-        };
-        assert_eq!(ticks, 64, "the recovered roll's result must pass through");
-        assert_eq!(output.rewards, vec![1.5]);
     }
 
     #[test]
