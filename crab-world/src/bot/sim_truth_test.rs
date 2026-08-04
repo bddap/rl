@@ -150,20 +150,42 @@ fn actuator_injects_no_net_wrench() {
             .map(|(e, t)| (e, t.translation))
             .collect()
     };
+    // `ExternalForce` after a tick also carries the rl#332 carapace drag — a
+    // modeled EXTERNAL force. Predict it from the same pre-tick `Velocity` the
+    // drag system reads, so the assert isolates the actuator's contribution.
+    let expected_drag = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&bevy_rapier3d::prelude::Velocity, With<super::body::CrabCarapace>>();
+        let v = q.single(app.world()).expect("one carapace").linear;
+        -(super::aero::CARAPACE_DRAG * v.length()) * v
+    };
     tick(&mut app, 1);
 
+    let carapace = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<Entity, With<super::body::CrabCarapace>>();
+        q.single(app.world()).expect("one carapace")
+    };
     let mut net_force = Vec3::ZERO;
     let mut net_torque = Vec3::ZERO;
     let mut q = app
         .world_mut()
         .query_filtered::<(Entity, &ExternalForce), With<CrabBodyPart>>();
     for (e, ef) in q.iter(app.world()) {
-        net_force += ef.force;
-        net_torque += pos[&e].cross(ef.force) + ef.torque;
+        let actuator_force = if e == carapace {
+            ef.force - expected_drag
+        } else {
+            ef.force
+        };
+        net_force += actuator_force;
+        net_torque += pos[&e].cross(actuator_force) + ef.torque;
     }
     println!(
-        "actuator net force {:.5} N, net torque {:.5} N·m",
+        "actuator net force {:.5} N (drag {:.5} N removed), net torque {:.5} N·m",
         net_force.length(),
+        expected_drag.length(),
         net_torque.length()
     );
     assert!(
@@ -727,12 +749,24 @@ fn airborne_thrash_residual(kind: Thrash, seed: u64, isolate: bool) -> (Vec3, us
 
     let (p0, m) = crab_linear_momentum(&mut app);
     let mut total_contacts = 0usize;
+    let mut j_drag = Vec3::ZERO;
     for t in 0..TICKS {
         assert!(
             app.world_mut()
                 .resource_mut::<CrabActions>()
                 .set_row(0, thrash_row(kind, t, &freqs, &phases))
         );
+        // The rl#332 carapace drag is a modeled EXTERNAL force, so the momentum
+        // books carry it explicitly. Read the same `Velocity` component the drag
+        // system reads this tick (nothing writes it between here and the system),
+        // so the subtraction reproduces the applied force bit-for-bit.
+        {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&bevy_rapier3d::prelude::Velocity, With<super::body::CrabCarapace>>();
+            let v = q.single(app.world()).expect("one carapace").linear;
+            j_drag += -(super::aero::CARAPACE_DRAG * v.length()) * v * crate::physics::PHYSICS_DT;
+        }
         tick(&mut app, 1);
         total_contacts += contact_points(&mut app);
     }
@@ -753,7 +787,7 @@ fn airborne_thrash_residual(kind: Thrash, seed: u64, isolate: bool) -> (Vec3, us
 
     let dt_total = TICKS as f32 * crate::physics::PHYSICS_DT;
     let g: Vec3 = crate::physics::PHYSICS_GRAVITY;
-    let resid = (p1 - p0 - m * g * dt_total) / (m * dt_total);
+    let resid = (p1 - p0 - m * g * dt_total - j_drag) / (m * dt_total);
     println!(
         "airborne thrash ({kind:?} seed {seed} isolate={isolate}): m={m:.3} kg  \
          resid={:.5} m/s² ({:.3}% of g)  dir={:?}  contacts={total_contacts}",
@@ -941,6 +975,7 @@ fn phantom_force_instrument() {
             .collect();
 
         let (p0, m) = crab_linear_momentum(&mut app);
+        let mut j_drag = Vec3::ZERO;
         for t in 0..256u32 {
             let mut row = thrash_row(Thrash::Sinusoid, t, &freqs, &phases);
             for a in row.iter_mut() {
@@ -951,12 +986,21 @@ fn phantom_force_instrument() {
                     .resource_mut::<CrabActions>()
                     .set_row(0, row)
             );
+            // Same drag-impulse bookkeeping as `airborne_thrash_residual`.
+            {
+                let mut q = app
+                    .world_mut()
+                    .query_filtered::<&bevy_rapier3d::prelude::Velocity, With<super::body::CrabCarapace>>();
+                let v = q.single(app.world()).expect("one carapace").linear;
+                j_drag +=
+                    -(super::aero::CARAPACE_DRAG * v.length()) * v * crate::physics::PHYSICS_DT;
+            }
             tick(&mut app, 1);
         }
         let (p1, _) = crab_linear_momentum(&mut app);
         let dt_total = 256.0 * crate::physics::PHYSICS_DT;
         let g: Vec3 = crate::physics::PHYSICS_GRAVITY;
-        ((p1 - p0 - m * g * dt_total) / (m * dt_total)).length()
+        ((p1 - p0 - m * g * dt_total - j_drag) / (m * dt_total)).length()
     };
 
     for (label, amp, substeps, iters, root_tq) in [
@@ -976,4 +1020,215 @@ fn phantom_force_instrument() {
         let r = run(amp, substeps, iters, root_tq);
         println!("INSTRUMENT {label}: resid={r:.5} m/s²");
     }
+}
+
+/// Total mechanical energy of the crab from the rapier set —
+/// Σ (½m|v|² + ½ω·I·ω + m·g·y). Passive bodies (zero drive) can only lose it;
+/// growth is solver-injected.
+#[cfg(test)]
+fn crab_mechanical_energy(app: &mut App) -> f32 {
+    use super::body::CrabBodyPart;
+    use bevy_rapier3d::plugin::context::RapierRigidBodySet;
+    use bevy_rapier3d::prelude::RapierRigidBodyHandle;
+
+    let handles: Vec<bevy_rapier3d::rapier::dynamics::RigidBodyHandle> = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&RapierRigidBodyHandle, With<CrabBodyPart>>();
+        q.iter(app.world()).map(|h| h.0).collect()
+    };
+    let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();
+    let set = set_q.single(app.world()).expect("rapier set");
+
+    let g = -crate::physics::PHYSICS_GRAVITY.y;
+    handles
+        .iter()
+        .map(|h| {
+            let rb = set.bodies.get(*h).expect("rapier body");
+            let m = rb.mass();
+            let v: Vec3 = rb.linvel();
+            let w: Vec3 = rb.angvel();
+            let rmat = Mat3::from_quat(rb.position().rotation);
+            let i_world = rmat
+                * rb.mass_properties()
+                    .local_mprops
+                    .reconstruct_inertia_matrix()
+                * rmat.transpose();
+            0.5 * m * v.length_squared() + 0.5 * w.dot(i_world * w) + m * g * rb.center_of_mass().y
+        })
+        .sum()
+}
+
+/// NOT a regression test — the bddap/rl#332 root-cause instrument, `#[ignore]`d.
+/// Energize the crab with 300 ticks of grounded full-amplitude thrash (the
+/// sally-soak storm regime), then ZERO all drives and watch total mechanical
+/// energy over a passive window. A passive multibody under gravity + friction +
+/// contacts can only dissipate; any sustained energy GROWTH is injected by the
+/// solver. Ablation variants isolate the term: joint limits off, friction
+/// motors off, both off.
+#[test]
+#[ignore = "rl#332 root-cause instrument — run explicitly with --ignored --nocapture"]
+fn passive_storm_energy_instrument() {
+    use bevy_rapier3d::prelude::MultibodyJoint;
+    use bevy_rapier3d::rapier::dynamics::JointAxesMask;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    const ENERGIZE: u32 = 300;
+    const PASSIVE: u32 = 640;
+
+    let run = |label: &str, kill_limits: bool, kill_motors: bool| {
+        let mut app = flat_headless_app();
+        tick(&mut app, 300);
+
+        let mut rng = StdRng::seed_from_u64(11);
+        let n = super::actuator::ACTION_SIZE;
+        let freqs: Vec<f32> = (0..n).map(|_| rng.gen_range(1.0..4.0)).collect();
+        let phases: Vec<f32> = (0..n)
+            .map(|_| rng.gen_range(-std::f32::consts::PI..std::f32::consts::PI))
+            .collect();
+        for t in 0..ENERGIZE {
+            assert!(
+                app.world_mut()
+                    .resource_mut::<CrabActions>()
+                    .set_row(0, thrash_row(Thrash::Sinusoid, t, &freqs, &phases))
+            );
+            tick(&mut app, 1);
+        }
+        // Zero drive; optionally strip the joint terms under test.
+        assert!(app.world_mut().resource_mut::<CrabActions>().fill(0, 0.0));
+        if kill_limits || kill_motors {
+            let mut q = app.world_mut().query::<&mut MultibodyJoint>();
+            for mut j in q.iter_mut(app.world_mut()) {
+                let raw = &mut j.data.as_mut().raw;
+                if kill_limits {
+                    raw.limit_axes = JointAxesMask::empty();
+                }
+                if kill_motors {
+                    raw.motor_axes = JointAxesMask::empty();
+                }
+            }
+        }
+
+        let e0 = crab_mechanical_energy(&mut app);
+        let (mut e_max, mut e_end, mut grow_ticks) = (e0, e0, 0u32);
+        let mut prev = e0;
+        for _ in 0..PASSIVE {
+            tick(&mut app, 1);
+            let e = crab_mechanical_energy(&mut app);
+            if e > prev + 1e-4 {
+                grow_ticks += 1;
+            }
+            e_max = e_max.max(e);
+            e_end = e;
+            prev = e;
+        }
+        println!(
+            "PASSIVE_STORM {label}: E0={e0:+.3} J  E_max={e_max:+.3} J  \
+             E_end={e_end:+.3} J  gain_max={:+.3} J  grew_on {grow_ticks}/{PASSIVE} ticks",
+            e_max - e0,
+        );
+    };
+
+    run("baseline           ", false, false);
+    run("limits OFF         ", true, false);
+    run("friction-motors OFF", false, true);
+    run("both OFF           ", true, true);
+}
+
+/// The [`passive_storm_energy_instrument`] on the CANONICAL GCR terrain instead of
+/// the flat grid — the regime the sally-soak zero-drive ablation showed
+/// accelerating passively (21 → 46 m/s with all drives zero). Flat ground
+/// dissipates; if THIS grows, the injector lives in heightfield contact
+/// resolution at speed, not in the joints.
+#[test]
+#[ignore = "rl#332 root-cause instrument — run explicitly with --ignored --nocapture"]
+fn passive_storm_energy_on_terrain_instrument() {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    const ENERGIZE: u32 = 600;
+    const PASSIVE: u32 = 1280;
+
+    let run = |label: &str, amp: f32| {
+        let mut app = headless_app();
+        tick(&mut app, 300);
+
+        let mut rng = StdRng::seed_from_u64(11);
+        let n = super::actuator::ACTION_SIZE;
+        let freqs: Vec<f32> = (0..n).map(|_| rng.gen_range(1.0..4.0)).collect();
+        let phases: Vec<f32> = (0..n)
+            .map(|_| rng.gen_range(-std::f32::consts::PI..std::f32::consts::PI))
+            .collect();
+        for t in 0..ENERGIZE {
+            let mut row = thrash_row(Thrash::Sinusoid, t, &freqs, &phases);
+            for a in row.iter_mut() {
+                *a *= amp;
+            }
+            assert!(
+                app.world_mut()
+                    .resource_mut::<CrabActions>()
+                    .set_row(0, row)
+            );
+            tick(&mut app, 1);
+        }
+        assert!(app.world_mut().resource_mut::<CrabActions>().fill(0, 0.0));
+
+        // On terrain, PE varies with where she wanders — energy alone still cannot
+        // grow passively. Track E and speed both.
+        let e0 = crab_mechanical_energy(&mut app);
+        let (mut e_max, mut e_end) = (e0, e0);
+        let mut grow_ticks = 0u32;
+        let mut prev = e0;
+        for t in 0..PASSIVE {
+            tick(&mut app, 1);
+            let e = crab_mechanical_energy(&mut app);
+            if e > prev + 1e-3 {
+                grow_ticks += 1;
+            }
+            e_max = e_max.max(e);
+            e_end = e;
+            prev = e;
+            if t.is_multiple_of(160) {
+                println!("  [{label}] passive t={t}: E={e:+.3} J");
+            }
+        }
+        println!(
+            "PASSIVE_TERRAIN {label}: E0={e0:+.3} J  E_max={e_max:+.3} J  \
+             E_end={e_end:+.3} J  gain_max={:+.3} J  grew_on {grow_ticks}/{PASSIVE} ticks",
+            e_max - e0,
+        );
+    };
+
+    run("thrash amp=1.0", 1.0);
+}
+
+/// bddap/rl#332 — the plant has air: an unactuated falling crab approaches the
+/// carapace-drag terminal velocity instead of integrating gravity unboundedly.
+/// Pre-drag this fall measured ~39 m/s at the window's end; with
+/// [`super::aero::CARAPACE_DRAG`] sized for v_t = √(m·g/DRAG) ≈ 15 m/s the same
+/// window must land in a band around that. The band is the drift alarm on BOTH
+/// sides: above 18 m/s the drag went missing (or mass grew — a re-bake changed
+/// the MDP, rl#277); below 11 m/s something over-damps her and the trained gait
+/// is next.
+#[test]
+fn airborne_crab_reaches_terminal_velocity() {
+    const TICKS: u32 = 256; // 4 s — ~2.6 drag time-constants past v_t
+
+    let mut app = flat_headless_app();
+    tick(&mut app, 1);
+    respawn_airborne(&mut app, MOMENTUM_SPAWN_Y);
+    tick(&mut app, 4);
+    disable_crab_collisions(&mut app);
+    tick(&mut app, TICKS);
+
+    let (p, m) = crab_linear_momentum(&mut app);
+    let speed = (p / m).length();
+    println!("terminal-velocity fall: |v_com|={speed:.2} m/s after {TICKS} ticks (m={m:.3} kg)");
+    assert!(
+        (11.0..18.0).contains(&speed),
+        "free-fall speed {speed:.2} m/s is outside the 11–18 m/s terminal band — \
+         carapace drag (bddap/rl#332) is mis-scaled for the current body mass, \
+         missing, or doubled; unbounded speed is how Sally flies"
+    );
 }
