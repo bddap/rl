@@ -9,7 +9,7 @@ use crate::training::reward::{GRAB_REWARD, compute_reward, is_progress_glitch, p
 use crate::training::targets::{seed_target, tip_touch};
 
 use super::state::TrainingState;
-use super::step::{BodyState, StepInputs};
+use super::step::{BodyState, MaxPartSpeed, StepInputs};
 
 pub const MAX_EPISODE_TICKS: u32 = 1500;
 
@@ -33,7 +33,7 @@ fn assert_physics_integrity(
     tick: u64,
     ep_step: u32,
     height: f32,
-    ms: &super::step::MaxPartSpeed,
+    ms: &MaxPartSpeed,
     drives: &[f32; ACTION_SIZE],
 ) {
     let blowing_up = ms.speed > 100.0 || !height.is_finite();
@@ -418,7 +418,7 @@ mod tests {
             poses: vec![Some((1.0, 1.0))],
             carapace_pos: vec![Some(Vec3::ZERO)],
             drifts: vec![None],
-            max_speeds: vec![super::step::MaxPartSpeed::default()],
+            max_speeds: vec![MaxPartSpeed::default()],
         };
         let inputs = StepInputs {
             body: &body,
@@ -467,7 +467,7 @@ mod tests {
             poses: vec![Some((1.0, 1.0))],
             carapace_pos: vec![Some(Vec3::ZERO)],
             drifts: vec![None],
-            max_speeds: vec![super::step::MaxPartSpeed::default()],
+            max_speeds: vec![MaxPartSpeed::default()],
         };
         let inputs = StepInputs {
             body: &body,
@@ -569,17 +569,25 @@ mod tests {
                     episode-step 3: carapace height outside [0.02, 50] m"
     )]
     fn a_sub_floor_height_hard_fails_training() {
-        assert_physics_integrity(0, 0, 3, 0.0, 1.0);
+        assert_physics_integrity(0, 0, 3, 0.0, &speed(1.0), &[0.0; ACTION_SIZE]);
     }
 
     #[test]
     #[should_panic(expected = "blowing up (part speed > 100 m/s or non-finite pose)")]
     fn a_blowup_hard_fails_training() {
-        assert_physics_integrity(0, 0, 0, f32::NAN, 1e9);
+        assert_physics_integrity(0, 0, 0, f32::NAN, &speed(1e9), &[0.0; ACTION_SIZE]);
     }
 
     #[test]
     fn a_live_crab_passes_the_integrity_check() {
-        assert_physics_integrity(0, 0, 0, 1.0, 5.0);
+        assert_physics_integrity(0, 0, 0, 1.0, &speed(5.0), &[0.0; ACTION_SIZE]);
+    }
+
+    fn speed(s: f32) -> MaxPartSpeed {
+        MaxPartSpeed {
+            speed: s,
+            lin: s,
+            ..MaxPartSpeed::default()
+        }
     }
 }
