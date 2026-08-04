@@ -1,7 +1,7 @@
 use super::app::NnCrabStackInstalled;
 use super::driver::{
-    FlightInput, GameState, PendingRound, VEHICLE_STICK_SENS, ensure_round_installed,
-    flight_control,
+    FlightControl, FlightInput, GameState, PendingRound, VEHICLE_STICK_SENS,
+    ensure_round_installed, flight_control,
 };
 use super::input::pad_stick_axes;
 use super::scene::{
@@ -268,7 +268,10 @@ fn pad_axes_are_not_pre_negated() {
 
 #[test]
 fn plane_flight_control_pitch_is_ac6_and_scaled() {
-    let plane = |fi: FlightInput| flight_control(VehicleKind::Plane, &fi);
+    let plane = |fi: FlightInput| match flight_control(VehicleKind::Plane, &fi) {
+        FlightControl::Plane(p) => p,
+        other => panic!("plane input mapped to {other:?}"),
+    };
     assert!(
         plane(FlightInput {
             left: Vec2::new(0.0, -1.0),
@@ -344,18 +347,16 @@ fn plane_flight_control_pitch_is_ac6_and_scaled() {
         })
         .yaw > 0.0
     );
-    let p = plane(FlightInput {
-        left: Vec2::new(1.0, 1.0),
-        rt: 1.0,
-        ..default()
-    });
-    assert_eq!(p.thrust, Vec3::ZERO);
-    assert!(!p.match_velocity);
+    // A plane emitting thrust or match_velocity is now unrepresentable: the
+    // FlightControl::Plane arm has neither field (rl#336).
 }
 
 #[test]
 fn ship_flight_control_is_outer_wilds() {
-    let ship = |fi: FlightInput| flight_control(VehicleKind::Ship, &fi);
+    let ship = |fi: FlightInput| match flight_control(VehicleKind::Ship, &fi) {
+        FlightControl::Ship(s) => s,
+        other => panic!("ship input mapped to {other:?}"),
+    };
     assert!(
         ship(FlightInput {
             left: Vec2::new(0.0, 1.0),
@@ -435,14 +436,8 @@ fn ship_flight_control_is_outer_wilds() {
         })
         .match_velocity
     );
-    assert_eq!(
-        ship(FlightInput {
-            rt: 1.0,
-            ..default()
-        })
-        .throttle_trim,
-        0.0
-    );
+    // A ship trimming throttle is now unrepresentable: the FlightControl::Ship arm
+    // has no throttle_trim field (rl#336) — rt maps to +y thrust, asserted above.
 }
 
 /// The FP perspective's EFFECTIVE clip must sit at its configured `near`. Bevy 0.18

@@ -41,12 +41,14 @@ pub(super) fn sync_ground_anchor(
     }
 }
 
-/// The rendered ground height under a sim point (one frame since rl#298 stage 5: the
-/// world IS the sim in meters). Every sim entity stands ON this surface; on the flat
-/// grids it is exactly the old y = 0.
-fn ground_y(pos: Pos, terrain: &crab_world::terrain::Terrain) -> f32 {
+/// The rendered spot `above` meters over the ground under a sim point (one frame since
+/// rl#298 stage 5: the world IS the sim in meters). Every sim entity stands ON this
+/// surface — via [`crab_world::terrain::TerrainGrid::place`], THE spawn-on-surface
+/// primitive (rl#336), not a reimplementation; on the flat grids the ground is exactly
+/// the old y = 0.
+fn place_over(pos: Pos, above: f32, terrain: &crab_world::terrain::Terrain) -> Vec3 {
     let (x, z) = pos.to_meters();
-    terrain.height(x, z)
+    terrain.place(Vec2::new(x, z), above)
 }
 
 /// Stand the extraction pillar on the ground under its sim point — per frame, like the
@@ -59,7 +61,7 @@ pub(super) fn place_extraction_pillar(
     let ex = state.client.sim().extraction().pos();
     let pillar_h = crate::sim::CRAB_STATURE * 1.2;
     for mut t in &mut pillars {
-        t.translation = world(ex, ground_y(ex, &terrain) + pillar_h * 0.5);
+        t.translation = place_over(ex, pillar_h * 0.5, &terrain);
     }
 }
 
@@ -342,7 +344,7 @@ pub(super) fn apply_transforms(
     let local = state.client.me();
     // Sim entities stand ON the world surface (rl#281): every lift below is height
     // above the local ground, sampled at the entity's own interpolated spot.
-    let ground = |pos: Pos| ground_y(pos, &terrain);
+    let place = |pos: Pos, above: f32| place_over(pos, above, &terrain);
 
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
         let Some(now) = sim.player(avatar.0) else {
@@ -354,7 +356,7 @@ pub(super) fn apply_transforms(
         let prev = state.prev.players.get(&avatar.0).copied().unwrap_or(now);
         let pos = lerp_pos(prev.pos(), now.pos(), alpha);
         let yaw = lerp_yaw(prev.yaw(), now.yaw(), alpha);
-        *tf = Transform::from_translation(world(pos, ground(pos) + PLAYER_HEIGHT * 0.5))
+        *tf = Transform::from_translation(place(pos, PLAYER_HEIGHT * 0.5))
             .with_rotation(Quat::from_rotation_y(yaw));
         // A piloting player's ONE visible body is its craft (rl#258): the walker avatar
         // hides while a craft flies under that pilot's id. `RemoteVehicle` already excludes
@@ -367,7 +369,7 @@ pub(super) fn apply_transforms(
             Visibility::Visible
         };
         if now.status() == PlayerStatus::Downed {
-            *tf = Transform::from_translation(world(pos, ground(pos) + PLAYER_RADIUS))
+            *tf = Transform::from_translation(place(pos, PLAYER_RADIUS))
                 .with_rotation(
                     Quat::from_rotation_y(yaw) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
                 );
@@ -381,7 +383,7 @@ pub(super) fn apply_transforms(
         let crab_prev = state.prev.crabs.get(avatar.0).copied().unwrap_or(crab_now);
         let pos = lerp_pos(crab_prev.pos(), crab_now.pos(), alpha);
         let yaw = lerp_yaw(crab_prev.yaw(), crab_now.yaw(), alpha);
-        *tf = Transform::from_translation(world(pos, ground(pos)))
+        *tf = Transform::from_translation(place(pos, 0.0))
             .with_rotation(Quat::from_rotation_y(yaw));
     }
 
@@ -398,7 +400,7 @@ pub(super) fn apply_transforms(
             } else {
                 yaw.0
             };
-            let eye = world(pos, ground(pos) + EYE_HEIGHT);
+            let eye = place(pos, EYE_HEIGHT);
             let look_dir = look_direction(cam_yaw, pitch.0);
             *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
         }
