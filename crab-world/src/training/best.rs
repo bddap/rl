@@ -247,6 +247,13 @@ impl BestKeeper {
             warn!("[best] chase-eval loaded no policy from the live checkpoint — not eligible");
             return true;
         }
+        if report.plant_unbounded() {
+            error!(
+                "[best] chase-eval plant went UNBOUNDED (bddap/rl#315) — a plant bug, not a \
+                 policy score; not eligible for snapshot"
+            );
+            return true;
+        }
         let Some(candidate) = Progress::new(report.progress_m()) else {
             warn!(
                 "[best] non-finite chase progress ({}) — not eligible for snapshot",
@@ -326,12 +333,14 @@ impl BestKeeper {
                 return false;
             }
         };
-        let scored = Progress::new(report.progress_m()).filter(|_| report.policy_loaded);
+        let scored = Progress::new(report.progress_m())
+            .filter(|_| report.policy_loaded && !report.plant_unbounded());
         let Some(progress) = scored else {
             error!(
-                "[best] incumbent best/ produced no usable score (policy_loaded={}, progress={}) \
-                 — protecting it unscored",
+                "[best] incumbent best/ produced no usable score (policy_loaded={}, \
+                 plant_unbounded={}, progress={}) — protecting it unscored",
                 report.policy_loaded,
+                report.plant_unbounded(),
                 report.progress_m()
             );
             return false;
@@ -422,6 +431,7 @@ mod tests {
             reached: false,
             active_ticks: DEFAULT_EVAL_TICKS,
             rescues: 0,
+            unbounded: false,
             sustained_pace_m_per_s: 0.0,
         };
         // The close probe is scripted to beat every bar in the suite (100 m — canned
@@ -547,10 +557,15 @@ mod tests {
 
         std::fs::write(dir.join("brain.bin"), b"brain-collapsed").unwrap();
         let best_brain = dir.join(BEST_SUBDIR).join("brain.bin");
+        // An unbounded plant (rl#315) must be refused even at winning progress —
+        // an explosion is a plant bug, never a policy score.
+        let mut unbounded = report(9.0, true);
+        unbounded.pace.per_bearing[0].unbounded = true;
         for bad in [
             Ok(report(0.0, true)),
             Ok(report(f32::NAN, true)),
             Ok(report(9.0, false)),
+            Ok(unbounded),
             Err("eval exploded".to_string()),
         ] {
             *score.borrow_mut() = bad;
@@ -558,7 +573,7 @@ mod tests {
             assert_eq!(
                 std::fs::read(&best_brain).unwrap(),
                 b"brain-v1",
-                "collapse/NaN/rest-baseline/error must not overwrite the best snapshot"
+                "collapse/NaN/rest-baseline/unbounded/error must not overwrite the best snapshot"
             );
         }
 

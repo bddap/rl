@@ -238,6 +238,20 @@ fn eval(e: EvalArgs) -> Result<ExitCode, String> {
             e.checkpoint.checkpoint_dir.display()
         );
     }
+    if r.plant_unbounded() {
+        // Unconditional (not just gate mode): an exploding plant is a plant bug, and
+        // every consumer — the eval monitor, a hand run — must see it as a hard
+        // fault, never as a slow eval with weird numbers (bddap/rl#315: the
+        // rigid-contact explosion surfaced as release unit timeouts for days before
+        // anyone read the magnitudes).
+        eprintln!(
+            "eval: FAIL — plant unbounded: a carapace strayed more than {:.0} m from \
+             its spawn (or went non-finite unhealed) mid-episode; the plant is \
+             injecting energy (bddap/rl#315). Exploded episodes were cut and forfeited.",
+            crab_world::eval::PLANT_POSITION_BOUND_M
+        );
+        return Ok(ExitCode::FAILURE);
+    }
     if let Some(min) = e.min_progress {
         // The literal `eval: FAIL` stderr prefix is the release gate's
         // refusal-vs-machinery seam (bothouse#148) — these verdicts keep their own

@@ -40,7 +40,10 @@
 //!   `plant=` (the constructed plant digest, hex — a fallback-body eval is
 //!   distinguishable, S3-4). `settle=` is the settle window in ticks — the one ruler
 //!   knob no other key witnessed (it re-bases `initial_dist`, hence every historical
-//!   `progress_m`, review round 1). When measurable it appends ` j_per_m_mean=` and the
+//!   `progress_m`, review round 1). When any episode exploded past the position
+//!   bound it appends ` plant_unbounded=true` (bddap/rl#315 — the exploded pairs
+//!   forfeited and `rl-train eval` also hard-fails; a bounded eval never prints the
+//!   key). When measurable it appends ` j_per_m_mean=` and the
 //!   rl#266 charge keys `charge_heights_per_s= charge_pinned= charge_drift_frac=
 //!   charge_drifted= charge_target_m=`; when the charge guard SHOULD have measured
 //!   and could not it appends ` charge_unmeasurable=true` instead (rl#341 S2-4 — the
@@ -113,6 +116,9 @@ impl EvalReport {
             crate::bot::body::constructed_plant_digest(),
         )
         .expect("writing to a String never fails");
+        if self.plant_unbounded() {
+            write!(out, " plant_unbounded=true").expect("writing to a String never fails");
+        }
         if let Some(jpm_mean) = self.far.mean_j_per_m() {
             write!(out, " j_per_m_mean={jpm_mean:.2}").expect("writing to a String never fails");
         }
@@ -194,6 +200,7 @@ mod tests {
             reached: false,
             active_ticks: 200,
             rescues: 0,
+            unbounded: false,
             sustained_pace_m_per_s: pace,
         };
         let sweep = |target: f32| CompassSweep {
@@ -307,6 +314,21 @@ mod tests {
     /// the rest-pose baseline carries neither the keys nor the unmeasurable marker,
     /// and a loaded-but-paceless full-budget eval carries `charge_unmeasurable=true`
     /// (rl#341 S2-4 — absence is no longer the only signal).
+    #[test]
+    fn plant_unbounded_is_a_conditional_headline_key() {
+        // rl#315 on the wire: one exploded episode anywhere in the eval stamps the
+        // headline; a fully bounded eval never prints the key, so no pre-#315
+        // consumer sees a token it doesn't know.
+        let bounded = report(true, 0.0).wire_report();
+        assert!(!bounded.contains("plant_unbounded"));
+
+        let mut r = report(true, 0.0);
+        r.pace.per_bearing[3].unbounded = true;
+        let wire = r.wire_report();
+        let headline = wire.lines().last().unwrap();
+        assert!(headline.contains(" plant_unbounded=true"));
+    }
+
     #[test]
     fn charge_keys_are_conditional_headline_keys() {
         let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");

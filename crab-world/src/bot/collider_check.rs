@@ -673,12 +673,16 @@ mod load_tests {
 
     /// rl#312 (b): the same invariant while every actuator is driven through
     /// aggressive deterministic sequences (max torque both directions,
-    /// alternating, seeded-random). Ignored on rl#315: this currently FINDS
-    /// 45 fought limb-crossing pairs (the claws scissor through each other at
-    /// ~120 mm under sustained max drive) — run with `--ignored` to reproduce
-    /// that table; un-ignore when the contact physics holds.
+    /// alternating, seeded-random). Ignored on rl#315: the viscous joint damper
+    /// (`CrabJointId::drive_damping`) + soft-CCD landed there cut the finding
+    /// table from 45 fought pairs / 120 mm to 22 / 102 mm, but closing it needs
+    /// contacts that WIN the static fight, and every contact-spring raise tried
+    /// (nf 300 and 1e6 alike) makes the terrain plant inject energy and explode
+    /// under the live policy (`rl-train eval` now hard-fails on that via
+    /// `PLANT_POSITION_BOUND_M`) — run with `--ignored` to reproduce the table;
+    /// un-ignore when a stiffening survives the terrain eval.
     #[test]
-    #[ignore = "rl#315: limbs interpenetrate under sustained aggressive drive (45 fought pairs); reproduces the finding table"]
+    #[ignore = "rl#315: limbs interpenetrate under sustained aggressive drive (22 fought pairs with damper + soft-CCD); reproduces the finding table"]
     fn body_primitives_never_interpenetrate_under_actuator_load() {
         let mut app = headless_app();
         tick(&mut app, SETTLE_TICKS);
