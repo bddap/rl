@@ -287,6 +287,11 @@ struct SoakTick {
     /// Touching contact points across the narrow phase this tick (soak world =
     /// Sally + ground + nothing else, so these are all hers).
     contacts: usize,
+    /// Whole-body mechanical energy, J ([`crab_mech_energy`]) — mass-weighted
+    /// incl. rotation, so a launch window can audit conversion (E
+    /// non-increasing) vs injection (E steps up beyond actuator power) without
+    /// per-part masses (rl#332 launch-geometry follow-up).
+    energy: f32,
     /// (pos, linvel) per crab body part, query order (stable within a run).
     parts: Vec<(Vec3, Vec3)>,
 }
@@ -300,13 +305,14 @@ impl SoakTick {
             .map(|(p, v)| format!("[{},{},{},{},{},{}]", p.x, p.y, p.z, v.x, v.y, v.z))
             .collect();
         format!(
-            "{{\"tick\":{},\"cara\":{},\"linvel\":{},\"angvel\":{},\"above\":{},\"contacts\":{},\"parts\":[{}]}}",
+            "{{\"tick\":{},\"cara\":{},\"linvel\":{},\"angvel\":{},\"above\":{},\"contacts\":{},\"energy\":{},\"parts\":[{}]}}",
             self.tick,
             v3(self.cara_pos),
             v3(self.cara_linvel),
             v3(self.cara_angvel),
             self.above_ground,
             self.contacts,
+            self.energy,
             parts.join(",")
         )
     }
@@ -509,6 +515,7 @@ pub fn run_flight_soak(
             cara_angvel: angvel,
             above_ground: above,
             contacts,
+            energy,
             parts,
         };
 
