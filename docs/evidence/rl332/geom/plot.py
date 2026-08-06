@@ -52,9 +52,16 @@ def plot_window(path, out_dir):
     vh = [analyze.hspeed(t["linvel"]) for t in ticks]
     sp = [math.hypot(a, b) for a, b in zip(vh, vy)]
     above = [t["above"] for t in ticks]
-    energy = [analyze.spec_energy(t) for t in ticks]
+    whole = analyze.whole_energy(ticks[0]) is not None
+    energy = [
+        analyze.whole_energy(t) if whole else analyze.spec_energy(t) for t in ticks
+    ]
     e0 = energy[0]
     energy = [e - e0 for e in energy]
+    e_label = (
+        "whole-body mech. energy (rel.)" if whole else "carapace specific energy (rel.)"
+    )
+    e_unit = "J vs window start" if whole else "J/kg vs window start"
 
     fig, (ax1, ax2, ax3) = plt.subplots(
         3, 1, figsize=(9, 7), sharex=True, height_ratios=[3, 2, 2]
@@ -68,8 +75,8 @@ def plot_window(path, out_dir):
     ax2.plot(xs, above, color=BLUE, label="carapace above ground")
     ax2.set_ylabel("m above ground")
     ax2.legend(loc="upper left", frameon=False, fontsize=8)
-    ax3.plot(xs, energy, color=ORANGE, label="carapace specific energy (rel.)")
-    ax3.set_ylabel("J/kg vs window start")
+    ax3.plot(xs, energy, color=ORANGE, label=e_label)
+    ax3.set_ylabel(e_unit)
     ax3.set_xlabel(f"tick − {t0} (64 Hz)")
     ax3.legend(loc="upper left", frameon=False, fontsize=8)
     for ax in (ax1, ax2, ax3):
@@ -102,16 +109,17 @@ def main():
         all_launches.extend(plot_window(p, out_dir))
 
     angles = [l["angle_to_normal_deg"] for l in all_launches if "angle_to_normal_deg" in l]
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.hist(angles, bins=list(range(0, 100, 10)), color=BLUE, edgecolor=SURFACE, linewidth=2)
-    ax.axvline(0, color=MUTED, linewidth=0.8)
-    ax.set_xlabel("launch angle from local ground NORMAL, deg (0 = perpendicular to ground)")
-    ax.set_ylabel("launches")
-    ax.set_title(
-        f"rl#332 launch angles, n={len(angles)} "
-        "(velocity at liftoff vs terrain normal, along-track plane)",
-        fontsize=10,
-    )
+    elevs = [l["vel_elev_deg"] for l in all_launches]
+    fig, (axa, axb) = plt.subplots(1, 2, figsize=(11, 4))
+    axa.hist(angles, bins=list(range(0, 100, 10)), color=BLUE, edgecolor=SURFACE, linewidth=2)
+    axa.set_xlabel("angle from local ground NORMAL, deg\n(0 = perpendicular to the slope)")
+    axa.set_ylabel("launches")
+    axa.set_title(f"vs terrain normal, n={len(angles)}", fontsize=10)
+    axb.hist(elevs, bins=list(range(-30, 100, 10)), color=BLUE, edgecolor=SURFACE, linewidth=2)
+    axb.set_xlabel("velocity elevation above horizon, deg\n(90 = straight up in the world frame)")
+    axb.set_ylabel("launches")
+    axb.set_title(f"vs world horizon, n={len(elevs)}", fontsize=10)
+    fig.suptitle("rl#332 launch-velocity direction at liftoff", fontsize=11)
     fig.tight_layout()
     fig.savefig(out_dir / "launch-angle-histogram.png", dpi=130)
     plt.close(fig)

@@ -59,8 +59,18 @@ def hspeed(v):
 
 
 def spec_energy(t):
+    """Carapace specific mechanical energy, J/kg — the fallback ruler for
+    windows that predate the whole-body `energy` field. Carapace-only energy
+    can legitimately rise during contact (transfer from the rest of the body),
+    so injection verdicts prefer whole_energy when present."""
     v = t["linvel"]
     return 0.5 * (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) + G * t["cara"][1]
+
+
+def whole_energy(t):
+    """Whole-body mechanical energy, J (mass-weighted, incl. rotation), dumped
+    by the instrumented soak; None on older windows."""
+    return t.get("energy")
 
 
 def clearance(t):
@@ -148,19 +158,58 @@ def kick_scan(ticks):
         if dvy >= KICK_DVY:
             sa = math.hypot(hspeed(a["linvel"]), a["linvel"][1])
             sb = math.hypot(hspeed(b["linvel"]), b["linvel"][1])
-            kicks.append(
-                {
-                    "tick": b["tick"],
-                    "dvy": dvy,
-                    "speed": f"{sa:.1f}->{sb:.1f}",
-                    "gained_speed": sb > sa * 1.05,
-                    "dE_per_s": (spec_energy(b) - spec_energy(a)) / DT,
-                    "clearance": clearance(b),
-                    "contacts": b["contacts"],
-                    "above": b["above"],
-                }
-            )
+            rec = {
+                "tick": b["tick"],
+                "dvy": dvy,
+                "speed": f"{sa:.1f}->{sb:.1f}",
+                "gained_speed": sb > sa * 1.05,
+                "dE_per_s": (spec_energy(b) - spec_energy(a)) / DT,
+                "clearance": clearance(b),
+                "contacts": b["contacts"],
+                "above": b["above"],
+            }
+            ea, eb = whole_energy(a), whole_energy(b)
+            if ea is not None:
+                # J/s through the WHOLE body: actuator gross power measured
+                # 55-237 W in storms; a solver kick reads far above.
+                rec["whole_dE_per_s"] = (eb - ea) / DT
+            kicks.append(rec)
     return kicks
+
+
+def ballistic_check(ticks):
+    """Over every strictly-airborne stretch (min part clearance > 1.5 m for
+    >= 8 ticks — wide margin over the flat-local terrain approximation), the
+    per-tick dvy/dt of the MEAN part velocity (COM proxy: internal leg forces
+    cancel between parts, imperfectly since parts are unweighted) vs -g. Drag
+    shifts it by a few m/s^2 at speed; a POSITIVE mean residual beyond that,
+    or large positive spikes, is a force from nowhere. The carapace alone is
+    NOT usable here: airborne actuator whips trade many m/s^2 between the
+    carapace and the legs."""
+    accs = []
+    run = []
+
+    def mean_vy(t):
+        return sum(p[4] for p in t["parts"]) / len(t["parts"])
+
+    for k in range(1, len(ticks)):
+        if clearance(ticks[k]) > 1.5 and clearance(ticks[k - 1]) > 1.5:
+            run.append((mean_vy(ticks[k]) - mean_vy(ticks[k - 1])) / DT)
+        else:
+            if len(run) >= 8:
+                accs.extend(run)
+            run = []
+    if len(run) >= 8:
+        accs.extend(run)
+    if not accs:
+        return None
+    mean = sum(accs) / len(accs)
+    return {
+        "airborne_ticks": len(accs),
+        "mean_dvy_dt": mean,
+        "residual_vs_minus_g": mean + G,
+        "max_dvy_dt": max(accs),
+    }
 
 
 def analyze(path):
@@ -181,8 +230,18 @@ def analyze(path):
         after = ticks[min(len(ticks) - 1, i + 2)]["linvel"]
         speed_before = math.hypot(hspeed(before), before[1])
         speed_after = math.hypot(hspeed(after), after[1])
+        wde2 = None
+        if whole_energy(t) is not None:
+            wde2 = max(
+                (whole_energy(ticks[k]) - whole_energy(ticks[k - 1])) / DT
+                for k in range(lo, min(i + IMPULSIVE_RISE_TICKS + 1, len(ticks)))
+            )
         fast = rise is not None and rise <= IMPULSIVE_RISE_TICKS and gain >= IMPULSIVE_GAIN
-        if fast and speed_after > speed_before * 1.05 and de2 >= IMPULSIVE_DE:
+        # With whole-body energy the injection test is direct: J/s beyond the
+        # measured 237 W actuator gross (5x margin). Without it, fall back to
+        # carapace specific energy.
+        energetic = wde2 >= 1200.0 if wde2 is not None else de2 >= IMPULSIVE_DE
+        if fast and speed_after > speed_before * 1.05 and energetic:
             kind = "injection"
         elif fast:
             kind = "bounce"
@@ -202,6 +261,7 @@ def analyze(path):
             "speed_before": speed_before,
             "speed_after": speed_after,
             "max_dE_per_s_2tick": de2,
+            "max_whole_dE_per_s_2tick": wde2,
             "class": kind,
         }
         slope = ground_slope(ticks, i)
@@ -216,13 +276,17 @@ def analyze(path):
 
 
 def main(paths):
-    out = {"launches": [], "kicks": []}
+    out = {"launches": [], "kicks": [], "ballistic": []}
     for p in map(Path, paths):
         header, ticks, launches = analyze(p)
         out["launches"].extend(launches)
         for k in kick_scan(ticks):
             k["file"] = p.name
             out["kicks"].append(k)
+        b = ballistic_check(ticks)
+        if b:
+            b["file"] = p.name
+            out["ballistic"].append(b)
     json.dump(out, sys.stdout, indent=1)
     print()
 
