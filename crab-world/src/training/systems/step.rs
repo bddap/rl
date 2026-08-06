@@ -10,19 +10,19 @@ use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns};
 use crate::training::algorithm::NormalizedValue;
-use crate::training::reward::{action_effort, dist_3d, planar_dist};
-use crate::training::targets::seed_target;
+use crate::training::reward::{action_effort, planar_dist};
+use crate::training::targets::{closest_tip_dists, seed_target};
 
 use super::lifecycle::{EnvEpisode, EnvPhase};
-use super::state::TrainingState;
+use super::state::WorkerState;
 
-fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32], effort_weight: f32) {
+fn log_effort_probe(envs: &[EnvEpisode], steps: &[EnvStep], effort_weight: f32) {
     let mut count = 0usize;
     let mut effort_sum = 0.0f32;
-    for (e, ep) in envs.iter().enumerate() {
+    for (ep, step) in envs.iter().zip(steps) {
         if matches!(ep.phase, EnvPhase::Recording) {
             count += 1;
-            effort_sum += efforts[e];
+            effort_sum += step.effort;
         }
     }
     if count > 0 {
@@ -34,16 +34,9 @@ fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32], effort_weight: f32) {
     }
 }
 
-pub(super) struct SampledAction {
+struct SampledAction {
     drive: [f32; ACTION_SIZE],
     log_prob: f32,
-}
-
-pub(super) struct BodyState {
-    pub(super) poses: Vec<Option<(f32, f32)>>,
-    pub(super) carapace_pos: Vec<Option<Vec3>>,
-    pub(super) drifts: Vec<Option<f32>>,
-    pub(super) max_speeds: Vec<MaxPartSpeed>,
 }
 
 /// The fastest part per env this tick, with enough identity to indict one joint
@@ -68,36 +61,61 @@ pub(super) struct MaxPartSpeed {
 /// the diagnostic detail — half the 100 m/s violation bound.
 const DETAIL_SPEED: f32 = 50.0;
 
-pub(super) struct StepInputs<'a> {
-    pub(super) body: &'a BodyState,
-    pub(super) min_tip_dists: &'a [Option<f32>],
-    pub(super) obs: &'a [[f32; OBS_SIZE]],
-    pub(super) drives: &'a [[f32; ACTION_SIZE]],
-    pub(super) values: &'a [NormalizedValue],
-    pub(super) log_probs: &'a [f32],
-    pub(super) efforts: &'a [f32],
+/// Everything one tick knows about one env — body readings and NN outputs in ONE
+/// struct, so index alignment across envs is by construction instead of eight
+/// parallel slices held equal by convention (bddap/rl#337).
+#[derive(Clone)]
+pub(super) struct EnvStep {
+    /// Carapace height ABOVE the local ground (rl#281) — the quantity the rl#343
+    /// integrity bounds test. `None` while the env has no body.
+    pub(super) height: Option<f32>,
+    pub(super) carapace_pos: Option<Vec3>,
+    /// Carapace planar drift from the spawn origin, for the drift telemetry.
+    pub(super) drift: Option<f32>,
+    pub(super) max_speed: MaxPartSpeed,
+    /// Closest claw tip to this env's target this tick.
+    pub(super) min_tip_dist: Option<f32>,
+    pub(super) obs: [f32; OBS_SIZE],
+    pub(super) drive: [f32; ACTION_SIZE],
+    pub(super) value: NormalizedValue,
+    pub(super) log_prob: f32,
+    pub(super) effort: f32,
+}
+
+impl Default for EnvStep {
+    fn default() -> Self {
+        Self {
+            height: None,
+            carapace_pos: None,
+            drift: None,
+            max_speed: MaxPartSpeed::default(),
+            min_tip_dist: None,
+            obs: [0.0; OBS_SIZE],
+            drive: [0.0; ACTION_SIZE],
+            value: NormalizedValue(0.0),
+            log_prob: 0.0,
+            effort: 0.0,
+        }
+    }
 }
 
 fn normalize_observations(
-    training: &mut TrainingState,
+    training: &mut WorkerState,
     obs: &CrabObservation,
 ) -> Vec<[f32; OBS_SIZE]> {
-    let n = training.envs.len();
+    let n = training.mode.envs.len();
     let mut obs_arrays: Vec<[f32; OBS_SIZE]> = Vec::with_capacity(n);
     for row in &obs.rows()[..n] {
         let normalized = training.obs_normalizer.normalize(row);
-        let nonfinite = match training.normalizer_increment.as_mut() {
-            Some(inc) => inc.observe(row),
-            None => 0,
-        };
-        training.nonfinite_obs_elements += u64::from(nonfinite);
+        let nonfinite = training.mode.increment.observe(row);
+        training.mode.telemetry.nonfinite_obs_elements += u64::from(nonfinite);
         obs_arrays.push(normalized);
     }
     obs_arrays
 }
 
 fn forward_pass(
-    training: &TrainingState,
+    training: &WorkerState,
     obs_arrays: &[[f32; OBS_SIZE]],
 ) -> (GaussianHead<NdArray>, Vec<NormalizedValue>) {
     let n = obs_arrays.len();
@@ -107,7 +125,7 @@ fn forward_pass(
         burn::tensor::TensorData::new(flat, [n, OBS_SIZE]),
         &device,
     );
-    let log_std_floor = training.log_std_floor;
+    let log_std_floor = training.mode.log_std_floor;
     training.brain.with_inference(|inference_brain| {
         let head = GaussianHead::new(inference_brain.policy(obs_batch.clone()), log_std_floor);
         let values: Vec<NormalizedValue> = inference_brain
@@ -171,8 +189,16 @@ fn sample_actions(
         .collect()
 }
 
-fn gather_body_state(
+/// Assemble this tick's [`EnvStep`]s: seed each env's slot from its NN outputs, then
+/// scatter the body queries in by env id. One `Vec` built in one place — the length
+/// checks here are the ONLY alignment seam, and they fail loud.
+#[allow(clippy::too_many_arguments)]
+fn gather_env_steps(
     n: usize,
+    obs_arrays: Vec<[f32; OBS_SIZE]>,
+    sampled: &[SampledAction],
+    values: Vec<NormalizedValue>,
+    min_tip_dists: Vec<Option<f32>>,
     spawns: &CrabSpawns,
     terrain: &crate::terrain::TerrainGrid,
     carapace_q: &Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
@@ -184,30 +210,31 @@ fn gather_body_state(
         ),
         With<CrabBodyPart>,
     >,
-) -> BodyState {
-    let mut poses: Vec<Option<(f32, f32)>> = vec![None; n];
-    let mut carapace_pos: Vec<Option<Vec3>> = vec![None; n];
-    let mut drifts: Vec<Option<f32>> = vec![None; n];
+) -> Vec<EnvStep> {
+    assert!(
+        obs_arrays.len() == n
+            && sampled.len() == n
+            && values.len() == n
+            && min_tip_dists.len() == n,
+        "per-env step data out of sync with the {n} training envs: obs {}, actions {}, \
+         values {}, tip dists {} — the training world is mis-wired",
+        obs_arrays.len(),
+        sampled.len(),
+        values.len(),
+        min_tip_dists.len(),
+    );
+    let mut steps: Vec<EnvStep> = env_steps_from_nn(obs_arrays, sampled, values, min_tip_dists);
+
     for (env, transform) in carapace_q.iter() {
-        if let Some(p) = poses.get_mut(env.0) {
-            let up = transform.rotation * Vec3::Y;
-            // Height ABOVE the local ground (rl#281) — the quantity the fall terminal
-            // and height reward mean.
+        if let Some(step) = steps.get_mut(env.0) {
             let t = transform.translation;
-            let height = t.y - terrain.height(t.x, t.z);
-            *p = Some((height, up.dot(Vec3::Y)));
-        }
-        if let Some(c) = carapace_pos.get_mut(env.0) {
-            *c = Some(transform.translation);
-        }
-        if let Some(d) = drifts.get_mut(env.0) {
-            let origin = spawns.origin(env.0);
-            *d = Some(planar_dist(transform.translation, origin));
+            step.height = Some(t.y - terrain.height(t.x, t.z));
+            step.carapace_pos = Some(t);
+            step.drift = Some(planar_dist(t, spawns.origin(env.0)));
         }
     }
-    let mut max_speeds: Vec<MaxPartSpeed> = vec![MaxPartSpeed::default(); n];
     for (env, vel, joint) in parts_q.iter() {
-        if let Some(m) = max_speeds.get_mut(env.0) {
+        if let Some(m) = steps.get_mut(env.0).map(|s| &mut s.max_speed) {
             let lin = vel.linear.length();
             let ang = vel.angular.length();
             let s = if lin.is_finite() && ang.is_finite() {
@@ -226,41 +253,35 @@ fn gather_body_state(
             }
         }
     }
-    BodyState {
-        poses,
-        carapace_pos,
-        drifts,
-        max_speeds,
-    }
+    steps
 }
 
-/// Batched, one query pass for N envs — the multi-env form of
-/// `targets::closest_tip_dist` (eval/demo use that single-env one).
-fn closest_tip_dists(
-    n: usize,
-    targets: &CrabTargets,
-    claw_tips_q: &Query<(&CrabEnvId, &Transform), With<CrabClawTip>>,
-) -> Vec<Option<f32>> {
-    let mut min_tip_dists: Vec<Option<f32>> = vec![None; n];
-    for (env, tip) in claw_tips_q.iter() {
-        let Some(slot) = min_tip_dists.get_mut(env.0) else {
-            continue;
-        };
-        let Some(target) = targets.get(env.0) else {
-            continue;
-        };
-        if !tip.translation.is_finite() {
-            continue;
-        }
-        let d = dist_3d(tip.translation, target);
-        *slot = Some(slot.map_or(d, |cur| cur.min(d)));
-    }
-    min_tip_dists
+fn env_steps_from_nn(
+    obs_arrays: Vec<[f32; OBS_SIZE]>,
+    sampled: &[SampledAction],
+    values: Vec<NormalizedValue>,
+    min_tip_dists: Vec<Option<f32>>,
+) -> Vec<EnvStep> {
+    obs_arrays
+        .into_iter()
+        .zip(sampled)
+        .zip(values)
+        .zip(min_tip_dists)
+        .map(|(((obs, s), value), min_tip_dist)| EnvStep {
+            obs,
+            drive: s.drive,
+            value,
+            log_prob: s.log_prob,
+            effort: action_effort(&s.drive),
+            min_tip_dist,
+            ..EnvStep::default()
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn brain_step(
-    mut training: NonSendMut<TrainingState>,
+    mut training: NonSendMut<WorkerState>,
     obs: Res<CrabObservation>,
     mut actions: ResMut<CrabActions>,
     mut targets: ResMut<CrabTargets>,
@@ -279,7 +300,7 @@ pub(crate) fn brain_step(
     mut exit: MessageWriter<AppExit>,
     mut rescued: MessageReader<CrabRescued>,
 ) {
-    let n = training.envs.len();
+    let n = training.mode.envs.len();
     // rl#343: a rescue is the engine confessing it lost a crab (rl#137 non-finite /
     // rl#283 tunneled / rl#303 buried). Training hard-fails on it — the deleted
     // finalize-as-Terminal path silently traded an engine bug for a free respawn.
@@ -290,15 +311,21 @@ pub(crate) fn brain_step(
              does not recover from a broken physics state; fix the engine bug instead \
              of respawning over it.",
             m.env,
-            training.total_steps,
-            training.envs.get(m.env).map_or(0, |ep| ep.steps),
+            training.mode.total_steps,
+            training.mode.envs.get(m.env).map_or(0, |ep| ep.steps),
             m.reason,
             m.body,
         );
     }
-    if obs.rows().len() != n || actions.len() != n {
-        return;
-    }
+    // Mis-sized obs/action resources mean the training world is mis-wired — fail
+    // loud (bddap/rl#337; a silent return here dropped whole ticks with no trace).
+    assert!(
+        obs.rows().len() == n && actions.len() == n,
+        "obs/action resources out of sync with the {n} training envs: obs {}, actions {} \
+         — the training world is mis-wired",
+        obs.rows().len(),
+        actions.len(),
+    );
     let device = training.device;
 
     let obs_arrays = normalize_observations(&mut training, &obs);
@@ -307,63 +334,61 @@ pub(crate) fn brain_step(
     let sampled = sample_actions(&head, &noise, &device);
 
     let drive_arrays: Vec<[f32; ACTION_SIZE]> = sampled.iter().map(|s| s.drive).collect();
-    let log_probs: Vec<f32> = sampled.iter().map(|s| s.log_prob).collect();
-    let efforts: Vec<f32> = sampled.iter().map(|s| action_effort(&s.drive)).collect();
-
     actions.set_rows(&drive_arrays);
-    for (e, ep) in training.envs.iter().enumerate() {
+    for (e, ep) in training.mode.envs.iter().enumerate() {
         if matches!(ep.phase, EnvPhase::Settling { .. }) {
             let _ = actions.rest(e); // deliberate skip pre-spawn
         }
     }
 
-    let body = gather_body_state(n, &spawns, &terrain, &carapace_q, &parts_q);
-
     for e in 0..n {
         if targets.get(e).is_none() {
+            let band_max_m = training.mode.band_max_m;
             seed_target(
                 &mut targets,
                 &spawns,
                 e,
-                training.band_max_m,
+                band_max_m,
                 &mut training.rng,
                 &terrain,
             );
         }
     }
 
-    let min_tip_dists = closest_tip_dists(n, &targets, &claw_tips_q);
-    for (e, tip) in min_tip_dists.iter().enumerate() {
-        if matches!(training.envs[e].phase, EnvPhase::Recording)
-            && let Some(d) = *tip
+    let steps = gather_env_steps(
+        n,
+        obs_arrays,
+        &sampled,
+        values,
+        closest_tip_dists(n, &targets, &claw_tips_q),
+        &spawns,
+        &terrain,
+        &carapace_q,
+        &parts_q,
+    );
+
+    for (e, step) in steps.iter().enumerate() {
+        if matches!(training.mode.envs[e].phase, EnvPhase::Recording)
+            && let Some(d) = step.min_tip_dist
         {
-            let ep = &mut training.envs[e];
+            let ep = &mut training.mode.envs[e];
             ep.min_tip_dist = Some(ep.min_tip_dist.map_or(d, |cur| cur.min(d)));
         }
     }
 
-    let inputs = StepInputs {
-        body: &body,
-        min_tip_dists: &min_tip_dists,
-        obs: &obs_arrays,
-        drives: &drive_arrays,
-        values: &values,
-        log_probs: &log_probs,
-        efforts: &efforts,
-    };
-    training.finalize_transitions(&inputs, &mut targets, &spawns, &terrain);
+    training.finalize_transitions(&steps, &mut targets, &spawns, &terrain);
 
-    if training.log_effort {
-        log_effort_probe(&training.envs, &efforts, training.effort_weight);
+    if training.mode.log_effort {
+        log_effort_probe(&training.mode.envs, &steps, training.mode.effort_weight);
     }
-    training.accumulate_drift(&body.drifts);
+    training.accumulate_drift(&steps);
 
-    training.total_steps += 1;
+    training.mode.total_steps += 1;
 
-    if training.tick_budget != 0 && training.total_steps == training.tick_budget {
+    if training.mode.tick_budget != 0 && training.mode.total_steps == training.mode.tick_budget {
         info!(
             "Tick budget reached ({} ticks) — stopping training.",
-            training.tick_budget
+            training.mode.tick_budget
         );
         exit.write(AppExit::Success);
     }
@@ -476,7 +501,7 @@ mod tests {
             // recording tick — into the same-seed contract.
             let mut app = headless_training_app(&dir, seed);
             app.world_mut()
-                .non_send_resource_mut::<TrainingState>()
+                .non_send_resource_mut::<WorkerState>()
                 .brain
                 .set(initial_brain.clone());
             for t in 0..TICKS {
@@ -485,13 +510,14 @@ mod tests {
                     // rl#343 — an underground teleport would hard-fail the run) so the
                     // respawn/reset path is inside the same-seed contract.
                     app.world_mut()
-                        .non_send_resource_mut::<TrainingState>()
+                        .non_send_resource_mut::<WorkerState>()
+                        .mode
                         .envs[0]
                         .steps = super::super::lifecycle::MAX_EPISODE_TICKS + 1;
                 }
                 app.update();
             }
-            let traj = app.world().non_send_resource::<TrainingState>().rollouts[0]
+            let traj = app.world().non_send_resource::<WorkerState>().mode.rollouts[0]
                 .transitions
                 .clone();
             let _ = std::fs::remove_dir_all(&dir);
@@ -503,7 +529,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&seed_dir);
         let brain = headless_training_app(&seed_dir, SEED)
             .world()
-            .non_send_resource::<TrainingState>()
+            .non_send_resource::<WorkerState>()
             .brain()
             .clone();
         let _ = std::fs::remove_dir_all(&seed_dir);
@@ -556,9 +582,9 @@ mod tests {
             app.update();
         }
         {
-            let st = app.world().non_send_resource::<TrainingState>();
+            let st = app.world().non_send_resource::<WorkerState>();
             assert!(
-                matches!(st.envs[0].phase, EnvPhase::Recording),
+                matches!(st.mode.envs[0].phase, EnvPhase::Recording),
                 "settle grace elapsed and no reset pending — env is recording"
             );
         }
@@ -592,15 +618,12 @@ mod tests {
         }
         assert!(
             matches!(
-                app.world().non_send_resource::<TrainingState>().envs[0].phase,
+                app.world().non_send_resource::<WorkerState>().mode.envs[0].phase,
                 EnvPhase::Recording
             ),
             "env 0 must be live-recording before the grab"
         );
-        let episodes_before = app
-            .world()
-            .non_send_resource::<TrainingState>()
-            .episode_count;
+        let episodes_before = app.world().non_send_resource::<WorkerState>().episode_count;
 
         let tip_pos = {
             let mut q = app
@@ -615,8 +638,8 @@ mod tests {
 
         app.update();
 
-        let st = app.world().non_send_resource::<TrainingState>();
-        let last = st.rollouts[0]
+        let st = app.world().non_send_resource::<WorkerState>();
+        let last = st.mode.rollouts[0]
             .transitions
             .last()
             .expect("env 0 recorded a transition");
@@ -636,7 +659,7 @@ mod tests {
             "the grab must end the episode and count it"
         );
         assert!(
-            !matches!(st.envs[0].phase, EnvPhase::Recording),
+            !matches!(st.mode.envs[0].phase, EnvPhase::Recording),
             "env 0 must have left Recording (reset for the next episode) after the grab"
         );
 
@@ -644,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn height_reward_pairs_with_the_action_that_produced_it() {
+    fn reward_pairs_with_the_action_that_produced_it() {
         let checkpoint_dir =
             std::env::temp_dir().join(format!("rl_test_phase15_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&checkpoint_dir);
@@ -655,7 +678,7 @@ mod tests {
         }
         assert!(
             matches!(
-                app.world().non_send_resource::<TrainingState>().envs[0].phase,
+                app.world().non_send_resource::<WorkerState>().mode.envs[0].phase,
                 EnvPhase::Recording
             ),
             "env must be recording before the hand-driven ticks"
@@ -673,11 +696,13 @@ mod tests {
         // underground teleport would hard-fail the run, and the pairing pin below is
         // about pending mechanics, not the terminal kind).
         app.world_mut()
-            .non_send_resource_mut::<TrainingState>()
+            .non_send_resource_mut::<WorkerState>()
+            .mode
             .envs[0]
             .steps = super::super::lifecycle::MAX_EPISODE_TICKS + 1;
 
-        let transitions_before = app.world().non_send_resource::<TrainingState>().rollouts[0].len();
+        let transitions_before =
+            app.world().non_send_resource::<WorkerState>().mode.rollouts[0].len();
 
         app.world_mut()
             .run_system_once(crate::bot::sensor::build_observation)
@@ -687,14 +712,14 @@ mod tests {
             .expect("brain_step B");
         let act_b = app.world().resource::<CrabActions>().rows()[0];
 
-        let st = app.world().non_send_resource::<TrainingState>();
-        let last = st.rollouts[0]
+        let st = app.world().non_send_resource::<WorkerState>();
+        let last = st.mode.rollouts[0]
             .transitions
             .last()
             .expect("a transition was pushed");
 
         assert_eq!(
-            st.rollouts[0].len(),
+            st.mode.rollouts[0].len(),
             transitions_before + 1,
             "tick B finalizes exactly the one pending transition"
         );
@@ -714,7 +739,7 @@ mod tests {
              one-tick phase the fix restores (issue #15)"
         );
         assert!(
-            st.envs[0].pending.is_none(),
+            st.mode.envs[0].pending.is_none(),
             "a terminated env carries no pending into its reset"
         );
 

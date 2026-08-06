@@ -98,9 +98,18 @@ pub(crate) fn tip_touch(min_tip_dist: f32) -> bool {
     min_tip_dist < REACH_RADIUS
 }
 
-/// Closest claw tip to `target` for one env — the single-env form of the
-/// measurement [`tip_touch`] judges (training's batched form is
-/// `closest_tip_dists` in `systems::step`). `None` until a finite tip is seen.
+/// Fold one claw-tip reading into a running closest-distance slot — the ONE tip
+/// measurement [`tip_touch`] judges, shared by the single- and multi-env forms
+/// below so they cannot drift.
+fn fold_tip(slot: &mut Option<f32>, tip: Vec3, target: Vec3) {
+    if tip.is_finite() {
+        let d = dist_3d(tip, target);
+        *slot = Some(slot.map_or(d, |cur| cur.min(d)));
+    }
+}
+
+/// Closest claw tip to `target` for one env (eval/demo use). `None` until a
+/// finite tip is seen.
 pub(crate) fn closest_tip_dist(
     env: usize,
     target: Vec3,
@@ -108,12 +117,27 @@ pub(crate) fn closest_tip_dist(
 ) -> Option<f32> {
     let mut min: Option<f32> = None;
     for (e, tip) in tips.iter() {
-        if e.0 == env && tip.translation.is_finite() {
-            let d = dist_3d(tip.translation, target);
-            min = Some(min.map_or(d, |cur| cur.min(d)));
+        if e.0 == env {
+            fold_tip(&mut min, tip.translation, target);
         }
     }
     min
+}
+
+/// The batched form for training's N envs — one query pass, each tip folded into
+/// its env's slot against that env's target.
+pub(crate) fn closest_tip_dists(
+    n: usize,
+    targets: &CrabTargets,
+    tips: &Query<(&CrabEnvId, &Transform), With<CrabClawTip>>,
+) -> Vec<Option<f32>> {
+    let mut min_tip_dists: Vec<Option<f32>> = vec![None; n];
+    for (env, tip) in tips.iter() {
+        if let (Some(slot), Some(target)) = (min_tip_dists.get_mut(env.0), targets.get(env.0)) {
+            fold_tip(slot, tip.translation, target);
+        }
+    }
+    min_tip_dists
 }
 
 /// The ONE polar target-placement formula — `theta` from `origin` in the ground plane,
