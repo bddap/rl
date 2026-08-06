@@ -115,7 +115,7 @@ def main():
     axa.set_xlabel("angle from local ground NORMAL, deg\n(0 = perpendicular to the slope)")
     axa.set_ylabel("launches")
     axa.set_title(f"vs terrain normal, n={len(angles)}", fontsize=10)
-    axb.hist(elevs, bins=list(range(-30, 100, 10)), color=BLUE, edgecolor=SURFACE, linewidth=2)
+    axb.hist(elevs, bins=list(range(-40, 100, 10)), color=BLUE, edgecolor=SURFACE, linewidth=2)
     axb.set_xlabel("velocity elevation above horizon, deg\n(90 = straight up in the world frame)")
     axb.set_ylabel("launches")
     axb.set_title(f"vs world horizon, n={len(elevs)}", fontsize=10)
