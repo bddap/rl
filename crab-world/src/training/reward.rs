@@ -4,7 +4,7 @@ use crate::bot::actuator::ACTION_SIZE;
 
 /// Historical effort-tax coefficient; the live baseline runs train with this value.
 /// The per-run override is `TrainConfig::effort_weight` (`--effort-weight` /
-/// `RL_EFFORT_WEIGHT`), threaded through `TrainingState` — experiment runs raise it
+/// `RL_EFFORT_WEIGHT`), threaded through the worker training state — experiment runs raise it
 /// without touching the baselines' default. rl#268: at 0.0006 the tax is ~14× too
 /// weak to bend the policy off the torque ceiling, so bang-bang saturation is the
 /// optimal gait.

@@ -64,7 +64,6 @@ const DETAIL_SPEED: f32 = 50.0;
 /// Everything one tick knows about one env — body readings and NN outputs in ONE
 /// struct, so index alignment across envs is by construction instead of eight
 /// parallel slices held equal by convention (bddap/rl#337).
-#[derive(Clone)]
 pub(super) struct EnvStep {
     /// Carapace height ABOVE the local ground (rl#281) — the quantity the rl#343
     /// integrity bounds test. `None` while the env has no body.
@@ -189,27 +188,15 @@ fn sample_actions(
         .collect()
 }
 
-/// Assemble this tick's [`EnvStep`]s: seed each env's slot from its NN outputs, then
-/// scatter the body queries in by env id. One `Vec` built in one place — the length
-/// checks here are the ONLY alignment seam, and they fail loud.
-#[allow(clippy::too_many_arguments)]
-fn gather_env_steps(
+/// Seed this tick's [`EnvStep`]s from the per-env NN outputs and tip distances —
+/// the ONE alignment seam: every input's length is checked against `n` here, loud,
+/// before anything zips. Body readings are scattered in by [`scatter_body_readings`].
+fn env_steps_from_nn(
     n: usize,
     obs_arrays: Vec<[f32; OBS_SIZE]>,
-    sampled: &[SampledAction],
+    sampled: Vec<SampledAction>,
     values: Vec<NormalizedValue>,
     min_tip_dists: Vec<Option<f32>>,
-    spawns: &CrabSpawns,
-    terrain: &crate::terrain::TerrainGrid,
-    carapace_q: &Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
-    parts_q: &Query<
-        (
-            &CrabEnvId,
-            &bevy_rapier3d::prelude::Velocity,
-            Option<&crate::bot::body::CrabJoint>,
-        ),
-        With<CrabBodyPart>,
-    >,
 ) -> Vec<EnvStep> {
     assert!(
         obs_arrays.len() == n
@@ -223,8 +210,38 @@ fn gather_env_steps(
         values.len(),
         min_tip_dists.len(),
     );
-    let mut steps: Vec<EnvStep> = env_steps_from_nn(obs_arrays, sampled, values, min_tip_dists);
+    obs_arrays
+        .into_iter()
+        .zip(sampled)
+        .zip(values)
+        .zip(min_tip_dists)
+        .map(|(((obs, s), value), min_tip_dist)| EnvStep {
+            obs,
+            drive: s.drive,
+            value,
+            log_prob: s.log_prob,
+            effort: action_effort(&s.drive),
+            min_tip_dist,
+            ..EnvStep::default()
+        })
+        .collect()
+}
 
+/// Scatter the body queries into the seeded steps by env id.
+fn scatter_body_readings(
+    steps: &mut [EnvStep],
+    spawns: &CrabSpawns,
+    terrain: &crate::terrain::TerrainGrid,
+    carapace_q: &Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
+    parts_q: &Query<
+        (
+            &CrabEnvId,
+            &bevy_rapier3d::prelude::Velocity,
+            Option<&crate::bot::body::CrabJoint>,
+        ),
+        With<CrabBodyPart>,
+    >,
+) {
     for (env, transform) in carapace_q.iter() {
         if let Some(step) = steps.get_mut(env.0) {
             let t = transform.translation;
@@ -253,30 +270,6 @@ fn gather_env_steps(
             }
         }
     }
-    steps
-}
-
-fn env_steps_from_nn(
-    obs_arrays: Vec<[f32; OBS_SIZE]>,
-    sampled: &[SampledAction],
-    values: Vec<NormalizedValue>,
-    min_tip_dists: Vec<Option<f32>>,
-) -> Vec<EnvStep> {
-    obs_arrays
-        .into_iter()
-        .zip(sampled)
-        .zip(values)
-        .zip(min_tip_dists)
-        .map(|(((obs, s), value), min_tip_dist)| EnvStep {
-            obs,
-            drive: s.drive,
-            value,
-            log_prob: s.log_prob,
-            effort: action_effort(&s.drive),
-            min_tip_dist,
-            ..EnvStep::default()
-        })
-        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -355,17 +348,14 @@ pub(crate) fn brain_step(
         }
     }
 
-    let steps = gather_env_steps(
+    let mut steps = env_steps_from_nn(
         n,
         obs_arrays,
-        &sampled,
+        sampled,
         values,
         closest_tip_dists(n, &targets, &claw_tips_q),
-        &spawns,
-        &terrain,
-        &carapace_q,
-        &parts_q,
     );
+    scatter_body_readings(&mut steps, &spawns, &terrain, &carapace_q, &parts_q);
 
     for (e, step) in steps.iter().enumerate() {
         if matches!(training.mode.envs[e].phase, EnvPhase::Recording)
@@ -623,7 +613,10 @@ mod tests {
             ),
             "env 0 must be live-recording before the grab"
         );
-        let episodes_before = app.world().non_send_resource::<WorkerState>().episode_count;
+        let episodes_before = app
+            .world()
+            .non_send_resource::<WorkerState>()
+            .episode_count();
 
         let tip_pos = {
             let mut q = app
@@ -654,7 +647,7 @@ mod tests {
             last.reward
         );
         assert_eq!(
-            st.episode_count,
+            st.episode_count(),
             episodes_before + 1,
             "the grab must end the episode and count it"
         );
