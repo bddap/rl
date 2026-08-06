@@ -236,11 +236,19 @@ def analyze(path):
                 (whole_energy(ticks[k]) - whole_energy(ticks[k - 1])) / DT
                 for k in range(lo, min(i + IMPULSIVE_RISE_TICKS + 1, len(ticks)))
             )
+        # Net whole-body energy across the strike (launch-8..launch+8 ticks).
+        # The 2-tick rate false-alarms on contact-spring return (the soft
+        # 30 Hz contacts store energy during compression and hand it back a
+        # tick later); the NET across the strike cannot: 16 ticks of full
+        # actuator gross (soak-measured <= 440 W) is ~110 J, so a net gain
+        # far above that is energy from nowhere.
+        net_de = None
+        if whole_energy(t) is not None:
+            a8 = ticks[max(0, i - 8)]
+            b8 = ticks[min(len(ticks) - 1, i + 8)]
+            net_de = whole_energy(b8) - whole_energy(a8)
         fast = rise is not None and rise <= IMPULSIVE_RISE_TICKS and gain >= IMPULSIVE_GAIN
-        # With whole-body energy the injection test is direct: J/s beyond the
-        # measured 237 W actuator gross (5x margin). Without it, fall back to
-        # carapace specific energy.
-        energetic = wde2 >= 1200.0 if wde2 is not None else de2 >= IMPULSIVE_DE
+        energetic = net_de >= 300.0 if net_de is not None else de2 >= IMPULSIVE_DE
         if fast and speed_after > speed_before * 1.05 and energetic:
             kind = "injection"
         elif fast:
@@ -262,6 +270,7 @@ def analyze(path):
             "speed_after": speed_after,
             "max_dE_per_s_2tick": de2,
             "max_whole_dE_per_s_2tick": wde2,
+            "net_whole_dE_strike": net_de,
             "class": kind,
         }
         slope = ground_slope(ticks, i)
@@ -287,6 +296,20 @@ def main(paths):
         if b:
             b["file"] = p.name
             out["ballistic"].append(b)
+        # What a viewer would read as "the launch direction": the velocity
+        # elevation while ascending fastest (owner: "near perpendicular").
+        k = max(range(len(ticks)), key=lambda k: ticks[k]["linvel"][1])
+        v = ticks[k]["linvel"]
+        out.setdefault("peak_ascent", []).append(
+            {
+                "file": p.name,
+                "tick": ticks[k]["tick"],
+                "vy": v[1],
+                "vh": hspeed(v),
+                "elev_deg": math.degrees(math.atan2(v[1], hspeed(v))),
+                "above": ticks[k]["above"],
+            }
+        )
     json.dump(out, sys.stdout, indent=1)
     print()
 
