@@ -14,7 +14,7 @@ use super::TrainBackend;
 use super::algorithm::RolloutBuffer;
 use super::checkpoint::{CheckpointDir, TICK_WATERMARK_FILENAME};
 use super::normalizer::NormalizerSnapshot;
-use super::systems::{HorizonOutput, HorizonRequest, TrainingState};
+use super::systems::{HorizonOutput, HorizonRequest, LearnerState, StepTelemetry, WorkerState};
 
 type SnapshotRecorder = BinBytesRecorder<FullPrecisionSettings>;
 
@@ -145,7 +145,7 @@ enum RollOutcome {
     SnapshotLoadFailed,
 }
 
-/// The training half of a rollout env: the worker's [`TrainingState`] plus the systems
+/// The training half of a rollout env: the worker's [`WorkerState`] plus the systems
 /// that drive and record her — the trainer's counterpart of net's inference driver
 /// (`run_crab_policy`), occupying the same `BotSet::Think` slot.
 /// [`build_rollout_app`] composes this onto the server world; the systems-level tests
@@ -153,7 +153,7 @@ enum RollOutcome {
 pub(crate) fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usize, arch: ArchId) {
     use super::systems::{self, brain_step, reset_crab};
 
-    let state = systems::TrainingState::new_worker(config, id, arch);
+    let state = systems::WorkerState::new_worker(config, id, arch);
     app.insert_non_send_resource(state).add_systems(
         FixedUpdate,
         (brain_step, reset_crab)
@@ -258,8 +258,8 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
     {
         let mut st = app
             .world_mut()
-            .get_non_send_resource_mut::<TrainingState>()
-            .expect("rollout TrainingState");
+            .get_non_send_resource_mut::<WorkerState>()
+            .expect("rollout WorkerState");
         let opened = st.begin_horizon(HorizonRequest {
             brain_bytes: &req.brain_bytes,
             normalizer: (*req.normalizer).clone(),
@@ -278,8 +278,8 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
 
     let mut st = app
         .world_mut()
-        .get_non_send_resource_mut::<TrainingState>()
-        .expect("rollout TrainingState");
+        .get_non_send_resource_mut::<WorkerState>()
+        .expect("rollout WorkerState");
     RollOutcome::Rolled {
         output: Box::new(st.end_horizon()),
         ticks: rolled,
@@ -288,8 +288,8 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
 
 fn horizon_tick(app: &mut App) -> u64 {
     app.world()
-        .get_non_send_resource::<TrainingState>()
-        .map(|st| st.total_steps)
+        .get_non_send_resource::<WorkerState>()
+        .map(|st| st.total_steps())
         .unwrap_or(0)
 }
 
@@ -299,8 +299,8 @@ fn warm_up_app(app: &mut App) {
     }
     let mut st = app
         .world_mut()
-        .get_non_send_resource_mut::<TrainingState>()
-        .expect("rollout TrainingState");
+        .get_non_send_resource_mut::<WorkerState>()
+        .expect("rollout WorkerState");
     let _ = st.end_horizon();
 }
 
@@ -524,7 +524,7 @@ mod tests {
         let horizon = 96u64;
         let (config, dir) = scratch_config("parity_thread", m);
 
-        let mut state = TrainingState::new(&config, None);
+        let mut state = LearnerState::new(&config, None);
         let before = snapshot_brain_bytes(state.brain());
 
         let thread = RolloutThread::spawn(0, config.clone(), state.brain().arch(), horizon);
@@ -555,7 +555,9 @@ mod tests {
 
         let rollouts: Vec<RolloutBuffer> = envs;
         let mut optimizer = crab_optimizer();
-        let (brain, ppo_config, device, ret_norm, rng) = state.learner_parts();
+        let device = state.device;
+        let (brain, ppo_config, ret_norm, rng) = state.learner_parts();
+        let device = &device;
         let metrics = ppo_update_core(
             brain,
             &mut optimizer,
@@ -590,7 +592,7 @@ mod tests {
         let k = 2usize;
         let (config, dir) = scratch_config("parity_two_threads", m);
 
-        let state = TrainingState::new(&config, None);
+        let state = LearnerState::new(&config, None);
         let brain_bytes = Arc::new(snapshot_brain_bytes(state.brain()));
         let normalizer = Arc::new(state.normalizer_snapshot());
 

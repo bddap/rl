@@ -15,8 +15,8 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::ExternalForce;
 use rand::Rng;
 
-use super::TrainingState;
 use super::lifecycle::EnvPhase;
+use super::state::WorkerState;
 use crate::bot::body::{CrabCarapace, CrabEnvId};
 
 /// One burst = 8 physics ticks (0.125 s), the stage-1 ram-pin duration.
@@ -39,10 +39,11 @@ pub(crate) struct ShoveState {
 /// rapier sync, exactly the seam the stage-1 shove test proves out. Draws come from
 /// the training RNG in env order, so a seeded run reproduces its shove schedule.
 pub(crate) fn shove_crabs(
-    mut training: NonSendMut<TrainingState>,
+    mut training: NonSendMut<WorkerState>,
     mut carapaces: Query<(&CrabEnvId, &mut ExternalForce), With<CrabCarapace>>,
 ) {
-    let TrainingState { envs, rng, .. } = &mut *training;
+    let WorkerState { rng, mode, .. } = &mut *training;
+    let envs = &mut mode.envs;
     for ep in envs.iter_mut() {
         // Starts are gated on Recording; clearing needs no code here because episode
         // end wholesale-replaces the `EnvEpisode` (`finalize_transitions`), so a burst
@@ -91,15 +92,15 @@ mod tests {
 
         // Flat grid so displacement attributes to the shove, not the GCR origin
         // slope (the stage-1 shove test's finding). No brain/reset systems: the
-        // shove seam only needs TrainingState's envs + rng beside the bot stack.
+        // shove seam only needs the worker's envs + rng beside the bot stack.
         let dir = std::env::temp_dir().join(format!("rl_test_shove_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = crate::TrainConfig::scratch(&dir, 1, 0x5140);
         let mut app = flat_headless_app();
-        let mut state = TrainingState::new_worker(&config, 0, crate::bot::arch::ArchId::DEFAULT);
+        let mut state = WorkerState::new_worker(&config, 0, crate::bot::arch::ArchId::DEFAULT);
         // Park the env outside Recording for the whole test: the draw gate stays
         // cold, so no spontaneous burst can contaminate the measured displacement.
-        state.envs[0].phase = EnvPhase::Settling { grace: u32::MAX };
+        state.mode.envs[0].phase = EnvPhase::Settling { grace: u32::MAX };
         app.insert_non_send_resource(state);
         app.add_systems(
             FixedUpdate,
@@ -122,9 +123,9 @@ mod tests {
         {
             let mut st = app
                 .world_mut()
-                .get_non_send_resource_mut::<TrainingState>()
+                .get_non_send_resource_mut::<WorkerState>()
                 .expect("training state");
-            st.envs[0].shove = ShoveState {
+            st.mode.envs[0].shove = ShoveState {
                 remaining: SHOVE_TICKS,
                 force: Vec3::new(120.0, 0.0, 0.0),
             };
@@ -138,9 +139,9 @@ mod tests {
         );
         let st = app
             .world()
-            .get_non_send_resource::<TrainingState>()
+            .get_non_send_resource::<WorkerState>()
             .expect("training state");
-        assert_eq!(st.envs[0].shove.remaining, 0, "the burst must age out");
+        assert_eq!(st.mode.envs[0].shove.remaining, 0, "the burst must age out");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

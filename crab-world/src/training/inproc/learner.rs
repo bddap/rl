@@ -13,28 +13,16 @@ struct MergedRollout {
     /// Threads that REFUSED their horizon because the snapshot failed to load (bddap/rl#177),
     /// pooled this iter; surfaced on the log so a recurring load failure can't hide.
     snapshot_load_failures: u32,
-    /// Carapace planar drift-from-spawn this iter as `(sum, count)` over recording-env
-    /// ticks, pooled across threads; the log divides it for the mean.
-    drift: (f64, u64),
-    /// Per-episode reach tally `(reached, finished)` pooled across threads; feeds the
-    /// best-keeper's solid-reach floor and the log's reach fraction.
-    reach: (u64, u64),
-    /// The reach tally split by compass bearing bin of each episode's target
-    /// (rl#276), pooled across threads; accumulated into the learner's
-    /// per-eval-period window for the `[bearing-reach]` line.
-    reach_by_bearing: [(u64, u64); crate::eval::EVAL_BEARINGS],
-    /// Progress-term drops (non-physical deltas the reward zeroed; bddap/rl#175) pooled across
-    /// threads this iter; surfaced on the log so a silent reward dropout is visible. 0 normally.
-    glitch_drops: u64,
-    /// Non-finite obs elements skipped from the normalizer (bddap/rl#181) pooled across threads
-    /// this iter; surfaced on the log so a NaN sensor/physics reading is visible. 0 normally.
-    nonfinite_obs: u64,
+    /// Every thread's step telemetry pooled for this iter (drift, reach + per-bearing
+    /// split, glitch drops, non-finite obs); feeds the log line and the best-keeper's
+    /// solid-reach floor.
+    telemetry: StepTelemetry,
 }
 
 /// Phase 1 — capture the consistent per-iteration view every thread rolls: the policy
 /// weights and the master normalizer baseline (a snapshot, never an increment).
 /// Captured before any thread runs, so none sees a half-updated net.
-fn snapshot_policy(state: &TrainingState, log_std_floor: f32) -> RollRequest {
+fn snapshot_policy(state: &LearnerState, log_std_floor: f32) -> RollRequest {
     RollRequest {
         brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
         normalizer: Arc::new(state.normalizer_snapshot()),
@@ -51,7 +39,7 @@ fn snapshot_policy(state: &TrainingState, log_std_floor: f32) -> RollRequest {
 /// carried previous-generation `optimizer.bin` refuses at load by stamp — a resume
 /// then starts the moments cold rather than blocking every future checkpoint on a
 /// persistent optimizer-serialize fault.
-fn persist_checkpoint(state: &TrainingState, gpu_learner: &crate::training::gpu::GpuLearner) {
+fn persist_checkpoint(state: &LearnerState, gpu_learner: &crate::training::gpu::GpuLearner) {
     state.save_checkpoint(|paths, save_stamp| {
         gpu_learner.save_adam_state(&paths.optimizer_path(), state.brain().arch(), save_stamp);
     });
@@ -79,17 +67,13 @@ fn dispatch_horizon(threads: &[RolloutThread], request: &RollRequest) -> Vec<Rol
 /// [`MergedRollout`]: fold each `Rolled` thread's DISJOINT increment into the master
 /// (counting each sample once, since the master holds the baseline), record its
 /// rewards, and pool its buffers + aggregates.
-fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> MergedRollout {
+fn merge_rollouts(state: &mut LearnerState, results: Vec<RollOutcome>) -> MergedRollout {
     let mut merged = MergedRollout {
         rollouts: Vec::new(),
         samples: 0,
         ticks: 0,
         snapshot_load_failures: 0,
-        drift: (0.0, 0),
-        reach: (0, 0),
-        reach_by_bearing: [(0, 0); crate::eval::EVAL_BEARINGS],
-        glitch_drops: 0,
-        nonfinite_obs: 0,
+        telemetry: StepTelemetry::default(),
     };
     for r in results {
         match r {
@@ -99,20 +83,7 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
                 for reward in output.rewards {
                     state.record_episode_reward(reward);
                 }
-                merged.drift.0 += output.drift.0;
-                merged.drift.1 += output.drift.1;
-                merged.reach.0 += output.reach.0;
-                merged.reach.1 += output.reach.1;
-                for (m, o) in merged
-                    .reach_by_bearing
-                    .iter_mut()
-                    .zip(output.reach_by_bearing)
-                {
-                    m.0 += o.0;
-                    m.1 += o.1;
-                }
-                merged.glitch_drops += output.glitch_drops;
-                merged.nonfinite_obs += output.nonfinite_obs;
+                merged.telemetry.absorb(&output.telemetry);
                 for buf in output.envs {
                     merged.samples += buf.len() as u64;
                     merged.rollouts.push(buf);
@@ -140,27 +111,23 @@ struct IterReport<'a> {
     total_samples: u64,
     total_ticks: u64,
     avg_reward: f32,
-    drift: (f64, u64),
-    reach: (u64, u64),
+    /// This iter's pooled step telemetry (drift, reach, glitch drops, non-finite obs).
+    telemetry: &'a StepTelemetry,
     metrics: &'a crate::training::algorithm::PpoMetrics,
     /// Threads that refused their horizon on a snapshot load failure this iter (bddap/rl#177).
     snapshot_load_failures: u32,
-    /// Progress-term drops this iter — non-physical deltas the reward zeroed (bddap/rl#175).
-    glitch_drops: u64,
-    /// Non-finite obs elements skipped from the normalizer this iter (bddap/rl#181).
-    nonfinite_obs: u64,
 }
 
 /// Phase 4 (reporting) — emit the one steady-state learner log line. Derives the means
 /// and notes (drift, reach fraction, GPU split) from the raw counts
 /// so the iteration body carries no formatting.
 fn log_iteration(r: &IterReport) {
-    let drift = if r.drift.1 > 0 {
-        r.drift.0 / r.drift.1 as f64
+    let drift = if r.telemetry.drift_count > 0 {
+        r.telemetry.drift_sum / r.telemetry.drift_count as f64
     } else {
         0.0
     };
-    let (reached, finished) = r.reach;
+    let (reached, finished) = (r.telemetry.reach_reached, r.telemetry.reach_finished);
     let reach_note = if finished > 0 {
         format!("{:.2}", reached as f64 / finished as f64)
     } else {
@@ -176,15 +143,18 @@ fn log_iteration(r: &IterReport) {
     } else {
         String::new()
     };
-    let glitch_note = if r.glitch_drops > 0 {
-        format!(" | {} progress-glitch drop(s)", r.glitch_drops)
+    let glitch_note = if r.telemetry.progress_glitch_drops > 0 {
+        format!(
+            " | {} progress-glitch drop(s)",
+            r.telemetry.progress_glitch_drops
+        )
     } else {
         String::new()
     };
-    let nonfinite_obs_note = if r.nonfinite_obs > 0 {
+    let nonfinite_obs_note = if r.telemetry.nonfinite_obs_elements > 0 {
         format!(
             " | {} non-finite obs element(s) skipped (sensor/physics anomaly)",
-            r.nonfinite_obs
+            r.telemetry.nonfinite_obs_elements
         )
     } else {
         String::new()
@@ -267,7 +237,7 @@ fn log_bearing_reach(window: &[(u64, u64); crate::eval::EVAL_BEARINGS]) {
 /// total physics ticks (0 = unbounded) — the latter is the production budget the
 /// crab-train loop sets via `--ticks`, on hitting which the learner prints
 /// "Tick budget reached" (verbatim, the loop's termination grep) and exits. The
-/// policy is (re)loaded from `--checkpoint-dir` by `TrainingState::new`, so a
+/// policy is (re)loaded from `--checkpoint-dir` by `LearnerState::new`, so a
 /// learner restarted by the service resumes from the latest checkpoint.
 ///
 /// Gated on `wgpu` (default-on for `rl-train`): the PPO update runs ONLY on the GPU
@@ -297,8 +267,8 @@ pub fn run_learner(
 
     // Resolve the run's master RNG seed ONCE here, so the same base seed reaches the host
     // and every rollout worker (each mixes in its index for an independent stream — see
-    // `TrainingState::build`). A single logged seed then reproduces the whole run; left to
-    // each `TrainingState` to resolve, an entropy-default run would draw K+1 unrelated
+    // `seeded_base`). A single logged seed then reproduces the whole run; left to
+    // each state to resolve, an entropy-default run would draw K+1 unrelated
     // seeds and no one value could reproduce it.
     let mut config_owned = config.clone();
     if config_owned.seed.is_none() {
@@ -311,13 +281,13 @@ pub fn run_learner(
     let checkpoint_dir = config.checkpoint.checkpoint_dir.clone();
     std::fs::create_dir_all(&checkpoint_dir).expect("create checkpoint dir");
 
-    // The learner hosts the policy through a normal TrainingState (brain on the CPU
+    // The learner hosts the policy through a LearnerState (brain on the CPU
     // backend + normalizer + config) but steps no world: it builds rollouts from the
     // threads' buffers and runs the PPO update over them. `new` loads any existing
     // checkpoint in checkpoint_dir — that is the resume. The CPU brain stays the source
     // of truth (rollout snapshots + checkpoints read it); the GPU learner only borrows
     // it each iter to update on the device.
-    let mut state = TrainingState::new(config, requested_arch);
+    let mut state = LearnerState::new(config, requested_arch);
     // The run's RESOLVED architecture: the checkpoint tag on a resume, the `--arch`
     // request (default mlp512x3) on a fresh start. Everything downstream that must hold
     // the same variant — the GPU learner and every rollout worker — is built from this,
@@ -365,9 +335,9 @@ pub fn run_learner(
     let anneal_epoch = read_or_init_anneal_epoch(&checkpoint_dir, total_ticks);
     eprintln!(
         "[learner] exploration-σ schedule: log_std floor {:.3} → {:.3} over {} ticks (epoch @ {} ticks)",
-        state.config.log_std_floor_start,
-        state.config.log_std_floor_end,
-        state.config.log_std_anneal_ticks,
+        state.ppo_config().log_std_floor_start,
+        state.ppo_config().log_std_floor_end,
+        state.ppo_config().log_std_anneal_ticks,
         anneal_epoch,
     );
     // Loud so a run's train.log proves which reward economy it trained under (rl#268).
@@ -439,7 +409,7 @@ pub fn run_learner(
         // and update policies share σ. `total_ticks` is the pre-iteration odometer here (it is
         // bumped after the update below), so rollout and update agree within the iteration.
         let log_std_floor = state
-            .config
+            .ppo_config()
             .log_std_floor(total_ticks.saturating_sub(anneal_epoch));
 
         // 1) Capture the consistent per-iteration snapshot (weights + master normalizer,
@@ -462,7 +432,7 @@ pub fn run_learner(
         //    `update_secs` spans the whole phase — including the host↔device copies —
         //    so it is the honest per-iter update cost.
         let update_start = Instant::now();
-        let (brain, ppo_config, ret_norm, rng) = state.learner_parts_for_gpu();
+        let (brain, ppo_config, ret_norm, rng) = state.learner_parts();
         let (metrics, gpu_timing) = gpu_learner.update(
             brain,
             ppo_config,
@@ -502,15 +472,15 @@ pub fn run_learner(
             total_samples,
             total_ticks,
             avg_reward: state.avg_reward(20),
-            drift: merged.drift,
-            reach: merged.reach,
+            telemetry: &merged.telemetry,
             metrics: &metrics,
             snapshot_load_failures: merged.snapshot_load_failures,
-            glitch_drops: merged.glitch_drops,
-            nonfinite_obs: merged.nonfinite_obs,
         });
 
-        for (w, m) in bearing_reach_window.iter_mut().zip(merged.reach_by_bearing) {
+        for (w, m) in bearing_reach_window
+            .iter_mut()
+            .zip(merged.telemetry.reach_by_bearing)
+        {
             w.0 += m.0;
             w.1 += m.1;
         }
@@ -569,28 +539,26 @@ mod tests {
     #[test]
     fn merge_rollouts_attributes_refusals_and_glitches() {
         let (config, dir) = scratch_config("merge_attr", 2);
-        let mut state = TrainingState::new(&config, None);
+        let mut state = LearnerState::new(&config, None);
 
+        let mut reach_by_bearing = [(0, 0); crate::eval::EVAL_BEARINGS];
+        reach_by_bearing[1] = (1, 2);
+        reach_by_bearing[2] = (0, 1);
         let results = vec![
             RollOutcome::Rolled {
                 output: Box::new(HorizonOutput {
                     envs: vec![],                            // no env buffers → zero samples
                     increment: empty_normalizer_increment(), // a no-op merge
                     rewards: vec![1.0],
-                    drift: (0.5, 2),
-                    reach: (1, 3),
-                    reach_by_bearing: [
-                        (0, 0),
-                        (1, 2),
-                        (0, 1),
-                        (0, 0),
-                        (0, 0),
-                        (0, 0),
-                        (0, 0),
-                        (0, 0),
-                    ],
-                    glitch_drops: 3,
-                    nonfinite_obs: 7,
+                    telemetry: StepTelemetry {
+                        drift_sum: 0.5,
+                        drift_count: 2,
+                        reach_reached: 1,
+                        reach_finished: 3,
+                        reach_by_bearing,
+                        progress_glitch_drops: 3,
+                        nonfinite_obs_elements: 7,
+                    },
                 }),
                 ticks: 64,
             },
@@ -605,30 +573,33 @@ mod tests {
             "a refusal contributes no buffer"
         );
         assert_eq!(
-            merged.glitch_drops, 3,
+            merged.telemetry.progress_glitch_drops, 3,
             "the Rolled thread's progress-glitch count flows through"
         );
         assert_eq!(
-            merged.nonfinite_obs, 7,
+            merged.telemetry.nonfinite_obs_elements, 7,
             "the Rolled thread's non-finite obs count flows through"
         );
         assert_eq!(merged.ticks, 64, "only the Rolled thread's ticks count");
         assert_eq!(
-            merged.drift,
+            (merged.telemetry.drift_sum, merged.telemetry.drift_count),
             (0.5, 2),
             "the Rolled thread's drift flows through"
         );
         assert_eq!(
-            merged.reach,
+            (
+                merged.telemetry.reach_reached,
+                merged.telemetry.reach_finished
+            ),
             (1, 3),
             "the Rolled thread's reach flows through"
         );
         assert_eq!(
-            merged.reach_by_bearing[1],
+            merged.telemetry.reach_by_bearing[1],
             (1, 2),
             "the Rolled thread's per-bearing reach flows through (rl#276)"
         );
-        assert_eq!(merged.reach_by_bearing[3], (0, 0));
+        assert_eq!(merged.telemetry.reach_by_bearing[3], (0, 0));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

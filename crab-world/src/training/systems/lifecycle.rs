@@ -8,8 +8,8 @@ use crate::training::algorithm::{NormalizedValue, StepEnd, Transition};
 use crate::training::reward::{GRAB_REWARD, compute_reward, is_progress_glitch, planar_dist};
 use crate::training::targets::{seed_target, tip_touch};
 
-use super::state::TrainingState;
-use super::step::{BodyState, MaxPartSpeed, StepInputs};
+use super::state::WorkerState;
+use super::step::{EnvStep, MaxPartSpeed};
 
 pub const MAX_EPISODE_TICKS: u32 = 1500;
 
@@ -136,54 +136,58 @@ pub(crate) struct EnvEpisode {
     pub(crate) shove: super::shove::ShoveState,
 }
 
-impl TrainingState {
+impl WorkerState {
     pub(super) fn finalize_transitions(
         &mut self,
-        inputs: &StepInputs,
+        steps: &[EnvStep],
         targets: &mut CrabTargets,
         spawns: &CrabSpawns,
         terrain: &crate::terrain::TerrainGrid,
     ) {
-        let body = inputs.body;
-        let min_tip_dists = inputs.min_tip_dists;
         #[allow(clippy::needless_range_loop)]
-        for e in 0..self.envs.len() {
-            if matches!(self.envs[e].phase, EnvPhase::Settling { .. }) || body.poses[e].is_none() {
+        for e in 0..self.mode.envs.len() {
+            let step = &steps[e];
+            if matches!(self.mode.envs[e].phase, EnvPhase::Settling { .. }) || step.height.is_none()
+            {
                 continue;
             }
 
-            if pre_touched_target(&self.envs[e], min_tip_dists[e]) {
-                debug_assert_eq!(self.envs[e].steps, 0, "Recording with no pending ⇒ virgin");
-                self.envs[e].min_tip_dist = None;
-                seed_target(targets, spawns, e, self.band_max_m, &mut self.rng, terrain);
+            if pre_touched_target(&self.mode.envs[e], step.min_tip_dist) {
+                debug_assert_eq!(
+                    self.mode.envs[e].steps, 0,
+                    "Recording with no pending ⇒ virgin"
+                );
+                self.mode.envs[e].min_tip_dist = None;
+                let band_max_m = self.mode.band_max_m;
+                seed_target(targets, spawns, e, band_max_m, &mut self.rng, terrain);
                 continue;
             }
 
-            let episode_ended = if let Some(pending) = self.envs[e].pending.take() {
-                let (height, _upright) = body.poses[e].expect("poses[e].is_none() handled above");
+            let episode_ended = if let Some(pending) = self.mode.envs[e].pending.take() {
+                let height = step.height.expect("height.is_none() handled above");
                 assert_physics_integrity(
                     e,
-                    self.total_steps,
-                    self.envs[e].steps,
+                    self.mode.total_steps,
+                    self.mode.envs[e].steps,
                     height,
-                    &body.max_speeds[e],
-                    &inputs.drives[e],
+                    &step.max_speed,
+                    &step.drive,
                 );
-                let d_now = carapace_target_dist(body, targets, e);
-                let over_cap = self.envs[e].steps > MAX_EPISODE_TICKS;
+                let d_now = carapace_target_dist(step, targets, e);
+                let over_cap = self.mode.envs[e].steps > MAX_EPISODE_TICKS;
                 let fin = finalize_pending_step(
                     &pending,
                     d_now,
-                    min_tip_dists[e],
+                    step.min_tip_dist,
                     over_cap,
-                    self.effort_weight,
+                    self.mode.effort_weight,
                 );
                 if fin.progress_glitch {
-                    self.progress_glitch_drops += 1;
+                    self.mode.telemetry.progress_glitch_drops += 1;
                 }
                 let reward = fin.transition.reward;
-                self.rollouts[e].push(fin.transition);
-                let ep = &mut self.envs[e];
+                self.mode.rollouts[e].push(fin.transition);
+                let ep = &mut self.mode.envs[e];
                 ep.reward += reward;
                 ep.steps += 1;
                 fin.ended
@@ -191,23 +195,23 @@ impl TrainingState {
                 false
             };
 
-            if !episode_ended && matches!(self.envs[e].phase, EnvPhase::Recording) {
-                let target_dist = carapace_target_dist(body, targets, e);
-                self.envs[e].pending = Some(Pending {
-                    obs: inputs.obs[e],
-                    action: inputs.drives[e],
-                    value: inputs.values[e],
-                    log_prob: inputs.log_probs[e],
-                    effort: inputs.efforts[e],
+            if !episode_ended && matches!(self.mode.envs[e].phase, EnvPhase::Recording) {
+                let target_dist = carapace_target_dist(step, targets, e);
+                self.mode.envs[e].pending = Some(Pending {
+                    obs: step.obs,
+                    action: step.drive,
+                    value: step.value,
+                    log_prob: step.log_prob,
+                    effort: step.effort,
                     target_dist,
                 });
             }
 
             if episode_ended {
-                let ep = &self.envs[e];
+                let ep = &self.mode.envs[e];
                 let ep_reward = ep.reward;
                 let reached = ep.min_tip_dist.is_some_and(tip_touch);
-                self.envs[e] = EnvEpisode {
+                self.mode.envs[e] = EnvEpisode {
                     phase: EnvPhase::AwaitingRespawn,
                     ..EnvEpisode::default()
                 };
@@ -221,16 +225,18 @@ impl TrainingState {
                     crate::eval::bearing_bin((t.z - origin.z).atan2(t.x - origin.x))
                 });
 
-                seed_target(targets, spawns, e, self.band_max_m, &mut self.rng, terrain);
+                let band_max_m = self.mode.band_max_m;
+                seed_target(targets, spawns, e, band_max_m, &mut self.rng, terrain);
 
-                self.reach_finished += 1;
+                let telemetry = &mut self.mode.telemetry;
+                telemetry.reach_finished += 1;
                 if reached {
-                    self.reach_reached += 1;
+                    telemetry.reach_reached += 1;
                 }
                 if let Some(bin) = bearing {
-                    self.reach_by_bearing[bin].1 += 1;
+                    telemetry.reach_by_bearing[bin].1 += 1;
                     if reached {
-                        self.reach_by_bearing[bin].0 += 1;
+                        telemetry.reach_by_bearing[bin].0 += 1;
                     }
                 }
 
@@ -240,25 +246,26 @@ impl TrainingState {
         }
     }
 
-    pub(super) fn accumulate_drift(&mut self, drifts: &[Option<f32>]) {
-        for (e, drift) in drifts.iter().enumerate() {
-            if matches!(self.envs[e].phase, EnvPhase::Recording)
-                && let Some(d) = *drift
+    pub(super) fn accumulate_drift(&mut self, steps: &[EnvStep]) {
+        for (ep, step) in self.mode.envs.iter().zip(steps) {
+            if matches!(ep.phase, EnvPhase::Recording)
+                && let Some(d) = step.drift
                 && d.is_finite()
             {
-                self.drift_sum += d as f64;
-                self.drift_count += 1;
+                self.mode.telemetry.drift_sum += d as f64;
+                self.mode.telemetry.drift_count += 1;
             }
         }
     }
 
     pub(super) fn step_explore_noise(&mut self, n: usize) -> Vec<[f32; ACTION_SIZE]> {
+        let WorkerState { rng, mode, .. } = self;
         (0..n)
             .map(|e| {
-                if matches!(self.envs[e].phase, EnvPhase::Recording) {
-                    self.explore_noise.next(e, &mut self.rng)
+                if matches!(mode.envs[e].phase, EnvPhase::Recording) {
+                    mode.explore_noise.next(e, rng)
                 } else {
-                    self.explore_noise.reset(e, &mut self.rng);
+                    mode.explore_noise.reset(e, rng);
                     [0.0; ACTION_SIZE]
                 }
             })
@@ -280,8 +287,8 @@ fn pre_touched_target(ep: &EnvEpisode, min_tip_dist: Option<f32>) -> bool {
         && min_tip_dist.is_some_and(tip_touch)
 }
 
-fn carapace_target_dist(body: &BodyState, targets: &CrabTargets, e: usize) -> Option<f32> {
-    body.carapace_pos[e]
+fn carapace_target_dist(step: &EnvStep, targets: &CrabTargets, e: usize) -> Option<f32> {
+    step.carapace_pos
         .zip(targets.get(e))
         .map(|(pos, target)| planar_dist(pos, target))
 }
@@ -289,7 +296,7 @@ fn carapace_target_dist(body: &BodyState, targets: &CrabTargets, e: usize) -> Op
 #[allow(clippy::too_many_arguments)] // a bevy system's params are its dependency list
 pub(crate) fn reset_crab(
     mut commands: Commands,
-    mut training: NonSendMut<TrainingState>,
+    mut training: NonSendMut<WorkerState>,
     mut actions: ResMut<CrabActions>,
     assets: Res<CrabAssets>,
     mut spawns: ResMut<CrabSpawns>,
@@ -297,9 +304,9 @@ pub(crate) fn reset_crab(
     terrain: Res<crate::terrain::Terrain>,
     parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>,
 ) {
-    for e in 0..training.envs.len() {
-        if matches!(training.envs[e].phase, EnvPhase::AwaitingRespawn) {
-            training.envs[e].phase = EnvPhase::Settling {
+    for e in 0..training.mode.envs.len() {
+        if matches!(training.mode.envs[e].phase, EnvPhase::AwaitingRespawn) {
+            training.mode.envs[e].phase = EnvPhase::Settling {
                 grace: RESET_GRACE_TICKS,
             };
             let _ = actions.rest(e); // deliberate skip pre-spawn
@@ -312,11 +319,12 @@ pub(crate) fn reset_crab(
             // banded the target around the PREVIOUS locale — re-seed from the new
             // origin or every post-first episode would chase a point up to a tile
             // away (its obs/reward kilometers out of the trained band).
+            let band_max_m = training.mode.band_max_m;
             seed_target(
                 &mut targets,
                 &spawns,
                 e,
-                training.band_max_m,
+                band_max_m,
                 &mut training.rng,
                 &terrain,
             );
@@ -333,7 +341,7 @@ pub(crate) fn reset_crab(
         }
     }
 
-    for ep in training.envs.iter_mut() {
+    for ep in training.mode.envs.iter_mut() {
         if let EnvPhase::Settling { grace } = ep.phase {
             ep.phase = match settle_countdown(grace) {
                 0 => EnvPhase::Recording,
@@ -353,6 +361,23 @@ mod tests {
     /// these tests pin lifecycle logic, and hand-checked geometry is exact on a plane.
     fn flat() -> crate::terrain::TerrainGrid {
         crate::terrain::TerrainGrid::flat(512.0)
+    }
+
+    /// A one-env worker plus the tick's [`EnvStep`] with a live body at the origin.
+    fn worker_and_step(test: &str, min_tip_dist: Option<f32>) -> (WorkerState, EnvStep) {
+        let config = crate::TrainConfig::scratch(
+            &std::env::temp_dir().join(format!("rl_test_{test}")),
+            1,
+            7,
+        );
+        let ts = WorkerState::new_worker(&config, 0, crate::bot::arch::ArchId::DEFAULT);
+        let step = EnvStep {
+            height: Some(1.0),
+            carapace_pos: Some(Vec3::ZERO),
+            min_tip_dist,
+            ..EnvStep::default()
+        };
+        (ts, step)
     }
 
     #[test]
@@ -401,40 +426,23 @@ mod tests {
     /// replaced, so the rest pose can never farm GRAB_REWARD.
     #[test]
     fn a_pre_touched_start_reseeds_without_scoring() {
-        let config = crate::TrainConfig::scratch(
-            &std::env::temp_dir().join("rl_test_pre_touched_reseed"),
-            1,
-            7,
-        );
-        let mut ts = TrainingState::new(&config, None);
-        ts.envs[0].min_tip_dist = Some(0.1);
+        let (mut ts, step) = worker_and_step("pre_touched_reseed", Some(0.1));
+        ts.mode.envs[0].min_tip_dist = Some(0.1);
 
         let mut targets = CrabTargets::default();
         targets.resize(1);
         let touched = Vec3::new(0.5, 0.2, 0.4);
         targets.envs[0] = Some(touched);
         let spawns = CrabSpawns::from_origins(vec![Vec3::ZERO]);
-        let body = BodyState {
-            poses: vec![Some((1.0, 1.0))],
-            carapace_pos: vec![Some(Vec3::ZERO)],
-            drifts: vec![None],
-            max_speeds: vec![MaxPartSpeed::default()],
-        };
-        let inputs = StepInputs {
-            body: &body,
-            min_tip_dists: &[Some(0.1)],
-            obs: &[[0.0; OBS_SIZE]],
-            drives: &[[0.0; ACTION_SIZE]],
-            values: &[NormalizedValue(0.0)],
-            log_probs: &[0.0],
-            efforts: &[0.0],
-        };
-        ts.finalize_transitions(&inputs, &mut targets, &spawns, &flat());
+        ts.finalize_transitions(&[step], &mut targets, &spawns, &flat());
 
-        assert_eq!(ts.rollouts[0].len(), 0, "no transition recorded");
-        assert_eq!(ts.reach_finished, 0, "no episode counted");
-        assert!(ts.envs[0].pending.is_none(), "the episode did not start");
-        assert_eq!(ts.envs[0].min_tip_dist, None, "stale touch cleared");
+        assert_eq!(ts.mode.rollouts[0].len(), 0, "no transition recorded");
+        assert_eq!(ts.mode.telemetry.reach_finished, 0, "no episode counted");
+        assert!(
+            ts.mode.envs[0].pending.is_none(),
+            "the episode did not start"
+        );
+        assert_eq!(ts.mode.envs[0].min_tip_dist, None, "stale touch cleared");
         assert_ne!(targets.envs[0], Some(touched), "target replaced");
     }
 
@@ -442,13 +450,8 @@ mod tests {
     /// (+Z of the spawn origin = 90° = bin 2), read before the reseed replaces it.
     #[test]
     fn a_finished_episode_bins_reach_by_target_bearing() {
-        let config = crate::TrainConfig::scratch(
-            &std::env::temp_dir().join("rl_test_bearing_bin_tally"),
-            1,
-            7,
-        );
-        let mut ts = TrainingState::new(&config, None);
-        ts.envs[0].pending = Some(Pending {
+        let (mut ts, step) = worker_and_step("bearing_bin_tally", Some(REACH_RADIUS * 4.0));
+        ts.mode.envs[0].pending = Some(Pending {
             obs: [0.0; OBS_SIZE],
             action: [0.0; ACTION_SIZE],
             value: NormalizedValue(0.0),
@@ -457,34 +460,22 @@ mod tests {
             target_dist: None,
         });
         // An over-cap truncation ends the episode without needing a whole physics run.
-        ts.envs[0].steps = MAX_EPISODE_TICKS + 1;
+        ts.mode.envs[0].steps = MAX_EPISODE_TICKS + 1;
 
         let mut targets = CrabTargets::default();
         targets.resize(1);
         targets.envs[0] = Some(Vec3::new(0.0, 0.2, 5.0));
         let spawns = CrabSpawns::from_origins(vec![Vec3::ZERO]);
-        let body = BodyState {
-            poses: vec![Some((1.0, 1.0))],
-            carapace_pos: vec![Some(Vec3::ZERO)],
-            drifts: vec![None],
-            max_speeds: vec![MaxPartSpeed::default()],
-        };
-        let inputs = StepInputs {
-            body: &body,
-            min_tip_dists: &[Some(REACH_RADIUS * 4.0)],
-            obs: &[[0.0; OBS_SIZE]],
-            drives: &[[0.0; ACTION_SIZE]],
-            values: &[NormalizedValue(0.0)],
-            log_probs: &[0.0],
-            efforts: &[0.0],
-        };
-        ts.finalize_transitions(&inputs, &mut targets, &spawns, &flat());
+        ts.finalize_transitions(&[step], &mut targets, &spawns, &flat());
 
-        assert_eq!(ts.reach_finished, 1, "the episode finished and was counted");
+        assert_eq!(
+            ts.mode.telemetry.reach_finished, 1,
+            "the episode finished and was counted"
+        );
         let mut want = [(0, 0); crate::eval::EVAL_BEARINGS];
         want[2] = (0, 1);
         assert_eq!(
-            ts.reach_by_bearing, want,
+            ts.mode.telemetry.reach_by_bearing, want,
             "the episode tallies (unreached) in its target's compass bin"
         );
     }
