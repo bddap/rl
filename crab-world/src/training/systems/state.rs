@@ -148,8 +148,7 @@ pub(crate) struct TrainingState<M> {
     pub device: NdArrayDevice,
     pub(super) obs_normalizer: ObsNormalizer,
     pub(super) rng: StdRng,
-    pub recent_rewards: Vec<f32>,
-    pub episode_count: u32,
+    pub(super) recent_rewards: Vec<f32>,
     pub(super) mode: M,
 }
 
@@ -217,7 +216,6 @@ impl LearnerState {
             obs_normalizer,
             rng,
             recent_rewards: Vec::new(),
-            episode_count: 0,
             mode: LearnerMode {
                 config: PpoConfig {
                     steps_cap: config.ppo_steps_cap,
@@ -308,11 +306,6 @@ impl LearnerState {
             &mut self.mode.return_normalizer,
             &mut self.rng,
         )
-    }
-
-    pub fn record_episode_reward(&mut self, reward: f32) {
-        self.recent_rewards.push(reward);
-        self.episode_count += 1;
     }
 
     pub(crate) fn avg_reward(&self, window: usize) -> f32 {
@@ -526,7 +519,6 @@ impl WorkerState {
             obs_normalizer: ObsNormalizer::new(NORMALIZER_CLIP),
             rng,
             recent_rewards: Vec::new(),
-            episode_count: 0,
             mode: WorkerMode {
                 envs: vec![EnvEpisode::default(); n],
                 rollouts: (0..n).map(|_| RolloutBuffer::new()).collect(),
@@ -617,6 +609,18 @@ impl<M> TrainingState<M> {
 
     pub(crate) fn normalizer_snapshot(&self) -> NormalizerSnapshot {
         self.obs_normalizer.snapshot()
+    }
+
+    pub(crate) fn record_episode_reward(&mut self, reward: f32) {
+        self.recent_rewards.push(reward);
+    }
+
+    /// Episodes finished on this state — every finished episode records exactly one
+    /// reward, so the count is the reward list's length, not a second counter to
+    /// keep in sync.
+    #[cfg(test)]
+    pub(crate) fn episode_count(&self) -> usize {
+        self.recent_rewards.len()
     }
 }
 

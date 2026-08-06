@@ -557,13 +557,12 @@ mod tests {
         let mut optimizer = crab_optimizer();
         let device = state.device;
         let (brain, ppo_config, ret_norm, rng) = state.learner_parts();
-        let device = &device;
         let metrics = ppo_update_core(
             brain,
             &mut optimizer,
             ppo_config,
             &rollouts,
-            device,
+            &device,
             ret_norm,
             rng,
             crate::bot::arch::LOG_STD_MIN,

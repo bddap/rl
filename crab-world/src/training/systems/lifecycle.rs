@@ -240,8 +240,7 @@ impl WorkerState {
                     }
                 }
 
-                self.recent_rewards.push(ep_reward);
-                self.episode_count += 1;
+                self.record_episode_reward(ep_reward);
             }
         }
     }
