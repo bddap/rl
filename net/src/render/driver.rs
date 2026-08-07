@@ -159,7 +159,11 @@ fn end_round_server_down(
     tel: Option<&crate::telemetry::TelemetrySender>,
 ) {
     let message = down.to_string();
-    error!("leaving the round — {message}");
+    // WARN, not ERROR: from the client's side losing the host is an expected round
+    // ending (host quit) or the client's own link dying (deck suspend) — not a fault
+    // in this process, and ERROR-severity deck logs page fleet-error on every normal
+    // host quit. The Fault telemetry event below keeps the durable record.
+    warn!("leaving the round — {message}");
     if let Some(t) = tel {
         t.send(TelemetryEvent::Fault {
             msg: format!("client server-down (rl#203): {message}"),
