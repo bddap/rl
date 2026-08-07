@@ -35,6 +35,7 @@ fn assert_physics_integrity(
     height: f32,
     ms: &MaxPartSpeed,
     drives: &[f32; ACTION_SIZE],
+    trace: &super::trace::IntegrityTrace,
 ) {
     let blowing_up = ms.speed > 100.0 || !height.is_finite();
     if blowing_up || !(0.02..=50.0).contains(&height) {
@@ -60,11 +61,12 @@ fn assert_physics_integrity(
              {part} at lin {} m/s ang {} rad/s (bound tests lin.max(ang/3) = {} m/s), \
              all parts past 50: [{}], drive row {drives:?}. Training does not recover \
              from a broken physics state; fix the engine bug instead of respawning \
-             over it.",
+             over it.\nflight recorder (rl#349), oldest first:{}",
             ms.lin,
             ms.ang,
             ms.speed,
             fast.join("; "),
+            trace.dump(env),
         );
     }
 }
@@ -172,6 +174,7 @@ impl WorkerState {
                     height,
                     &step.max_speed,
                     &step.drive,
+                    &self.mode.trace,
                 );
                 let d_now = carapace_target_dist(step, targets, e);
                 let over_cap = self.mode.envs[e].steps > MAX_EPISODE_TICKS;
@@ -559,18 +562,46 @@ mod tests {
                     episode-step 3: carapace height outside [0.02, 50] m"
     )]
     fn a_sub_floor_height_hard_fails_training() {
-        assert_physics_integrity(0, 0, 3, 0.0, &speed(1.0), &[0.0; ACTION_SIZE]);
+        assert_physics_integrity(
+            0,
+            0,
+            3,
+            0.0,
+            &speed(1.0),
+            &[0.0; ACTION_SIZE],
+            &empty_trace(),
+        );
     }
 
     #[test]
     #[should_panic(expected = "blowing up (part speed > 100 m/s or non-finite pose)")]
     fn a_blowup_hard_fails_training() {
-        assert_physics_integrity(0, 0, 0, f32::NAN, &speed(1e9), &[0.0; ACTION_SIZE]);
+        assert_physics_integrity(
+            0,
+            0,
+            0,
+            f32::NAN,
+            &speed(1e9),
+            &[0.0; ACTION_SIZE],
+            &empty_trace(),
+        );
     }
 
     #[test]
     fn a_live_crab_passes_the_integrity_check() {
-        assert_physics_integrity(0, 0, 0, 1.0, &speed(5.0), &[0.0; ACTION_SIZE]);
+        assert_physics_integrity(
+            0,
+            0,
+            0,
+            1.0,
+            &speed(5.0),
+            &[0.0; ACTION_SIZE],
+            &empty_trace(),
+        );
+    }
+
+    fn empty_trace() -> super::super::trace::IntegrityTrace {
+        super::super::trace::IntegrityTrace::new(1)
     }
 
     fn speed(s: f32) -> MaxPartSpeed {

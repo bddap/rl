@@ -122,6 +122,10 @@ pub(crate) struct WorkerMode {
     pub(super) reported_episodes: usize,
     pub(super) increment: IncrementAccumulator,
     pub(super) telemetry: StepTelemetry,
+    /// rl#349 flight recorder: per env, a ring of the last ~48 ticks' joint
+    /// (angle, rate) rows + fastest part, dumped by the rl#343 integrity panic so
+    /// a violation shows its approach trajectory instead of one post-hoc frame.
+    pub(super) trace: super::trace::IntegrityTrace,
 }
 
 /// Learner-only state: checkpoint I/O, the PPO update's knobs and normalizer, and
@@ -532,6 +536,7 @@ impl WorkerState {
                 reported_episodes: 0,
                 increment: IncrementAccumulator::new(),
                 telemetry: StepTelemetry::default(),
+                trace: super::trace::IntegrityTrace::new(n),
             },
         }
     }
