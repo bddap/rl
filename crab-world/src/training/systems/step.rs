@@ -366,6 +366,17 @@ pub(crate) fn brain_step(
         }
     }
 
+    // rl#349 flight recorder: snapshot every env's raw joint row + speed scan
+    // BEFORE the integrity check below, so a violating tick is the ring's last
+    // entry and the panic prints the whole approach.
+    for (e, step) in steps.iter().enumerate() {
+        let tick = training.mode.total_steps;
+        training
+            .mode
+            .trace
+            .record(e, tick, &obs.rows()[e], &step.max_speed);
+    }
+
     training.finalize_transitions(&steps, &mut targets, &spawns, &terrain);
 
     if training.mode.log_effort {

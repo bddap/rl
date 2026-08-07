@@ -2,6 +2,7 @@ mod lifecycle;
 mod shove;
 mod state;
 mod step;
+mod trace;
 
 /// Re-exported for `reward`'s calibration tests and for `rl-train`'s eval `--ticks`
 /// default (one episode horizon); `finalize_transitions` uses the [`lifecycle`]-local
