@@ -39,6 +39,15 @@ fn rapier_context_init() -> RapierContextInitialization {
     RapierContextInitialization::InitializeDefaultRapierContext {
         integration_parameters: IntegrationParameters {
             contact_softness: CONTACT_SOFTNESS,
+            // rapier 0.35 split fixed-body contacts onto a new, stiffer default
+            // spring (60 Hz, ζ 10) and moved friction out of the bias pass. The
+            // terrain is a fixed body, so both silently replaced the contact
+            // physics the plant was tuned under (rl#299 spring, rl#318 slope
+            // hold): with either default, zero-input drift on a 55° ramp blows
+            // through the slope-hold gate (14.2 m/tumble stock; 2.6 m with only
+            // the spring pinned). Pin both to the pre-0.35 semantics.
+            static_contact_softness: CONTACT_SOFTNESS,
+            friction_in_bias_pass: true,
             ..IntegrationParameters::default()
         },
         rapier_configuration: RapierConfiguration {
@@ -71,16 +80,26 @@ fn assert_contact_spring_applied(
         bevy::ecs::query::With<bevy_rapier3d::plugin::context::DefaultRapierContext>,
     >,
 ) {
-    let spring = ctx
+    let params = &ctx
         .single()
         .expect("CrabPhysicsPlugin: exactly one default Rapier context")
-        .integration_parameters
-        .contact_softness;
+        .integration_parameters;
+    let spring = params.contact_softness;
+    let static_spring = params.static_contact_softness;
     assert_eq!(
-        (spring.natural_frequency, spring.damping_ratio),
+        (
+            spring.natural_frequency,
+            spring.damping_ratio,
+            static_spring.natural_frequency,
+            static_spring.damping_ratio,
+            params.friction_in_bias_pass,
+        ),
         (
             CONTACT_SOFTNESS.natural_frequency,
-            CONTACT_SOFTNESS.damping_ratio
+            CONTACT_SOFTNESS.damping_ratio,
+            CONTACT_SOFTNESS.natural_frequency,
+            CONTACT_SOFTNESS.damping_ratio,
+            true,
         ),
         "CrabPhysicsPlugin: the spawned Rapier context lost CONTACT_SOFTNESS — its \
          RapierContextInitialization was overridden after the plugin (last-write-wins). \
