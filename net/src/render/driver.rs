@@ -171,7 +171,7 @@ fn end_round_server_down(
     }
     if world.get_resource::<super::app::BootedWithMenu>().is_some() {
         let host = world
-            .non_send_resource::<GameState>()
+            .non_send::<GameState>()
             .coord
             .server_endpoint()
             .expect(
@@ -602,7 +602,7 @@ fn apply_vehicle_request(world: &mut World) {
         return;
     };
     let may_board = {
-        let state = world.non_send_resource::<GameState>();
+        let state = world.non_send::<GameState>();
         let me = state.client.me();
         state
             .client
@@ -668,7 +668,7 @@ struct TickOutcome {
 /// interpolation and reconciling the local prediction).
 fn exchange_tick(world: &mut World, role: PeerRole, local: &LocalControl) -> TickOutcome {
     let scripted_pack: Option<Input> = world.get_resource::<ScriptedPackInput>().map(|r| r.0);
-    let mut state = world.non_send_resource_mut::<GameState>();
+    let mut state = world.non_send_mut::<GameState>();
     // Plain `&mut GameState` (not `Mut`) so the adopt closure below can borrow the
     // `reported_outcome` field disjointly from the `client` it runs against.
     let state = &mut *state;
@@ -769,7 +769,7 @@ fn publish_pilot_commands(world: &mut World) {
     }
     let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
     let entries: BTreeMap<PilotId, PilotCommand> = {
-        let state = world.non_send_resource::<GameState>();
+        let state = world.non_send::<GameState>();
         let server = state.coord.server().expect("server_auth ⇒ a server");
         server
             .pilot_intents()
@@ -795,7 +795,7 @@ fn publish_pilot_commands(world: &mut World) {
 fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
     loop {
         {
-            let state = world.non_send_resource::<GameState>();
+            let state = world.non_send::<GameState>();
             if !state
                 .server()
                 .expect("server_auth ⇒ a server")
@@ -805,12 +805,12 @@ fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
             }
         }
         {
-            let mut state = world.non_send_resource_mut::<GameState>();
+            let mut state = world.non_send_mut::<GameState>();
             state.prev = SimSnapshot::capture(&state.client);
         }
 
         let inputs = {
-            let state = world.non_send_resource::<GameState>();
+            let state = world.non_send::<GameState>();
             crate::crab_slot::slot_inputs(state.server().expect("server_auth ⇒ a server").sim())
         };
         let (crab_poses, shadows) = if armed {
@@ -829,7 +829,7 @@ fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
             (inputs.fallback.clone(), BTreeMap::new())
         };
         let (bytes, restarted) = {
-            let mut state = world.non_send_resource_mut::<GameState>();
+            let mut state = world.non_send_mut::<GameState>();
             let stepped = state
                 .server_mut()
                 .expect("server_auth ⇒ a server")
@@ -840,7 +840,7 @@ fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
             .expect("the authoritative server's snapshot must decode");
         let articulation = armed.then(|| crate::render::articulation::capture(world, snap.tick));
         {
-            let state = world.non_send_resource::<GameState>();
+            let state = world.non_send::<GameState>();
             state.coord.broadcast_step(&snap, articulation.as_ref());
         }
         if let Some(art) = &articulation {
@@ -850,7 +850,7 @@ fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
             super::articulation::publish_remote_vehicles(world, art.tick, &art.vehicles, me);
         }
         {
-            let mut state = world.non_send_resource_mut::<GameState>();
+            let mut state = world.non_send_mut::<GameState>();
             // Same per-tick latch clear as the adopt arm: an Ongoing tick means the
             // round is (or just became, via RESTART) live, so the next decision must
             // report even if this frame's unbounded catch-up drain also re-decides it.
@@ -861,7 +861,7 @@ fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
         }
         if restarted && armed {
             let spawns: Vec<crate::sim::Pos> = world
-                .non_send_resource::<GameState>()
+                .non_send::<GameState>()
                 .server()
                 .expect("server_auth ⇒ a server")
                 .sim()
@@ -884,7 +884,7 @@ fn sample_telemetry(
     sim_input: Input,
 ) {
     let due = {
-        let mut state = world.non_send_resource_mut::<GameState>();
+        let mut state = world.non_send_mut::<GameState>();
         let due = state.client.sim().tick() >= state.next_tel_tick;
         if due {
             state.next_tel_tick = next_sample_tick(state.client.sim().tick());
@@ -953,7 +953,7 @@ fn sample_telemetry(
 /// the round's decided outcome once per decision (the latch clears per Ongoing tick in
 /// the drain arms — a RESTART revives a decided round, rl#204).
 fn log_round_edges(world: &mut World, tel: Option<&crate::telemetry::TelemetrySender>) {
-    let mut state = world.non_send_resource_mut::<GameState>();
+    let mut state = world.non_send_mut::<GameState>();
     let state = &mut *state;
     for (pid, p) in state.client.sim().players() {
         match state.logged_statuses.insert(pid, p.status()) {
@@ -1004,28 +1004,28 @@ pub(super) fn drive_client_sim(world: &mut World) {
     let armed = world
         .get_resource::<crate::crab_slot::NnCrabsArmed>()
         .is_some();
-    let role = PeerRole::of(world.non_send_resource::<GameState>());
-    let me = local_pilot(world.non_send_resource::<GameState>());
+    let role = PeerRole::of(world.non_send::<GameState>());
+    let me = local_pilot(world.non_send::<GameState>());
     let delta = world.resource::<Time>().delta().as_secs_f64();
     let (tel, roster_len) = {
-        let state = world.non_send_resource::<GameState>();
+        let state = world.non_send::<GameState>();
         let tel = state.coord.telemetry().cloned();
         (tel, state.client.sim().players().count())
     };
 
-    world.non_send_resource_mut::<GameState>().accumulator += delta;
+    world.non_send_mut::<GameState>().accumulator += delta;
 
     apply_vehicle_request(world);
 
     let mut applied = 0u32;
     loop {
         {
-            let state = world.non_send_resource::<GameState>();
+            let state = world.non_send::<GameState>();
             if state.accumulator < TICK_DT || applied >= MAX_TICKS_PER_FRAME {
                 break;
             }
         }
-        world.non_send_resource_mut::<GameState>().accumulator -= TICK_DT;
+        world.non_send_mut::<GameState>().accumulator -= TICK_DT;
         applied += 1;
 
         let local = take_local_control(world);
@@ -1053,19 +1053,19 @@ pub(super) fn drive_client_sim(world: &mut World) {
     // player, so once per frame — after the tick drain — is plenty. A remote-adopt client has
     // no server and drains nothing.
     crate::telemetry::surface_starvation(
-        world.non_send_resource_mut::<GameState>().server_mut(),
+        world.non_send_mut::<GameState>().server_mut(),
         tel.as_ref(),
     );
 
     if applied == MAX_TICKS_PER_FRAME {
-        let mut state = world.non_send_resource_mut::<GameState>();
+        let mut state = world.non_send_mut::<GameState>();
         state.accumulator = state.accumulator.min(TICK_DT);
     }
 
     log_round_edges(world, tel.as_ref());
 
     let clock = {
-        let state = world.non_send_resource::<GameState>();
+        let state = world.non_send::<GameState>();
         RenderClock {
             tick: state.client.sim().tick(),
             frac: render_frac(state.accumulator, state.stalled),

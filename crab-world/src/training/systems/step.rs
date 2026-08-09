@@ -502,7 +502,7 @@ mod tests {
             // recording tick — into the same-seed contract.
             let mut app = headless_training_app(&dir, seed);
             app.world_mut()
-                .non_send_resource_mut::<WorkerState>()
+                .non_send_mut::<WorkerState>()
                 .brain
                 .set(initial_brain.clone());
             for t in 0..TICKS {
@@ -510,15 +510,12 @@ mod tests {
                     // Force an episode boundary mid-trajectory (over-cap truncation,
                     // rl#343 — an underground teleport would hard-fail the run) so the
                     // respawn/reset path is inside the same-seed contract.
-                    app.world_mut()
-                        .non_send_resource_mut::<WorkerState>()
-                        .mode
-                        .envs[0]
-                        .steps = super::super::lifecycle::MAX_EPISODE_TICKS + 1;
+                    app.world_mut().non_send_mut::<WorkerState>().mode.envs[0].steps =
+                        super::super::lifecycle::MAX_EPISODE_TICKS + 1;
                 }
                 app.update();
             }
-            let traj = app.world().non_send_resource::<WorkerState>().mode.rollouts[0]
+            let traj = app.world().non_send::<WorkerState>().mode.rollouts[0]
                 .transitions
                 .clone();
             let _ = std::fs::remove_dir_all(&dir);
@@ -530,7 +527,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&seed_dir);
         let brain = headless_training_app(&seed_dir, SEED)
             .world()
-            .non_send_resource::<WorkerState>()
+            .non_send::<WorkerState>()
             .brain()
             .clone();
         let _ = std::fs::remove_dir_all(&seed_dir);
@@ -583,7 +580,7 @@ mod tests {
             app.update();
         }
         {
-            let st = app.world().non_send_resource::<WorkerState>();
+            let st = app.world().non_send::<WorkerState>();
             assert!(
                 matches!(st.mode.envs[0].phase, EnvPhase::Recording),
                 "settle grace elapsed and no reset pending — env is recording"
@@ -619,15 +616,12 @@ mod tests {
         }
         assert!(
             matches!(
-                app.world().non_send_resource::<WorkerState>().mode.envs[0].phase,
+                app.world().non_send::<WorkerState>().mode.envs[0].phase,
                 EnvPhase::Recording
             ),
             "env 0 must be live-recording before the grab"
         );
-        let episodes_before = app
-            .world()
-            .non_send_resource::<WorkerState>()
-            .episode_count();
+        let episodes_before = app.world().non_send::<WorkerState>().episode_count();
 
         let tip_pos = {
             let mut q = app
@@ -642,7 +636,7 @@ mod tests {
 
         app.update();
 
-        let st = app.world().non_send_resource::<WorkerState>();
+        let st = app.world().non_send::<WorkerState>();
         let last = st.mode.rollouts[0]
             .transitions
             .last()
@@ -682,7 +676,7 @@ mod tests {
         }
         assert!(
             matches!(
-                app.world().non_send_resource::<WorkerState>().mode.envs[0].phase,
+                app.world().non_send::<WorkerState>().mode.envs[0].phase,
                 EnvPhase::Recording
             ),
             "env must be recording before the hand-driven ticks"
@@ -699,14 +693,10 @@ mod tests {
         // End the episode at tick B via over-cap truncation (rl#343 — the old
         // underground teleport would hard-fail the run, and the pairing pin below is
         // about pending mechanics, not the terminal kind).
-        app.world_mut()
-            .non_send_resource_mut::<WorkerState>()
-            .mode
-            .envs[0]
-            .steps = super::super::lifecycle::MAX_EPISODE_TICKS + 1;
+        app.world_mut().non_send_mut::<WorkerState>().mode.envs[0].steps =
+            super::super::lifecycle::MAX_EPISODE_TICKS + 1;
 
-        let transitions_before =
-            app.world().non_send_resource::<WorkerState>().mode.rollouts[0].len();
+        let transitions_before = app.world().non_send::<WorkerState>().mode.rollouts[0].len();
 
         app.world_mut()
             .run_system_once(crate::bot::sensor::build_observation)
@@ -716,7 +706,7 @@ mod tests {
             .expect("brain_step B");
         let act_b = app.world().resource::<CrabActions>().rows()[0];
 
-        let st = app.world().non_send_resource::<WorkerState>();
+        let st = app.world().non_send::<WorkerState>();
         let last = st.mode.rollouts[0]
             .transitions
             .last()
