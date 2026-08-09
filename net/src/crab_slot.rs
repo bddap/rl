@@ -1443,7 +1443,7 @@ mod tests {
             "the sensor must have built a LIVE obs this pump — on the defaulted all-zero \
              row the forward-pass pin below would hold vacuously"
         );
-        let expected = app.world().non_send_resource::<CrabPolicies>().0[0].act(&obs);
+        let expected = app.world().non_send::<CrabPolicies>().0[0].act(&obs);
         let got = app.world().resource::<CrabActions>().rows()[0];
         assert_eq!(
             got, expected,

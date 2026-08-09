@@ -138,7 +138,7 @@ fn consume_round_over(world: &mut World) {
     let Some(over) = world.remove_resource::<RoundOver>() else {
         return;
     };
-    let mut state = world.non_send_resource_mut::<MenuState>();
+    let mut state = world.non_send_mut::<MenuState>();
     state.error = Some(over.message);
     state.last_host = Some(over.host);
 }
