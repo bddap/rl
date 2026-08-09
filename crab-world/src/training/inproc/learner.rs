@@ -14,8 +14,8 @@ struct MergedRollout {
     /// pooled this iter; surfaced on the log so a recurring load failure can't hide.
     snapshot_load_failures: u32,
     /// Every thread's step telemetry pooled for this iter (drift, reach + per-bearing
-    /// split, glitch drops, non-finite obs); feeds the log line and the best-keeper's
-    /// solid-reach floor.
+    /// split, glitch drops, non-finite obs); feeds the log line and the per-bearing
+    /// training-reach window (rl#276).
     telemetry: StepTelemetry,
 }
 
@@ -234,9 +234,9 @@ fn log_bearing_reach(window: &[(u64, u64); crate::eval::EVAL_BEARINGS]) {
 /// sample count.
 ///
 /// Stops at the first of: `iters` PPO iterations (0 = unbounded) or `config.ticks`
-/// total physics ticks (0 = unbounded) — the latter is the production budget the
-/// crab-train loop sets via `--ticks`, on hitting which the learner prints
-/// "Tick budget reached" (verbatim, the loop's termination grep) and exits. The
+/// total physics ticks (0 = unbounded) — a budget an invocation may set via `--ticks`
+/// (the live fleet's `run-train.sh` scripts run unbounded); on hitting it the learner
+/// exits CLEANLY, which stops the run: the `rl-target@` unit restarts only on failure. The
 /// policy is (re)loaded from `--checkpoint-dir` by `LearnerState::new`, so a
 /// learner restarted by the service resumes from the latest checkpoint.
 ///
@@ -518,8 +518,6 @@ pub fn run_learner(
         );
     }
     if budget_hit {
-        // The crab-train overnight loop greps for this exact phrase to stop
-        // resuming; keep the wording stable.
         eprintln!("[learner] Tick budget reached ({total_ticks} ticks) — stopping training.");
     }
     drop(threads);

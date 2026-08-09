@@ -60,12 +60,24 @@ pub struct Membership {
     expect: usize,
     peers: BTreeMap<EndpointId, PeerView>,
     tombstones: BTreeMap<EndpointId, Instant>,
+    /// When the agreement predicate (see [`Membership::poll`]) most recently became true
+    /// AND on which roster hash, or `None` if it is currently false. Keying on the hash
+    /// (not just a bool) means *any* change to our agreed set rewinds the timer — even
+    /// the (impossible-on-a-real-LAN but cheap-to-rule-out) case where every peer's set
+    /// flips S→S′ in the same poll with no peer ever observing disagreement. Closing
+    /// requires `Some((t, h))` with `h == my_hash` and `now - t >= STABLE_FOR`. Maintained
+    /// only in `poll`.
     agreed_since: Option<(Instant, u64)>,
     started: Instant,
     /// How the barrier closes — see [`LobbyMode`]. The roster a peer freezes is the same
     /// `live_set` in every mode (only the close *moment* differs), so determinism is
     /// untouched.
     lobby: LobbyMode,
+    /// Whether we've received a direct [`Beat`] with `start` set from a peer whose roster
+    /// hash equals our CURRENT one — the host's GO landing on a roster we agree with.
+    /// Recomputed each [`Membership::poll`] from peer views, so it can never latch on a
+    /// stale roster: a GO seen while our sets disagreed does not close us, and a set change
+    /// after a GO re-gates on the new hash. The joiner's sole close trigger in the lobby.
     host_go_on_my_roster: bool,
     local: crate::SyncStamp,
 }
@@ -166,9 +178,10 @@ impl Membership {
                 view.stamp = Some(beat.stamp);
             }
         }
-        // Transitive admission (see the method docs): seed only the id's existence
-        // (`advertised = None`), capped at MAX_MEMBERS so a flooded beat can't inflate
-        // our roster.
+        // Transitive admission: seed only the relayed id's existence (`advertised =
+        // None`) — no liveness, since only a DIRECT beat refreshes `last_direct`, so a
+        // relay can neither keep a dead peer alive nor resurrect a tombstoned one —
+        // capped at MAX_MEMBERS so a flooded beat can't inflate our roster.
         for &id in &beat.members {
             if id != self.me
                 && !self.peers.contains_key(&id)
@@ -314,7 +327,7 @@ const MAX_BEAT_MEMBERS: usize = 256;
 pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     anyhow::ensure!(
         body.len() >= 20,
-        "barrier frame too short for start+count+asset digest+plant digest+crab count"
+        "barrier frame too short for start+count+body digest+plant digest+crab count"
     );
     let start = body[0] != 0;
     let count = u16::from_le_bytes([body[1], body[2]]) as usize;

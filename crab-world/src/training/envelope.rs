@@ -40,9 +40,8 @@ impl ArtifactKind {
 
     /// The format version this build writes and accepts for this kind — each kind owns
     /// its counter, so e.g. an optimizer-record layout change bumps only the optimizer's.
-    /// A file tagged with any other version is refused, never deserialized blind
-    /// (the `OptimizerCheckpoint` precedent this module generalizes) — with deliberate
-    /// BACKWARD exceptions so the fleet's live checkpoints resume instead of being
+    /// A file tagged with any other version is refused, never deserialized blind —
+    /// with deliberate BACKWARD exceptions so the fleet's live checkpoints resume instead of being
     /// invalidated: every kind's v1 is still read (predates all stamps), and v2/v3
     /// BRAINS (v2 predates the bddap/rl#215 save stamp, v3 the bddap/rl#271 layout
     /// digest) are still read — each with the absent stamps as `None`

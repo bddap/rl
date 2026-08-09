@@ -279,8 +279,8 @@ mod tests {
 
     #[test]
     fn progress_episode_dominates_freezing() {
-        // Episode-scale check AT THE DEFAULT WEIGHT: a full band traverse must CLEARLY
-        // out-earn standing still over a whole MAX_EPISODE_TICKS episode, and the
+        // Episode-scale check AT THE DEFAULT WEIGHT: a representative 3 m traverse must
+        // CLEARLY out-earn standing still over a whole MAX_EPISODE_TICKS episode, and the
         // integrated effort tax must stay a regularizer, never the dominant term
         // (~4:1 progress-dominant). Experiment runs that raise --effort-weight
         // (rl#268) deliberately opt out of this economy.

@@ -344,8 +344,7 @@ pub struct Server {
     /// stepping inside `advance`) so the host can run the crab slot between the two
     /// (`crab_slot::pump_crab_slot`, rl#298 stage 2): the tick's crab physics AND policy
     /// forward, pumped in the host's one bevy `World`, which this pure core can't hold. The
-    /// headless `game net` host (no bevy world, no crab slot) assembles and steps in the same
-    /// pass.
+    /// headless `game net` host runs the same slot via `crate::crab_slot::HeadlessHostWorld`.
     pending: Option<PendingTick>,
 }
 

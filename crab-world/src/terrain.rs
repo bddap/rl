@@ -1,9 +1,9 @@
 //! The ONE terrain path (rl#281): a baked height grid drives BOTH the rapier
 //! [`Collider`] and (render-gated) the visible mesh, so wherever this module's mesh is
 //! what's drawn (rl-demo, GCR) it cannot diverge from what the crab stands on. Since
-//! the rl#293 flip the committed GCR bake is the only production grid; tests may build
-//! constant grids through this same seam ([`TerrainGrid::flat`], test-gated) — there
-//! is deliberately no flat-vs-terrain fork anywhere.
+//! the rl#293 flip the committed GCR bake is the default production grid; constant
+//! grids ([`TerrainGrid::flat`]) reach production only through the one diagnostic
+//! seam, [`crate::TrainTerrain`] — a flag choice, never a forked code path.
 //!
 //! Coordinates: the grid is centered on the world origin, +x = artifact column
 //! (preview-PNG right), +z = artifact row (preview-PNG down), heights along +y.

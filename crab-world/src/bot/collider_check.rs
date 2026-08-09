@@ -613,11 +613,13 @@ fn designed_contact(o: &Overlap) -> bool {
 #[cfg(test)]
 mod load_tests {
     //! rl#312: Sally's body primitives never interpenetrate outside the
-    //! designed-contact allowlist — (a) at rest and (b) while every actuator
-    //! is driven through aggressive deterministic sequences (max torque both
-    //! directions, alternating, seeded-random). The rl#303 buried-carapace
-    //! trap was legs pinning the shell: self-collision integrity is
-    //! load-bearing, so a violation names the offending pair and tick.
+    //! designed-contact allowlist — (a) at rest (enforced) and (b) while every
+    //! actuator is driven through aggressive deterministic sequences (max
+    //! torque both directions, alternating, seeded-random). (b) still FAILS on
+    //! rl#315, so its test is `#[ignore]`d and stands as the reproduction of
+    //! the finding table, not an invariant. The rl#303 buried-carapace trap
+    //! was legs pinning the shell: self-collision integrity is load-bearing,
+    //! so a violation names the offending pair and tick.
 
     use super::*;
 

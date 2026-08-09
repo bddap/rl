@@ -1253,10 +1253,10 @@ fn eval_step(
 /// The pace probe's posed obs target: [`band_lure`] of the real ball — beyond the
 /// band the policy sees a ball a constant band edge ahead on the true bearing;
 /// inside it (every probe ball, since rl#292 widened the band), the real ball
-/// itself. The posed point is re-landed at the real
-/// ball's height-above-surface over the LURE'S own ground: its absolute y is surface +
-/// band at the distant xz, which on a slope can sit meters off the trained y band at
-/// the lure's xz — an OOD obs target, the exact artifact the lure exists to prevent.
+/// itself. The posed point is re-landed over the LURE'S own ground at the real
+/// ball's height-above-surface: carrying the real ball's absolute y instead would, on
+/// a slope, sit meters off the trained y band at the lure's xz — an OOD obs target,
+/// the exact artifact the lure exists to prevent.
 /// Flat grids (and an in-band real ball, same xz): bit-identical passthrough.
 fn probe_lure(carapace: Vec3, real_target: Vec3, terrain: &crate::terrain::TerrainGrid) -> Vec3 {
     let cxz = Vec2::new(carapace.x, carapace.z);

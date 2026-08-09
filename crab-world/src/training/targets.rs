@@ -500,9 +500,10 @@ mod tests {
         assert!((band_lure(cxz, to_near) - Vec2::new(near.x, near.z)).length() < 1e-5);
     }
 
-    /// The rl#240 recenter formula: dormant inside the obs-support radius; one step
-    /// outside it, the delta lands the carapace back on its origin planar-wise with
-    /// y untouched on the flat grid.
+    /// The rl#240 recenter formula: dormant inside `DRIFT_REBASE_M` (float-precision
+    /// hygiene post-rl#311, no longer obs support); one step outside it, the delta
+    /// lands the carapace back on its origin planar-wise with y untouched on the
+    /// flat grid.
     #[test]
     fn recenter_delta_snaps_planar_drift_back_onto_the_origin() {
         let origin = Vec3::new(2.0, 0.0, -3.0);
@@ -540,7 +541,8 @@ mod tests {
 
     /// On terrain the recenter carries the surface-height difference: after the
     /// shift, height-above-ground at the origin equals what it was at the drifted
-    /// spot — the spawn-relative body:pos.y channel is invariant across the teleport.
+    /// spot — the teleport preserves her clearance over the surface, where a flat
+    /// planar delta would bury or launch her on real relief.
     #[test]
     fn recenter_delta_preserves_height_above_terrain() {
         let g = TerrainGrid::gcr();

@@ -26,7 +26,8 @@
 //! systems live — the incident class) is caught at the next fixed step. A
 //! `FixedUpdate` system ordered after [`super::PoseSentinelSet`] and before
 //! `SyncBackend` is invisible to the check — that ordering is the SANCTIONED
-//! lane for deliberate physics teleports (the rl#240 recenter); anything else
+//! lane for deliberate physics teleports (currently unused: the rl#240
+//! recenter moves no `Transform` since rl#311); anything else
 //! of that shape is covered by the static transform-ownership gate
 //! (`game/tests/transform_ownership_gate.rs`).
 //!

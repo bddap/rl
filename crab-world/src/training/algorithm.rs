@@ -34,8 +34,9 @@ impl PpoConfig {
 }
 
 /// σ-floor anneal defaults — the live baseline's exploration schedule (rl#161).
-/// Per-run overrides are `TrainConfig` flags, so `Default` here is PURE: no ambient
-/// process state can move a training run (rl#272).
+/// Per-run overrides flow only through `TrainConfig` flags (clap, including their
+/// `RL_LOG_STD_*` env fallbacks), so `Default` itself is PURE — it reads no ambient
+/// state (rl#272).
 pub(crate) const LOG_STD_FLOOR_START_DEFAULT: f32 = -0.7;
 pub(crate) const LOG_STD_ANNEAL_TICKS_DEFAULT: u64 = 5_000_000;
 
