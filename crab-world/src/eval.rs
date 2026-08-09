@@ -1186,8 +1186,9 @@ fn eval_step(
             continue;
         };
         // Probe mode re-poses the lure every tick from her CURRENT position — net's
-        // `set_crab_walk_target` cadence — so the obs ball recedes ahead of her until
-        // the real ball comes inside the band, then converges onto it.
+        // `set_crab_walk_target` cadence. The probe ball sits well inside the band
+        // (`PACE_PROBE_DISTANCE_M` vs `BAND_MAX_M`), so `probe_lure` passes the real
+        // ball straight through.
         if cfg.pace_probe
             && let Some(slot) = targets.envs.get_mut(i)
         {
@@ -1268,7 +1269,8 @@ fn probe_lure(carapace: Vec3, real_target: Vec3, terrain: &crate::terrain::Terra
     )
 }
 
-/// The rl#240 recenter, probe-side: past [`recenter_delta`]'s band edge, shift every
+/// The rl#240 recenter, probe-side: past [`recenter_delta`]'s drift threshold
+/// (`DRIFT_REBASE_M` planar, not the band edge), shift every
 /// crab part back onto the spawn origin planar-wise — production's sanctioned
 /// multibody teleport (rl#116) — and carry the real ball AND the posed lure by the
 /// same delta, so the remaining chase geometry (every distance eval_step measures)

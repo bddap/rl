@@ -140,7 +140,7 @@ pub(crate) struct BestKeeper {
     evaluate: Evaluator,
     eval_period: Duration,
     /// `None` until the first eval so it fires on the first call: a restart-looping
-    /// trainer must not accumulate unevaluated 10-minute dead zones, and a legacy
+    /// trainer must not accumulate unevaluated [`EVAL_PERIOD`]-wide dead zones, and a legacy
     /// (reach-era) `best/` gets its progress bar established promptly, not after a
     /// full period of exposure.
     last_eval: Option<Instant>,
@@ -467,8 +467,8 @@ mod tests {
         }
     }
 
-    /// Keeper whose evaluator returns the current value of `score` — `Err` for a
-    /// negative sentinel — and counts calls, tagged by whether it scored `best/`.
+    /// Keeper whose evaluator returns the current value of `score` — set it `Err`
+    /// to script a failed eval — and counts calls, tagged by whether it scored `best/`.
     fn scripted_keeper(
         dir: &Path,
         score: Rc<RefCell<Result<EvalReport, String>>>,
