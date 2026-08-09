@@ -660,10 +660,10 @@ struct EvalConfig {
     /// Per-env target bearing — env i chases `bearings[i]` from its own start.
     bearings: Vec<f32>,
     settle_ticks: u64,
-    /// Pace-probe mode (rl#280): the real ball sits past the training band edge, so
-    /// the obs target is posed through [`probe_lure`] and planar drift through
-    /// [`pace_recenter`] — the production seams — while every measurement stays
-    /// against the real ball. Single-env by construction ([`run_pairs`] asserts).
+    /// Pace-probe mode (rl#280): the obs target is posed through [`probe_lure`] and
+    /// planar drift through [`pace_recenter`] — the production seams — while every
+    /// measurement stays against the real ball. Single-env by construction
+    /// ([`run_pairs`] asserts).
     pace_probe: bool,
 }
 

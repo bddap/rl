@@ -82,7 +82,7 @@ const BEST_FILES: &[BestFile] = &[
 /// `EVAL_PAIRS` full-length episodes BATCHED (≤16 envs per world, rl#341 — total
 /// episode spend ~4/3 of the retired 3-locale compass at a fraction of the world
 /// builds), plus the close-probe compass and the short rl#280 pace-probe compass;
-/// the period keeps eval spend in the same ~15-20% band of training wall-clock
+/// the period bounds eval spend to a small fraction of training wall-clock
 /// (rollout threads idle while the learner-thread eval runs). Promotion latency is
 /// the trade, and keep-best is a ratchet — a later eval still catches any brain an
 /// earlier tick missed.

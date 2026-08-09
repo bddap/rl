@@ -362,8 +362,8 @@ impl Pos {
         (self.x as f32 / UNIT as f32, self.z as f32 / UNIT as f32)
     }
 
-    /// Inverse of [`Pos::to_meters`]: meters onto the fixed-point grid (truncating cast,
-    /// exactly the cast the external-crab bridge has always used).
+    /// Inverse of [`Pos::to_meters`]: meters onto the fixed-point grid (truncating,
+    /// not rounding).
     pub fn from_meters(x_m: f32, z_m: f32) -> Self {
         Pos {
             x: meters_to_grid(x_m),
@@ -1146,7 +1146,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_foot_and_neutral_pilot_steps_deterministically() {
+    fn mixed_walking_and_idle_players_step_deterministically() {
         let run = || {
             let mut sim = Sim::new(7, &players(2));
             let p0_start = sim.player(PlayerId(0)).unwrap().pos();
@@ -1164,12 +1164,9 @@ mod tests {
         let (h2, p0_start, p0_end, p1_start, p1_end) = run();
         assert_eq!(
             h1, h2,
-            "the same mixed foot+pilot inputs must reproduce the state hash"
+            "the same mixed walking+idle inputs must reproduce the state hash"
         );
-        assert_eq!(
-            p1_start, p1_end,
-            "a piloting (neutral-input) player's foot avatar stays put"
-        );
+        assert_eq!(p1_start, p1_end, "a neutral-input player stays put");
         assert_ne!(
             p0_start, p0_end,
             "the walking player actually moved (not a no-op step)"

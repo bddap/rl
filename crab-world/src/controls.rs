@@ -478,9 +478,9 @@ mod overlay {
     #[derive(Component)]
     pub struct HintGlyphFor(Device);
 
-    // Sized so the biggest legend (GCR's 28-row foot context, rl#330 stage 5) wraps to
-    // TWO ≤Vh(70) columns at 1280x720 — 30px rows, 16 per column; at 30px chips it
-    // wrapped to three and the third ran off the panel.
+    // Sized so the biggest legend (GCR's foot context — `FOOT_ROWS` plus a row per
+    // `GCR_CHORDS` entry) wraps to TWO ≤Vh(70) columns at 1280x720 — 30px rows, 16
+    // per column; at 30px chips it wrapped to three and the third ran off the panel.
     const GLYPH_PX: f32 = 24.0;
 
     pub const PAD_STICK_DEADZONE: f32 = 0.15;
@@ -534,8 +534,8 @@ mod overlay {
         parent
             .spawn((
                 // Wrap into extra columns against a viewport-relative height cap: the
-                // chord registry made legends long (28 rows in GCR's foot context after
-                // the rl#330 stage-5 variant codes), and a single column overflows the
+                // chord registry made legends long (a row per chord entry on top of
+                // the context rows, rl#330), and a single column overflows the
                 // 92%-capped overlay — silently, since flex neither scrolls nor clips
                 // visibly. Vh, not Percent: the overlay parent is content-sized, so a
                 // percent max-height resolves to auto and never triggers the wrap.
