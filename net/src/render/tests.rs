@@ -29,8 +29,7 @@ fn menu_handoff_installs_the_chosen_round() {
         net: None,
     })
     .expect("a solo round always arms");
-    app.world_mut()
-        .insert_non_send(PendingRound(Some(armed)));
+    app.world_mut().insert_non_send(PendingRound(Some(armed)));
     app.world_mut()
         .resource_mut::<NextState<AppPhase>>()
         .set(AppPhase::Playing);
