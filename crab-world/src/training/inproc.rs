@@ -148,8 +148,8 @@ enum RollOutcome {
 /// The training half of a rollout env: the worker's [`WorkerState`] plus the systems
 /// that drive and record her — the trainer's counterpart of net's inference driver
 /// (`run_crab_policy`), occupying the same `BotSet::Think` slot.
-/// [`build_rollout_app`] composes this onto the server world; the systems-level tests
-/// (`systems::step`) compose it onto their one-env fixtures.
+/// [`build_rollout_app`] is the sole composer, onto the server world — the
+/// systems-level tests (`systems::step`) build their one-env fixtures through it too.
 pub(crate) fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usize, arch: ArchId) {
     use super::systems::{self, brain_step, reset_crab};
 

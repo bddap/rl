@@ -46,8 +46,9 @@ use crab_world::training::targets::band_lure;
 /// stays in-distribution on terrain; flat grids reduce to the old absolute 0.3.
 pub(crate) const CLAW_TARGET_Y: f32 = 0.3;
 
-/// Pursuit-heartbeat cadence: one range line per this many hunt-fed ticks (~5 s at the
-/// 60 Hz fixed step) — so a "she stopped giving chase" report (rl#265) is diagnosable
+/// Pursuit-heartbeat cadence: one range line per this many hunt-fed ticks — `fed_ticks`
+/// counts `feed_hunt` calls, one per assembled net tick, so ~10 s at the 30 Hz
+/// `TICK_HZ` — so a "she stopped giving chase" report (rl#265) is diagnosable
 /// from any run's log, live deck telemetry included, without a repro.
 const HUNT_LOG_EVERY_TICKS: u64 = 300;
 
@@ -410,7 +411,7 @@ pub(crate) fn collect_crab_poses(world: &mut World, fallback: &[CrabPose]) -> Ve
         .collect()
 }
 
-/// Feed the NEXT pump's hunt targets (and the ~5 s pursuit heartbeat, rl#265).
+/// Feed the NEXT pump's hunt targets (and the ~10 s pursuit heartbeat, rl#265).
 /// `poses` are the crab poses just collected — the heartbeat's range source.
 pub(crate) fn feed_hunt(world: &mut World, hunt: &[Option<Pos>], poses: &[CrabPose]) {
     let mut state = world.resource_mut::<CrabHunt>();
@@ -579,9 +580,10 @@ pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
 }
 
 /// Resolve a claw-tip collider to its capsule — segment endpoints in entity-local
-/// space plus radius. `spawn_crab` wraps every placed shape as a ONE-shape compound
-/// (today only cuboid links; the read-through is future-proofing so the pincer stays
-/// readable if capsules ever ship wrapped the same way), so readable = a bare capsule,
+/// space plus radius. `spawn_crab` places capsules bare and wraps only oriented cuboid
+/// links as ONE-shape compounds (the compound carries the rotation bevy_rapier's cuboid
+/// constructor can't); the compound read-through here is future-proofing so the pincer
+/// stays readable if capsules ever ship wrapped the same way. Readable = a bare capsule,
 /// or a one-shape compound resolving to one. `None` = anything else — a multi-shape
 /// compound is a shape our claw model can't honestly reduce, not a wrapper — and the
 /// caller screams: a bare `as_capsule` here silently dropped the claw from MP

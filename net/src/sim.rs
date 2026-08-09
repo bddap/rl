@@ -605,7 +605,7 @@ impl Sim {
     }
 
     /// Adopt this tick's crab world poses — [`Sim::step`]'s first act, and callable
-    /// alone only where a pose must land without stepping (a snapshot round-trip test).
+    /// alone only where a pose must land without stepping (tests placing crabs directly).
     fn adopt_crab_poses(&mut self, crabs: &[CrabPose]) {
         assert_eq!(
             crabs.len(),

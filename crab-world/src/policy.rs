@@ -302,7 +302,7 @@ fn log_checkpoint_refusal(surface: &str, dir: &Path, why: &str) {
 /// plant this process resolved. A feed flip (e.g. terrain→flat) swaps a NEW RUN into
 /// the live dir under a long-lived kiosk, and hot-reloading that run's weights into
 /// the old run's arena drives them in a world they never trained in — indefinitely,
-/// since nothing restarts the demo on deploy. Force-resolving both plant locks first
+/// since nothing restarts the demo on deploy. Force-resolving the plant lock first
 /// makes `adopt_recorded_plant` agreement-or-error BY CONSTRUCTION: an embedder that
 /// never adopted at boot resolves from env here rather than silently adopting the
 /// checkpoint's plant into a world that was already built without it. Reuses the one

@@ -352,9 +352,9 @@ mod overlay {
 
     /// Whether `action` was just pressed this frame — on any of its bound keys or any bound
     /// button of any connected pad. THE tap-verb dispatch: apps route their discrete verbs
-    /// through this one composition (the demo's verbs, GCR's render-mode cycle), so the
-    /// composition itself can't drift per app. Reads with genuinely per-device semantics
-    /// (GCR's kb-tap vs pad-hold quit, pad-only held actions) legitimately stay app-side.
+    /// through this one composition (the demo's verbs, GCR's menu navigation), so the
+    /// composition itself can't drift per app. (GCR's command verbs — render-mode cycle,
+    /// quit — are chord codes since rl#330 and never pass through here.)
     pub fn just_pressed<S: ControlInput>(
         action: S::Action,
         keys: &ButtonInput<KeyCode>,

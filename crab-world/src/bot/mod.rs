@@ -75,9 +75,11 @@ pub enum BotSet {
 
 /// The rl#116 pose sentinel's slot, ordered before `BotSet::Sense` and
 /// `PhysicsSet::SyncBackend` (NOT guaranteed first in `FixedUpdate` — an unordered
-/// system can still sneak in ahead of it). A legitimate physics-side teleport (e.g.
-/// the rl#240 recenter) MUST order `.after(PoseSentinelSet)` — the same tick's
-/// `SyncBackend` then consumes it without the sentinel ever seeing it. Foreign
+/// system can still sneak in ahead of it). A deliberate physics-side teleport, if
+/// one ever lives in `FixedUpdate`, MUST order `.after(PoseSentinelSet)` — the same
+/// tick's `SyncBackend` then consumes it without the sentinel ever seeing it. No
+/// current system uses that lane: the rl#240 recenter moves no `Transform` since
+/// rl#311 removed the spawn-relative obs ([`recenter_drifted_origins`]). Foreign
 /// writes from other schedules (where render systems live) always land between
 /// fixed ticks, before this set, and are caught.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]

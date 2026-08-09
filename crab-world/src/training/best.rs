@@ -202,7 +202,7 @@ impl BestKeeper {
 
     /// Once per [`EVAL_PERIOD`]: chase-eval the checkpoint on disk and mirror it into
     /// `best/` iff it beats the incumbent's progress. Runs between learner iterations
-    /// (rollout threads idle for the eval's ~4 min far+close sweep), so it costs wall
+    /// (rollout threads idle for the eval's ~5 min far+close+pace sweep), so it costs wall
     /// clock only — no training data or update is touched.
     ///
     /// Returns whether the eval period elapsed this call (an eval was spent, whatever
