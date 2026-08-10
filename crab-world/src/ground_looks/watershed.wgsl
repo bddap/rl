@@ -495,9 +495,8 @@ fn fragment(
 
     // Dew glints (rl::noise sparkle): near-field only, boosted on snow AND
     // moisture, drowned in puddles.
-    let spark_f = footprint_fade(0.4, fw) * S.z * (1.0 - pud);
     let boost = (0.35 + 0.65 * snow) * (0.35 + 0.65 * moist);
-    let glint = sparkle(p, pbr_input.N, pbr_input.V, spark_f, boost);
+    let glint = sparkle(p, pbr_input.N, pbr_input.V, fw, S.z * (1.0 - pud), boost);
     out.color = vec4(out.color.rgb + glint, out.color.a);
 
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);

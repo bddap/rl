@@ -9,9 +9,10 @@
 // Same integer-hash family as the Rust side's sky/terrain jitter (sky.rs hash3).
 fn hash2(p: vec2<i32>, seed: u32) -> u32 {
     var h = bitcast<u32>(p.x) * 0x8da6b343u ^ bitcast<u32>(p.y) * 0xd8163841u ^ seed * 0xcb1ab31fu;
-    h = h ^ (h >> 13u);
-    h = h * 0x165667b1u;
-    return h ^ (h >> 16u);
+    h ^= h >> 13u;
+    h *= 0x165667b1u;
+    h ^= h >> 16u;
+    return h;
 }
 
 // 3D sibling; constants match sky.rs's hash3 (bitcast matches Rust's `as u32` on
@@ -65,10 +66,12 @@ const ROT: mat2x2<f32> = mat2x2<f32>(0.5646, 0.8254, -0.8254, 0.5646);
 
 // Dew glints: sparse bright points on a 0.4 m jittered grid, cool moonlit white.
 // Additive POST-lighting radiance — a glint is a glint, not a brighter patch of
-// albedo. The caller computes `spark_f` (footprint fade × strength × its own
-// drowning masks, e.g. puddles) and `boost` (its snow/moisture emphasis); both
-// gates keep the miss case to one hash.
-fn sparkle(p: vec2<f32>, n: vec3<f32>, v: vec3<f32>, spark_f: f32, boost: f32) -> vec3<f32> {
+// albedo. The grid size and its footprint fade live HERE, coupled — a caller
+// repeating the 0.4 for its own fade is the drift this module exists to kill.
+// The caller passes `mask` (strength × its drowning masks, e.g. puddles) and
+// `boost` (its snow/moisture emphasis); both gates keep the miss case to one hash.
+fn sparkle(p: vec2<f32>, n: vec3<f32>, v: vec3<f32>, fw: f32, mask: f32, boost: f32) -> vec3<f32> {
+    let spark_f = footprint_fade(0.4, fw) * mask;
     if spark_f <= 0.001 {
         return vec3(0.0);
     }
