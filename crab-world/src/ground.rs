@@ -501,6 +501,10 @@ pub struct GroundMaterialPlugin {
 
 impl Plugin for GroundMaterialPlugin {
     fn build(&self, app: &mut App) {
+        // The shared noise module (rl#333 seam 1). Path-addressed (`rl::noise` via
+        // `#define_import_path`), so the looks resolve it through the same naga_oil
+        // composer their `bevy_pbr::` imports already ride.
+        bevy::shader::load_shader_library!(app, "noise.wgsl");
         register_look_shaders(app);
         app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
             .insert_resource(self.initial)

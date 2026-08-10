@@ -27,47 +27,10 @@
 }
 #endif
 
+#import rl::noise::{vnoise, footprint_fade, grain_fade, ROT}
+
 // x: macro patchiness, y: meso mottling, z: fine on-foot detail, w: detail normal.
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> strengths: vec4<f32>;
-
-// Same integer-hash family as the Rust side's sky/terrain jitter (sky.rs hash3).
-fn hash2(p: vec2<i32>, seed: u32) -> u32 {
-    var h = bitcast<u32>(p.x) * 0x8da6b343u ^ bitcast<u32>(p.y) * 0xd8163841u ^ seed * 0xcb1ab31fu;
-    h = h ^ (h >> 13u);
-    h = h * 0x165667b1u;
-    return h ^ (h >> 16u);
-}
-
-fn rand01(h: u32) -> f32 {
-    return f32(h & 0xffffffu) / f32(0x1000000u);
-}
-
-// Value noise in [-1, 1]. Quintic (C2) interpolant: smoothstep's discontinuous
-// second derivative creases along every lattice edge, and the rl#324 close-up
-// octaves are large enough on screen to read those creases as a woven grid.
-fn vnoise(p: vec2<f32>, seed: u32) -> f32 {
-    let i = vec2<i32>(floor(p));
-    let f = fract(p);
-    let w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    let a = rand01(hash2(i, seed));
-    let b = rand01(hash2(i + vec2(1, 0), seed));
-    let c = rand01(hash2(i + vec2(0, 1), seed));
-    let d = rand01(hash2(i + vec2(1, 1), seed));
-    return 2.0 * mix(mix(a, b, w.x), mix(c, d, w.x), w.y) - 1.0;
-}
-
-// 1 while the octave's wavelength spans many pixels, 0 once it is subpixel.
-fn footprint_fade(wavelength: f32, fw: f32) -> f32 {
-    return 1.0 - smoothstep(wavelength * 0.15, wavelength * 0.5, fw);
-}
-
-// The adaptive-descent fade (rl#324): wider margins than footprint_fade, so the
-// finest octave the descent keeps still spans ~8+ pixels per wavelength. Letting
-// octaves ride down toward Nyquist (footprint_fade's window) turns the fine tail
-// into per-pixel salt noise — grain must stay coarse enough to read as surface.
-fn grain_fade(wavelength: f32, fw: f32) -> f32 {
-    return 1.0 - smoothstep(wavelength * 0.05, wavelength * 0.125, fw);
-}
 
 @fragment
 fn fragment(
@@ -119,11 +82,7 @@ fn fragment(
     // at ~1-2 mm out at the corners, a large fraction of such a lattice cell.
     // Distant ground exits after one test — fw alone decides, so the loop is
     // quad-coherent and the near-fullscreen far ground pays nothing.
-    // Each octave rotated 55.62° (90°/φ) from the last: value noise's lattice is
-    // axis-aligned, and any octave landing near a multiple of 90° reads as a woven
-    // plaid — 90°/φ keeps every small multiple ≥13° away from the axes (the golden
-    // angle itself fails: 2×137.5° mod 90° = 5°, a visibly axis-aligned octave).
-    let rot = mat2x2<f32>(0.5646, 0.8254, -0.8254, 0.5646);
+    // Each octave rotated by ROT from the last (why that angle: rl::noise).
     var fine_n = 0.0;
     var q = p;
     var wl = 2.6;
@@ -135,7 +94,7 @@ fn fragment(
             break;
         }
         fine_n += vnoise(q / wl, seed) * amp * fade;
-        q = rot * q;
+        q = ROT * q;
         wl /= 3.0;
         amp *= 0.72;
         seed += 1u;
@@ -184,7 +143,7 @@ fn fragment(
             let hx = vnoise((nq + vec2(step, 0.0)) / nwl, nseed);
             let hz = vnoise((nq + vec2(0.0, step)) / nwl, nseed);
             grad += fade * (transpose(nrot) * vec2(hx - h0, hz - h0)) / step * nweight;
-            nrot = rot * nrot;
+            nrot = ROT * nrot;
             nwl /= 3.0;
             nweight *= 0.45;
             nseed += 1u;
