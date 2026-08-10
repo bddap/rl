@@ -36,37 +36,10 @@
 }
 #endif
 
+#import rl::noise::{vnoise, footprint_fade}
+
 // x: macro drift, y: meso comb streaks, z: fine grain, w: detail normal.
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> strengths: vec4<f32>;
-
-// Same integer-hash family as the Rust side's sky/terrain jitter (sky.rs hash3).
-fn hash2(p: vec2<i32>, seed: u32) -> u32 {
-    var h = bitcast<u32>(p.x) * 0x8da6b343u ^ bitcast<u32>(p.y) * 0xd8163841u ^ seed * 0xcb1ab31fu;
-    h = h ^ (h >> 13u);
-    h = h * 0x165667b1u;
-    return h ^ (h >> 16u);
-}
-
-fn rand01(h: u32) -> f32 {
-    return f32(h & 0xffffffu) / f32(0x1000000u);
-}
-
-// Value noise in [-1, 1], C1-smooth.
-fn vnoise(p: vec2<f32>, seed: u32) -> f32 {
-    let i = vec2<i32>(floor(p));
-    let f = fract(p);
-    let w = f * f * (3.0 - 2.0 * f);
-    let a = rand01(hash2(i, seed));
-    let b = rand01(hash2(i + vec2(1, 0), seed));
-    let c = rand01(hash2(i + vec2(0, 1), seed));
-    let d = rand01(hash2(i + vec2(1, 1), seed));
-    return 2.0 * mix(mix(a, b, w.x), mix(c, d, w.x), w.y) - 1.0;
-}
-
-// 1 while the octave's wavelength spans many pixels, 0 once it is subpixel.
-fn footprint_fade(wavelength: f32, fw: f32) -> f32 {
-    return 1.0 - smoothstep(wavelength * 0.15, wavelength * 0.5, fw);
-}
 
 // Anisotropic value noise: stretched to `along`×`across` meters in the comb
 // frame `d`, so one sample is a streak, not a blot.
