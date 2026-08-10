@@ -347,6 +347,7 @@ pub struct RescueStats {
     pub since_nonfinite: u32,
     pub since_below_terrain: u32,
     pub since_buried: u32,
+    pub since_escaped: u32,
     pub last_body: Option<RescueBody>,
 }
 
@@ -382,6 +383,13 @@ pub enum RescueReason {
     /// NaN/inf pose — a physics-correctness fault (rl#137): error + debug-panic when
     /// armed. Wins over the other reasons when one env shows several.
     NonFinite,
+    /// Carapace flung clear off the terrain tile (rl#339 — the crab half of
+    /// [`rescue_lost_crafts`](crate::vehicle)): past the edge no collider ever
+    /// brings her back, and an UPWARD escape never crosses the y-floor, so before
+    /// this class an escapee flew for minutes while her skinned shadow streamed
+    /// 1e8 m coordinates at the renderer. Warn tier like the craft's edge case —
+    /// the fling that put her there is the fault (rl#347 class), not the crossing.
+    Escaped,
     /// Tunneled through the heightfield sheet (rl#283) — reachable by legitimate hard
     /// hits, so it warns when armed instead of faulting. Also catches a body fallen
     /// past the tile EDGE (the sampler clamps flat there but the collider ends): the
@@ -401,13 +409,15 @@ impl RescueReason {
             RescueReason::NonFinite => 0,
             RescueReason::BelowTerrain => 1,
             RescueReason::Buried => 2,
+            RescueReason::Escaped => 3,
         }
     }
 
     /// Worst-reason-wins ordering for one env showing several reasons in one tick.
     fn rank(self) -> u8 {
         match self {
-            RescueReason::NonFinite => 2,
+            RescueReason::NonFinite => 3,
+            RescueReason::Escaped => 2,
             RescueReason::BelowTerrain => 1,
             RescueReason::Buried => 0,
         }
@@ -440,7 +450,7 @@ pub fn rescue_lost_crabs(
     mut stats: ResMut<RescueStats>,
     is_fault: Option<Res<CrabRescueIsFault>>,
     time: Res<Time>,
-    mut last_log_secs: Local<[Option<f64>; 3]>,
+    mut last_log_secs: Local<[Option<f64>; 4]>,
     mut buried_ticks: Local<std::collections::BTreeMap<usize, u32>>,
 ) {
     // Worst reason wins per env: a blowup plausibly leaves some parts NaN and others
@@ -468,6 +478,17 @@ pub fn rescue_lost_crabs(
         if !t.translation.is_finite() || !t.rotation.is_finite() {
             consider(id.0, body, t, RescueReason::NonFinite);
             continue;
+        }
+        // Carapace-keyed like the buried case: a leg swinging past the edge while she
+        // stands inside it is posture, her body's centre off the tile is an escape.
+        if carapace.is_some()
+            && t.translation
+                .xz()
+                .abs()
+                .cmpgt(Vec2::splat(terrain.half_span_min()))
+                .any()
+        {
+            consider(id.0, body, t, RescueReason::Escaped);
         }
         let depth = terrain.height(t.translation.x, t.translation.z) - t.translation.y;
         if depth > BELOW_TERRAIN_RESCUE_M {
@@ -504,6 +525,9 @@ pub fn rescue_lost_crabs(
             }
             RescueReason::Buried => {
                 stats.since_buried = stats.since_buried.saturating_add(1);
+            }
+            RescueReason::Escaped => {
+                stats.since_escaped = stats.since_escaped.saturating_add(1);
             }
         }
         stats.last_body = Some(body);
@@ -552,6 +576,16 @@ pub fn rescue_lost_crabs(
                          terrain sheet for {CARAPACE_BURIED_RESCUE_TICKS}+ ticks at \
                          translation={translation:?} — one-sided heightfield, nothing pushes \
                          it back out; respawning (rl#303; rescue total={})",
+                        stats.total
+                    );
+                }
+            }
+            RescueReason::Escaped => {
+                if log_ok {
+                    warn!(
+                        "rescue_lost_crabs: armed crab (env {env}) left the world at `{body}` \
+                         translation={translation:?} — respawning (rl#339 escape backstop; \
+                         rescue total={})",
                         stats.total
                     );
                 }

@@ -296,3 +296,40 @@ fn crab_lands_sane_on_the_terrain_arena() {
         c.z
     );
 }
+
+/// rl#339 escape backstop: a crab flung UP and off the tile never crosses the rl#283
+/// y-floor — pre-this-class she flew for minutes (the TV wedge flights). Once the
+/// carapace leaves the tile's planar bounds the rescue must respawn her in bounds,
+/// promptly, not wait for a descent that may never come.
+#[test]
+fn rescue_recovers_an_upward_escaped_crab() {
+    let mut app = flat_headless_app();
+    tick(&mut app, 192);
+    let n_parts = part_translations(&mut app).len();
+
+    let bound = app
+        .world()
+        .resource::<crate::terrain::Terrain>()
+        .half_span_min();
+    // An upward/off-tile arc frozen at its apex: past the edge planar, high above
+    // the surface, exactly where neither the y-floor nor the buried trap can see.
+    let delta = Vec3::new(bound + 120.0, 300.0, 0.0);
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<CrabBodyPart>>();
+        for mut t in q.iter_mut(app.world_mut()) {
+            t.translation += delta;
+        }
+    }
+
+    tick(&mut app, 4);
+    let stats = app.world().resource::<super::RescueStats>();
+    assert!(
+        stats.since_escaped >= 1,
+        "the escaped-crab rescue must have fired (since_escaped={})",
+        stats.since_escaped
+    );
+    tick(&mut app, 188);
+    assert_crab_sane(&mut app, n_parts, "after rescue from off the tile");
+}

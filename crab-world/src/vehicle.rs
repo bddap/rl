@@ -12,14 +12,10 @@ const VEHICLE_DENSITY: f32 = 50.0;
 /// drag-stability cap below.
 const VEHICLE_MASS: f32 = VEHICLE_DENSITY * 8.0 * VEHICLE_HALF.x * VEHICLE_HALF.y * VEHICLE_HALF.z;
 
-/// Cap on the speed-proportional braking coefficient (drag + match-velocity damp), at
-/// the value whose one-step impulse exactly cancels the body's momentum. Explicit
-/// integration of the quadratic drag is a brake only while dt·c/m ≤ 1; past that the
-/// "drag" overshoots zero and grows geometrically each step, so one large contact
-/// impulse (Sally striking a craft) turned into a constant ~1e6 m/s escape that
-/// wedged the renderer (rl#339). The cap only engages past ~110 m/s (plane) /
-/// ~277 m/s (ship) — 25×+ any flyable speed — so tuned feel is untouched.
-const BRAKE_COEFF_MAX: f32 = VEHICLE_MASS * crate::physics::PHYSICS_HZ as f32;
+/// The craft's [`crate::physics::brake_coeff_max`] (one-step momentum cancel) on the
+/// drag + match-velocity damp coefficient. The cap only engages past ~110 m/s (plane)
+/// / ~277 m/s (ship) — 25×+ any flyable speed — so tuned feel is untouched.
+const BRAKE_COEFF_MAX: f32 = crate::physics::brake_coeff_max(VEHICLE_MASS);
 
 /// How far below the local surface a craft must sink before rescue: past the
 /// heightfield's one-sided collider nothing pushes it back up (the crab's Buried

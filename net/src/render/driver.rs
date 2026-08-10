@@ -898,21 +898,25 @@ fn sample_telemetry(
     // so a frame-by-frame blowup shows on the hub feed as a filtered per-window
     // count instead of a per-step flood. One event PER REASON — a legitimate
     // hard-hit tunneling rescue (rl#283) reported as "going non-finite" would be a
-    // false rl#137 alarm. A stable solo Sally never enters this branch (both
-    // counters stay 0) — a nonzero count IS the alarm.
+    // false rl#137 alarm. A stable solo Sally never enters this branch (every
+    // counter stays 0) — a nonzero count IS the alarm.
     if due
         && let Some(mut stats) = world.get_resource_mut::<crab_world::bot::RescueStats>()
-        && (stats.since_nonfinite > 0 || stats.since_below_terrain > 0 || stats.since_buried > 0)
+        && (stats.since_nonfinite > 0
+            || stats.since_below_terrain > 0
+            || stats.since_buried > 0
+            || stats.since_escaped > 0)
     {
-        let (nf, bt, bu) = (
+        let (nf, bt, bu, es) = (
             stats.since_nonfinite,
             stats.since_below_terrain,
             stats.since_buried,
+            stats.since_escaped,
         );
         // `last_body` is reason-blind, so name it only when one reason fired —
         // else the rl#137 event could name a below-terrain offender or vice versa.
         let last = match stats.last_body {
-            Some(b) if [nf, bt, bu].iter().filter(|&&n| n > 0).count() == 1 => {
+            Some(b) if [nf, bt, bu, es].iter().filter(|&&n| n > 0).count() == 1 => {
                 format!(" (last offender: {b})")
             }
             _ => String::new(),
@@ -920,6 +924,7 @@ fn sample_telemetry(
         stats.since_nonfinite = 0;
         stats.since_below_terrain = 0;
         stats.since_buried = 0;
+        stats.since_escaped = 0;
         if nf > 0 {
             t.send(TelemetryEvent::Fault {
                 msg: format!(
@@ -943,6 +948,15 @@ fn sample_telemetry(
                     "crab rescue: {bu} buried-carapace respawn(s) this telemetry \
                      window{last} — carapace pinned under the one-sided \
                      heightfield sheet (rl#303)"
+                ),
+            });
+        }
+        if es > 0 {
+            t.send(TelemetryEvent::Fault {
+                msg: format!(
+                    "crab rescue: {es} escaped-crab respawn(s) this telemetry \
+                     window{last} — carapace flung clear off the terrain tile \
+                     (rl#339 escape backstop)"
                 ),
             });
         }
