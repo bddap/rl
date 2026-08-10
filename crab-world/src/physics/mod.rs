@@ -13,6 +13,17 @@ pub const PHYSICS_HZ: u64 = 64;
 
 pub const PHYSICS_DT: f32 = 1.0 / PHYSICS_HZ as f32;
 
+/// One-step momentum-cancel cap on a speed-proportional braking coefficient `c`
+/// (brake force `F = −c·v`, held over one explicit tick at [`PHYSICS_HZ`]): at
+/// `c = m·Hz` the tick's impulse exactly cancels the body's momentum, and past it
+/// the "brake" overshoots zero and grows geometrically each step — one large
+/// impulse becomes a ballistic escape (rl#339: the craft's quadratic drag past
+/// ~440 m/s, Sally's carapace drag past ~1470 m/s). ONE source for the formula:
+/// every explicit braking force caps its coefficient through here.
+pub const fn brake_coeff_max(mass: f32) -> f32 {
+    mass * PHYSICS_HZ as f32
+}
+
 pub const PHYSICS_SUBSTEPS: usize = 2;
 
 fn fixed_timestep() -> TimestepMode {

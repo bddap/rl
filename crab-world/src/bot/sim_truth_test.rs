@@ -1232,3 +1232,92 @@ fn airborne_crab_reaches_terminal_velocity() {
          missing, or doubled; unbounded speed is how Sally flies"
     );
 }
+
+/// bddap/rl#339 — the carapace drag brake must stay a brake at ANY speed. Explicit
+/// integration of `F = −c·|v|·v` is a brake only below `|v| = m·Hz/c`; past it the
+/// drag tick overshoots zero and amplifies geometrically (measured on the full crab:
+/// 6000 → 788,000 m/s in ONE tick), which is what stretched a solver fling into the
+/// rl#339 wedge flights. With the drag FORCE capped
+/// ([`super::aero::CARAPACE_BRAKE_WEIGHT_MAX`]) the per-tick Δv is ~constant and
+/// tiny, so hypersonic speed decays monotonically and stays finite.
+///
+/// A LONE carapace-tagged rigid body, deliberately: the integrator's stability is a
+/// single-body property, and the full multibody masks it — a violent fling excites
+/// the (open, rl#349) solver energy-injection class, which amplifies the COM with
+/// or without drag. Collision-free and not a `CrabBodyPart`, so neither contacts
+/// nor rescues touch the measurement.
+#[test]
+fn hypersonic_carapace_brake_decays() {
+    use super::body::CrabCarapace;
+    use bevy_rapier3d::prelude::{
+        Collider, ColliderMassProperties, CollisionGroups, ExternalForce, Group,
+        ReadMassProperties, RigidBody, Velocity,
+    };
+
+    let mut app = flat_headless_app();
+    tick(&mut app, 1);
+    let body = app
+        .world_mut()
+        .spawn((
+            CrabCarapace,
+            RigidBody::Dynamic,
+            Collider::cuboid(0.15, 0.06, 0.11),
+            ColliderMassProperties::Density(50.0),
+            CollisionGroups::new(Group::NONE, Group::NONE),
+            ReadMassProperties::default(),
+            Velocity {
+                linear: Vec3::Y * 6000.0,
+                ..default()
+            },
+            ExternalForce::default(),
+            Transform::from_xyz(0.0, 400.0, 0.0),
+        ))
+        .id();
+    // One settle tick: rapier ingests the body and writes back its mass mirror (the
+    // drag cap reads it; it is zero until the first writeback).
+    tick(&mut app, 1);
+
+    let speed = |app: &mut App| -> f32 {
+        app.world()
+            .get::<Velocity>(body)
+            .expect("test body")
+            .linear
+            .length()
+    };
+    let v1 = speed(&mut app);
+    assert!(v1 > 5000.0, "launch speed not held: |v|={v1:.0} m/s");
+
+    // Per-tick, because the uncapped amplifier peaks (and dies to NaN) within a few
+    // ticks of crossing the stability line. 5 s of ~20 g braking sheds ~1000 m/s.
+    const TICKS: u32 = 320;
+    let mut prev = v1;
+    for t in 0..TICKS {
+        // `apply_actions` zeroes ExternalForce for CRAB parts each tick; this lone
+        // body isn't one, so zero it here or the += drag would accumulate forever.
+        app.world_mut()
+            .get_mut::<ExternalForce>(body)
+            .expect("test body")
+            .force = Vec3::ZERO;
+        tick(&mut app, 1);
+        let v = app.world().get::<Velocity>(body).expect("test body").linear;
+        assert!(
+            v.is_finite(),
+            "velocity went non-finite {t} ticks in — the drag brake is amplifying \
+             again (rl#339)"
+        );
+        let s = v.length();
+        assert!(
+            s < prev + 0.5,
+            "|v| grew {prev:.0} -> {s:.0} m/s at tick {t} under drag+gravity alone — \
+             the brake is adding energy (rl#339)"
+        );
+        prev = s;
+    }
+    println!("hypersonic brake: |v| {v1:.0} -> {prev:.0} m/s over {TICKS} ticks");
+    assert!(
+        prev < v1 - 800.0,
+        "a {v1:.0} m/s carapace shed only {:.0} m/s in 4 s — the force-capped brake \
+         is missing or mis-scaled (rl#339)",
+        v1 - prev
+    );
+}

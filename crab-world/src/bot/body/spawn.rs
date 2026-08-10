@@ -143,6 +143,9 @@ pub fn spawn_crab(
             )]),
             crab_collision(env),
             ColliderMassProperties::Density(recipe.carapace_density),
+            // Live mass mirror for the drag brake's momentum-cancel cap
+            // (`aero::apply_air_drag`) — the collider density is the one mass source.
+            ReadMassProperties::default(),
             place(origin),
             CrabRestPose(place(origin)),
             Velocity::default(),
