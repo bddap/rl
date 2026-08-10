@@ -133,7 +133,7 @@ fn eval_pairs(
     // Keep every start AND its full band (targets, lure clamp) clear of the tile
     // edge, matching the training sampler's edge margin.
     let margin = 2.0 * BAND_MAX_M + far_distance_m.max(BAND_MAX_M);
-    let radius = grid.extent_x().min(grid.extent_z()) / 2.0 - margin;
+    let radius = grid.half_span_min() - margin;
     if radius <= 0.0 {
         return Err(format!(
             "terrain tile ({:.0}×{:.0} m) is smaller than the eval's edge margin \
