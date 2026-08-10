@@ -62,12 +62,12 @@ const TERRAIN_EDGE_MARGIN: f32 = 2.0 * BAND_MAX_M;
 /// sampling nonsense (a negative clamp NaNs band distances and panics the origin
 /// draw's `gen_range`).
 pub fn sample_clamp_half(terrain: &TerrainGrid) -> f32 {
-    let clamp = terrain.extent_x().min(terrain.extent_z()) / 2.0 - TERRAIN_EDGE_MARGIN;
+    let clamp = terrain.half_span_min() - TERRAIN_EDGE_MARGIN;
     assert!(
         clamp > BAND_MAX_M,
         "grid half-span {} m leaves sampling clamp {clamp} m ≤ the {BAND_MAX_M} m band \
          — the whole chase geometry must fit on real ground",
-        terrain.extent_x().min(terrain.extent_z()) / 2.0,
+        terrain.half_span_min(),
     );
     clamp
 }

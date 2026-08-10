@@ -10,7 +10,9 @@
 //! [`TerrainGrid::height`] is triangle-exact against parry's default heightfield
 //! subdivision — the sampler IS the collider surface, not a bilinear approximation
 //! of it. Outside the tile the sampler clamps to the edge value, but the collider
-//! ends at the tile edge; a world-bounds policy is a later stage of rl#281.
+//! ends at the tile edge; a world-bounds policy is a later stage of rl#281
+//! (interim backstops: `rescue_lost_crabs`' BelowTerrain and the rl#339
+//! `rescue_lost_crafts` park).
 
 use std::sync::{Arc, OnceLock};
 
@@ -214,6 +216,14 @@ impl TerrainGrid {
     /// Full world-x span (grid columns).
     pub fn extent_x(&self) -> f32 {
         (self.cols - 1) as f32 * self.cell
+    }
+
+    /// Half the tile's shorter span — where the ground collider ends on the tighter
+    /// axis. The ONE source for "the edge of the world": the sampling interior
+    /// (`training::targets::sample_clamp_half`) and the rl#339 craft rescue both
+    /// derive from it, so an escape bound can never drift outside the collider.
+    pub fn half_span_min(&self) -> f32 {
+        self.extent_x().min(self.extent_z()) / 2.0
     }
 
     /// Full world-z span (grid rows).

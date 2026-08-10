@@ -7,6 +7,29 @@ const VEHICLE_HALF: Vec3 = Vec3::new(0.11, 0.035, 0.17);
 
 const VEHICLE_DENSITY: f32 = 50.0;
 
+/// The craft body's mass (box volume × density — mirrors the cuboid
+/// `ColliderMassProperties::Density`; revisit on a collider shape change) — the
+/// drag-stability cap below.
+const VEHICLE_MASS: f32 = VEHICLE_DENSITY * 8.0 * VEHICLE_HALF.x * VEHICLE_HALF.y * VEHICLE_HALF.z;
+
+/// Cap on the speed-proportional braking coefficient (drag + match-velocity damp), at
+/// the value whose one-step impulse exactly cancels the body's momentum. Explicit
+/// integration of the quadratic drag is a brake only while dt·c/m ≤ 1; past that the
+/// "drag" overshoots zero and grows geometrically each step, so one large contact
+/// impulse (Sally striking a craft) turned into a constant ~1e6 m/s escape that
+/// wedged the renderer (rl#339). The cap only engages past ~110 m/s (plane) /
+/// ~277 m/s (ship) — 25×+ any flyable speed — so tuned feel is untouched.
+const BRAKE_COEFF_MAX: f32 = VEHICLE_MASS * crate::physics::PHYSICS_HZ as f32;
+
+/// How far below the local surface a craft must sink before rescue: past the
+/// heightfield's one-sided collider nothing pushes it back up (the crab's Buried
+/// case), and at rl#339 escape speeds a single substep tunnels straight through.
+/// Generous vs the crab's 2 m: a craft is never legitimately underground at all.
+const CRAFT_BELOW_TERRAIN_RESCUE_M: f32 = 20.0;
+
+/// Pulled-in margin for the escape park — see [`rescue_lost_crafts`].
+const CRAFT_EDGE_PARK_MARGIN_M: f32 = 2.0;
+
 /// Craft ground handling (thrust scales, ground roll, the rl#307 grounded-ship
 /// feel) was tuned while the terrain had no Friction component — a 0.5↔0.5 Average
 /// pair. The rl#318 grip fix raised the ground side
@@ -228,6 +251,7 @@ impl Plugin for VehiclePlugin {
             FixedUpdate,
             (
                 manage_vehicles.in_set(VehicleManageSet),
+                rescue_lost_crafts,
                 apply_vehicle_forces,
             )
                 .chain()
@@ -542,6 +566,59 @@ pub fn spawn_ram_vehicle(
         .id()
 }
 
+/// Park a craft physics can no longer recover — the vehicle half of
+/// [`rescue_lost_crabs`](crate::bot::rescue_lost_crabs) (rl#339): a non-finite pose,
+/// or a finite one off the terrain tile, where the ground collider ends
+/// (`terrain.rs` — the rl#281 world-bounds gap), so nothing ever brings an escapee
+/// back; meanwhile its shadow keeps streaming 1e8 m coordinates into the render
+/// path, which is what froze the TV both times in rl#339. Parked at rest on the
+/// local surface (velocities and lever zeroed, facing kept when finite) via the same
+/// [`clear_of_ground`] every other placement uses; a non-finite craft has no
+/// position left and parks at the arena origin.
+fn rescue_lost_crafts(
+    terrain: Res<crate::terrain::Terrain>,
+    mut q: Query<(&mut Vehicle, &mut Transform, &mut Velocity)>,
+) {
+    // Park strictly inside the edge, not on it: a craft whose COM lands exactly on
+    // the collider boundary can tip off the unsupported half and re-trigger forever.
+    let bound = terrain.half_span_min() - CRAFT_EDGE_PARK_MARGIN_M;
+    for (mut vehicle, mut transform, mut velocity) in q.iter_mut() {
+        let pos = transform.translation;
+        let finite = pos.is_finite() && transform.rotation.is_finite();
+        let below = finite && terrain.height(pos.x, pos.z) - pos.y > CRAFT_BELOW_TERRAIN_RESCUE_M;
+        if finite && !below && pos.x.abs() <= bound && pos.z.abs() <= bound {
+            continue;
+        }
+        let anchor = if finite {
+            Vec2::new(pos.x.clamp(-bound, bound), pos.z.clamp(-bound, bound))
+        } else {
+            Vec2::ZERO
+        };
+        // Yaw-only pose, like the restart park: the nose survives, any tumble doesn't.
+        let nose = transform.rotation * Vec3::Z;
+        let yaw = if finite { nose.x.atan2(nose.z) } else { 0.0 };
+        let parked = clear_of_ground(terrain.place(anchor, 0.0), GROUND_CLEARANCE, &terrain);
+        *transform = Transform::from_translation(parked).with_rotation(Quat::from_rotation_y(yaw));
+        *velocity = Velocity::default();
+        vehicle.throttle = 0.0;
+        if finite {
+            // Reachable by legitimate long flight (nothing else stops a craft at the
+            // edge), so a warn — the fault tier is non-finite, as in the crab rescue.
+            warn!(
+                "rescue_lost_crafts: pilot {:?} craft left the world at translation={pos:?} \
+                 — parked at rest at {parked:?} (rl#339)",
+                vehicle.pilot
+            );
+        } else {
+            error!(
+                "rescue_lost_crafts: pilot {:?} craft went NON-FINITE — parked at rest at \
+                 {parked:?} (rl#339; physics-correctness fault)",
+                vehicle.pilot
+            );
+        }
+    }
+}
+
 /// The ONE flight force model. For each spawned body, reads ITS pilot's
 /// command + the body's own pose and velocity, integrates the throttle lever, and overwrites the
 /// body's [`ExternalForce`] with thrust + lift + drag (force) and the body-frame control torque +
@@ -585,7 +662,7 @@ fn apply_vehicle_forces(
         } else {
             0.0
         };
-        let drag = -v * (p.drag_lin + match_damp + p.drag_quad * speed);
+        let drag = -v * (p.drag_lin + match_damp + p.drag_quad * speed).min(BRAKE_COEFF_MAX);
 
         // Grip: the sideslip force of the wing+fuselage, as a spring from v to
         // `forward·|v|` — it mostly REDIRECTS momentum toward the nose; the along-track
@@ -673,7 +750,11 @@ mod tests {
         )
     }
 
-    const FAR: Vec3 = Vec3::new(500.0, 300.0, 500.0);
+    /// A hermetic free-space spot: hundreds of meters from the origin (and the crab),
+    /// in the NEGATIVE quadrant so a test flying the craft outward (+X/+Z thrust)
+    /// heads into the tile interior — from the positive corner it would cross the
+    /// 512 m fixture edge mid-measurement and be parked by `rescue_lost_crafts`.
+    const FAR: Vec3 = Vec3::new(-300.0, 300.0, -300.0);
 
     /// rl#235 regression: nested (coxa) links were vehicle-transparent — neither
     /// NESTED_COLLISION's filter nor VEHICLE_COLLISION's carried the other side, so a
@@ -1636,6 +1717,129 @@ mod tests {
             (0.5..0.8).contains(&(one_s / terminal)),
             "most of the ramp sweeps through the first second — visibly \
              accelerating, not yet settled: {one_s} of {terminal} m/s"
+        );
+    }
+
+    /// rl#339 regression: past dt·c/m = 1 the explicit quadratic drag flips from
+    /// brake to amplifier — a craft kicked to a few hundred m/s by a crab strike
+    /// escaped at a constant ~1e6 m/s. With the [`BRAKE_COEFF_MAX`] cap, ANY finite
+    /// launch speed must decay, never grow.
+    #[test]
+    fn hypersonic_craft_brakes_instead_of_amplifying() {
+        use crate::bot::headless::tick;
+        // In-bounds launch (the rescue bound is the flat fixture's 512 m half-span)
+        // so the out-of-world park can't mask a drag blowup; vertical UP so neither
+        // the tile edge nor the below-terrain rescue is ever crossed while braking.
+        let (mut app, e) =
+            app_with_vehicle(VehicleKind::Plane, Vec3::new(0.0, 5.0, 0.0), Vec3::Y * 1e4);
+        set_cmd(&mut app, |c| c.throttle_trim = -1.0);
+        let mut prev = 1e4_f32;
+        for _ in 0..16 {
+            tick(&mut app, 1);
+            let (t, v) = body(&app, e);
+            let speed = v.linear.length();
+            assert!(
+                t.translation.is_finite() && speed.is_finite(),
+                "craft went non-finite while braking"
+            );
+            // `<=`: an update before the first fixed step leaves the speed untouched.
+            assert!(
+                speed <= prev.max(10.0),
+                "drag amplified instead of braking: {prev} -> {speed} m/s"
+            );
+            prev = speed;
+        }
+        assert!(
+            prev < 100.0,
+            "hypersonic launch must be dead within 16 ticks, still {prev} m/s"
+        );
+    }
+
+    /// rl#339: a craft outside the tile interior (where no ground collider exists)
+    /// is parked back on in-bounds terrain at rest by [`rescue_lost_crafts`].
+    #[test]
+    fn escaped_craft_parks_back_in_bounds() {
+        use crate::bot::headless::tick;
+        let mut app = flat_headless_app();
+        app.add_plugins(VehiclePlugin);
+        board(&mut app, P0, VehicleKind::Ship);
+        tick(&mut app, 4); // spawn edge (the first update may run no fixed step)
+        let bound = app
+            .world()
+            .resource::<crate::terrain::Terrain>()
+            .half_span_min();
+        let e = *app
+            .world_mut()
+            .query_filtered::<Entity, With<Vehicle>>()
+            .iter(app.world())
+            .collect::<Vec<_>>()
+            .first()
+            .expect("craft spawned");
+        {
+            let mut ent = app.world_mut().entity_mut(e);
+            ent.get_mut::<Transform>().unwrap().translation = Vec3::new(bound + 5000.0, 40.0, 0.0);
+            ent.get_mut::<Velocity>().unwrap().linear = Vec3::X * 1e6;
+        }
+        tick(&mut app, 4);
+        let (t, v) = body(&app, e);
+        assert!(
+            t.translation.x.abs() <= bound && t.translation.z.abs() <= bound,
+            "escaped craft not parked back in bounds: {:?}",
+            t.translation
+        );
+        assert!(
+            v.linear.length() < 1.0,
+            "parked craft must be at rest, moving {:?}",
+            v.linear
+        );
+    }
+
+    /// rl#339: an escape impulse aimed DOWN tunnels through the one-sided
+    /// heightfield in one substep and would free-fall forever with x/z in bounds —
+    /// the below-terrain branch must lift it back onto the surface.
+    #[test]
+    fn buried_craft_parks_back_on_the_surface() {
+        use crate::bot::headless::tick;
+        let (mut app, e) =
+            app_with_vehicle(VehicleKind::Plane, Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO);
+        app.world_mut()
+            .entity_mut(e)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::new(0.0, -100.0, 0.0);
+        tick(&mut app, 4);
+        let (t, v) = body(&app, e);
+        assert!(
+            t.translation.y > -1.0,
+            "buried craft must be lifted back onto the surface: {:?}",
+            t.translation
+        );
+        assert!(v.linear.length() < 1.0, "rescued craft must be at rest");
+    }
+
+    /// rl#339: a non-finite craft pose (nothing else guards crafts — the pose
+    /// sentinel and rescue cover crab body parts only) parks at the arena origin.
+    #[test]
+    fn nonfinite_craft_parks_at_origin() {
+        use crate::bot::headless::tick;
+        let (mut app, e) =
+            app_with_vehicle(VehicleKind::Plane, Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO);
+        app.world_mut()
+            .entity_mut(e)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::splat(f32::NAN);
+        tick(&mut app, 4);
+        let (t, v) = body(&app, e);
+        assert!(
+            t.translation.is_finite() && t.rotation.is_finite(),
+            "craft still non-finite after rescue: {t:?}"
+        );
+        assert!(
+            t.translation.x.abs() < 1.0 && t.translation.z.abs() < 1.0 && v.linear.length() < 1.0,
+            "non-finite craft must park at rest at the origin: {:?} {:?}",
+            t.translation,
+            v.linear
         );
     }
 }
