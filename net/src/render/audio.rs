@@ -27,9 +27,9 @@ use crab_world::vehicle::VehicleKind;
 
 /// The shared "external world" mix bus (rl#359): every diegetic outdoor sound routes
 /// its parameters through this resource instead of straight to the master mix, so
-/// one writer (combo entry ducks + muffles the outside world while X is held) can
-/// shape them all. `gain` multiplies a member's amplitude; `lowpass_hz` caps its
-/// lowpass cutoff. Defaults are transparent.
+/// one writer ([`drive_muffle`]: combo entry ducks + muffles the outside world while
+/// the chord modifier is held) can shape them all. `gain` multiplies a member's
+/// amplitude; `lowpass_hz` caps its lowpass cutoff. Defaults are transparent.
 #[derive(Resource, Clone, Copy)]
 pub struct ExternalBus {
     pub gain: f32,
@@ -45,9 +45,52 @@ impl Default for ExternalBus {
     }
 }
 
-/// The DSP's rendering rate. Fixed rather than device-queried: rodio resamples to
-/// the device, and every filter coefficient below is derived from this one number.
-pub(super) const SAMPLE_RATE: u32 = 44_100;
+/// A bus member's muffle policy, declared per sound: `Duck` follows the bus,
+/// `Exempt` bleeds through untouched. Nothing is exempted yet — the flag exists so a
+/// specific sound can later be sent through a code-entry melody as artistic flair
+/// without restructuring the bus (owner spec, rl#359).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Muffle {
+    Duck,
+    Exempt,
+}
+
+impl ExternalBus {
+    /// Shape one member's (gain, lowpass cutoff) by its muffle policy.
+    pub fn shape(&self, gain: f32, lowpass_hz: f32, muffle: Muffle) -> (f32, f32) {
+        match muffle {
+            Muffle::Duck => (gain * self.gain, lowpass_hz.min(self.lowpass_hz)),
+            Muffle::Exempt => (gain, lowpass_hz),
+        }
+    }
+}
+
+/// The muffled world while a code is being typed: quiet and behind a closed window,
+/// but present — the instrument sits alone on top, and the return to transparency on
+/// release is itself the "exhale". Cutoffs glide at the members' 60 ms bus rate, so
+/// the duck lands as one mix move.
+const MUFFLE_GAIN: f32 = 0.22;
+const MUFFLE_LOWPASS_HZ: f32 = 650.0;
+
+/// Bus writer (the ONE writer): while chord entry is live, duck + low-pass every
+/// non-exempt external sound so the d-pad instrument never competes with the world.
+/// `typing`, not `capturing`: the release frame still counts as entry, so the world
+/// swells back only after the resolution sound has started.
+pub(super) fn drive_muffle(
+    chords: Res<crab_world::chord::Chords<crate::controls::GcrControls>>,
+    mut bus: ResMut<ExternalBus>,
+) {
+    *bus = if chords.typing() {
+        ExternalBus {
+            gain: MUFFLE_GAIN,
+            lowpass_hz: MUFFLE_LOWPASS_HZ,
+        }
+    } else {
+        ExternalBus::default()
+    };
+}
+
+pub(super) use crab_world::wav::SAMPLE_RATE;
 
 /// The wind's loudness ceiling — the loudest thing in the outdoor mix; the
 /// ambience beds key their levels under it (ambience.rs).
@@ -180,13 +223,11 @@ pub(super) fn drive_wind(
         LocalVehicle::Flying { poses, .. } => poses.speed_mps().unwrap_or(0.0),
     };
     let [gain, cutoff, whistle_hz, whistle_gain, gust] = profile(vehicle.kind(), speed);
-    channel.0.store(
-        gain * bus.gain,
-        cutoff.min(bus.lowpass_hz),
-        whistle_hz,
-        whistle_gain,
-        gust,
-    );
+    // Wind is ordinary outdoor audio — it ducks under code entry like everything else.
+    let (gain, cutoff) = bus.shape(gain, cutoff, Muffle::Duck);
+    channel
+        .0
+        .store(gain, cutoff, whistle_hz, whistle_gain, gust);
 }
 
 /// Timbre map: context + airspeed → `[gain, cutoff_hz, whistle_hz, whistle_gain,
@@ -444,7 +485,7 @@ mod tests {
                 pcm.push((s.next().unwrap() * i16::MAX as f32) as i16);
             }
             let path = std::path::Path::new(&dir).join(format!("{name}.wav"));
-            std::fs::write(path, super::super::wav::wav_bytes(&pcm)).unwrap();
+            std::fs::write(path, crab_world::wav::wav_bytes(&pcm)).unwrap();
         }
     }
 }

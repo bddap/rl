@@ -292,6 +292,7 @@ mod glue {
         capture: ChordCapture,
         executed: Option<S::Action>,
         code_entry: bool,
+        events: ChordEvents,
     }
 
     impl<S: ControlScheme> Default for Chords<S> {
@@ -300,7 +301,53 @@ mod glue {
                 capture: ChordCapture::default(),
                 executed: None,
                 code_entry: false,
+                events: ChordEvents::default(),
             }
+        }
+    }
+
+    /// What the combo system CONSUMED this frame, for the d-pad instrument (rl#359):
+    /// the code path including this frame's taps, how many of its tail arrived this
+    /// frame, and whether a code completed (and was a registered one). Derived, not
+    /// tracked: recomputed each frame from the capture's own transitions, so it can't
+    /// drift from what the capture actually swallowed. A poisoned capture yields no
+    /// events — its taps are discarded, not consumed, and its release is a no-op.
+    #[derive(Default, PartialEq, Debug)]
+    pub(super) struct ChordEvents {
+        path: Vec<ChordDir>,
+        fresh: usize,
+        resolution: Option<bool>,
+    }
+
+    impl ChordEvents {
+        /// `prev_depth`: the live capture's length BEFORE this frame's step.
+        /// `completed`: the code the step returned (release frame) with its
+        /// registry verdict. `live`: the capture's buffer after the step.
+        pub(super) fn from_frame(
+            prev_depth: usize,
+            completed: Option<(Vec<ChordDir>, bool)>,
+            live: Option<&[ChordDir]>,
+        ) -> Self {
+            let (path, resolution) = match (completed, live) {
+                (Some((code, accepted)), _) => (code, Some(accepted)),
+                (None, Some(buf)) => (buf.to_vec(), None),
+                (None, None) => return Self::default(),
+            };
+            Self {
+                fresh: path.len() - prev_depth,
+                path,
+                resolution,
+            }
+        }
+
+        pub(super) fn presses(&self) -> impl Iterator<Item = (&[ChordDir], ChordDir)> {
+            let first = self.path.len() - self.fresh;
+            (first..self.path.len()).map(|i| (&self.path[..i], self.path[i]))
+        }
+
+        pub(super) fn resolution(&self) -> Option<(&[ChordDir], bool)> {
+            self.resolution
+                .map(|accepted| (self.path.as_slice(), accepted))
         }
     }
 
@@ -327,6 +374,21 @@ mod glue {
         /// See [`ChordCapture::entered`].
         pub fn entered(&self) -> Option<&[ChordDir]> {
             self.capture.entered()
+        }
+
+        /// The taps the combo system consumed THIS frame, each with the code prefix
+        /// it landed after — the d-pad instrument (rl#359) maps every one to a note.
+        /// Release-frame taps are included (they join the code; see
+        /// [`ChordCapture::step`]).
+        pub fn presses(&self) -> impl Iterator<Item = (&[ChordDir], ChordDir)> {
+            self.events.presses()
+        }
+
+        /// The code that COMPLETED this frame, with whether the registry accepted
+        /// it — the instrument's resolution sound. `None` on non-release frames and
+        /// on a poisoned (overflowed) release.
+        pub fn resolution(&self) -> Option<(&[ChordDir], bool)> {
+            self.events.resolution()
         }
     }
 
@@ -430,9 +492,15 @@ mod glue {
             )
             .collect::<Vec<_>>();
         let was_live = chords.capture.capturing();
+        let prev_depth = chords.capture.entered().map_or(0, <[_]>::len);
         let code = chords.capture.step(modifier, taps);
         chords.code_entry = was_live || chords.capture.capturing();
-        chords.executed = code.and_then(|c| S::chords().lookup(&c));
+        chords.executed = code.as_deref().and_then(|c| S::chords().lookup(c));
+        let completed = code.map(|c| {
+            let accepted = S::chords().lookup(&c).is_some();
+            (c, accepted)
+        });
+        chords.events = ChordEvents::from_frame(prev_depth, completed, chords.capture.entered());
     }
 
     /// See [`ChordCapture::reset`] — schedule on the surface's round-entry transition
@@ -442,6 +510,7 @@ mod glue {
         chords.capture.reset();
         chords.executed = None;
         chords.code_entry = false;
+        chords.events = ChordEvents::default();
     }
 
     /// The one wiring of chord input onto an app: the resource plus the capture system.
@@ -455,6 +524,9 @@ mod glue {
             )
             .add_systems(Startup, spawn_chord_menu::<S>)
             .add_systems(Update, update_chord_menu::<S>);
+        // Code entry IS playing the d-pad instrument (rl#359) — every chord surface
+        // sounds through the one install, so a new surface can't ship silent entry.
+        crate::instrument::install::<S>(app);
     }
 
     #[cfg(test)]
@@ -497,6 +569,36 @@ mod glue {
             );
             assert_eq!(CHORD_MODIFIER_MOUSE, MouseButton::Right);
             assert_eq!(modifier_glyph(Device::KeyboardMouse), Glyph::Label("RMB"));
+        }
+
+        /// The instrument's event accounting (rl#359): mid-capture taps come with the
+        /// prefix each landed after; release-frame taps are included; the completed
+        /// code carries the registry verdict; a poisoned frame yields nothing.
+        #[test]
+        fn chord_events_expose_consumed_taps_and_resolution() {
+            use ChordDir::*;
+            // Two taps arrived this frame onto a 1-deep capture.
+            let live = ChordEvents::from_frame(1, None, Some(&[Up, Down, Left]));
+            let presses: Vec<_> = live.presses().map(|(p, d)| (p.to_vec(), d)).collect();
+            assert_eq!(presses, vec![(vec![Up], Down), (vec![Up, Down], Left)]);
+            assert_eq!(live.resolution(), None);
+
+            // Release frame with a same-frame final tap: the tap sounds AND the
+            // accepted code resolves.
+            let released = ChordEvents::from_frame(1, Some((vec![Up, Right], true)), None);
+            let presses: Vec<_> = released.presses().map(|(p, d)| (p.to_vec(), d)).collect();
+            assert_eq!(presses, vec![(vec![Up], Right)]);
+            assert_eq!(released.resolution(), Some((&[Up, Right][..], true)));
+
+            // Unknown code: resolution says so.
+            let unknown = ChordEvents::from_frame(2, Some((vec![Down, Down], false)), None);
+            assert_eq!(unknown.presses().count(), 0);
+            assert_eq!(unknown.resolution(), Some((&[Down, Down][..], false)));
+
+            // Poisoned (or idle) frame: no path, no events.
+            let idle = ChordEvents::from_frame(0, None, None);
+            assert_eq!(idle.presses().count(), 0);
+            assert_eq!(idle.resolution(), None);
         }
 
         /// Pins the fix for the sub-frame modifier tap: press+release inside one frame

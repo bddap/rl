@@ -1,15 +1,19 @@
-//! Minimal strict WAV IO for the ambience beds. The fetch pipeline ships every bed
-//! as 16-bit mono PCM at [`SAMPLE_RATE`] (ffmpeg at asset-prep time is the one
-//! converter), so the reader REFUSES anything else instead of resampling — a
-//! runtime resampler would be a second, silent conversion path.
+//! Minimal strict WAV IO plus the one DSP rendering rate every procedural audio
+//! source in the workspace runs at (net's wind/ambience, the d-pad instrument). The
+//! fetch pipeline ships every sampled bed as 16-bit mono PCM at [`SAMPLE_RATE`]
+//! (ffmpeg at asset-prep time is the one converter), so the reader REFUSES anything
+//! else instead of resampling — a runtime resampler would be a second, silent
+//! conversion path.
 
 use std::path::Path;
 
-use super::audio::SAMPLE_RATE;
+/// The DSP rendering rate. Fixed rather than device-queried: rodio resamples to the
+/// device, and every synth's filter/envelope coefficients derive from this number.
+pub const SAMPLE_RATE: u32 = 44_100;
 
 /// Read a whole WAV file as f32 samples in −1..1, requiring 16-bit mono PCM at
 /// [`SAMPLE_RATE`].
-pub(super) fn read_mono_44k(path: &Path) -> Result<Vec<f32>, String> {
+pub fn read_mono_44k(path: &Path) -> Result<Vec<f32>, String> {
     parse_mono_44k(&std::fs::read(path).map_err(|e| e.to_string())?)
 }
 
@@ -56,10 +60,10 @@ fn parse_mono_44k(b: &[u8]) -> Result<Vec<f32>, String> {
     Err("no data chunk".into())
 }
 
-/// RIFF/WAVE writer for tests and evidence generators: 16-bit mono PCM at
-/// [`SAMPLE_RATE`] — the same (only) format the reader accepts.
-#[cfg(test)]
-pub(super) fn wav_bytes(pcm: &[i16]) -> Vec<u8> {
+/// RIFF/WAVE writer for tests and evidence generators (net's wind/ambience clips,
+/// the rl#359 instrument clips): 16-bit mono PCM at [`SAMPLE_RATE`] — the same
+/// (only) format the reader accepts.
+pub fn wav_bytes(pcm: &[i16]) -> Vec<u8> {
     let data_len = (pcm.len() * 2) as u32;
     let mut out = Vec::with_capacity(44 + pcm.len() * 2);
     out.extend(b"RIFF");

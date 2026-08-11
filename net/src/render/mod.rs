@@ -89,7 +89,6 @@ mod screenshot;
 #[cfg(test)]
 mod tests;
 mod vehicle_view;
-mod wav;
 
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use audio::ExternalBus;
