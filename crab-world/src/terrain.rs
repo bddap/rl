@@ -387,7 +387,7 @@ impl TerrainGrid {
 /// paints scree (rl#304: decoration that disagrees with the ground's own colors
 /// reads as pasted-on).
 #[cfg(feature = "render")]
-pub(crate) mod biome {
+pub mod biome {
     use crate::sky::smoothstep;
 
     pub(crate) const DEEP_VALLEY_M: f32 = -3200.0;
@@ -408,7 +408,9 @@ pub(crate) mod biome {
     /// 0..1 chance weight that a grass tuft stands at elevation `h` on ground with
     /// up-normal `normal_y`: grass thins past the scree rim, is gone by the
     /// high-brown band, and never grows on rock-steep faces or under snow.
-    pub(crate) fn tuft_weight(h: f32, normal_y: f32) -> f32 {
+    /// `pub` beyond the crate: the ambience bus (net's render) keys its grassland
+    /// beds on this same weight, so birds sing exactly where tufts grow.
+    pub fn tuft_weight(h: f32, normal_y: f32) -> f32 {
         let steep = 1.0 - normal_y;
         let low_enough = 1.0 - smoothstep(SCREE_M, HIGH_BROWN_M, h);
         let flat_enough = 1.0 - smoothstep(ROCK_STEEP.0, ROCK_STEEP.1, steep);

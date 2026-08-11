@@ -47,7 +47,7 @@ impl Default for ExternalBus {
 
 /// The DSP's rendering rate. Fixed rather than device-queried: rodio resamples to
 /// the device, and every filter coefficient below is derived from this one number.
-const SAMPLE_RATE: u32 = 44_100;
+pub(super) const SAMPLE_RATE: u32 = 44_100;
 
 /// Full-wind airspeed, m/s — the plane's full-throttle terminal (~4.5 m/s, the
 /// fastest thing in the game; see `PLANE` in crab-world's vehicle.rs). At or above
@@ -431,27 +431,7 @@ mod tests {
                 pcm.push((s.next().unwrap() * i16::MAX as f32) as i16);
             }
             let path = std::path::Path::new(&dir).join(format!("{name}.wav"));
-            std::fs::write(path, wav_bytes(&pcm)).unwrap();
+            std::fs::write(path, super::super::wav::wav_bytes(&pcm)).unwrap();
         }
-    }
-
-    /// Minimal RIFF/WAVE writer: 16-bit mono PCM at [`SAMPLE_RATE`].
-    fn wav_bytes(pcm: &[i16]) -> Vec<u8> {
-        let data_len = (pcm.len() * 2) as u32;
-        let mut out = Vec::with_capacity(44 + pcm.len() * 2);
-        out.extend(b"RIFF");
-        out.extend((36 + data_len).to_le_bytes());
-        out.extend(b"WAVEfmt ");
-        out.extend(16u32.to_le_bytes());
-        out.extend(1u16.to_le_bytes()); // PCM
-        out.extend(1u16.to_le_bytes()); // mono
-        out.extend(SAMPLE_RATE.to_le_bytes());
-        out.extend((SAMPLE_RATE * 2).to_le_bytes()); // byte rate
-        out.extend(2u16.to_le_bytes()); // block align
-        out.extend(16u16.to_le_bytes()); // bits
-        out.extend(b"data");
-        out.extend(data_len.to_le_bytes());
-        out.extend(pcm.iter().flat_map(|s| s.to_le_bytes()));
-        out
     }
 }

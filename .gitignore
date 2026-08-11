@@ -20,6 +20,9 @@ vendor/
 # spot a dev may still have. The committed CC0 control glyphs under
 # crab-world/assets/controls/ stay tracked (different name).
 sally.glb
+# CC0 ambience beds (see NOTICE): fetched by scripts/fetch-ambience.sh, kept out
+# of git for size only.
+crab-world/assets/ambience/
 # Checkpoint scratch dirs: the default is `checkpoints` (above), but smoke/scratch
 # runs name theirs `<prefix>-ckpt`/`ckpt-<suffix>` (e.g. `smoke-ckpt`). Ignore any
 # dir whose name contains `ckpt` so a broad `git add` can't sweep brain/optimizer
