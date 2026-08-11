@@ -87,9 +87,8 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let macro_n = vnoise(p / 560.0, 11u) * 0.6 + vnoise(p / 150.0, 12u) * 0.4;
     rgb *= 1.0 + 0.30 * strengths.y * macro_n;
 
-    // ── Tier 3: mudcracks (~1.2 m) + fine grain — the on-foot read ─────────
-    // (Isotropic fine octaves kept for stage 4(a)'s identical-output sweep;
-    // 4(b) deletes them for the scaffold's adaptive layer.)
+    // ── Tier 3: mudcracks (~1.2 m) — the on-foot read ──────────────────────
+    // Fine isotropic grain is the scaffold's always-on layer (grain = 1 below).
     let crack_fade = footprint_fade(1.2, fw);
     var crack = 0.0;
     if crack_fade > 0.001 {
@@ -101,28 +100,13 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         // Slight per-polygon value so shards read individually.
         rgb *= 1.0 + 0.10 * (mud.z - 0.5) * strengths.z * crack_fade;
     }
-    var fine_n = vnoise(p / 0.9, 32u) * 0.8 * footprint_fade(0.9, fw)
-        + vnoise(p / 0.31, 33u) * 0.6 * footprint_fade(0.31, fw);
-    let grit_fade = footprint_fade(0.11, fw);
-    if grit_fade > 0.001 {
-        fine_n += vnoise(p / 0.11, 35u) * 0.45 * grit_fade;
-    }
-    rgb *= 1.0 + 0.26 * strengths.z * fine_n;
 
-    // ── Normals: crack grooves + micro-relief ──────────────────────────────
+    // ── Normals: crack grooves ─────────────────────────────────────────────
     // Mudcrack grooves dip toward the crack line (finite-difference of the
-    // crack field), so grazing moonlight draws every polygon edge; plus the
-    // round-2 micro-relief (kept for 4(a); 4(b) hands the isotropic part to the
-    // scaffold's relief layer). Shading only — geometry untouched.
-    let w_n = strengths.w * footprint_fade(0.45, fw);
+    // crack field), so grazing moonlight draws every polygon edge; isotropic
+    // micro-relief is the scaffold's relief layer. Shading only — geometry
+    // untouched.
     var grad = vec2(0.0);
-    if w_n > 0.001 {
-        let step = 0.12;
-        let h0 = vnoise(p / 0.45, 51u);
-        let hx = vnoise((p + vec2(step, 0.0)) / 0.45, 51u);
-        let hz = vnoise((p + vec2(0.0, step)) / 0.45, 51u);
-        grad = vec2(hx - h0, hz - h0) / step * 0.06 * w_n;
-    }
     let groove_w = strengths.w * crack_fade;
     if groove_w > 0.001 {
         let gs = 0.08;
@@ -143,7 +127,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     out.n = n;
     out.emissive = vec3(0.0);
     out.glow = vec3(0.0);
-    out.grain = 0.0;
-    out.relief = 0.0;
+    out.grain = 1.0;
+    out.relief = 1.0;
     return out;
 }

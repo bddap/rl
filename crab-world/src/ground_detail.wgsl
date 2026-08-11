@@ -1,8 +1,7 @@
 // rl::ground::detail — the always-on high-frequency ground layer (rl#333 seam 2):
-// the rl#324 adaptive descents, extracted verbatim from shipped.wgsl. One copy, so
-// a taste pass on on-foot detail is one edit, fleet-wide. Stage 4 moves the calls
-// into the ground scaffold (every look composes with this by construction); until
-// then shipped.wgsl is the sole importer.
+// the rl#324 adaptive descents. One copy, called only by the ground scaffold
+// (ground.wgsl), so every look composes with it by construction and a taste pass
+// on on-foot detail is one edit, fleet-wide.
 
 #define_import_path rl::ground::detail
 
@@ -19,11 +18,10 @@
 // Distant ground exits after one test — fw alone decides, so the loop is
 // quad-coherent and the near-fullscreen far ground pays nothing.
 // Each octave rotated by ROT from the last (why that angle: rl::noise).
-// `gain` is the caller's composed grain strength (0.30 * strengths.z today;
-// `strengths.z * art.grain` after stage 4) — inside the function, like
-// relief_normal's, so both seams share one contract (pass the composed gain,
-// get the finished contribution) and a zero-gain look skips the descent
-// entirely instead of paying it and multiplying by nothing.
+// `gain` is the scaffold's composed grain strength (`strengths.z * art.grain`)
+// — inside the function, like relief_normal's, so both seams share one contract
+// (pass the composed gain, get the finished contribution) and a zero-gain look
+// skips the descent entirely instead of paying it and multiplying by nothing.
 fn fine_color(p: vec2<f32>, fw: f32, gain: f32) -> f32 {
     // Exact-zero gate, not a relief_normal-style threshold: a threshold on
     // gain*fade drops sub-LSB contributions and breaks this module's
@@ -61,9 +59,8 @@ fn fine_color(p: vec2<f32>, fw: f32, gain: f32) -> f32 {
 // step scales with the wavelength so each octave's gradient stays honest;
 // per-octave gradient weight falls slower than the color amplitude (relief keeps
 // more of its punch as it refines — pebbles under moonlight, not blur).
-// `gain` is the caller's relief strength (strengths.w today; scaffold-owned
-// `strengths.w * art.relief` after stage 4); at or below the fade threshold the
-// geometric normal passes through untouched.
+// `gain` is the scaffold's composed relief strength (`strengths.w * art.relief`);
+// at or below the fade threshold the incoming normal passes through untouched.
 fn relief_normal(p: vec2<f32>, fw: f32, n: vec3<f32>, gain: f32) -> vec3<f32> {
     if gain * footprint_fade(0.45, fw) <= 0.001 {
         return n;

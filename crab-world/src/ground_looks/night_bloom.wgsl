@@ -45,20 +45,11 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         + vnoise(p / 90.0, 13u) * 0.15;
     rgb *= 1.0 + 0.40 * strengths.y * macro_n * mix(0.4, 1.0, veg);
 
-    // Meso mottling + fine detail: the optic-flow duty, unchanged in role.
-    // (Fine octaves kept for stage 4(a)'s identical-output sweep; 4(b) deletes
-    // them for the scaffold's adaptive layer.)
+    // Meso mottling: the mid-range octave gap. Fine on-foot detail is the
+    // scaffold's always-on layer (grain = 1 below).
     let meso_n = vnoise(p / 26.0, 21u) * footprint_fade(26.0, fw)
         + vnoise(p / 9.0, 22u) * 0.7 * footprint_fade(9.0, fw);
     rgb *= 1.0 + 0.30 * strengths.y * meso_n;
-    var fine_n = vnoise(p / 2.6, 31u) * footprint_fade(2.6, fw)
-        + vnoise(p / 0.9, 32u) * 0.8 * footprint_fade(0.9, fw)
-        + vnoise(p / 0.31, 33u) * 0.6 * footprint_fade(0.31, fw);
-    let grit_fade = footprint_fade(0.11, fw);
-    if grit_fade > 0.001 {
-        fine_n += vnoise(p / 0.11, 35u) * 0.45 * grit_fade;
-    }
-    rgb *= 1.0 + 0.28 * strengths.z * fine_n;
 
     // ── The bloom ──────────────────────────────────────────────────────────
     // Two dendritic vein tiers on warped noise zero-sets: arteries (params[4].z
@@ -109,26 +100,14 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let emissive = vein_col * (params[1].w * artery_g + params[4].x * capil_g)
         + params[3].xyz * params[3].w * spore_g;
 
-    // Detail normal: moonlit micro-relief up close (kept for stage 4(a);
-    // 4(b) hands the duty to the scaffold's relief layer).
-    var n = ctx.n;
-    let w_n = strengths.w * footprint_fade(0.45, fw);
-    if w_n > 0.001 {
-        let step = 0.12;
-        let h0 = vnoise(p / 0.45, 51u);
-        let hx = vnoise((p + vec2(step, 0.0)) / 0.45, 51u);
-        let hz = vnoise((p + vec2(0.0, step)) / 0.45, 51u);
-        let grad = vec2(hx - h0, hz - h0) / step * 0.06;
-        n = normalize(n + w_n * vec3(-grad.x, 0.0, -grad.y));
-    }
-
     var out: GroundArt;
     out.rgb = rgb;
     out.roughness = ctx.rough;
-    out.n = n;
+    // Micro-relief is the scaffold's relief layer.
+    out.n = ctx.n;
     out.emissive = emissive;
     out.glow = vec3(0.0);
-    out.grain = 0.0;
-    out.relief = 0.0;
+    out.grain = 1.0;
+    out.relief = 1.0;
     return out;
 }

@@ -132,7 +132,9 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     out.n = n;
     out.emissive = vec3(0.0);
     out.glow = vec3(0.0);
-    out.grain = 0.0;
-    out.relief = 0.0;
+    // The cobble above is structured near-field art, not the generic layer —
+    // the scaffold's grain/relief ride on top at full strength.
+    out.grain = 1.0;
+    out.relief = 1.0;
     return out;
 }

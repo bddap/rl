@@ -75,16 +75,14 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     // Straw combs lighter, green combs darker: a hue tilt, not a gray wash.
     rgb *= vec3(1.0 + 0.12 * comb_v, 1.0 + 0.04 * comb_v, 1.0 - 0.08 * comb_v);
 
-    // Fine on-foot grain: short combed fiber plus a little isotropic grit so
-    // bare soil never reads as pure stripes. Branch-gated (screen-coherent,
-    // distance-driven) so the far ground never pays for it. (Kept for stage
-    // 4(a)'s identical-output sweep; 4(b) keeps the directional fiber and hands
-    // the isotropic grit to the scaffold's adaptive layer.)
+    // Fine on-foot grain: short combed fiber — the directional identity the
+    // shared layer cannot carry; isotropic grit is the scaffold's always-on
+    // layer (grain = 1 below). Branch-gated (screen-coherent, distance-driven)
+    // so the far ground never pays for it.
     let grain_f = footprint_fade(0.5, fw);
     if grain_f > 0.001 {
         let g = streak(p, d, 3.4, 0.5, 81u) * grain_f
-            + streak(p, d, 1.2, 0.18, 82u) * 0.7 * footprint_fade(0.18, fw)
-            + vnoise(p / 0.24, 83u) * 0.45 * footprint_fade(0.24, fw);
+            + streak(p, d, 1.2, 0.18, 82u) * 0.7 * footprint_fade(0.18, fw);
         rgb *= 1.0 + 0.33 * strengths.z * g;
     }
 
@@ -116,7 +114,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     out.n = n;
     out.emissive = vec3(0.0);
     out.glow = vec3(0.0);
-    out.grain = 0.0;
-    out.relief = 0.0;
+    out.grain = 1.0;
+    out.relief = 1.0;
     return out;
 }
