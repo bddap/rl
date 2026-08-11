@@ -73,6 +73,9 @@ pub struct ScatterPlugin;
 impl Plugin for ScatterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Chunks>()
+            // Also owned by GroundMaterialPlugin; init here too so this plugin
+            // stands alone (tests, a future surface without the ground material).
+            .init_resource::<crate::ground::GroundAnchor>()
             .add_systems(Startup, setup_scatter_assets)
             .add_systems(Update, update_scatter);
     }
@@ -246,6 +249,7 @@ fn update_scatter(
     mut commands: Commands,
     terrain: Res<Terrain>,
     assets: Option<Res<ScatterAssets>>,
+    anchor: Res<crate::ground::GroundAnchor>,
     mut chunks: ResMut<Chunks>,
     cams: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
@@ -259,6 +263,11 @@ fn update_scatter(
     else {
         return;
     };
+    // The camera lives in the render frame (world − anchor, rl#354); chunk coords
+    // and instance placement are ABSOLUTE world, so add the anchor back here and
+    // subtract it once per chunk parent below. The mm-scale f32 rounding this costs
+    // selects chunks and grounds tufts — both far coarser than a millimeter.
+    let cam = cam + Vec3::new(anchor.0.x, 0.0, anchor.0.y);
     let cam_xz = Vec2::new(cam.x, cam.z);
     let above = cam.y - terrain.height(cam.x, cam.z);
     let cutoff = if chunks.0.is_empty() {
@@ -284,7 +293,14 @@ fn update_scatter(
         }
         spawned += 1;
         let parent = commands
-            .spawn((Transform::IDENTITY, Visibility::default()))
+            .spawn((
+                // Children are absolute-world instances; the parent carries them
+                // into the render frame. A round change re-anchors only chunks
+                // spawned after it — the old locale's chunks leave the wanted disc
+                // the same frame the camera teleports.
+                Transform::from_translation(Vec3::new(-anchor.0.x, 0.0, -anchor.0.y)),
+                Visibility::default(),
+            ))
             .with_children(|p| {
                 for (kind, tf) in chunk_instances(&terrain, c) {
                     let (mesh, mat) = match kind {

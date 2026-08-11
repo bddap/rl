@@ -117,12 +117,16 @@ fn reconcile_vehicle_models(
     remote: Res<RemoteVehicle>,
     clock: Res<super::driver::RenderClock>,
     mode: Res<RenderMode>,
+    origin: Res<super::RenderOrigin>,
     mut models: Query<(Entity, &VehicleModel, &mut Transform, &mut Visibility)>,
 ) {
     let sampled = remote.sample(clock.tick, clock.frac);
     let want_vis = mode.mesh_visibility();
-    let placed =
-        |c: &SampledCraft| Transform::from_translation(c.pose.pos).with_rotation(c.pose.orient);
+    // Physics poses are absolute; models render in the render frame (rl#354).
+    let offset = origin.offset_m();
+    let placed = |c: &SampledCraft| {
+        Transform::from_translation(c.pose.pos - offset).with_rotation(c.pose.orient)
+    };
     let mut matched = std::collections::BTreeSet::new();
     for (entity, model, mut tf, mut vis) in &mut models {
         match sampled.iter().find(|v| v.pilot == model.pilot) {
@@ -262,6 +266,7 @@ mod tests {
         // and articulation.rs.
         w.insert_resource(super::super::driver::RenderClock { tick: 1, frac: 0.0 });
         w.insert_resource(mode);
+        w.insert_resource(super::super::RenderOrigin::default());
         w
     }
 

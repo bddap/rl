@@ -37,8 +37,31 @@ const PAD_LOOK_SPEED: f32 = 2.5;
 
 const PITCH_LIMIT: f32 = 1.5;
 
-fn world(pos: Pos, y: f32) -> Vec3 {
-    let (x, z) = pos.to_meters();
+/// The render frame's origin in sim space — the round's extraction point, synced
+/// with [`crab_world::ground::GroundAnchor`] by `sync_ground_anchor` (rl#354).
+/// EVERY Transform written render-side is world − this: subtracting on the i64
+/// grid before the f32 conversion is what keeps the 0.051 m player's eye path
+/// smooth at the rl#305 locales, where absolute f32 meters quantize at ~0.5–1.3 mm
+/// — a large fraction of a per-tick walking step (the owner-visible nearby-ground
+/// judder). Values already in absolute f32 world meters (rapier poses) subtract
+/// [`RenderOrigin::offset_m`] instead — exact near the origin (Sterbenz), keeping
+/// whatever precision physics gave them.
+#[derive(Resource, Default, Clone, Copy)]
+pub(crate) struct RenderOrigin(pub(crate) Pos);
+
+impl RenderOrigin {
+    /// The origin as absolute world meters, y = 0 (the anchor is xz-only) — the
+    /// subtrahend for poses that only exist in f32 world meters.
+    pub(crate) fn offset_m(self) -> Vec3 {
+        let (x, z) = self.0.to_meters();
+        Vec3::new(x, 0.0, z)
+    }
+}
+
+/// A sim point in the render frame, at explicit height `y` (absolute — the frame
+/// rebases xz only).
+fn world(pos: Pos, y: f32, origin: RenderOrigin) -> Vec3 {
+    let (x, z) = pos.rel_meters(origin.0);
     Vec3::new(x, y, z)
 }
 

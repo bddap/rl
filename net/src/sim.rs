@@ -370,6 +370,27 @@ impl Pos {
             z: meters_to_grid(z_m),
         }
     }
+
+    /// This position relative to `origin`, in meters — THE render-frame conversion
+    /// (rl#354). Subtract on the i64 grid FIRST, then convert: the difference is
+    /// small near the origin, so the f32 keeps the grid's full 10 µm resolution.
+    /// Converting each side to f32 first quantizes at ~0.5–1.3 mm out at the
+    /// rl#305 locales — a large fraction of the 0.051 m player's per-tick walking
+    /// step, rendered as nearby-ground judder.
+    pub fn rel_meters(self, origin: Pos) -> (f32, f32) {
+        Pos {
+            x: self.x - origin.x,
+            z: self.z - origin.z,
+        }
+        .to_meters()
+    }
+
+    /// Absolute meters at f64 — for terrain sampling
+    /// ([`crab_world::terrain::TerrainGrid::height_f64`]), where f32's ~1 mm
+    /// quantization at the far locales is the rl#354 stair-step.
+    pub fn to_meters_f64(self) -> (f64, f64) {
+        (self.x as f64 / UNIT as f64, self.z as f64 / UNIT as f64)
+    }
 }
 
 /// Scalar leg of [`Pos::from_meters`], for the heights that ride beside a `Pos`

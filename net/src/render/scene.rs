@@ -17,24 +17,29 @@ pub(super) struct FpCamera;
 #[derive(Component)]
 pub(super) struct ExtractionPillar;
 
-/// Anchor the ground detail's UV frame on the round's locale (rl#334):
-/// world-frame f32 coordinates quantize at ~1-2 mm out at the rl#305 corners,
-/// which the fine detail octaves render as boiling speckle. The extraction point
-/// is the anchor rather than the spawn-frame origin because it is the one locale
-/// mark every peer holds host-authoritatively (it ships in the snapshot;
-/// `spawn_frame` is each sim's private draw, so a wire-joiner's disagrees with
-/// the host's by up to the whole tile) — and it sits within meters of the spawn
-/// line. Constant per round, so the pattern stays glued to the ground mid-round;
-/// a wire-joiner may render a frame or two on its placeholder extraction before
-/// the first snapshot lands — one extra UV rewrite and pattern re-pop,
-/// self-correcting at snapshot cadence. The `!=` guard is change-tick hygiene
-/// only; the rewrite itself is gated by
-/// [`crab_world::ground::apply_ground_anchor`]'s per-mesh value compare.
+/// Anchor the render frame on the round's locale (rl#334/rl#354): world-frame f32
+/// coordinates quantize at ~0.5–2 mm out at the rl#305 corners — boiling speckle
+/// in the detail octaves, and per-frame judder of everything near a walking eye —
+/// so every rendered Transform is world − this anchor ([`super::RenderOrigin`];
+/// [`crab_world::ground::GroundAnchor`] is its f32 shadow, consumed by the
+/// terrain/scatter side). The extraction point is the anchor rather than the
+/// spawn-frame origin because it is the one locale mark every peer holds
+/// host-authoritatively (it ships in the snapshot; `spawn_frame` is each sim's
+/// private draw, so a wire-joiner's disagrees with the host's by up to the whole
+/// tile) — and it sits within meters of the spawn line. Constant per round, so
+/// nothing pops mid-round; a wire-joiner may render a frame or two on its
+/// placeholder extraction before the first snapshot lands — one re-anchor,
+/// self-correcting at snapshot cadence. The `!=` guards are change-tick hygiene.
 pub(super) fn sync_ground_anchor(
     state: NonSend<GameState>,
+    mut origin: ResMut<super::RenderOrigin>,
     mut anchor: ResMut<crab_world::ground::GroundAnchor>,
 ) {
-    let (x, z) = state.client.sim().extraction().pos().to_meters();
+    let extraction = state.client.sim().extraction().pos();
+    if origin.0 != extraction {
+        origin.0 = extraction;
+    }
+    let (x, z) = extraction.to_meters();
     let locale = Vec2::new(x, z);
     if anchor.0 != locale {
         anchor.0 = locale;
@@ -42,13 +47,20 @@ pub(super) fn sync_ground_anchor(
 }
 
 /// The rendered spot `above` meters over the ground under a sim point (one frame since
-/// rl#298 stage 5: the world IS the sim in meters). Every sim entity stands ON this
-/// surface — via [`crab_world::terrain::TerrainGrid::place`], THE spawn-on-surface
-/// primitive (rl#336), not a reimplementation; on the flat grids the ground is exactly
-/// the old y = 0.
-fn place_over(pos: Pos, above: f32, terrain: &crab_world::terrain::Terrain) -> Vec3 {
-    let (x, z) = pos.to_meters();
-    terrain.place(Vec2::new(x, z), above)
+/// rl#298 stage 5: the world IS the sim in meters, rebased into the render frame,
+/// rl#354). Every sim entity stands ON this surface — xz subtracts the origin on the
+/// i64 grid (full fixed-point resolution), y samples the terrain at f64 so the eye
+/// height cannot stair-step with f32's ~1 mm far-locale quantization; on the flat
+/// grids the ground is exactly the old y = 0.
+fn place_over(
+    pos: Pos,
+    above: f32,
+    terrain: &crab_world::terrain::Terrain,
+    origin: super::RenderOrigin,
+) -> Vec3 {
+    let (x, z) = pos.rel_meters(origin.0);
+    let (ax, az) = pos.to_meters_f64();
+    Vec3::new(x, terrain.height_f64(ax, az) as f32 + above, z)
 }
 
 /// Stand the extraction pillar on the ground under its sim point — per frame, like the
@@ -56,17 +68,19 @@ fn place_over(pos: Pos, above: f32, terrain: &crab_world::terrain::Terrain) -> V
 pub(super) fn place_extraction_pillar(
     state: NonSend<GameState>,
     terrain: Res<crab_world::terrain::Terrain>,
+    origin: Res<super::RenderOrigin>,
     mut pillars: Query<&mut Transform, With<ExtractionPillar>>,
 ) {
     let ex = state.client.sim().extraction().pos();
     let pillar_h = crate::sim::CRAB_STATURE * 1.2;
     for mut t in &mut pillars {
-        t.translation = place_over(ex, pillar_h * 0.5, &terrain);
+        t.translation = place_over(ex, pillar_h * 0.5, &terrain, *origin);
     }
 }
 
 pub(super) fn spawn_world(
     mut commands: Commands,
+    origin: Res<super::RenderOrigin>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     state: NonSend<GameState>,
@@ -88,7 +102,7 @@ pub(super) fn spawn_world(
             emissive: LinearRgba::new(0.0, 2.2, 0.4, 1.0),
             ..default()
         })),
-        Transform::from_translation(world(ex, pillar_h * 0.5)),
+        Transform::from_translation(world(ex, pillar_h * 0.5, *origin)),
     ));
 
     commands.insert_resource(AvatarAssets {
@@ -125,7 +139,7 @@ pub(super) fn spawn_world(
         let crab_root = commands
             .spawn((
                 DespawnOnExit(AppPhase::Playing),
-                Transform::from_translation(world(crab.pos(), 0.0)),
+                Transform::from_translation(world(crab.pos(), 0.0, *origin)),
                 if crab_hidden {
                     Visibility::Hidden
                 } else {
@@ -153,6 +167,7 @@ pub(super) struct AvatarAssets {
 
 pub(super) fn reconcile_avatars(
     mut commands: Commands,
+    origin: Res<super::RenderOrigin>,
     assets: Res<AvatarAssets>,
     state: NonSend<GameState>,
     avatars: Query<(Entity, &PlayerAvatar)>,
@@ -183,7 +198,7 @@ pub(super) fn reconcile_avatars(
             DespawnOnExit(AppPhase::Playing),
             Mesh3d(assets.mesh.clone()),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(world(p.pos(), 0.0)),
+            Transform::from_translation(world(p.pos(), 0.0, *origin)),
             PlayerAvatar(id),
         ));
     }
@@ -334,6 +349,7 @@ pub(super) fn apply_transforms(
     mut yaw: ResMut<CameraYaw>,
     vehicle: Res<LocalVehicle>,
     terrain: Res<crab_world::terrain::Terrain>,
+    origin: Res<super::RenderOrigin>,
     remote_crafts: Res<super::articulation::RemoteVehicle>,
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
@@ -344,7 +360,7 @@ pub(super) fn apply_transforms(
     let local = state.client.me();
     // Sim entities stand ON the world surface (rl#281): every lift below is height
     // above the local ground, sampled at the entity's own interpolated spot.
-    let place = |pos: Pos, above: f32| place_over(pos, above, &terrain);
+    let place = |pos: Pos, above: f32| place_over(pos, above, &terrain, *origin);
 
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
         let Some(now) = sim.player(avatar.0) else {
@@ -388,7 +404,7 @@ pub(super) fn apply_transforms(
 
     if let Ok(mut cam) = cam_q.single_mut() {
         if let Some(pose) = vehicle.cockpit_sample(clock.tick, alpha) {
-            *cam = cockpit_camera(pose);
+            *cam = cockpit_camera(pose, *origin);
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
@@ -403,7 +419,7 @@ pub(super) fn apply_transforms(
             let look_dir = look_direction(cam_yaw, pitch.0);
             *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
         }
-        clamp_camera_above_terrain(&mut cam, &terrain);
+        clamp_camera_above_terrain(&mut cam, &terrain, *origin);
     }
 }
 
@@ -423,13 +439,23 @@ pub(super) const CAM_TERRAIN_CLEARANCE: f32 = 4.0 * FP_NEAR;
 pub(super) fn clamp_camera_above_terrain(
     cam: &mut Transform,
     terrain: &crab_world::terrain::TerrainGrid,
+    origin: super::RenderOrigin,
 ) {
-    let floor = terrain.height(cam.translation.x, cam.translation.z) + CAM_TERRAIN_CLEARANCE;
+    // The camera lives in the render frame; the terrain sampler speaks absolute
+    // world meters, so add the origin back — at f64, or the sum re-quantizes at
+    // the very ~1 mm the frame exists to avoid (rl#354).
+    let (ox, oz) = origin.0.to_meters_f64();
+    let floor = terrain.height_f64(cam.translation.x as f64 + ox, cam.translation.z as f64 + oz)
+        as f32
+        + CAM_TERRAIN_CLEARANCE;
     cam.translation.y = cam.translation.y.max(floor);
 }
 
-fn cockpit_camera(pose: Pose) -> Transform {
-    let eye = pose.pos;
+/// The cockpit eye: the craft's physics pose carried into the render frame. The
+/// pose only exists in absolute f32 world meters (rapier), so this subtraction is
+/// as precise as physics itself — exact near the origin (Sterbenz).
+fn cockpit_camera(pose: Pose, origin: super::RenderOrigin) -> Transform {
+    let eye = pose.pos - origin.offset_m();
     let rot = pose.orient;
     Transform::from_translation(eye).looking_at(eye + rot * Vec3::Z, rot * Vec3::Y)
 }

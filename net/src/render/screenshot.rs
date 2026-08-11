@@ -95,11 +95,13 @@ fn finish_offscreen_app(
                 gather_input,
                 drive_pilot_script,
                 drive_client_sim,
+                // Before any pose/transform consumer, as in the windowed app: the
+                // render origin must be current the frame it changes (rl#354).
+                sync_ground_anchor.before(crab_world::ground::apply_ground_anchor),
                 super::articulation::sample_crab_part_poses,
                 reconcile_avatars,
                 apply_transforms,
                 place_extraction_pillar,
-                sync_ground_anchor.before(crab_world::ground::apply_ground_anchor),
                 apply_shot_cam_offset,
                 // Keeps the controls context live like the windowed app. A shot that PINNED
                 // a context is unaffected: ActiveContext::sync is a no-op while pinned.

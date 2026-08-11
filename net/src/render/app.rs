@@ -89,11 +89,14 @@ pub fn build_windowed_app(
             (
                 gather_input,
                 drive_client_sim,
+                // Directly after the sim step, before ANY consumer: the render
+                // origin must be current when poses/transforms are written, or a
+                // round's first frame renders against the previous locale (rl#354).
+                sync_ground_anchor.before(crab_world::ground::apply_ground_anchor),
                 super::articulation::sample_crab_part_poses,
                 reconcile_avatars,
                 apply_transforms,
                 place_extraction_pillar,
-                sync_ground_anchor.before(crab_world::ground::apply_ground_anchor),
             )
                 .chain()
                 .run_if(in_state(AppPhase::Playing)),

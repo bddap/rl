@@ -115,6 +115,7 @@ fn draw_vehicle_collider_wireframe(
     mode: Res<RenderMode>,
     remote: Res<super::articulation::RemoteVehicle>,
     clock: Res<super::driver::RenderClock>,
+    origin: Res<super::RenderOrigin>,
     vehicles: Query<(&GlobalTransform, &Collider), With<Vehicle>>,
     mut gizmos: Gizmos,
 ) {
@@ -122,9 +123,11 @@ fn draw_vehicle_collider_wireframe(
     if !mode.shows_colliders() {
         return;
     }
+    // Physics transforms are absolute; gizmos draw in the render frame (rl#354).
+    let to_frame = Mat4::from_translation(-origin.offset_m());
     if !vehicles.is_empty() {
         for (gt, collider) in &vehicles {
-            let world = gt.to_matrix();
+            let world = to_frame * gt.to_matrix();
             draw_collider_wireframe(
                 &mut gizmos,
                 collider.as_typed_shape(),
@@ -141,7 +144,7 @@ fn draw_vehicle_collider_wireframe(
         return;
     }
     for c in &remote.sample(clock.tick, clock.frac) {
-        let world = Mat4::from_rotation_translation(c.pose.orient, c.pose.pos);
+        let world = to_frame * Mat4::from_rotation_translation(c.pose.orient, c.pose.pos);
         draw_collider_wireframe(
             &mut gizmos,
             crab_world::vehicle::vehicle_collider().as_typed_shape(),

@@ -286,6 +286,7 @@ type CrabPartQuery<'w, 's> = Query<
     's,
     (
         Entity,
+        &'static Transform,
         &'static CrabEnvId,
         Option<&'static CrabJoint>,
         Option<&'static CrabCarapace>,
@@ -306,25 +307,30 @@ type CrabPartQuery<'w, 's> = Query<
 pub(super) fn sample_crab_part_poses(
     clock: Res<RenderClock>,
     windows: Res<CrabPartWindows>,
+    origin: Res<super::RenderOrigin>,
     parts: CrabPartQuery,
     mut sampled: ResMut<CrabRenderPose>,
 ) {
+    // Physics poses are absolute world meters; everything rendered lives in the
+    // render frame (world − origin, rl#354). The subtraction happens HERE — the one
+    // physics→render seam for crab parts — so every consumer (skin bones, cage,
+    // labels) inherits the frame. A part whose window has never been fed still gets
+    // an entry, from its raw physics transform: the consumers' physics-pose
+    // fallback is absolute and would render the crab a whole locale away.
+    let offset = origin.offset_m();
     sampled.0.clear();
-    for (entity, env, joint, carapace) in &parts {
-        let Some(tag) = part_tag(carapace.is_some(), joint) else {
-            continue;
+    for (entity, physics, env, joint, carapace) in &parts {
+        let pose = part_tag(carapace.is_some(), joint)
+            .and_then(|tag| windows.0.get(&(env.0, tag)))
+            .and_then(|w| w.sample(clock.tick, clock.frac));
+        let t = match pose {
+            Some(p) => Transform::from_translation(p.pos - offset).with_rotation(p.orient),
+            None => Transform {
+                translation: physics.translation - offset,
+                ..*physics
+            },
         };
-        let Some(p) = windows
-            .0
-            .get(&(env.0, tag))
-            .and_then(|w| w.sample(clock.tick, clock.frac))
-        else {
-            continue;
-        };
-        sampled.0.insert(
-            entity,
-            Transform::from_translation(p.pos).with_rotation(p.orient),
-        );
+        sampled.0.insert(entity, t);
     }
 }
 
@@ -398,6 +404,7 @@ mod tests {
         // windows, and sampling reproduces its own parts' exact poses in the overlay —
         // while the rapier-owned Transforms it renders FROM stay untouched.
         host.insert_resource(CrabPartWindows::default());
+        host.insert_resource(super::super::RenderOrigin::default());
         host.insert_resource(CrabRenderPose::default());
         host.insert_resource(RenderClock {
             tick: 42,
@@ -435,6 +442,7 @@ mod tests {
             Transform::from_xyz(6.0, 6.0, 6.0),
         );
         client.insert_resource(CrabPartWindows::default());
+        client.insert_resource(super::super::RenderOrigin::default());
         client.insert_resource(CrabRenderPose::default());
         client.insert_resource(RemoteVehicle::default());
 
@@ -573,6 +581,7 @@ mod tests {
             Transform::IDENTITY,
         );
         client.insert_resource(CrabPartWindows::default());
+        client.insert_resource(super::super::RenderOrigin::default());
         client.insert_resource(CrabRenderPose::default());
         for tick in 1..=3u64 {
             let art = CrabArticulation {

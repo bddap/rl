@@ -157,9 +157,9 @@ fn fragment(
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
     let wp = in.world_position.xyz;
-    // Anchor-relative ground meters (rl#334): raw world xz quantizes at the fine
-    // octaves' own scale out at the tile corners — see shipped.wgsl.
-    let p = in.uv;
+    // Anchor-relative ground meters (rl#334/rl#354: the mesh entity is translated
+    // by −anchor, so world_position.xz is small and precise near play).
+    let p = in.world_position.xz;
     // Ground meters per pixel at this fragment — the octave-fade driver. Both
     // derivatives are taken here, in uniform control flow, because every fade
     // below is consumed inside a region branch.
@@ -197,9 +197,10 @@ fn fragment(
     // at real local minima and ran down real drainage lines (moisture.rs). Noise
     // only frays the wet/dry boundary — its gain peaks at the shoreline and dies
     // in the cores, so it can never move water uphill or invent a pond.
-    // The bake is world-mapped, so its uv comes from RAW world xz, not the
-    // anchored p — tile-scale mapping is immune to the mm-scale quantization.
-    let muv = wp.xz / moisture_extent.xy + 0.5;
+    // The bake is world-mapped, so its uv needs ABSOLUTE world xz: wp.xz is
+    // anchor-relative (rl#354), and moisture_extent.zw carries the anchor to add
+    // back — tile-scale mapping is immune to the mm-scale quantization this costs.
+    let muv = (wp.xz + moisture_extent.zw) / moisture_extent.xy + 0.5;
     let hydro = textureSampleLevel(moisture_tex, moisture_smp, muv, 0.0);
     let standing = hydro.g;
     let mwarp = vec2(vnoise(p / 300.0, 111u), vnoise((p + vec2(5.1, 1.7)) / 300.0, 112u)) * 90.0;
