@@ -496,11 +496,13 @@ mod glue {
         let code = chords.capture.step(modifier, taps);
         chords.code_entry = was_live || chords.capture.capturing();
         chords.executed = code.as_deref().and_then(|c| S::chords().lookup(c));
-        let completed = code.map(|c| {
-            let accepted = S::chords().lookup(&c).is_some();
-            (c, accepted)
-        });
-        chords.events = ChordEvents::from_frame(prev_depth, completed, chords.capture.entered());
+        // `accepted` IS `executed` — one verdict, not two lookups to drift apart.
+        let accepted = chords.executed.is_some();
+        chords.events = ChordEvents::from_frame(
+            prev_depth,
+            code.map(|c| (c, accepted)),
+            chords.capture.entered(),
+        );
     }
 
     /// See [`ChordCapture::reset`] — schedule on the surface's round-entry transition

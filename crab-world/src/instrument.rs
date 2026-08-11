@@ -29,7 +29,9 @@ use crate::wav::SAMPLE_RATE;
 
 /// The instrument's loudness ceiling. Sits ABOVE the muffled external mix by design:
 /// while a code is entered the world ducks and the instrument carries the frame.
-const MASTER: f32 = 0.5;
+/// 0.35, not 0.5: the accepted-cadence's three overlapping notes summed to full
+/// scale and clipped at the safety clamp (heard as a hard edge on the chime).
+const MASTER: f32 = 0.35;
 
 /// A musical scale as data: a root pitch plus the semitone degrees of one octave.
 /// Scale-degree indices address it beyond the octave in either direction, so a
@@ -298,12 +300,21 @@ pub fn frame_phrase(
 fn sound_chords<S: ControlScheme>(
     chords: Res<Chords<S>>,
     scheme: Res<InstrumentScheme>,
+    live: Query<(), With<AudioPlayer<Phrase>>>,
     mut assets: ResMut<Assets<Phrase>>,
     mut commands: Commands,
 ) {
-    let notes = frame_phrase(&scheme, chords.presses(), chords.resolution());
+    let mut notes = frame_phrase(&scheme, chords.presses(), chords.resolution());
     if notes.is_empty() {
         return;
+    }
+    // Each frame's phrase is its own entity, and the per-stream clamp bounds only
+    // that stream — rodio sums live streams unlimited. A note rings ~7τ, so a fast
+    // code stacks several; attenuate new phrases by the count still sounding to
+    // keep the device sum out of hard clipping.
+    let atten = 1.0 / (1.0 + 0.3 * live.iter().count() as f32);
+    for n in &mut notes {
+        n.gain *= atten;
     }
     commands.spawn((
         AudioPlayer(assets.add(Phrase(notes))),
@@ -311,13 +322,15 @@ fn sound_chords<S: ControlScheme>(
     ));
 }
 
-/// Wired by [`crate::chord::install_chords`] — not called directly. The shared parts
-/// (audio source, scheme resource) install once; the per-scheme system per call.
+/// Wired by [`crate::chord::install_chords`] — not called directly. The per-scheme
+/// system installs per call; the shared parts once, keyed on `Assets<Phrase>` (what
+/// `add_audio_source` actually provides — a surface may legitimately insert its own
+/// [`InstrumentScheme`] before installing chords).
 pub(crate) fn install<S: ControlScheme>(app: &mut App) {
-    if !app.world().contains_resource::<InstrumentScheme>() {
+    if !app.world().contains_resource::<Assets<Phrase>>() {
         app.add_audio_source::<Phrase>();
-        app.init_resource::<InstrumentScheme>();
     }
+    app.init_resource::<InstrumentScheme>();
     app.add_systems(Update, sound_chords::<S>);
 }
 
