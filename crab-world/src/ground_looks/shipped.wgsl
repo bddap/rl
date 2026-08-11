@@ -75,7 +75,7 @@ fn fragment(
 
     // Fine on-foot detail: the rl#324 adaptive descent, one copy in
     // rl::ground::detail (rl#333 seam 2).
-    rgb *= 1.0 + 0.30 * strengths.z * fine_color(p, fw);
+    rgb *= 1.0 + fine_color(p, fw, 0.30 * strengths.z);
 
     // Grass clumps: darker tufted patches where the ground is vegetated.
     let tuft = smoothstep(0.15, 0.75, vnoise(p / 1.4, 34u)) * veg * footprint_fade(1.4, fw);

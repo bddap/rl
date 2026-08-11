@@ -19,9 +19,20 @@
 // Distant ground exits after one test — fw alone decides, so the loop is
 // quad-coherent and the near-fullscreen far ground pays nothing.
 // Each octave rotated by ROT from the last (why that angle: rl::noise).
-// Returns the raw signed noise sum; the caller owns the gain
-// (`rgb *= 1.0 + gain * fine_color(...)`).
-fn fine_color(p: vec2<f32>, fw: f32) -> f32 {
+// `gain` is the caller's composed grain strength (0.30 * strengths.z today;
+// `strengths.z * art.grain` after stage 4) — inside the function, like
+// relief_normal's, so both seams share one contract (pass the composed gain,
+// get the finished contribution) and a zero-gain look skips the descent
+// entirely instead of paying it and multiplying by nothing.
+fn fine_color(p: vec2<f32>, fw: f32, gain: f32) -> f32 {
+    // Exact-zero gate, not a relief_normal-style threshold: a threshold on
+    // gain*fade drops sub-LSB contributions and breaks this module's
+    // identical-output guarantee (measured: 188 px shift 1 LSB at 0.001). The
+    // subpixel early-out is already the loop's first break; this only spares a
+    // gain=0 look the descent.
+    if gain == 0.0 {
+        return 0.0;
+    }
     var fine_n = 0.0;
     var q = p;
     var wl = 2.6;
@@ -38,7 +49,7 @@ fn fine_color(p: vec2<f32>, fw: f32) -> f32 {
         amp *= 0.72;
         seed += 1u;
     }
-    return fine_n;
+    return gain * fine_n;
 }
 
 // Detail normal from the fine-noise heightfield gradient: micro-relief up
