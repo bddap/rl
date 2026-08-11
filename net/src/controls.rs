@@ -157,6 +157,11 @@ pub enum Action {
     StrafeLeft,
     StrafeRight,
     Look,
+    // On-foot movement stances (rl#355): hold-to-sprint, jump (works from sprint —
+    // the carried step IS the jump's horizontal velocity), hold-to-slide.
+    Sprint,
+    Jump,
+    Slide,
     Extract,
     Restart,
     Quit,
@@ -211,8 +216,10 @@ pub enum Key {
     A,
     S,
     D,
+    C,
     Tab,
     Space,
+    Shift,
     Escape,
     ArrowUp,
     ArrowDown,
@@ -236,6 +243,9 @@ pub enum PadButton {
     Back,
     LeftStick,
     RightStick,
+    /// The left-stick CLICK (L3) — a real pollable button, unlike [`PadButton::LeftStick`],
+    /// which is the stick axes' legend token.
+    LeftStickClick,
     Dpad,
     /// Single D-pad directions — unlike [`PadButton::Dpad`] (the whole cluster, an
     /// analog-style multi-input) these resolve to one `GamepadButton`, so menu nav can
@@ -321,8 +331,10 @@ impl ControlScheme for GcrControls {
             Key::A => "controls/keyboard_a.png",
             Key::S => "controls/keyboard_s.png",
             Key::D => "controls/keyboard_d.png",
+            Key::C => return Glyph::Label("C"),
             Key::Tab => "controls/keyboard_tab.png",
             Key::Space => "controls/keyboard_space.png",
+            Key::Shift => return Glyph::Label("Shift"),
             Key::Escape => "controls/keyboard_escape.png",
             // No key art for these — text chips, like the art-less triggers/bumpers.
             Key::ArrowUp => return Glyph::Label("Up"),
@@ -340,6 +352,7 @@ impl ControlScheme for GcrControls {
             PadButton::LeftBumper => Glyph::Label("LB"),
             PadButton::RightBumper => Glyph::Label("RB"),
             PadButton::Back => Glyph::Icon("controls/xbox_button_view.png"),
+            PadButton::LeftStickClick => Glyph::Label("L3"),
             PadButton::LeftStick => Glyph::Icon("controls/xbox_stick_l.png"),
             PadButton::RightStick => Glyph::Icon("controls/xbox_stick_r.png"),
             PadButton::Dpad | PadButton::DpadUp | PadButton::DpadDown => {
@@ -361,7 +374,7 @@ impl ControlScheme for GcrControls {
 // second trigger route is a
 // well-formedness error. What remains is analog/held state plus menu nav and the
 // hold-to-reveal legend — reads the chord system's execute-on-release can't express.
-pub const BINDINGS: [Binding<GcrControls>; 19] = [
+pub const BINDINGS: [Binding<GcrControls>; 22] = [
     Binding {
         action: Action::MoveForward,
         keyboard: KbBinding::new(&[Key::W], &[]),
@@ -387,10 +400,28 @@ pub const BINDINGS: [Binding<GcrControls>; 19] = [
         keyboard: KbBinding::new(&[], &[MouseInput::Motion]),
         pad: PadBinding::new(&[PadButton::RightStick]),
     },
+    // Jump owns Space/South (rl#355) — the universal jump inputs; Extract keeps its
+    // click/trigger alternates so the two can't collide ON the pad (a jump over the
+    // extraction disc must not scoop the win).
+    Binding {
+        action: Action::Jump,
+        keyboard: KbBinding::new(&[Key::Space], &[]),
+        pad: PadBinding::new(&[PadButton::South]),
+    },
+    Binding {
+        action: Action::Sprint,
+        keyboard: KbBinding::hold(&[Key::Shift], &[]),
+        pad: PadBinding::hold(&[PadButton::LeftStickClick]),
+    },
+    Binding {
+        action: Action::Slide,
+        keyboard: KbBinding::hold(&[Key::C], &[]),
+        pad: PadBinding::hold(&[PadButton::East]),
+    },
     Binding {
         action: Action::Extract,
-        keyboard: KbBinding::new(&[Key::Space], &[MouseInput::Left]),
-        pad: PadBinding::new(&[PadButton::South, PadButton::RightTrigger]),
+        keyboard: KbBinding::new(&[], &[MouseInput::Left]),
+        pad: PadBinding::new(&[PadButton::RightTrigger]),
     },
     Binding {
         action: Action::RevealControls,
@@ -465,7 +496,7 @@ pub const BINDINGS: [Binding<GcrControls>; 19] = [
 // The in-round row tables list only DIRECT-bound controls: the chorded command verbs'
 // legend rows come from [`GCR_CHORDS`] itself (labels live there, appended by
 // `crab_world::controls::legend`), so the two can't drift.
-pub const FOOT_ROWS: [ContextRow<GcrControls>; 7] = [
+pub const FOOT_ROWS: [ContextRow<GcrControls>; 10] = [
     ContextRow {
         action: Action::MoveForward,
         label: "Forward",
@@ -485,6 +516,18 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 7] = [
     ContextRow {
         action: Action::Look,
         label: "Look",
+    },
+    ContextRow {
+        action: Action::Sprint,
+        label: "Sprint (hold)",
+    },
+    ContextRow {
+        action: Action::Jump,
+        label: "Jump",
+    },
+    ContextRow {
+        action: Action::Slide,
+        label: "Slide (hold)",
     },
     ContextRow {
         action: Action::Extract,
@@ -578,7 +621,10 @@ mod bevy_glue {
                 Key::A => &[KeyCode::KeyA],
                 Key::S => &[KeyCode::KeyS],
                 Key::D => &[KeyCode::KeyD],
+                Key::C => &[KeyCode::KeyC],
                 Key::Tab => &[KeyCode::Tab],
+                // One control to the player, either physical shift.
+                Key::Shift => &[KeyCode::ShiftLeft, KeyCode::ShiftRight],
                 Key::Space => &[KeyCode::Space],
                 Key::Escape => &[KeyCode::Escape],
                 Key::ArrowUp => &[KeyCode::ArrowUp],
@@ -609,6 +655,7 @@ mod bevy_glue {
                 PadButton::LeftBumper => Some(GamepadButton::LeftTrigger),
                 PadButton::RightBumper => Some(GamepadButton::RightTrigger),
                 PadButton::Back => Some(GamepadButton::Select),
+                PadButton::LeftStickClick => Some(GamepadButton::LeftThumb),
                 PadButton::DpadUp => Some(GamepadButton::DPadUp),
                 PadButton::DpadDown => Some(GamepadButton::DPadDown),
                 PadButton::LeftStick | PadButton::RightStick | PadButton::Dpad => None,
@@ -648,12 +695,15 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 43] = [
+    const ALL_ACTIONS: [Action; 46] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
         Action::StrafeRight,
         Action::Look,
+        Action::Sprint,
+        Action::Jump,
+        Action::Slide,
         Action::Extract,
         Action::Restart,
         Action::Quit,
@@ -838,6 +888,9 @@ mod tests {
                 | Action::StrafeLeft
                 | Action::StrafeRight
                 | Action::Look
+                | Action::Sprint
+                | Action::Jump
+                | Action::Slide
                 | Action::Extract
                 | Action::Restart
                 | Action::Quit
@@ -1138,9 +1191,12 @@ mod tests {
                             b.action
                         ),
                         Glyph::Label(l) => assert!(
-                            matches!(l, "LT" | "LB" | "RB" | "Up" | "Down" | "Enter"),
+                            matches!(
+                                l,
+                                "LT" | "LB" | "RB" | "L3" | "Up" | "Down" | "Enter" | "Shift" | "C"
+                            ),
                             "unexpected text glyph {l:?} for {:?} (only the art-less \
-                             triggers/bumpers and the menu keys)",
+                             triggers/bumpers/stick-click and the menu/stance keys)",
                             b.action
                         ),
                     }
@@ -1173,25 +1229,33 @@ mod tests {
         }
     }
 
+    /// rl#355: Jump owns Space/South; Extract keeps its click/trigger alternates so a
+    /// jump over the extraction disc can't scoop the win.
     #[test]
-    fn extract_shows_both_bindings() {
+    fn jump_owns_space_south_and_extract_keeps_its_alternates() {
+        assert_eq!(
+            binding::<GcrControls>(Action::Jump)
+                .unwrap()
+                .glyphs(Device::KeyboardMouse),
+            vec![Glyph::Icon("controls/keyboard_space.png")]
+        );
+        assert_eq!(
+            binding::<GcrControls>(Action::Jump)
+                .unwrap()
+                .glyphs(Device::Gamepad),
+            vec![Glyph::Icon("controls/xbox_button_a.png")]
+        );
         assert_eq!(
             binding::<GcrControls>(Action::Extract)
                 .unwrap()
                 .glyphs(Device::KeyboardMouse),
-            vec![
-                Glyph::Icon("controls/keyboard_space.png"),
-                Glyph::Icon("controls/mouse_left.png")
-            ]
+            vec![Glyph::Icon("controls/mouse_left.png")]
         );
         assert_eq!(
             binding::<GcrControls>(Action::Extract)
                 .unwrap()
                 .glyphs(Device::Gamepad),
-            vec![
-                Glyph::Icon("controls/xbox_button_a.png"),
-                Glyph::Icon("controls/xbox_rt.png")
-            ]
+            vec![Glyph::Icon("controls/xbox_rt.png")]
         );
     }
 }

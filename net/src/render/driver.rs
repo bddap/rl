@@ -257,15 +257,31 @@ fn boarding_of(
 /// feed for [`crate::server::Server::step_next`] (rl#258): a piloting player's walker
 /// rides its craft, so the sim never keeps a husk at the boarding spot.
 fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose> {
-    let mut q = world.query::<(&Transform, &Vehicle)>();
-    q.iter(world)
-        .map(|(t, v)| {
-            let nose = t.rotation * Vec3::Z;
+    // The craft's world y over the surface and its rapier velocity ride along
+    // (rl#355): the sim mirrors both into the walker every piloted tick, so stepping
+    // out mid-air hands the ballistic walker exactly the craft's altitude + momentum.
+    let mut q = world.query::<(&Transform, &bevy_rapier3d::dynamics::Velocity, &Vehicle)>();
+    let rows: Vec<(Vec3, Quat, Vec3, u8)> = q
+        .iter(world)
+        .map(|(t, vel, v)| (t.translation, t.rotation, vel.linear, v.pilot.0))
+        .collect();
+    let terrain = world.resource::<crab_world::terrain::Terrain>();
+    let per_tick = |mps: f32| (mps * crate::sim::UNIT as f32 / crate::sim::TICK_HZ as f32) as i64;
+    rows.into_iter()
+        .map(|(pos, rot, linvel, pilot)| {
+            let nose = rot * Vec3::Z;
+            let alt_m = pos.y - terrain.height(pos.x, pos.z);
             (
-                PlayerId(v.pilot.0),
+                PlayerId(pilot),
                 crate::sim::PilotPose {
-                    pos: world_to_sim(t.translation),
+                    pos: world_to_sim(pos),
                     yaw: crate::sim::trig_client::radians_to_turns(nose.x.atan2(nose.z)),
+                    alt: crate::sim::meters_to_grid(alt_m).max(0),
+                    vel: crate::sim::Vel {
+                        x: per_tick(linvel.x),
+                        y: per_tick(linvel.y),
+                        z: per_tick(linvel.z),
+                    },
                 },
             )
         })
@@ -361,6 +377,9 @@ pub(super) struct PendingInput {
     pub(super) yaw_delta: f32,
     pub(super) action: bool,
     pub(super) restart: bool,
+    pub(super) sprint: bool,
+    pub(super) jump: bool,
+    pub(super) slide: bool,
     pub(super) vehicle: Option<VehicleRequest>,
 }
 
@@ -638,11 +657,17 @@ fn take_local_control(world: &mut World) -> LocalControl {
         let mut pending = world.resource_mut::<PendingInput>();
         let look_axis = (pending.yaw_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
         let btns = (if pending.action { buttons::ACTION } else { 0 })
-            | (if pending.restart { buttons::RESTART } else { 0 });
+            | (if pending.restart { buttons::RESTART } else { 0 })
+            | (if pending.sprint { buttons::SPRINT } else { 0 })
+            | (if pending.jump { buttons::JUMP } else { 0 })
+            | (if pending.slide { buttons::SLIDE } else { 0 });
         let input = Input::new(pending.strafe, pending.forward, look_axis, btns);
         pending.yaw_delta = 0.0;
         pending.action = false;
         pending.restart = false;
+        pending.sprint = false;
+        pending.jump = false;
+        pending.slide = false;
         input
     };
     match world.resource::<LocalVehicle>().kind() {

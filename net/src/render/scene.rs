@@ -372,7 +372,8 @@ pub(super) fn apply_transforms(
         let prev = state.prev.players.get(&avatar.0).copied().unwrap_or(now);
         let pos = lerp_pos(prev.pos(), now.pos(), alpha);
         let yaw = lerp_yaw(prev.yaw(), now.yaw(), alpha);
-        *tf = Transform::from_translation(place(pos, PLAYER_HEIGHT * 0.5))
+        let alt = lerp_alt(prev.alt(), now.alt(), alpha);
+        *tf = Transform::from_translation(place(pos, PLAYER_HEIGHT * 0.5 + alt))
             .with_rotation(Quat::from_rotation_y(yaw));
         // A piloting player's ONE visible body is its craft (rl#258): the walker avatar
         // hides while a craft flies under that pilot's id. `RemoteVehicle` already excludes
@@ -415,7 +416,10 @@ pub(super) fn apply_transforms(
             } else {
                 yaw.0
             };
-            let eye = place(pos, EYE_HEIGHT);
+            // The airborne walker's eye rides its altitude (rl#355) — the plane-exit
+            // handoff sails, so the camera sails with it and settles on touchdown.
+            let alt = lerp_alt(prev.alt(), now.alt(), alpha);
+            let eye = place(pos, EYE_HEIGHT + alt);
             let look_dir = look_direction(cam_yaw, pitch.0);
             *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
         }
@@ -458,6 +462,12 @@ fn cockpit_camera(pose: Pose, origin: super::RenderOrigin) -> Transform {
     let eye = pose.pos - origin.offset_m();
     let rot = pose.orient;
     Transform::from_translation(eye).looking_at(eye + rot * Vec3::Z, rot * Vec3::Y)
+}
+
+/// Interpolated feet-over-surface height in meters (rl#355) — the walker's sim
+/// altitude, ready to add to a `place` lift.
+pub(super) fn lerp_alt(a: i64, b: i64, alpha: f32) -> f32 {
+    (a as f32 + (b - a) as f32 * alpha) / crate::sim::UNIT as f32
 }
 
 pub(super) fn lerp_pos(a: Pos, b: Pos, alpha: f32) -> Pos {

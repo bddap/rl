@@ -785,7 +785,7 @@ mod tests {
         let p = snap.players[&p1];
         snap.players.insert(
             p1,
-            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Extracted),
+            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Extracted, p.alt(), p.vel()),
         );
         sim.apply_core_snapshot(snap);
         let mut s = Server::new(PlayerId(0), &ids(2), sim);
@@ -811,7 +811,7 @@ mod tests {
         let p = snap.players[&p1];
         snap.players.insert(
             p1,
-            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed),
+            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed, p.alt(), p.vel()),
         );
         s.sim.apply_core_snapshot(snap);
         s.record_remote(
@@ -829,7 +829,7 @@ mod tests {
         let p = snap.players[&p1];
         snap.players.insert(
             p1,
-            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Extracted),
+            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Extracted, p.alt(), p.vel()),
         );
         s.sim.apply_core_snapshot(snap);
         s.record_remote(
