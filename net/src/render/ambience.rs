@@ -16,12 +16,11 @@
 //! sally.glb precedent — so plain checkouts and CI need no binaries.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use bevy::audio::{AddAudioSource, Decodable, PlaybackSettings};
 use bevy::prelude::*;
 
-use super::audio::{ExternalBus, SAMPLE_RATE};
+use super::audio::{AtomicF32, ExternalBus, SAMPLE_RATE, WIND_MASTER};
 use super::driver::{GameState, LocalVehicle, RenderClock};
 use crab_world::sky::smoothstep;
 use crab_world::terrain::{Terrain, biome};
@@ -44,7 +43,8 @@ pub(super) struct AmbientContext {
 struct LayerDef {
     /// Loop file under the asset root's `assets/` (see scripts/fetch-ambience.sh).
     file: &'static str,
-    /// Full-context level — sits under the wind's 0.45 master so beds never mask it.
+    /// Full-context level, as a fraction of the wind's master ceiling so the
+    /// beds sit under the loudest thing in the outdoor mix by construction.
     level: f32,
     /// Bus → 0..1 activation.
     gain: fn(&AmbientContext) -> f32,
@@ -65,36 +65,46 @@ fn grass_bed(ctx: &AmbientContext) -> f32 {
 const LAYERS: [LayerDef; 2] = [
     LayerDef {
         file: "ambience/grassland-birds.wav",
-        level: 0.16,
+        level: 0.35 * WIND_MASTER,
         gain: grass_bed,
     },
     LayerDef {
         file: "ambience/crickets.wav",
-        level: 0.22,
+        level: 0.5 * WIND_MASTER,
         gain: grass_bed,
     },
 ];
 
-/// Per-layer target gains + the bus lowpass, f32s bit-stored in atomics — same
-/// lock-free ECS-writer/audio-reader handshake as the wind's `WindTargets`.
+/// The one target formula: a layer's activation from the context — shared by the
+/// live driver and the evidence generator, so the proof capture cannot drift from
+/// the shipped path.
+fn layer_target(def: &LayerDef, ctx: &AmbientContext) -> f32 {
+    def.level * (def.gain)(ctx)
+}
+
+/// Per-layer activation targets plus the external-bus factors, kept SEPARATE so
+/// they can glide at different rates: activations crossfade deliberately, while a
+/// bus duck must land on beds and wind together (see the stream's glide consts).
 struct AmbienceTargets {
-    gains: [AtomicU32; LAYERS.len()],
-    lowpass_hz: AtomicU32,
+    acts: [AtomicF32; LAYERS.len()],
+    bus_gain: AtomicF32,
+    bus_lowpass_hz: AtomicF32,
 }
 
 impl Default for AmbienceTargets {
     fn default() -> Self {
         Self {
-            gains: std::array::from_fn(|_| AtomicU32::new(0.0f32.to_bits())),
-            lowpass_hz: AtomicU32::new(20_000.0f32.to_bits()),
+            acts: Default::default(),
+            bus_gain: AtomicF32::new(1.0),
+            bus_lowpass_hz: AtomicF32::new(20_000.0),
         }
     }
 }
 
 impl AmbienceTargets {
     fn silence(&self) {
-        for g in &self.gains {
-            g.store(0.0f32.to_bits(), Ordering::Relaxed);
+        for a in &self.acts {
+            a.store(0.0);
         }
     }
 }
@@ -104,7 +114,7 @@ impl AmbienceTargets {
 #[derive(Resource, Clone)]
 pub(super) struct AmbienceChannel {
     targets: Arc<AmbienceTargets>,
-    beds: Arc<[Arc<[f32]>; LAYERS.len()]>,
+    beds: [Arc<[f32]>; LAYERS.len()],
 }
 
 /// The bed mixer as a bevy audio asset: `decoder()` hands the audio thread a fresh
@@ -116,7 +126,7 @@ impl Decodable for AmbienceMix {
     type DecoderItem = f32;
     type Decoder = AmbienceStream;
     fn decoder(&self) -> AmbienceStream {
-        AmbienceStream::new(self.0.targets.clone(), (*self.0.beds).clone())
+        AmbienceStream::new(self.0.targets.clone(), self.0.beds.clone())
     }
 }
 
@@ -129,7 +139,7 @@ pub(super) fn install(app: &mut App) {
     app.init_resource::<AmbientContext>();
     app.insert_resource(AmbienceChannel {
         targets: Arc::default(),
-        beds: Arc::new(std::array::from_fn(|i| load_bed(&LAYERS[i]))),
+        beds: std::array::from_fn(|i| load_bed(&LAYERS[i])),
     });
 }
 
@@ -203,27 +213,44 @@ pub(super) fn update_context(
     terrain: Res<Terrain>,
     mut ctx: ResMut<AmbientContext>,
 ) {
+    // The walker's sim altitude is already height-above-terrain; the craft
+    // reports absolute y, resolved against the ground height sampled below.
+    enum Alt {
+        AboveGround(f32),
+        Absolute(f32),
+    }
     // Absolute world xz for the terrain sampler (render-frame coordinates are
-    // anchor-relative and must never touch it — rl#354), plus height above ground.
-    let (x, z, alt_m) = match &*vehicle {
+    // anchor-relative and must never touch it — rl#354).
+    let (x, z, alt) = match &*vehicle {
         LocalVehicle::OnFoot => {
             let Some(p) = state.client.sim().player(state.client.me()) else {
                 *ctx = AmbientContext::default();
                 return;
             };
             let (x, z) = p.pos().to_meters_f64();
-            (x, z, p.alt() as f32 / crate::sim::UNIT as f32)
+            (
+                x,
+                z,
+                Alt::AboveGround(p.alt() as f32 / crate::sim::UNIT as f32),
+            )
         }
         LocalVehicle::Flying { .. } => {
             let Some(pose) = vehicle.cockpit_sample(clock.tick, clock.frac) else {
                 *ctx = AmbientContext::default();
                 return;
             };
-            let (x, z) = (pose.pos.x as f64, pose.pos.z as f64);
-            (x, z, pose.pos.y - terrain.height_f64(x, z) as f32)
+            (
+                pose.pos.x as f64,
+                pose.pos.z as f64,
+                Alt::Absolute(pose.pos.y),
+            )
         }
     };
     let h = terrain.height_f64(x, z) as f32;
+    let alt_m = match alt {
+        Alt::AboveGround(a) => a,
+        Alt::Absolute(y) => y - h,
+    };
     // Ground slope from central differences — plenty close to the mesh normal for
     // a gain weight.
     const D: f64 = 2.0;
@@ -237,31 +264,30 @@ pub(super) fn update_context(
     };
 }
 
-/// Bus reader: per-layer targets from the context, shaped by the external bus.
+/// Bus reader: per-layer activation targets from the context, the external-bus
+/// factors passed through untouched (they glide at their own rate downstream).
 pub(super) fn drive_layers(
     ctx: Res<AmbientContext>,
     bus: Res<ExternalBus>,
     channel: Res<AmbienceChannel>,
 ) {
-    for (def, slot) in LAYERS.iter().zip(&channel.targets.gains) {
-        let g = def.level * (def.gain)(&ctx) * bus.gain;
-        slot.store(g.to_bits(), Ordering::Relaxed);
+    for (def, slot) in LAYERS.iter().zip(&channel.targets.acts) {
+        slot.store(layer_target(def, &ctx));
     }
-    channel
-        .targets
-        .lowpass_hz
-        .store(bus.lowpass_hz.to_bits(), Ordering::Relaxed);
+    channel.targets.bus_gain.store(bus.gain);
+    channel.targets.bus_lowpass_hz.store(bus.lowpass_hz);
 }
 
 /// The audio-thread mixer: each bed loops at its own cursor and rides its own
-/// glided gain; the sum passes one shared one-pole lowpass (the external bus's
-/// muffle hook) and a safety clamp.
+/// glided activation; the sum rides the glided bus gain, passes one one-pole
+/// lowpass (the external bus's muffle hook), and a safety clamp.
 pub(super) struct AmbienceStream {
     targets: Arc<AmbienceTargets>,
     beds: [Arc<[f32]>; LAYERS.len()],
     cursors: [usize; LAYERS.len()],
-    /// Smoothed per-layer gains + lowpass cutoff.
-    gains: [f32; LAYERS.len()],
+    /// Smoothed per-layer activations + bus gain + lowpass cutoff.
+    acts: [f32; LAYERS.len()],
+    bus_gain: f32,
     cutoff: f32,
     lp_a: f32,
     lp: f32,
@@ -271,16 +297,20 @@ pub(super) struct AmbienceStream {
 impl AmbienceStream {
     /// Samples between coefficient refreshes — same tradeoff as the wind's block.
     const BLOCK: u32 = 64;
-    /// Per-sample one-pole toward targets: τ ≈ 0.4 s — a deliberate, audible
-    /// crossfade (the wind's 60 ms would jump-cut an ambience bed).
-    const GLIDE: f32 = 1.0 / (0.4 * SAMPLE_RATE as f32);
+    /// Activation glide: τ ≈ 0.4 s — a deliberate, audible crossfade (the wind's
+    /// 60 ms would jump-cut an ambience bed).
+    const GLIDE_ACT: f32 = 1.0 / (0.4 * SAMPLE_RATE as f32);
+    /// Bus glide: the wind's 60 ms, so one combo-entry duck lands on the beds and
+    /// the wind as a single mix move instead of two staggered ones.
+    const GLIDE_BUS: f32 = 1.0 / (0.060 * SAMPLE_RATE as f32);
 
     fn new(targets: Arc<AmbienceTargets>, beds: [Arc<[f32]>; LAYERS.len()]) -> Self {
         Self {
             targets,
             beds,
             cursors: [0; LAYERS.len()],
-            gains: [0.0; LAYERS.len()],
+            acts: [0.0; LAYERS.len()],
+            bus_gain: 1.0,
             cutoff: 20_000.0,
             lp_a: 1.0,
             lp: 0.0,
@@ -303,21 +333,20 @@ impl Iterator for AmbienceStream {
         }
         self.block_left -= 1;
 
-        let target_cutoff = f32::from_bits(self.targets.lowpass_hz.load(Ordering::Relaxed));
-        self.cutoff += (target_cutoff - self.cutoff) * Self::GLIDE;
+        self.bus_gain += (self.targets.bus_gain.load() - self.bus_gain) * Self::GLIDE_BUS;
+        self.cutoff += (self.targets.bus_lowpass_hz.load() - self.cutoff) * Self::GLIDE_BUS;
 
         let mut s = 0.0;
         for i in 0..LAYERS.len() {
-            let t = f32::from_bits(self.targets.gains[i].load(Ordering::Relaxed));
-            self.gains[i] += (t - self.gains[i]) * Self::GLIDE;
+            self.acts[i] += (self.targets.acts[i].load() - self.acts[i]) * Self::GLIDE_ACT;
             let bed = &self.beds[i];
             if bed.is_empty() {
                 continue;
             }
-            s += bed[self.cursors[i]] * self.gains[i];
+            s += bed[self.cursors[i]] * self.acts[i];
             self.cursors[i] = (self.cursors[i] + 1) % bed.len();
         }
-        self.lp += (s - self.lp) * self.lp_a;
+        self.lp += (s * self.bus_gain - self.lp) * self.lp_a;
         Some(self.lp.clamp(-1.0, 1.0))
     }
 }
@@ -350,7 +379,13 @@ mod tests {
         };
         assert_eq!(grass_bed(&grassy), 1.0);
         // Barren ground silences the bed; altitude fades it; a canopy halves it.
-        assert_eq!(grass_bed(&AmbientContext { grass: 0.0, ..grassy }), 0.0);
+        assert_eq!(
+            grass_bed(&AmbientContext {
+                grass: 0.0,
+                ..grassy
+            }),
+            0.0
+        );
         assert_eq!(
             grass_bed(&AmbientContext {
                 alt_m: 100.0,
@@ -386,27 +421,39 @@ mod tests {
     }
 
     #[test]
-    fn mixer_settles_on_target_gain() {
+    fn mixer_settles_on_target_activation() {
         // A DC bed passes the (transparent-cutoff) lowpass whole, so the settled
-        // output IS gain × sample.
+        // output IS activation × sample.
         let (targets, mut s) = one_bed_stream(vec![0.5; 64]);
-        targets.gains[0].store(0.8f32.to_bits(), Ordering::Relaxed);
+        targets.acts[0].store(0.8);
         let _ = s.by_ref().take(3 * SAMPLE_RATE as usize).count();
         let settled = s.next().unwrap();
         assert!((settled - 0.4).abs() < 0.01, "settled at {settled}");
     }
 
     #[test]
-    fn gain_change_glides_not_jumps() {
+    fn activation_change_glides_not_jumps() {
         let (targets, mut s) = one_bed_stream(vec![0.5; 64]);
-        targets.gains[0].store(0.8f32.to_bits(), Ordering::Relaxed);
+        targets.acts[0].store(0.8);
         let _ = s.by_ref().take(3 * SAMPLE_RATE as usize).count();
-        targets.gains[0].store(0.0f32.to_bits(), Ordering::Relaxed);
+        targets.acts[0].store(0.0);
         // Mid-fade the signal is clearly alive, and by 3 s it is clearly gone.
         let mid = s.by_ref().nth(4096).unwrap();
         assert!(mid > 0.1, "jump-cut: {mid}");
         let _ = s.by_ref().take(3 * SAMPLE_RATE as usize).count();
         assert!(s.next().unwrap() < 1e-3);
+    }
+
+    #[test]
+    fn bus_duck_lands_at_wind_rate() {
+        // A bus duck settles in ~0.3 s (5τ at 60 ms) — the activation glide alone
+        // would still be at ~47% after that long.
+        let (targets, mut s) = one_bed_stream(vec![0.5; 64]);
+        targets.acts[0].store(0.8);
+        let _ = s.by_ref().take(3 * SAMPLE_RATE as usize).count();
+        targets.bus_gain.store(0.0);
+        let after = s.by_ref().nth((0.3 * SAMPLE_RATE as f32) as usize).unwrap();
+        assert!(after < 0.02, "duck too slow: {after}");
     }
 
     /// Not a test — the evidence generator for rl#357 stage 1: renders a context
@@ -445,8 +492,8 @@ mod tests {
                 alt_m,
                 vehicle,
             };
-            for (def, slot) in LAYERS.iter().zip(&targets.gains) {
-                slot.store((def.level * (def.gain)(&ctx)).to_bits(), Ordering::Relaxed);
+            for (def, slot) in LAYERS.iter().zip(&targets.acts) {
+                slot.store(layer_target(def, &ctx));
             }
             pcm.push((s.next().unwrap() * i16::MAX as f32) as i16);
         }

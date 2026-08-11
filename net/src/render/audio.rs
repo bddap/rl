@@ -49,6 +49,32 @@ impl Default for ExternalBus {
 /// the device, and every filter coefficient below is derived from this one number.
 pub(super) const SAMPLE_RATE: u32 = 44_100;
 
+/// The wind's loudness ceiling — the loudest thing in the outdoor mix; the
+/// ambience beds key their levels under it (ambience.rs).
+pub(super) const WIND_MASTER: f32 = 0.45;
+
+/// An f32 bit-stored in an `AtomicU32`: the lock-free handshake every audio
+/// target struct uses between the frame-rate ECS writer and the audio thread.
+pub(super) struct AtomicF32(AtomicU32);
+
+impl AtomicF32 {
+    pub(super) fn new(v: f32) -> Self {
+        Self(AtomicU32::new(v.to_bits()))
+    }
+    pub(super) fn store(&self, v: f32) {
+        self.0.store(v.to_bits(), Ordering::Relaxed);
+    }
+    pub(super) fn load(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed))
+    }
+}
+
+impl Default for AtomicF32 {
+    fn default() -> Self {
+        Self::new(0.0)
+    }
+}
+
 /// Full-wind airspeed, m/s — the plane's full-throttle terminal (~4.5 m/s, the
 /// fastest thing in the game; see `PLANE` in crab-world's vehicle.rs). At or above
 /// it the wind is at full roar in every context.
@@ -57,34 +83,21 @@ const FULL_WIND_MPS: f32 = 4.5;
 /// One target parameter set, f32s bit-stored in atomics — the frame-rate ECS writer
 /// and the audio-thread reader share this with no lock on the audio path.
 #[derive(Default)]
-struct WindTargets {
-    gain: AtomicU32,
-    cutoff_hz: AtomicU32,
-    whistle_hz: AtomicU32,
-    whistle_gain: AtomicU32,
-    gust_depth: AtomicU32,
-}
+struct WindTargets([AtomicF32; 5]);
 
 impl WindTargets {
     fn store(&self, gain: f32, cutoff_hz: f32, whistle_hz: f32, whistle_gain: f32, gust: f32) {
-        self.gain.store(gain.to_bits(), Ordering::Relaxed);
-        self.cutoff_hz.store(cutoff_hz.to_bits(), Ordering::Relaxed);
-        self.whistle_hz
-            .store(whistle_hz.to_bits(), Ordering::Relaxed);
-        self.whistle_gain
-            .store(whistle_gain.to_bits(), Ordering::Relaxed);
-        self.gust_depth.store(gust.to_bits(), Ordering::Relaxed);
+        for (slot, v) in self
+            .0
+            .iter()
+            .zip([gain, cutoff_hz, whistle_hz, whistle_gain, gust])
+        {
+            slot.store(v);
+        }
     }
 
     fn load(&self) -> [f32; 5] {
-        [
-            &self.gain,
-            &self.cutoff_hz,
-            &self.whistle_hz,
-            &self.whistle_gain,
-            &self.gust_depth,
-        ]
-        .map(|a| f32::from_bits(a.load(Ordering::Relaxed)))
+        [&self.0[0], &self.0[1], &self.0[2], &self.0[3], &self.0[4]].map(|a| a.load())
     }
 }
 
@@ -180,8 +193,8 @@ pub(super) fn drive_wind(
 /// gust_depth]`. Each context normalizes speed over its own audible band — quiet
 /// floor to [`FULL_WIND_MPS`] — then shapes loudness and brightness from that.
 fn profile(kind: Option<VehicleKind>, speed_mps: f32) -> [f32; 5] {
-    // Master loudness ceiling: leave headroom under the (future) rest of the mix.
-    const MASTER: f32 = 0.45;
+    // Loudness ceiling: leave headroom under the rest of the mix.
+    const MASTER: f32 = WIND_MASTER;
     // On foot the floor sits above sprint (~0.25 m/s): walking and sprinting stay
     // near-silent, a fall or a claw launch is what roars (owner spec: "hear wind
     // when I'm going fast — falling or flying").
