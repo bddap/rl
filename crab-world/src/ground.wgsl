@@ -13,6 +13,7 @@
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
+    mesh_view_bindings::globals,
 }
 
 #ifdef PREPASS_PIPELINE
@@ -101,6 +102,7 @@ fn fragment(
     let muv = (wp.xz + moisture_extent.zw) / moisture_extent.xy + 0.5;
     ctx.hydro = textureSampleLevel(moisture_tex, moisture_smp, muv, 0.0);
     ctx.strengths = strengths;
+    ctx.time = globals.time;
 
     let a = art(ctx, params);
 
