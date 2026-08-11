@@ -1,15 +1,4 @@
-// Procedural ground detail (bddap/rl#304) over the terrain mesh's vertex biome
-// tint. Everything is derived from WORLD-SPACE position — no sampled texture, so
-// no repeat period exists to spot from any altitude. Octaves are faded by their
-// on-screen footprint (fwidth): the procedural analogue of mipmapping, so fine
-// detail exists on foot and at landing height (the rl#197 optic-flow duty the old
-// checker carried) but never shimmers from the plane.
-//
-// One of the interchangeable looks in this directory; the contract every
-// file here keeps — inputs, binding 100, the `fragment` entry point — is
-// documented once on `GroundLook` in ground.rs.
-
-// ─── THIS LOOK: CRACKED LOAM & COBBLE (kimi competition variant 2) ──────────
+// Ground look: CRACKED LOAM & COBBLE (kimi competition variant 2).
 // Art direction: the ground is a MOSAIC, not a wash. Domain-warped Voronoi
 // cells at three scales carry everything: dried clay plates with dark crack
 // seams in the dry bands, soft turf patches in the green valley floors,
@@ -17,30 +6,16 @@
 // from the plane. Structure over noise — the eye reads cells, cracks, and
 // stones, never a blur. Elevation/slope styling mirrors the biome band edges
 // in terrain.rs `biome` (one source: the vertex tint's stops).
-// strengths lanes: x macro provinces, y meso crack network, z fine cobble,
-// w cobble detail normal.
+//
+// One of the interchangeable `art()` modules in this directory; the contract —
+// GroundCtx in, GroundArt out, the scaffold owns `fn fragment` and the detail
+// layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
+// (ground.rs).
 
-#import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
-}
-
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-    prepass_io::{VertexOutput, FragmentOutput},
-    pbr_deferred_functions::deferred_output,
-}
-#else
-#import bevy_pbr::{
-    forward_io::{VertexOutput, FragmentOutput},
-    pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
-}
-#endif
+#define_import_path rl::ground::looks::cracked_loam
 
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade}
-
-// x: macro provinces, y: meso cracks, z: fine cobble, w: detail normal.
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> strengths: vec4<f32>;
+#import rl::ground::art::{GroundCtx, GroundArt}
 
 struct Voro {
     f1: f32,   // distance to nearest feature point (cell units)
@@ -75,35 +50,24 @@ fn voronoi(p: vec2<f32>, seed: u32) -> Voro {
     return Voro(d1, sqrt(f2) - d1, id);
 }
 
-@fragment
-fn fragment(
-    in: VertexOutput,
-    @builtin(front_facing) is_front: bool,
-) -> FragmentOutput {
-    var pbr_input = pbr_input_from_standard_material(in, is_front);
+fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
+    let wp = ctx.wp;
+    let p = ctx.p;
+    let fw = ctx.fw;
+    let strengths = ctx.strengths;
 
-    let wp = in.world_position.xyz;
-    // Anchor-relative ground meters (rl#334/rl#354: the mesh entity is translated
-    // by −anchor, so world_position.xz is small and precise near play).
-    let p = in.world_position.xz;
-    // Ground meters per pixel at this fragment — the octave-fade driver.
-    let fw = max(max(fwidth(p.x), fwidth(p.y)), 1e-4);
+    var rgb = ctx.base;
 
-    var rgb = pbr_input.material.base_color.rgb;
+    let veg = ctx.veg;
 
-    // Vegetation mask from the biome tint's greenness.
-    let veg = clamp((rgb.g - max(rgb.r, rgb.b)) * 6.0, 0.0, 1.0);
-
-    let n_geo = normalize(in.world_normal);
-    let steep = 1.0 - n_geo.y;
+    let steep = 1.0 - ctx.n_geo.y;
 
     // Biome band edges mirrored from terrain.rs `biome` so cell styling follows
     // the same elevation logic the vertex tint and scatter placement use.
     let dry = smoothstep(-1400.0, -500.0, wp.y);   // LOWLAND_M → DRY_GRASS_M
     let stony = smoothstep(-500.0, 100.0, wp.y);   // DRY_GRASS_M → SCREE_M
     let rock = smoothstep(0.18, 0.42, steep);      // ROCK_STEEP
-    let snow = smoothstep(350.0, 650.0, wp.y)      // SNOWLINE_M …
-        * (1.0 - smoothstep(0.18, 0.38, steep));   // … on SNOW_HOLD_STEEP
+    let snow = ctx.snow;                           // SNOWLINE_M on SNOW_HOLD_STEEP
 
     // ── macro provinces (420 m): faint polygonal geology from the plane ──
     // Per-cell tone, washed with plain noise so borders never read vector-hard.
@@ -136,6 +100,7 @@ fn fragment(
     rgb *= 1.0 + 0.14 * strengths.y * (1.0 - smoothstep(0.0, 0.45, mv.f1)) * meso_f;
 
     // ── fine cobble (0.55 m): stones underfoot, branch-gated ──
+    var n = ctx.n;
     let cob_f = footprint_fade(0.55, fw);
     if cob_f > 0.001 {
         let cobble_amt = strengths.z * mix(0.55, 1.0, max(stony, rock)) * (1.0 - snow);
@@ -157,20 +122,17 @@ fn fragment(
             let fx = voronoi(cp + vec2(step / 0.55, 0.0), 98u).f1;
             let fz = voronoi(cp + vec2(0.0, step / 0.55), 98u).f1;
             let grad = vec2(fx - cv.f1, fz - cv.f1) / step;
-            pbr_input.N = normalize(pbr_input.N + w_n * 0.05 * vec3(grad.x, 0.0, grad.y));
+            n = normalize(n + w_n * 0.05 * vec3(grad.x, 0.0, grad.y));
         }
     }
 
-    pbr_input.material.base_color = vec4(rgb, pbr_input.material.base_color.a);
-
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
-
-#ifdef PREPASS_PIPELINE
-    let out = deferred_output(in, pbr_input);
-#else
-    var out: FragmentOutput;
-    out.color = apply_pbr_lighting(pbr_input);
-    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
-#endif
+    var out: GroundArt;
+    out.rgb = rgb;
+    out.roughness = ctx.rough;
+    out.n = n;
+    out.emissive = vec3(0.0);
+    out.glow = vec3(0.0);
+    out.grain = 0.0;
+    out.relief = 0.0;
     return out;
 }

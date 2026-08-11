@@ -1,45 +1,20 @@
-// Procedural ground detail (bddap/rl#304) over the terrain mesh's vertex biome
-// tint. Everything is derived from WORLD-SPACE position — no sampled texture, so
-// no repeat period exists to spot from any altitude. Octaves are faded by their
-// on-screen footprint (fwidth): the procedural analogue of mipmapping, so fine
-// detail exists on foot and at landing height (the rl#197 optic-flow duty the old
-// checker carried) but never shimmers from the plane.
-//
-// One of the interchangeable looks in this directory; the contract every
-// file here keeps — inputs, binding 100, the `fragment` entry point — is
-// documented once on `GroundLook` in ground.rs.
-
-// ─── THIS LOOK: WIND-COMBED (kimi competition variant 1) ────────────────────
+// Ground look: WIND-COMBED (kimi competition variant 1).
 // Art direction: the ground is COMBED, not mottled — every scale reads as
 // aligned by wind and gravity, the way farmland and hillsides do from the air.
 // A slowly varying wind field (bent onto slope contours as faces steepen —
 // sediment combs AROUND a hill) orients anisotropic streak octaves, so the
 // terrain has a directional GRAIN: long straw-and-green comb-lines in the
 // meadows, sediment flow-lines on the steeps, short combed fiber underfoot.
-// strengths lanes: x macro warm/cool drift, y meso comb streaks, z fine
-// on-foot grain, w streak detail normal.
+//
+// One of the interchangeable `art()` modules in this directory; the contract —
+// GroundCtx in, GroundArt out, the scaffold owns `fn fragment` and the detail
+// layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
+// (ground.rs).
 
-#import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
-}
-
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-    prepass_io::{VertexOutput, FragmentOutput},
-    pbr_deferred_functions::deferred_output,
-}
-#else
-#import bevy_pbr::{
-    forward_io::{VertexOutput, FragmentOutput},
-    pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
-}
-#endif
+#define_import_path rl::ground::looks::wind_combed
 
 #import rl::noise::{vnoise, footprint_fade}
-
-// x: macro drift, y: meso comb streaks, z: fine grain, w: detail normal.
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> strengths: vec4<f32>;
+#import rl::ground::art::{GroundCtx, GroundArt}
 
 // Anisotropic value noise: stretched to `along`×`across` meters in the comb
 // frame `d`, so one sample is a streak, not a blot.
@@ -48,26 +23,17 @@ fn streak(p: vec2<f32>, d: vec2<f32>, along: f32, across: f32, seed: u32) -> f32
     return vnoise(q, seed);
 }
 
-@fragment
-fn fragment(
-    in: VertexOutput,
-    @builtin(front_facing) is_front: bool,
-) -> FragmentOutput {
-    var pbr_input = pbr_input_from_standard_material(in, is_front);
+fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
+    let p = ctx.p;
+    let fw = ctx.fw;
+    let strengths = ctx.strengths;
 
-    // Anchor-relative ground meters (rl#334/rl#354: the mesh entity is translated
-    // by −anchor, so world_position.xz is small and precise near play).
-    let p = in.world_position.xz;
-    // Ground meters per pixel at this fragment — the octave-fade driver.
-    let fw = max(max(fwidth(p.x), fwidth(p.y)), 1e-4);
+    var rgb = ctx.base;
 
-    var rgb = pbr_input.material.base_color.rgb;
+    // Combs read strongest on growth, muted on scree/rock/snow.
+    let veg = ctx.veg;
 
-    // Vegetation mask from the biome tint's greenness: combs read strongest on
-    // growth, muted on scree/rock/snow.
-    let veg = clamp((rgb.g - max(rgb.r, rgb.b)) * 6.0, 0.0, 1.0);
-
-    let n_geo = normalize(in.world_normal);
+    let n_geo = ctx.n_geo;
     let steep = 1.0 - n_geo.y;
 
     // The comb direction: a wind angle from two low-frequency octaves, blended
@@ -111,7 +77,9 @@ fn fragment(
 
     // Fine on-foot grain: short combed fiber plus a little isotropic grit so
     // bare soil never reads as pure stripes. Branch-gated (screen-coherent,
-    // distance-driven) so the far ground never pays for it.
+    // distance-driven) so the far ground never pays for it. (Kept for stage
+    // 4(a)'s identical-output sweep; 4(b) keeps the directional fiber and hands
+    // the isotropic grit to the scaffold's adaptive layer.)
     let grain_f = footprint_fade(0.5, fw);
     if grain_f > 0.001 {
         let g = streak(p, d, 3.4, 0.5, 81u) * grain_f
@@ -131,6 +99,7 @@ fn fragment(
 
     // Detail normal: streaks carry micro-relief across the comb direction only
     // (that is where they vary). Two taps, footprint-gated like the base.
+    var n = ctx.n;
     let w_n = strengths.w * footprint_fade(1.2, fw);
     if w_n > 0.001 {
         let perp = vec2(-d.y, d.x);
@@ -138,19 +107,16 @@ fn fragment(
         let s0 = streak(p, d, 5.0, 1.2, 84u);
         let s1 = streak(p + perp * step, d, 5.0, 1.2, 84u);
         let g = (s1 - s0) / step * 0.045;
-        pbr_input.N = normalize(pbr_input.N + w_n * vec3(-perp.x * g, 0.0, -perp.y * g));
+        n = normalize(n + w_n * vec3(-perp.x * g, 0.0, -perp.y * g));
     }
 
-    pbr_input.material.base_color = vec4(rgb, pbr_input.material.base_color.a);
-
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
-
-#ifdef PREPASS_PIPELINE
-    let out = deferred_output(in, pbr_input);
-#else
-    var out: FragmentOutput;
-    out.color = apply_pbr_lighting(pbr_input);
-    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
-#endif
+    var out: GroundArt;
+    out.rgb = rgb;
+    out.roughness = ctx.rough;
+    out.n = n;
+    out.emissive = vec3(0.0);
+    out.glow = vec3(0.0);
+    out.grain = 0.0;
+    out.relief = 0.0;
     return out;
 }

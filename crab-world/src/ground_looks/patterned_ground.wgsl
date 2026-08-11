@@ -4,35 +4,18 @@
 // read as a patchwork of fields seamed by darker ground. On foot: mudcrack
 // polygons (~1.2 m) with grooved crack normals, dry earth between growth.
 // Voronoi cellular structure everywhere — a macro identity value noise cannot
-// fake. Everything is derived from WORLD-SPACE position — no sampled texture,
-// so no repeat period exists to spot from any altitude. Cell tiers are faded by
-// their on-screen footprint (fwidth), so nothing shimmers from the plane.
+// fake. Cell tiers are faded by their on-screen footprint (fwidth), so nothing
+// shimmers from the plane.
 //
-// One of the interchangeable looks in this directory; the contract every
-// file here keeps — inputs, binding 100, the `fragment` entry point — is
-// documented once on `GroundLook` in ground.rs.
+// One of the interchangeable `art()` modules in this directory; the contract —
+// GroundCtx in, GroundArt out, the scaffold owns `fn fragment` and the detail
+// layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
+// (ground.rs).
 
-#import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
-}
-
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-    prepass_io::{VertexOutput, FragmentOutput},
-    pbr_deferred_functions::deferred_output,
-}
-#else
-#import bevy_pbr::{
-    forward_io::{VertexOutput, FragmentOutput},
-    pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
-}
-#endif
+#define_import_path rl::ground::looks::patterned_ground
 
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade}
-
-// x: plate mosaic, y: macro weathering, z: mudcracks + fine, w: detail normal.
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> strengths: vec4<f32>;
+#import rl::ground::art::{GroundCtx, GroundArt}
 
 // Voronoi over jittered lattice cells: returns (F1, F2 − F1, cell hash).
 // F2 − F1 ≈ 0 on cell borders — the seam/crack driver; the hash gives each
@@ -62,24 +45,16 @@ fn voronoi(q: vec2<f32>, seed: u32) -> vec3<f32> {
     return vec3(sqrt(f1), sqrt(f2) - sqrt(f1), id);
 }
 
-@fragment
-fn fragment(
-    in: VertexOutput,
-    @builtin(front_facing) is_front: bool,
-) -> FragmentOutput {
-    var pbr_input = pbr_input_from_standard_material(in, is_front);
+fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
+    let p = ctx.p;
+    let fw = ctx.fw;
+    let strengths = ctx.strengths;
 
-    // Anchor-relative ground meters (rl#334/rl#354: the mesh entity is translated
-    // by −anchor, so world_position.xz is small and precise near play).
-    let p = in.world_position.xz;
-    // Ground meters per pixel at this fragment — the octave-fade driver.
-    let fw = max(max(fwidth(p.x), fwidth(p.y)), 1e-4);
+    var rgb = ctx.base;
 
-    var rgb = pbr_input.material.base_color.rgb;
-
-    // Vegetation mask from the biome tint's greenness: plates are strongest on
-    // open/dry ground; deep growth softens the seams (roots hold the soil).
-    let veg = clamp((rgb.g - max(rgb.r, rgb.b)) * 6.0, 0.0, 1.0);
+    // Plates are strongest on open/dry ground; deep growth softens the seams
+    // (roots hold the soil).
+    let veg = ctx.veg;
 
     // ── Tier 1: giant plates (~120 m) — the patchwork-from-the-plane read ──
     // Domain-warped so plate edges meander instead of reading as a jittered grid.
@@ -113,6 +88,8 @@ fn fragment(
     rgb *= 1.0 + 0.30 * strengths.y * macro_n;
 
     // ── Tier 3: mudcracks (~1.2 m) + fine grain — the on-foot read ─────────
+    // (Isotropic fine octaves kept for stage 4(a)'s identical-output sweep;
+    // 4(b) deletes them for the scaffold's adaptive layer.)
     let crack_fade = footprint_fade(1.2, fw);
     var crack = 0.0;
     if crack_fade > 0.001 {
@@ -132,12 +109,11 @@ fn fragment(
     }
     rgb *= 1.0 + 0.26 * strengths.z * fine_n;
 
-    pbr_input.material.base_color = vec4(rgb, pbr_input.material.base_color.a);
-
     // ── Normals: crack grooves + micro-relief ──────────────────────────────
     // Mudcrack grooves dip toward the crack line (finite-difference of the
     // crack field), so grazing moonlight draws every polygon edge; plus the
-    // round-2 micro-relief. Shading only — geometry untouched.
+    // round-2 micro-relief (kept for 4(a); 4(b) hands the isotropic part to the
+    // scaffold's relief layer). Shading only — geometry untouched.
     let w_n = strengths.w * footprint_fade(0.45, fw);
     var grad = vec2(0.0);
     if w_n > 0.001 {
@@ -156,18 +132,18 @@ fn fragment(
         // Depress the surface where F2−F1 shrinks: normals lean INTO cracks.
         grad += vec2(cx - c0, cz - c0) / gs * 0.10 * groove_w;
     }
+    var n = ctx.n;
     if length(grad) > 1e-4 {
-        pbr_input.N = normalize(pbr_input.N + vec3(-grad.x, 0.0, -grad.y));
+        n = normalize(n + vec3(-grad.x, 0.0, -grad.y));
     }
 
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
-
-#ifdef PREPASS_PIPELINE
-    let out = deferred_output(in, pbr_input);
-#else
-    var out: FragmentOutput;
-    out.color = apply_pbr_lighting(pbr_input);
-    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
-#endif
+    var out: GroundArt;
+    out.rgb = rgb;
+    out.roughness = ctx.rough;
+    out.n = n;
+    out.emissive = vec3(0.0);
+    out.glow = vec3(0.0);
+    out.grain = 0.0;
+    out.relief = 0.0;
     return out;
 }
