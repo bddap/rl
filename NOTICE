@@ -20,15 +20,21 @@ glyphs the control map actually uses are bundled.
 Ambient soundscape beds (crab-world/assets/ambience/*.wav)
 ----------------------------------------------------------
 CC0 (public domain) field recordings, fetched from the bddap-bot/rl-assets release
-`ambience-v1` by scripts/fetch-ambience.sh — not committed here only because of
+`ambience-v2` by scripts/fetch-ambience.sh — not committed here only because of
 their size; when absent the ambience layers stay silent (non-fatal). Converted to
-16-bit mono 44.1 kHz WAV; otherwise unmodified. Sources (both published under
+16-bit mono 44.1 kHz WAV; otherwise unmodified. Sources (all published under
 Creative Commons 0 on their Freesound pages):
 
 - grassland-birds.wav — "Springtime birdsong with soft wind ambiance" by
   rubindaniel, https://freesound.org/people/rubindaniel/sounds/847380/
 - crickets.wav — "Southern Summer Evening Ambience with Crickets 5" by
   RyanKingArt, https://freesound.org/people/RyanKingArt/sounds/746366/
+- valley-frogs.wav — "LS110062FrogTheaterFantastic-2012May" by Amyrl,
+  https://freesound.org/people/Amyrl/sounds/397830/
+- grass-rustle.wav — "Silencyo_CC_Wind Mistral_Rustling_Gusts_High Grass" by
+  silencyo, https://freesound.org/people/silencyo/sounds/81793/
+- mountain-birds.wav — "Rocky Mountain Outdoors: wind and birds" by
+  petebuchwald, https://freesound.org/people/petebuchwald/sounds/288899/
 
 Sally Lightfoot crab model (sally.glb / grapsus_grapsus_crab_280.blend)
 -----------------------------------------------------------------------

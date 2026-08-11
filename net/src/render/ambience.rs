@@ -7,8 +7,12 @@
 //! and the audio thread glides toward the targets per-sample — so a context
 //! change (walk off the grass, take off, board a craft) crossfades by
 //! construction, the wind synth's scheme (audio.rs) applied to sampled loops.
-//! Stage 2 hangs more biome beds off the same bus; stage 3 adds vehicle/on-foot
-//! layers.
+//!
+//! "Biome" is what the terrain actually has (rl#357 stage 2): elevation and
+//! slope bands (crab-world's `biome` stops). The lush low greens double as the
+//! moisture map — frogs sing where the valleys are green — and the mountain bed
+//! lives on the complement of the grass, exactly where the tint paints rock and
+//! scree. Stage 3 adds vehicle/on-foot layers.
 //!
 //! Beds are CC0 recordings fetched from bddap-bot/rl-assets
 //! (scripts/fetch-ambience.sh; provenance in NOTICE) into the gitignored asset
@@ -34,6 +38,13 @@ pub(super) struct AmbientContext {
     /// placement weight, so the beds live exactly where the tufts grow and thin
     /// out over scree, rock faces, and snow exactly where the ground art does.
     pub grass: f32,
+    /// 0..1: how lush (green) the ground is — the complement of crab-world's
+    /// grass-dryness ramp. High in the deep valley greens, zero by the dry-grass
+    /// band; the terrain's moisture proxy, so it gates the wet-ground beds.
+    pub lush: f32,
+    /// 0..1: how rocky the ground is — crab-world's rock/scree weight (steep
+    /// faces + the above-the-grass band, gone under snow).
+    pub rocky: f32,
     /// Listener height above the terrain, meters.
     pub alt_m: f32,
     /// Vehicle context (`None` = on foot).
@@ -53,19 +64,39 @@ struct LayerDef {
     muffle: Muffle,
 }
 
-/// Ground beds are heard on grassy terrain, fade out by ~60 m up (a low pass over
-/// the meadow keeps a trace of it), and duck under a craft canopy.
-fn grass_bed(ctx: &AmbientContext) -> f32 {
-    let near_ground = 1.0 - smoothstep(12.0, 60.0, ctx.alt_m);
+/// Ground proximity shared by every ground bed: full on the ground, gone by
+/// ~60 m up (a low pass over the meadow keeps a trace of it), halved under a
+/// craft canopy.
+fn near_ground(ctx: &AmbientContext) -> f32 {
+    let near = 1.0 - smoothstep(12.0, 60.0, ctx.alt_m);
     let canopy = if ctx.vehicle.is_some() { 0.5 } else { 1.0 };
-    ctx.grass * near_ground * canopy
+    near * canopy
 }
 
-/// Both beds are night sounds gated on biome only: the world is PERMANENTLY night
+/// Grassy-ground beds: anywhere the tufts grow.
+fn grass_bed(ctx: &AmbientContext) -> f32 {
+    ctx.grass * near_ground(ctx)
+}
+
+/// Wet-valley beds: grassy AND lush — the green low valleys, the closest thing
+/// this terrain has to frog water.
+fn valley_bed(ctx: &AmbientContext) -> f32 {
+    ctx.grass * ctx.lush * near_ground(ctx)
+}
+
+/// Rock/scree beds: where the grass gives out — steep faces and the high band
+/// below the snowline (above it the wind synth owns the mix alone).
+fn mountain_bed(ctx: &AmbientContext) -> f32 {
+    ctx.rocky * near_ground(ctx)
+}
+
+/// All beds are gated on biome only, never time: the world is PERMANENTLY night
 /// (a static `NightSkyPlugin` sky, one fixed moon-sun light — no time-of-day
 /// exists anywhere in sim or render), so a "night" gate would be constant-true.
-/// If a day/night cycle ever lands, it multiplies into [`grass_bed`].
-const LAYERS: [LayerDef; 2] = [
+/// If a day/night cycle ever lands, it multiplies into the gain maps here.
+/// Levels are rough placements under the wind ceiling; the deliberate mix pass
+/// is stage 3.
+const LAYERS: [LayerDef; 5] = [
     LayerDef {
         file: "ambience/grassland-birds.wav",
         level: 0.35 * WIND_MASTER,
@@ -76,6 +107,24 @@ const LAYERS: [LayerDef; 2] = [
         file: "ambience/crickets.wav",
         level: 0.5 * WIND_MASTER,
         gain: grass_bed,
+        muffle: Muffle::Duck,
+    },
+    LayerDef {
+        file: "ambience/valley-frogs.wav",
+        level: 0.45 * WIND_MASTER,
+        gain: valley_bed,
+        muffle: Muffle::Duck,
+    },
+    LayerDef {
+        file: "ambience/grass-rustle.wav",
+        level: 0.3 * WIND_MASTER,
+        gain: grass_bed,
+        muffle: Muffle::Duck,
+    },
+    LayerDef {
+        file: "ambience/mountain-birds.wav",
+        level: 0.3 * WIND_MASTER,
+        gain: mountain_bed,
         muffle: Muffle::Duck,
     },
 ];
@@ -264,6 +313,8 @@ pub(super) fn update_context(
     let normal_y = 1.0 / (1.0 + gx * gx + gz * gz).sqrt();
     *ctx = AmbientContext {
         grass: biome::tuft_weight(h, normal_y),
+        lush: 1.0 - biome::grass_dryness(h),
+        rocky: biome::rocky_weight(h, normal_y),
         alt_m,
         vehicle: vehicle.kind(),
     };
@@ -385,6 +436,8 @@ mod tests {
     fn grass_bed_follows_context() {
         let grassy = AmbientContext {
             grass: 1.0,
+            lush: 0.0,
+            rocky: 0.0,
             alt_m: 0.0,
             vehicle: None,
         };
@@ -413,6 +466,44 @@ mod tests {
     }
 
     #[test]
+    fn valley_and_mountain_beds_split_the_terrain() {
+        // Frogs need grassy AND lush; the dry plateau (lush 0) silences them
+        // while the grass beds stay up.
+        let dry_plateau = AmbientContext {
+            grass: 1.0,
+            lush: 0.0,
+            rocky: 0.0,
+            alt_m: 0.0,
+            vehicle: None,
+        };
+        assert_eq!(valley_bed(&dry_plateau), 0.0);
+        assert_eq!(grass_bed(&dry_plateau), 1.0);
+        let green_valley = AmbientContext {
+            lush: 1.0,
+            ..dry_plateau
+        };
+        assert_eq!(valley_bed(&green_valley), 1.0);
+        // The rock face is the grass beds' complement: mountain up, grass out.
+        let rock_face = AmbientContext {
+            grass: 0.0,
+            lush: 0.0,
+            rocky: 1.0,
+            ..dry_plateau
+        };
+        assert_eq!(mountain_bed(&rock_face), 1.0);
+        assert_eq!(grass_bed(&rock_face), 0.0);
+        assert_eq!(valley_bed(&rock_face), 0.0);
+        // Same altitude fade as every ground bed.
+        assert_eq!(
+            mountain_bed(&AmbientContext {
+                alt_m: 100.0,
+                ..rock_face
+            }),
+            0.0
+        );
+    }
+
+    #[test]
     fn seal_loop_blends_tail_into_head() {
         // A 2 s ramp: after sealing, sample 0 is the pure tail (t=0 ⇒ head×0 +
         // tail×1) and the bed is shorter by the blend window.
@@ -427,7 +518,8 @@ mod tests {
 
     fn one_bed_stream(pcm: Vec<f32>) -> (Arc<AmbienceTargets>, AmbienceStream) {
         let targets = Arc::<AmbienceTargets>::default();
-        let beds = [Arc::from(pcm), Arc::from([])];
+        let mut beds: [Arc<[f32]>; LAYERS.len()] = std::array::from_fn(|_| Arc::from([]));
+        beds[0] = pcm.into();
         (targets.clone(), AmbienceStream::new(targets, beds))
     }
 
@@ -467,10 +559,10 @@ mod tests {
         assert!(after < 0.02, "duck too slow: {after}");
     }
 
-    /// Not a test — the evidence generator for rl#357 stage 1: renders a context
-    /// sweep (grassland on foot → climb to rock → return → take off) through the
+    /// Not a test — the evidence generator for rl#357: renders a biome walk
+    /// (green valley → dry plateau → rock face → past the snowline) through the
     /// real fetched beds to WAV. Skips (with a note) when the beds are absent.
-    /// `AMBIENCE_EVIDENCE_DIR=docs/evidence/rl357-stage1 cargo test -p net
+    /// `AMBIENCE_EVIDENCE_DIR=docs/evidence/rl357-stage2 cargo test -p net
     /// --features render ambience_evidence -- --ignored`
     #[test]
     #[ignore = "artifact generator, not a check"]
@@ -485,23 +577,30 @@ mod tests {
         }
         let targets = Arc::<AmbienceTargets>::default();
         let mut s = AmbienceStream::new(targets.clone(), beds);
-        let secs = 20;
+        let secs = 24;
         let n = SAMPLE_RATE as usize * secs;
         let mut pcm = Vec::with_capacity(n);
         for i in 0..n {
             let t = i as f32 / SAMPLE_RATE as f32;
-            // 0–5 s deep grassland on foot; 5–10 s climb onto rock (grass → 0);
-            // 10–13 s walk back down; 13–20 s board the plane and climb out.
-            let (grass, alt_m, vehicle) = match t {
-                t if t < 5.0 => (1.0, 0.0, None),
-                t if t < 10.0 => (1.0 - (t - 5.0) / 5.0, 0.0, None),
-                t if t < 13.0 => ((t - 10.0) / 3.0, 0.0, None),
-                t => (1.0, (t - 13.0) * 12.0, Some(VehicleKind::Plane)),
+            // A walk up the whole biome ramp, 6 s per band: green valley (frogs
+            // + birds + crickets + rustle) → dry plateau (frogs fade) → rock
+            // face (grass beds out, mountain birds in) → past the snowline
+            // (everything to the wind's silence).
+            let (grass, lush, rocky) = match t {
+                t if t < 6.0 => (1.0, 1.0, 0.0),
+                t if t < 12.0 => (1.0, 1.0 - (t - 6.0) / 6.0, 0.0),
+                t if t < 18.0 => {
+                    let c = (t - 12.0) / 6.0;
+                    (1.0 - c, 0.0, c)
+                }
+                t => (0.0, 0.0, 1.0 - (t - 18.0) / 6.0),
             };
             let ctx = AmbientContext {
                 grass,
-                alt_m,
-                vehicle,
+                lush,
+                rocky,
+                alt_m: 0.0,
+                vehicle: None,
             };
             for (def, slot) in LAYERS.iter().zip(&targets.acts) {
                 slot.store(layer_target(def, &ctx));

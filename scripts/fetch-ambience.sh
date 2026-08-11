@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo="bddap-bot/rl-assets"
-tag="ambience-v1"
+tag="ambience-v2"
 
 manifest="$(cargo metadata --format-version 1 --no-deps \
     | jq -r '.packages[] | select(.name == "crab-world") | .manifest_path')"
