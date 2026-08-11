@@ -1,7 +1,7 @@
 // rl::noise — the one copy of the procedural-noise helpers (rl#333 seam 1).
 // Every ground look imports from here; sky.wgsl folds in at rl#353 stage 5.
 // History's warning, and this module's reason to exist: as per-file copies these
-// drifted twice (the rl#324 quintic fix reached 1 of 13 looks) — a fix here is
+// drifted twice (the rl#324 quintic fix reached 1 of 14 looks) — a fix here is
 // fleet-wide by construction.
 
 #define_import_path rl::noise
