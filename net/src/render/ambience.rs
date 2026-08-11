@@ -12,7 +12,9 @@
 //! slope bands (crab-world's `biome` stops). The lush low greens double as the
 //! moisture map — frogs sing where the valleys are green — and the mountain bed
 //! lives on the complement of the grass, exactly where the tint paints rock and
-//! scree. Stage 3 adds vehicle/on-foot layers.
+//! scree. The listener's own sounds ride the same bus (rl#357 stage 3): movement
+//! layers (footsteps everywhere walkable, a grass swish where the tufts grow)
+//! keyed to gait, and per-craft engine loops keyed to boarding + speed.
 //!
 //! Beds are CC0 recordings fetched from bddap-bot/rl-assets
 //! (scripts/fetch-ambience.sh; provenance in NOTICE) into the gitignored asset
@@ -47,6 +49,9 @@ pub(super) struct AmbientContext {
     pub rocky: f32,
     /// Listener height above the terrain, meters.
     pub alt_m: f32,
+    /// Listener speed, m/s ([`super::audio::local_speed_mps`] — the same speed
+    /// the wind timbre rides), driving the movement and engine layers.
+    pub speed_mps: f32,
     /// Vehicle context (`None` = on foot).
     pub vehicle: Option<VehicleKind>,
 }
@@ -90,13 +95,65 @@ fn mountain_bed(ctx: &AmbientContext) -> f32 {
     ctx.rocky * near_ground(ctx)
 }
 
+/// On-foot walking pace, m/s — the sim's tuned walk speed, the full-gain point of
+/// the movement layers (sprint holds full, it does not get louder).
+fn walk_mps() -> f32 {
+    crate::sim::PLAYER_SPEED as f32 / crate::sim::UNIT as f32 * crate::sim::TICK_HZ as f32
+}
+
+/// On-foot movement: grounded (the jump apex is ~1.5 player heights ≈ 0.08 m in
+/// this miniature world, so the fade sits inside it — steps cut out mid-air) and
+/// moving, ramping in from a quarter of walking pace to full at walk.
+fn on_foot_move(ctx: &AmbientContext) -> f32 {
+    if ctx.vehicle.is_some() {
+        return 0.0;
+    }
+    let grounded = 1.0 - smoothstep(0.03, 0.08, ctx.alt_m);
+    grounded * smoothstep(0.25 * walk_mps(), walk_mps(), ctx.speed_mps)
+}
+
+/// Footsteps: any walkable ground — the neutral movement layer under the swish.
+fn footsteps(ctx: &AmbientContext) -> f32 {
+    on_foot_move(ctx)
+}
+
+/// Grass swish: legs brushing through the tufts, so it lives exactly where the
+/// tufts grow, on top of the neutral footsteps.
+fn grass_swish(ctx: &AmbientContext) -> f32 {
+    ctx.grass * on_foot_move(ctx)
+}
+
+/// Engine loops: full presence the moment the craft is boarded — an engine idles
+/// audibly — with speed adding the top of the band. Board/exit crossfades on the
+/// activation glide like every layer. Each craft normalizes speed over its own
+/// audible band, matching the wind profile's (audio.rs).
+fn engine(ctx: &AmbientContext, kind: VehicleKind, top_mps: f32) -> f32 {
+    if ctx.vehicle != Some(kind) {
+        return 0.0;
+    }
+    0.6 + 0.4 * (ctx.speed_mps / top_mps).clamp(0.0, 1.0)
+}
+
+/// Plane: the prop buzz, up to the full-throttle terminal (audio.rs FULL_WIND).
+fn plane_engine(ctx: &AmbientContext) -> f32 {
+    engine(ctx, VehicleKind::Plane, 4.5)
+}
+
+/// Ship: the hover thrusters' hum, over the ship's own lower band (its wind
+/// profile tops out at 3 m/s for the same reason).
+fn ship_thruster(ctx: &AmbientContext) -> f32 {
+    engine(ctx, VehicleKind::Ship, 3.0)
+}
+
 /// All beds are gated on biome only, never time: the world is PERMANENTLY night
 /// (a static `NightSkyPlugin` sky, one fixed moon-sun light — no time-of-day
 /// exists anywhere in sim or render), so a "night" gate would be constant-true.
 /// If a day/night cycle ever lands, it multiplies into the gain maps here.
-/// Levels are rough placements under the wind ceiling; the deliberate mix pass
-/// is stage 3.
-const LAYERS: [LayerDef; 5] = [
+/// Levels are the stage-3 deliberate mix pass, set from measured solo RMS in the
+/// evidence scenario (see docs/evidence/rl357-stage3): beds sit in a band under
+/// the wind ceiling, the listener's own movement reads just above the beds, and
+/// the engines are the loudest layer — still under the full-speed wind.
+const LAYERS: [LayerDef; 9] = [
     LayerDef {
         file: "ambience/grassland-birds.wav",
         level: 0.35 * WIND_MASTER,
@@ -125,6 +182,41 @@ const LAYERS: [LayerDef; 5] = [
         file: "ambience/mountain-birds.wav",
         level: 0.3 * WIND_MASTER,
         gain: mountain_bed,
+        muffle: Muffle::Duck,
+    },
+    // Stage-3 layers: plain amplitudes, not ×WIND_MASTER — these are set against
+    // each asset's MEASURED mastering to hit a mix target, not parked at a
+    // fraction of the wind ceiling. Movement (steps −30.7 LUFS mastered, swish
+    // −26.8) lands ~6 dB above the bed stack: the listener's own sounds read as
+    // foreground without drowning the world. Engines are mastered hot (−19.0 /
+    // −19.6 LUFS, I=−16 loudnorm — steady hums take it without clipping) so full
+    // activation lands ~−18 LUFS: clearly over the ship's ~−21 LUFS wind rumble
+    // and over the plane's cruise wind, while the −8 LUFS full-throttle roar
+    // still wins — speed drowns the motor, which is the point of the roar.
+    // Amplitude × activation stays under the asset's ~0.84 true peak, so the
+    // mixer's clamp never bites.
+    LayerDef {
+        file: "ambience/footsteps.wav",
+        level: 1.0,
+        gain: footsteps,
+        muffle: Muffle::Duck,
+    },
+    LayerDef {
+        file: "ambience/grass-swish.wav",
+        level: 0.5,
+        gain: grass_swish,
+        muffle: Muffle::Duck,
+    },
+    LayerDef {
+        file: "ambience/plane-engine.wav",
+        level: 1.15,
+        gain: plane_engine,
+        muffle: Muffle::Duck,
+    },
+    LayerDef {
+        file: "ambience/ship-thruster.wav",
+        level: 1.25,
+        gain: ship_thruster,
         muffle: Muffle::Duck,
     },
 ];
@@ -316,6 +408,7 @@ pub(super) fn update_context(
         lush: 1.0 - biome::grass_dryness(h),
         rocky: biome::rocky_weight(h, normal_y),
         alt_m,
+        speed_mps: super::audio::local_speed_mps(&state, &vehicle),
         vehicle: vehicle.kind(),
     };
 }
@@ -439,6 +532,7 @@ mod tests {
             lush: 0.0,
             rocky: 0.0,
             alt_m: 0.0,
+            speed_mps: 0.0,
             vehicle: None,
         };
         assert_eq!(grass_bed(&grassy), 1.0);
@@ -474,6 +568,7 @@ mod tests {
             lush: 0.0,
             rocky: 0.0,
             alt_m: 0.0,
+            speed_mps: 0.0,
             vehicle: None,
         };
         assert_eq!(valley_bed(&dry_plateau), 0.0);
@@ -559,6 +654,91 @@ mod tests {
         assert!(after < 0.02, "duck too slow: {after}");
     }
 
+    #[test]
+    fn movement_layers_follow_gait() {
+        let walking = AmbientContext {
+            grass: 1.0,
+            lush: 0.0,
+            rocky: 0.0,
+            alt_m: 0.0,
+            speed_mps: walk_mps(),
+            vehicle: None,
+        };
+        assert_eq!(footsteps(&walking), 1.0);
+        assert_eq!(grass_swish(&walking), 1.0);
+        // Standing still is silent; sprint holds full rather than clipping past it.
+        let still = AmbientContext {
+            speed_mps: 0.0,
+            ..walking
+        };
+        assert_eq!(footsteps(&still), 0.0);
+        assert_eq!(
+            footsteps(&AmbientContext {
+                speed_mps: 1.8 * walk_mps(),
+                ..walking
+            }),
+            1.0
+        );
+        // The swish needs grass under foot; the steps do not.
+        let on_rock = AmbientContext {
+            grass: 0.0,
+            rocky: 1.0,
+            ..walking
+        };
+        assert_eq!(grass_swish(&on_rock), 0.0);
+        assert_eq!(footsteps(&on_rock), 1.0);
+        // Mid-jump (past the ~0.08 m apex fade) and in a craft the steps cut out.
+        assert_eq!(
+            footsteps(&AmbientContext {
+                alt_m: 0.1,
+                ..walking
+            }),
+            0.0
+        );
+        assert_eq!(
+            footsteps(&AmbientContext {
+                vehicle: Some(VehicleKind::Plane),
+                ..walking
+            }),
+            0.0
+        );
+    }
+
+    #[test]
+    fn engine_layers_gate_on_their_craft() {
+        let in_plane = AmbientContext {
+            grass: 0.0,
+            lush: 0.0,
+            rocky: 0.0,
+            alt_m: 20.0,
+            speed_mps: 0.0,
+            vehicle: Some(VehicleKind::Plane),
+        };
+        // An idling engine is present the moment the craft is boarded, and speed
+        // adds the top of the band.
+        assert_eq!(plane_engine(&in_plane), 0.6);
+        assert_eq!(
+            plane_engine(&AmbientContext {
+                speed_mps: 4.5,
+                ..in_plane
+            }),
+            1.0
+        );
+        assert_eq!(ship_thruster(&in_plane), 0.0);
+        let in_ship = AmbientContext {
+            vehicle: Some(VehicleKind::Ship),
+            ..in_plane
+        };
+        assert_eq!(plane_engine(&in_ship), 0.0);
+        assert_eq!(ship_thruster(&in_ship), 0.6);
+        let on_foot = AmbientContext {
+            vehicle: None,
+            ..in_plane
+        };
+        assert_eq!(plane_engine(&on_foot), 0.0);
+        assert_eq!(ship_thruster(&on_foot), 0.0);
+    }
+
     /// Not a test — the evidence generator for rl#357: renders a biome walk
     /// (green valley → dry plateau → rock face → past the snowline) through the
     /// real fetched beds to WAV. Skips (with a note) when the beds are absent.
@@ -600,6 +780,7 @@ mod tests {
                 lush,
                 rocky,
                 alt_m: 0.0,
+                speed_mps: 0.0,
                 vehicle: None,
             };
             for (def, slot) in LAYERS.iter().zip(&targets.acts) {
@@ -610,5 +791,88 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = std::path::Path::new(&dir).join("ambience-context-sweep.wav");
         std::fs::write(path, crab_world::wav::wav_bytes(&pcm)).unwrap();
+    }
+
+    /// The stage-3 scenario, shared by the before and after renders so the A/B
+    /// differs ONLY in the mix: stand in the green valley → walk → sprint →
+    /// board the plane and climb to full speed → cruise the ship → back on foot
+    /// in the grass. Returns the context plus the airspeed the wind synth sees.
+    fn stage3_scenario(t: f32) -> (AmbientContext, f32) {
+        let walk = walk_mps();
+        let (speed, alt_m, vehicle) = match t {
+            t if t < 4.0 => (0.0, 0.0, None),
+            t if t < 10.0 => (walk, 0.0, None),
+            t if t < 14.0 => (1.8 * walk, 0.0, None),
+            t if t < 22.0 => {
+                let n = ((t - 14.0) / 5.0).min(1.0);
+                (4.5 * n, 40.0 * n, Some(VehicleKind::Plane))
+            }
+            t if t < 28.0 => (2.5, 10.0, Some(VehicleKind::Ship)),
+            _ => (walk, 0.0, None),
+        };
+        let ctx = AmbientContext {
+            grass: if vehicle.is_some() { 0.0 } else { 1.0 },
+            lush: if vehicle.is_some() { 0.0 } else { 1.0 },
+            rocky: 0.0,
+            alt_m,
+            speed_mps: speed,
+            vehicle,
+        };
+        (ctx, speed)
+    }
+
+    /// Not a test — the stage-3 before/after capture: the full outdoor mix (wind
+    /// synth + every sampled layer) over one scenario, rendered twice. BEFORE is
+    /// the mix as stage 2 left it — the five beds at their rough placement
+    /// levels, no movement or engine layers; AFTER is the shipped LAYERS table
+    /// (stage-3 layers + the deliberate level pass). Same scenario, same streams:
+    /// the A/B is purely the mix. `AMBIENCE_EVIDENCE_DIR=docs/evidence/rl357-stage3
+    /// cargo test -p net --features render stage3_mix_evidence -- --ignored`
+    #[test]
+    #[ignore = "artifact generator, not a check"]
+    fn stage3_mix_evidence() {
+        let Some(dir) = std::env::var_os("AMBIENCE_EVIDENCE_DIR") else {
+            return;
+        };
+        let beds: [Arc<[f32]>; LAYERS.len()] = std::array::from_fn(|i| load_bed(&LAYERS[i]));
+        if beds.iter().any(|b| b.is_empty()) {
+            eprintln!("beds absent — run scripts/fetch-ambience.sh first");
+            return;
+        }
+        // Stage 2's rough placement levels (its landed LAYERS values), the four
+        // stage-3 layers muted — the historical snapshot the A/B is against.
+        let before: [f32; LAYERS.len()] = [
+            0.35 * WIND_MASTER,
+            0.5 * WIND_MASTER,
+            0.45 * WIND_MASTER,
+            0.3 * WIND_MASTER,
+            0.3 * WIND_MASTER,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let after: [f32; LAYERS.len()] = std::array::from_fn(|i| LAYERS[i].level);
+        for (name, levels) in [("mix-before.wav", before), ("mix-after.wav", after)] {
+            let amb_targets = Arc::<AmbienceTargets>::default();
+            let mut amb = AmbienceStream::new(amb_targets.clone(), beds.clone());
+            let wind_targets = Arc::new(super::super::audio::WindTargets::default());
+            let mut wind = super::super::audio::WindStream::new(wind_targets.clone());
+            let n = SAMPLE_RATE as usize * 34;
+            let mut pcm = Vec::with_capacity(n);
+            for i in 0..n {
+                let (ctx, speed) = stage3_scenario(i as f32 / SAMPLE_RATE as f32);
+                for ((def, slot), level) in LAYERS.iter().zip(&amb_targets.acts).zip(levels) {
+                    slot.store(level * (def.gain)(&ctx));
+                }
+                let [g, c, wh, wg, gu] = super::super::audio::profile(ctx.vehicle, speed);
+                wind_targets.store(g, c, wh, wg, gu);
+                let s = (amb.next().unwrap() + wind.next().unwrap()).clamp(-1.0, 1.0);
+                pcm.push((s * i16::MAX as f32) as i16);
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = std::path::Path::new(&dir).join(name);
+            std::fs::write(path, crab_world::wav::wav_bytes(&pcm)).unwrap();
+        }
     }
 }

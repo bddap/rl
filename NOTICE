@@ -20,7 +20,7 @@ glyphs the control map actually uses are bundled.
 Ambient soundscape beds (crab-world/assets/ambience/*.wav)
 ----------------------------------------------------------
 CC0 (public domain) field recordings, fetched from the bddap-bot/rl-assets release
-`ambience-v2` by scripts/fetch-ambience.sh — not committed here only because of
+`ambience-v3` by scripts/fetch-ambience.sh — not committed here only because of
 their size; when absent the ambience layers stay silent (non-fatal). Converted to
 16-bit mono 44.1 kHz WAV; otherwise unmodified. Sources (all published under
 Creative Commons 0 on their Freesound pages):
@@ -35,6 +35,14 @@ Creative Commons 0 on their Freesound pages):
   silencyo, https://freesound.org/people/silencyo/sounds/81793/
 - mountain-birds.wav — "Rocky Mountain Outdoors: wind and birds" by
   petebuchwald, https://freesound.org/people/petebuchwald/sounds/288899/
+- footsteps.wav — "Human_Steps_Sand_Dry_Thickererer.wav" by LamaMakesMusic,
+  https://freesound.org/people/LamaMakesMusic/sounds/403604/
+- grass-swish.wav — "FOOTSTEPS GRASS WALK1 (F).wav" by sillygrizzlies,
+  https://freesound.org/people/sillygrizzlies/sounds/635056/
+- plane-engine.wav — "Prop Plane" by Mozfoo,
+  https://freesound.org/people/Mozfoo/sounds/440163/
+- ship-thruster.wav — "Ominous Rumble - loopable (24bit flac)" by steaq,
+  https://freesound.org/people/steaq/sounds/593785/
 
 Sally Lightfoot crab model (sally.glb / grapsus_grapsus_crab_280.blend)
 -----------------------------------------------------------------------

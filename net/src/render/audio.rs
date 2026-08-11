@@ -130,10 +130,17 @@ const FULL_WIND_MPS: f32 = 4.5;
 /// One target parameter set, f32s bit-stored in atomics — the frame-rate ECS writer
 /// and the audio-thread reader share this with no lock on the audio path.
 #[derive(Default)]
-struct WindTargets([AtomicF32; 5]);
+pub(super) struct WindTargets([AtomicF32; 5]);
 
 impl WindTargets {
-    fn store(&self, gain: f32, cutoff_hz: f32, whistle_hz: f32, whistle_gain: f32, gust: f32) {
+    pub(super) fn store(
+        &self,
+        gain: f32,
+        cutoff_hz: f32,
+        whistle_hz: f32,
+        whistle_gain: f32,
+        gust: f32,
+    ) {
         for (slot, v) in self
             .0
             .iter()
@@ -202,14 +209,10 @@ pub(super) fn despawn_wind(
     }
 }
 
-/// Per-frame: local airspeed → timbre targets, shaped by the external bus.
-pub(super) fn drive_wind(
-    state: NonSend<GameState>,
-    vehicle: Res<LocalVehicle>,
-    bus: Res<ExternalBus>,
-    channel: Res<WindChannel>,
-) {
-    let speed = match &*vehicle {
+/// The listener's speed, m/s — the one speed every speed-driven sound reads
+/// (wind timbre here, the movement/engine layers in ambience.rs).
+pub(super) fn local_speed_mps(state: &GameState, vehicle: &LocalVehicle) -> f32 {
+    match vehicle {
         // The walker's sim velocity is per-tick grid units, all three axes (falling
         // counts — rl#355 airborne integration).
         LocalVehicle::OnFoot => state
@@ -225,7 +228,17 @@ pub(super) fn drive_wind(
         // The craft's pose window is the same tick-stamped stream the cockpit
         // renders from; empty (engage grace / teleport reset) reads as still air.
         LocalVehicle::Flying { poses, .. } => poses.speed_mps().unwrap_or(0.0),
-    };
+    }
+}
+
+/// Per-frame: local airspeed → timbre targets, shaped by the external bus.
+pub(super) fn drive_wind(
+    state: NonSend<GameState>,
+    vehicle: Res<LocalVehicle>,
+    bus: Res<ExternalBus>,
+    channel: Res<WindChannel>,
+) {
+    let speed = local_speed_mps(&state, &vehicle);
     let [gain, cutoff, whistle_hz, whistle_gain, gust] = profile(vehicle.kind(), speed);
     let (gain, cutoff) = bus.shape(gain, cutoff, WIND_MUFFLE);
     channel
@@ -236,7 +249,7 @@ pub(super) fn drive_wind(
 /// Timbre map: context + airspeed → `[gain, cutoff_hz, whistle_hz, whistle_gain,
 /// gust_depth]`. Each context normalizes speed over its own audible band — quiet
 /// floor to [`FULL_WIND_MPS`] — then shapes loudness and brightness from that.
-fn profile(kind: Option<VehicleKind>, speed_mps: f32) -> [f32; 5] {
+pub(super) fn profile(kind: Option<VehicleKind>, speed_mps: f32) -> [f32; 5] {
     // Loudness ceiling: leave headroom under the rest of the mix.
     const MASTER: f32 = WIND_MASTER;
     // On foot the floor sits above sprint (~0.25 m/s): walking and sprinting stay
@@ -303,7 +316,7 @@ impl WindStream {
     /// Per-sample one-pole toward targets: τ ≈ 60 ms at 44.1 kHz.
     const GLIDE: f32 = 1.0 / (0.060 * SAMPLE_RATE as f32);
 
-    fn new(targets: Arc<WindTargets>) -> Self {
+    pub(super) fn new(targets: Arc<WindTargets>) -> Self {
         Self {
             targets,
             params: [0.0, 400.0, 0.0, 0.0, 0.0],
