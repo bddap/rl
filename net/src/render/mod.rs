@@ -75,6 +75,7 @@ const MAX_YAW_PER_TICK_RADIANS: f32 =
 
 mod app;
 mod articulation;
+mod audio;
 mod brain_swap;
 mod controls_sync;
 mod driver;
@@ -89,6 +90,7 @@ mod tests;
 mod vehicle_view;
 
 pub use app::{AppPhase, Boot, build_windowed_app};
+pub use audio::ExternalBus;
 pub use render_mode::RenderMode;
 pub use screenshot::{
     ChordScript, PilotScript, ScreenshotConfig, build_net_screenshot_app, build_screenshot_app,

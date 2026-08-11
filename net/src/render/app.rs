@@ -48,6 +48,7 @@ pub fn build_windowed_app(
         ..default()
     })));
     app.add_plugins(crab_world::sky::NightSkyPlugin);
+    super::audio::install(&mut app);
     app.add_plugins(crab_world::physics::ArenaWorldPlugin {
         ground_look: view.ground_look,
     });
@@ -78,6 +79,7 @@ pub fn build_windowed_app(
                 ensure_round_installed,
                 spawn_world,
                 spawn_fp_camera,
+                super::audio::spawn_wind,
                 // A modifier held across menu-confirm must not smuggle menu-time d-pad
                 // taps into the round as a chord (rl#330).
                 crab_world::chord::reset_chords::<GcrControls>,
@@ -96,12 +98,16 @@ pub fn build_windowed_app(
                 super::articulation::sample_crab_part_poses,
                 reconcile_avatars,
                 apply_transforms,
+                super::audio::drive_wind,
                 place_extraction_pillar,
             )
                 .chain()
                 .run_if(in_state(AppPhase::Playing)),
         )
-        .add_systems(OnExit(AppPhase::Playing), (teardown_round, release_cursor))
+        .add_systems(
+            OnExit(AppPhase::Playing),
+            (teardown_round, release_cursor, super::audio::despawn_wind),
+        )
         .add_systems(
             Update,
             (
