@@ -96,6 +96,10 @@ pub(super) use crab_world::wav::SAMPLE_RATE;
 /// ambience beds key their levels under it (ambience.rs).
 pub(super) const WIND_MASTER: f32 = 0.45;
 
+/// Wind's bus policy, declared like the ambience layers declare theirs (one style
+/// of membership across the bus): ordinary outdoor audio, ducks under code entry.
+const WIND_MUFFLE: Muffle = Muffle::Duck;
+
 /// An f32 bit-stored in an `AtomicU32`: the lock-free handshake every audio
 /// target struct uses between the frame-rate ECS writer and the audio thread.
 pub(super) struct AtomicF32(AtomicU32);
@@ -223,8 +227,7 @@ pub(super) fn drive_wind(
         LocalVehicle::Flying { poses, .. } => poses.speed_mps().unwrap_or(0.0),
     };
     let [gain, cutoff, whistle_hz, whistle_gain, gust] = profile(vehicle.kind(), speed);
-    // Wind is ordinary outdoor audio — it ducks under code entry like everything else.
-    let (gain, cutoff) = bus.shape(gain, cutoff, Muffle::Duck);
+    let (gain, cutoff) = bus.shape(gain, cutoff, WIND_MUFFLE);
     channel
         .0
         .store(gain, cutoff, whistle_hz, whistle_gain, gust);
