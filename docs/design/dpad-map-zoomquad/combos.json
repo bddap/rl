@@ -1,0 +1,122 @@
+[
+ {
+  "code": "UL",
+  "action": "BoardPlane",
+  "label": "Enter plane"
+ },
+ {
+  "code": "UR",
+  "action": "BoardShip",
+  "label": "Enter ship"
+ },
+ {
+  "code": "DD",
+  "action": "ExitVehicle",
+  "label": "Exit to foot"
+ },
+ {
+  "code": "UUU",
+  "action": "RenderMesh",
+  "label": "Render: mesh"
+ },
+ {
+  "code": "UUD",
+  "action": "RenderMeshColliders",
+  "label": "Render: mesh+colliders"
+ },
+ {
+  "code": "UUL",
+  "action": "RenderColliders",
+  "label": "Render: colliders"
+ },
+ {
+  "code": "DUUU",
+  "action": "GroundNightBloom",
+  "label": "Ground: bloom"
+ },
+ {
+  "code": "DUUD",
+  "action": "GroundNightBloomAurora",
+  "label": "Ground: bloom aurora"
+ },
+ {
+  "code": "DUUL",
+  "action": "GroundNightBloomEmber",
+  "label": "Ground: bloom ember"
+ },
+ {
+  "code": "DUUR",
+  "action": "GroundNightBloomFrost",
+  "label": "Ground: bloom frost"
+ },
+ {
+  "code": "DUDU",
+  "action": "GroundNightBloomRose",
+  "label": "Ground: bloom rose"
+ },
+ {
+  "code": "DUDD",
+  "action": "GroundNightBloomFiligree",
+  "label": "Ground: bloom filigree"
+ },
+ {
+  "code": "DLU",
+  "action": "GroundShipped",
+  "label": "Ground: shipped"
+ },
+ {
+  "code": "DLD",
+  "action": "GroundPatternedGround",
+  "label": "Ground: patterned"
+ },
+ {
+  "code": "DLL",
+  "action": "GroundWindCombed",
+  "label": "Ground: wind-combed"
+ },
+ {
+  "code": "DLR",
+  "action": "GroundCrackedLoam",
+  "label": "Ground: cracked loam"
+ },
+ {
+  "code": "DRU",
+  "action": "GroundWetNocturne",
+  "label": "Ground: wet nocturne"
+ },
+ {
+  "code": "DRD",
+  "action": "GroundWatershed",
+  "label": "Ground: watershed"
+ },
+ {
+  "code": "DRL",
+  "action": "GroundWatershedNaturalist",
+  "label": "Ground: naturalist"
+ },
+ {
+  "code": "DRR",
+  "action": "GroundWatershedNocturne",
+  "label": "Ground: nocturne"
+ },
+ {
+  "code": "L",
+  "action": "SwapBrain",
+  "label": "Swap brain"
+ },
+ {
+  "code": "R",
+  "action": "Restart",
+  "label": "Restart round"
+ },
+ {
+  "code": "LR",
+  "action": "ToggleDebugOverlay",
+  "label": "Perf overlay"
+ },
+ {
+  "code": "UUDDLR",
+  "action": "Quit",
+  "label": "Quit round"
+ }
+]
