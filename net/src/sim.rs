@@ -14,12 +14,19 @@ pub struct PlayerId(pub u8);
 pub mod buttons {
     pub const ACTION: u8 = 1 << 0;
     pub const RESTART: u8 = 1 << 1;
+    pub const SPRINT: u8 = 1 << 2;
+    pub const JUMP: u8 = 1 << 3;
+    pub const SLIDE: u8 = 1 << 4;
     /// The foot buttons that stay live while piloting ([`super::Input::pilot_masked`]):
     /// RESTART works in every context (rl#261 — every cockpit legend in
-    /// `net::controls` promises "Restart round"), while ACTION must NOT — the ship's
-    /// brake shares Space/South with Extract, so a braking pilot over the pad would
-    /// extract.
+    /// `net::controls` promises "Restart round"), while the rest must NOT — the ship's
+    /// brake shares South with Jump (rl#355) and Extract's triggers ride the flight
+    /// controls, so an unmasked pilot would hop or extract mid-maneuver.
     pub const PILOT_MASK: u8 = RESTART;
+    /// The held-state buttons a starved-tick hold preserves ([`super::Input::hold`]):
+    /// sprint and slide are stances like the move axes, not taps — dropping them
+    /// mid-lag would break a slide the player is still holding.
+    pub const HOLD_MASK: u8 = SPRINT | SLIDE;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -54,13 +61,14 @@ impl Input {
     /// The input the server substitutes for a tick where this player's stream is STARVED
     /// (transit lag): keep the held-state move axes, zero the rest — `look_yaw` is a per-tick
     /// DELTA (re-applying it would keep the avatar turning) and a re-fired button tap would
-    /// double an extract/restart. See [`crate::server`]'s hold semantics.
+    /// double an extract/restart; the held-stance buttons ([`buttons::HOLD_MASK`]) persist
+    /// like the axes. See [`crate::server`]'s hold semantics.
     pub fn hold(self) -> Self {
         Self {
             move_strafe: self.move_strafe,
             move_forward: self.move_forward,
             look_yaw: 0,
-            buttons: 0,
+            buttons: self.buttons & buttons::HOLD_MASK,
         }
     }
 
@@ -99,6 +107,30 @@ const PLAYER_SPEED_HEIGHTS_PER_S: f32 = 166.0 * 30.0 / (1000.0 * 1.8);
 
 pub(crate) const PLAYER_SPEED: i64 =
     (PLAYER_SPEED_HEIGHTS_PER_S * PLAYER_HEIGHT * UNIT as f32 / TICK_HZ as f32 + 0.5) as i64;
+
+/// Sprint pace (rl#355) — 1.8× walk, the common run multiplier. Feel knob.
+pub(crate) const SPRINT_SPEED: i64 = PLAYER_SPEED * 9 / 5;
+
+/// On-foot gravity, grid units per tick² — the SAME 9.81 m/s² the crafts fall under
+/// (`crab_world::physics::PHYSICS_GRAVITY`), so a plane-exit handoff (rl#355) keeps
+/// falling at the rate the cockpit taught the eye; a second gravity here would make
+/// the ballistic arc visibly change slope at the switch.
+const GRAVITY_PER_TICK2: i64 = (9.81 * UNIT as f64 / (TICK_HZ * TICK_HZ) as f64) as i64;
+
+/// Jump liftoff speed, grid units per tick: √(2·g·h) for an apex of h ≈ 1.5 player
+/// heights (0.077 m) under the shared gravity → 1.23 m/s. Feel knob; the airtime is
+/// ~0.25 s, snappy at this world's 0.051 m stature.
+const JUMP_SPEED: i64 = (1.23 * UNIT as f64 / TICK_HZ as f64) as i64;
+
+/// A slide sustains only above this pace — 1.3× walk, between walk and sprint, so a
+/// sprint (or any carried landing momentum) can slide but plain walking cannot fake
+/// one. Below it the skid ends and the axes take over again.
+const SLIDE_MIN_SPEED: i64 = PLAYER_SPEED * 13 / 10;
+
+/// Slide friction per tick, as a 63/64 decay: sprint pace (1.8×) reaches the
+/// [`SLIDE_MIN_SPEED`] cutoff (1.3×) in ~21 ticks ≈ 0.7 s of skid. Feel knob.
+const SLIDE_KEEP_NUM: i64 = 63;
+const SLIDE_KEEP_DEN: i64 = 64;
 
 /// Test-driver step per tick, folded from the ONE measured speed
 /// ([`CRAB_CHARGE_SPEED_PER_S`], rl#257) so pursuit/grace tests exercise her honest
@@ -399,16 +431,52 @@ pub fn meters_to_grid(m: f32) -> i64 {
     (m * UNIT as f32) as i64
 }
 
+/// Terrain surface height under a sim point, grid units — the airborne walker's ground
+/// reference (rl#355). Samples the committed GCR bake (the ONE world every peer ships,
+/// already this sim's spawn-bounds source) at f64, the same entry the render path uses,
+/// so "landed" here is the surface the eye stands on.
+fn ground_at(pos: Pos) -> i64 {
+    let (x, z) = pos.to_meters_f64();
+    let h = crab_world::terrain::TerrainGrid::gcr().height_f64(x, z);
+    (h * UNIT as f64) as i64
+}
+
+/// A walker's carried velocity, grid units per tick (rl#355). `y` is vertical.
+/// Airborne it IS the motion (ballistic — the plane-exit handoff sails on it); grounded
+/// it is the record of the last step, so a jump or slide inherits walk/sprint pace, and
+/// a slide decays it in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Vel {
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Player {
     pos: Pos,
     yaw: i32,
     status: PlayerStatus,
+    /// Feet height above the terrain surface, grid units. 0 = grounded (glued to the
+    /// surface, the pre-rl#355 invariant); > 0 = airborne, integrating under gravity.
+    alt: i64,
+    vel: Vel,
 }
 
 impl Player {
-    pub(crate) fn from_parts(pos: Pos, yaw: i32, status: PlayerStatus) -> Self {
-        Self { pos, yaw, status }
+    pub(crate) fn from_parts(pos: Pos, yaw: i32, status: PlayerStatus, alt: i64, vel: Vel) -> Self {
+        Self {
+            pos,
+            yaw,
+            status,
+            alt,
+            vel,
+        }
+    }
+
+    /// A grounded, motionless walker — every spawn starts here.
+    pub(crate) fn standing(pos: Pos, yaw: i32, status: PlayerStatus) -> Self {
+        Self::from_parts(pos, yaw, status, 0, Vel::default())
     }
 
     pub fn pos(self) -> Pos {
@@ -419,6 +487,12 @@ impl Player {
     }
     pub fn status(self) -> PlayerStatus {
         self.status
+    }
+    pub fn alt(self) -> i64 {
+        self.alt
+    }
+    pub fn vel(self) -> Vel {
+        self.vel
     }
 }
 
@@ -450,16 +524,18 @@ pub struct ClawPose {
 }
 
 impl ClawPose {
-    /// Whether this claw touches (within [`CLAW_DOWN_BUFFER`]) a player standing at `p`:
-    /// the player's vertical span must meet the capsule's reach-fattened height band, and
-    /// their XZ point must lie within reach of the capsule's XZ segment.
-    fn downs(&self, p: Pos) -> bool {
+    /// Whether this claw touches (within [`CLAW_DOWN_BUFFER`]) a player at `p` whose
+    /// feet are `alt` over the surface: the player's vertical span must meet the
+    /// capsule's reach-fattened height band, and their XZ point must lie within reach
+    /// of the capsule's XZ segment. An airborne walker (rl#355) lifts its span with it,
+    /// so sailing over a claw is safe passage — no separate exemption.
+    fn downs(&self, p: Pos, alt: i64) -> bool {
         let reach = self.radius + CLAW_DOWN_BUFFER;
         let (lo, hi) = (
             self.a_y.min(self.b_y) - reach,
             self.a_y.max(self.b_y) + reach,
         );
-        if hi < 0 || lo > PLAYER_HEIGHT_FP {
+        if hi < alt || lo > alt + PLAYER_HEIGHT_FP {
             return false;
         }
         let (cx, cz) = closest_on_segment(self.a, self.b, p);
@@ -485,6 +561,14 @@ impl Crab {
 pub struct PilotPose {
     pub pos: Pos,
     pub yaw: i32,
+    /// Craft height above the terrain surface, grid units (≥ 0). Adopted into the
+    /// walker every piloted tick so that stepping out mid-air resumes on foot AT the
+    /// craft's altitude (rl#355).
+    pub alt: i64,
+    /// Craft velocity, grid units per tick — the momentum-handoff feed (rl#355): the
+    /// walker's carried velocity mirrors it while piloting, so the tick the pilot
+    /// steps out it sails ballistically with exactly the craft's last velocity.
+    pub vel: Vel,
 }
 
 /// One crab's world pose + claw colliders as of this tick — the mandatory per-crab
@@ -672,11 +756,11 @@ impl Sim {
         let x = (idx - n / 2) * SPAWN_SLOT_PITCH;
         self.players.insert(
             pid,
-            Player {
-                pos: self.nearest_clear_join_slot(x),
-                yaw: self.spawn_frame.rot,
-                status: PlayerStatus::Alive,
-            },
+            Player::standing(
+                self.nearest_clear_join_slot(x),
+                self.spawn_frame.rot,
+                PlayerStatus::Alive,
+            ),
         );
     }
 
@@ -728,13 +812,9 @@ impl Sim {
             let x = (i as i64 - n / 2) * SPAWN_SLOT_PITCH;
             map.insert(
                 id,
-                Player {
-                    pos: frame.place(x, 0),
-                    // Facing local +z — the party opens looking at the objective,
-                    // whatever heading the frame drew.
-                    yaw: frame.rot,
-                    status: PlayerStatus::Alive,
-                },
+                // Facing local +z — the party opens looking at the objective,
+                // whatever heading the frame drew.
+                Player::standing(frame.place(x, 0), frame.rot, PlayerStatus::Alive),
             );
         }
         // The objective sits BEYOND the crab's spawn ring by more than her ~0.48 m
@@ -868,6 +948,12 @@ impl Sim {
             if let Some(p) = self.players.get_mut(id) {
                 p.pos = pp.pos;
                 p.yaw = pp.yaw;
+                // The momentum handoff (rl#355): every piloted tick mirrors the
+                // craft's altitude and velocity into the walker, so the tick the
+                // pilot steps out (drops from this feed) the airborne integrator
+                // above takes over from EXACTLY the craft's last state — no seam.
+                p.alt = pp.alt.max(0);
+                p.vel = pp.vel;
             }
         }
 
@@ -882,7 +968,7 @@ impl Sim {
                 for (id, p) in self.players.iter_mut() {
                     if p.status == PlayerStatus::Alive
                         && !externals.pilots.contains_key(id)
-                        && claw.downs(p.pos)
+                        && claw.downs(p.pos, p.alt)
                     {
                         p.status = PlayerStatus::Downed;
                     }
@@ -892,7 +978,10 @@ impl Sim {
 
         let ex = self.extraction.pos;
         for (id, p) in self.players.iter_mut() {
+            // Grounded only (rl#355): extraction is stepping onto the pad, and a
+            // walker sailing over it at plane speed must not scoop the win mid-air.
             if p.status == PlayerStatus::Alive
+                && p.alt == 0
                 && within(p.pos.x, p.pos.z, ex.x, ex.z, EXTRACT_RADIUS)
                 && inputs[id].pressed(buttons::ACTION)
             {
@@ -909,14 +998,66 @@ impl Sim {
             (inp.look_yaw as i64 * MAX_YAW_TURNS_PER_TICK as i64 / Input::AXIS_SCALE as i64) as i32;
         p.yaw = trig::wrap_turns(p.yaw + dyaw);
 
+        if p.alt > 0 {
+            // Airborne (rl#355): ballistic — the carried velocity IS the motion, no
+            // air control (the spec: sail with the craft's velocity and fall). The
+            // altitude is terrain-relative, so integrate in absolute height and
+            // re-express over the terrain under the new spot.
+            let ground_before = ground_at(p.pos);
+            p.pos.x += p.vel.x;
+            p.pos.z += p.vel.z;
+            p.vel.y -= GRAVITY_PER_TICK2;
+            let abs_y = ground_before + p.alt + p.vel.y;
+            p.alt = abs_y - ground_at(p.pos);
+            if p.alt <= 0 {
+                // Touchdown: glue back to the surface. The horizontal momentum
+                // survives the landing tick so a held slide catches it next tick;
+                // otherwise walking overwrites it with the axes.
+                p.alt = 0;
+                p.vel.y = 0;
+            }
+            return;
+        }
+
+        let speed2 = dist2_i128(p.vel.x, p.vel.z);
+        let min = SLIDE_MIN_SPEED as i128;
+        if inp.pressed(buttons::SLIDE) && speed2 > min * min {
+            // Sliding (rl#355): a committed skid — the move axes are surrendered and
+            // the carried momentum decays under friction until it drops to near
+            // walking pace. Look stays live (handled above), steering does not.
+            p.vel.x = p.vel.x * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN;
+            p.vel.z = p.vel.z * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN;
+            p.pos.x += p.vel.x;
+            p.pos.z += p.vel.z;
+            return;
+        }
+
+        // Walking: direct-drive axes, sprint scales the pace. The step is recorded as
+        // the carried velocity so a jump (or slide entry) inherits walk/sprint speed.
         let (sin, cos) = trig::sin_cos(p.yaw);
         let strafe = inp.move_strafe as i64;
         let forward = inp.move_forward as i64;
         let vx = sin * forward + cos * strafe;
         let vz = cos * forward - sin * strafe;
         let denom = Input::AXIS_SCALE as i64 * trig::ONE as i64;
-        p.pos.x += vx * PLAYER_SPEED / denom;
-        p.pos.z += vz * PLAYER_SPEED / denom;
+        let speed = if inp.pressed(buttons::SPRINT) {
+            SPRINT_SPEED
+        } else {
+            PLAYER_SPEED
+        };
+        p.vel.x = vx * speed / denom;
+        p.vel.z = vz * speed / denom;
+        p.vel.y = 0;
+        p.pos.x += p.vel.x;
+        p.pos.z += p.vel.z;
+        if inp.pressed(buttons::JUMP) {
+            // Liftoff — from walk AND sprint alike (rl#355). One grid unit (10 µm) of
+            // altitude flips the state machine to airborne; the real rise integrates
+            // next tick. Holding jump re-fires on every touchdown (auto-hop) — a feel
+            // choice, not an edge-detect omission.
+            p.vel.y = JUMP_SPEED;
+            p.alt = 1;
+        }
     }
 
     // Live only via `ClientSim::reconcile_local_prediction` (render-only) outside
@@ -997,11 +1138,22 @@ impl Sim {
         let mut h = Fnv::new();
         h.write(&tick.to_le_bytes());
         for (id, player) in players.iter() {
-            let Player { pos, yaw, status } = player;
+            let Player {
+                pos,
+                yaw,
+                status,
+                alt,
+                vel,
+            } = player;
             h.write(&[id.0]);
             h.write(&pos_bytes(*pos));
             h.write(&yaw.to_le_bytes());
             h.write(&[status.tag()]);
+            h.write(&alt.to_le_bytes());
+            let Vel { x, y, z } = vel;
+            h.write(&x.to_le_bytes());
+            h.write(&y.to_le_bytes());
+            h.write(&z.to_le_bytes());
         }
         h.write(&(crabs.len() as u32).to_le_bytes());
         for crab in crabs {
@@ -1164,6 +1316,227 @@ mod tests {
         let mut poses = hold_poses(sim);
         poses[0].claws = claws;
         poses
+    }
+
+    /// Step with player 0 riding the fed craft state — the rl#355 handoff driver.
+    fn step_piloted(sim: &mut Sim, alt: i64, vel: Vel) {
+        let poses = hold_poses(sim);
+        let pilot = sim.player(PlayerId(0)).unwrap();
+        let pilots = BTreeMap::from([(
+            PlayerId(0),
+            PilotPose {
+                pos: pilot.pos(),
+                yaw: pilot.yaw(),
+                alt,
+                vel,
+            },
+        )]);
+        sim.step(
+            &neutral_for(sim),
+            Externals {
+                crabs: &poses,
+                pilots: &pilots,
+            },
+        );
+    }
+
+    #[test]
+    fn sprint_outpaces_walk_and_slide_rides_the_momentum_out() {
+        let mut sim = Sim::new(11, &players(2));
+        let start0 = sim.player(PlayerId(0)).unwrap().pos();
+        let start1 = sim.player(PlayerId(1)).unwrap().pos();
+        for _ in 0..10 {
+            let mut inputs = neutral_for(&sim);
+            inputs.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, buttons::SPRINT));
+            inputs.insert(PlayerId(1), Input::from_axes(0.0, 1.0));
+            step_scenery(&mut sim, &inputs);
+        }
+        let d = |a: Pos, b: Pos| dist2_i128(b.x - a.x, b.z - a.z);
+        let sprint_d = d(start0, sim.player(PlayerId(0)).unwrap().pos());
+        let walk_d = d(start1, sim.player(PlayerId(1)).unwrap().pos());
+        assert!(
+            sprint_d > walk_d * 3 && sprint_d < walk_d * 4,
+            "sprint is 1.8× walk, so 10 ticks cover 3.24× the squared distance \
+             (got {sprint_d} vs {walk_d})"
+        );
+
+        // Neutral axes + SLIDE: the sprint momentum carries the skid, decaying, and
+        // the walker keeps moving with NO axis input.
+        let mid = sim.player(PlayerId(0)).unwrap();
+        let first_step = {
+            let mut inputs = neutral_for(&sim);
+            inputs.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::SLIDE));
+            step_scenery(&mut sim, &inputs);
+            d(mid.pos(), sim.player(PlayerId(0)).unwrap().pos())
+        };
+        assert!(first_step > 0, "the slide keeps moving on carried momentum");
+        // Held long enough, friction bleeds it below the cutoff and the skid ends:
+        // with the axes still neutral the walker stops.
+        for _ in 0..120 {
+            let mut inputs = neutral_for(&sim);
+            inputs.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::SLIDE));
+            step_scenery(&mut sim, &inputs);
+        }
+        let end = sim.player(PlayerId(0)).unwrap().pos();
+        let mut inputs = neutral_for(&sim);
+        inputs.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::SLIDE));
+        step_scenery(&mut sim, &inputs);
+        assert_eq!(
+            end,
+            sim.player(PlayerId(0)).unwrap().pos(),
+            "below the slide cutoff the skid is over — neutral axes hold still"
+        );
+    }
+
+    #[test]
+    fn jump_works_from_sprint_rises_and_lands() {
+        let mut sim = Sim::new(13, &players(1));
+        let mut jump = neutral_for(&sim);
+        jump.insert(
+            PlayerId(0),
+            Input::new(0.0, 1.0, 0.0, buttons::SPRINT | buttons::JUMP),
+        );
+        step_scenery(&mut sim, &jump);
+        assert!(
+            sim.player(PlayerId(0)).unwrap().alt() > 0,
+            "jump lifts off from the sprint state"
+        );
+        let sprint_step = {
+            let p = sim.player(PlayerId(0)).unwrap();
+            debug_assert_eq!(p.vel().y, JUMP_SPEED);
+            p.vel()
+        };
+        let before = sim.player(PlayerId(0)).unwrap().pos();
+        let mut peak = 0;
+        let mut ticks = 0;
+        while sim.player(PlayerId(0)).unwrap().alt() > 0 {
+            // Airborne: axes are surrendered — feed hard reverse to prove it.
+            let mut inputs = neutral_for(&sim);
+            inputs.insert(PlayerId(0), Input::from_axes(0.0, -1.0));
+            step_scenery(&mut sim, &inputs);
+            peak = peak.max(sim.player(PlayerId(0)).unwrap().alt());
+            ticks += 1;
+            assert!(ticks < 300, "a jump must come back down");
+        }
+        let after = sim.player(PlayerId(0)).unwrap().pos();
+        // Flat-ground apex is ~1.5 player heights; the half-height floor leaves slack
+        // for the terrain slope the sprint carries the arc across (alt is
+        // surface-relative).
+        assert!(
+            peak > PLAYER_HEIGHT_FP / 2,
+            "the apex clears half a player height (got {peak})"
+        );
+        assert_eq!(
+            (after.x - before.x, after.z - before.z),
+            (sprint_step.x * ticks, sprint_step.z * ticks),
+            "airborne motion is the carried sprint step, immune to the axes"
+        );
+        assert_eq!(sim.player(PlayerId(0)).unwrap().vel().y, 0, "landed clean");
+    }
+
+    #[test]
+    fn plane_exit_hands_off_the_craft_momentum() {
+        let mut sim = Sim::new(17, &players(1));
+        let carried = Vel {
+            x: 2_000,
+            y: 0,
+            z: 1_000,
+        };
+        let alt = meters_to_grid(1.0);
+        for _ in 0..3 {
+            step_piloted(&mut sim, alt, carried);
+        }
+        let exit = sim.player(PlayerId(0)).unwrap();
+        assert_eq!(
+            exit.alt(),
+            alt,
+            "the piloted walker mirrors the craft altitude"
+        );
+        assert_eq!(exit.vel(), carried, "…and the craft velocity");
+
+        // The craft is gone (no pilots fed): the walker sails ballistically with the
+        // carried velocity — the axes are dead weight — and falls under gravity.
+        let mut inputs = neutral_for(&sim);
+        inputs.insert(PlayerId(0), Input::from_axes(1.0, 1.0));
+        let poses = hold_poses(&sim);
+        sim.step(&inputs, Externals::crabs_only(&poses));
+        let after = sim.player(PlayerId(0)).unwrap();
+        assert_eq!(
+            (after.pos().x - exit.pos().x, after.pos().z - exit.pos().z),
+            (carried.x, carried.z),
+            "first free tick advances by exactly the craft's velocity"
+        );
+        assert_eq!(
+            after.vel().y,
+            -GRAVITY_PER_TICK2,
+            "gravity starts pulling the moment the craft is gone"
+        );
+        let mut ticks = 0;
+        while sim.player(PlayerId(0)).unwrap().alt() > 0 {
+            let n = neutral_for(&sim);
+            step_scenery(&mut sim, &n);
+            ticks += 1;
+            assert!(ticks < 600, "the handoff must eventually land");
+        }
+        assert!(ticks > 3, "a 1 m drop is a real sail, not an instant snap");
+    }
+
+    #[test]
+    fn airborne_walker_sails_over_the_claw_and_cannot_extract_midair() {
+        let mut sim = Sim::new(19, &players(1));
+        // Arm the round, then hoist the walker via a piloted tick and cut the feed.
+        for _ in 0..(STARTUP_GRACE_TICKS + 1) {
+            let n = neutral_for(&sim);
+            step_scenery(&mut sim, &n);
+        }
+        let ex = sim.extraction().pos();
+        let pilots = BTreeMap::from([(
+            PlayerId(0),
+            PilotPose {
+                pos: ex,
+                yaw: 0,
+                alt: 20 * PLAYER_HEIGHT_FP,
+                vel: Vel::default(),
+            },
+        )]);
+        let poses = hold_poses(&sim);
+        sim.step(
+            &neutral_for(&sim),
+            Externals {
+                crabs: &poses,
+                pilots: &pilots,
+            },
+        );
+        // Airborne over the pad, claw sweeping the ground at the same spot, ACTION
+        // held: neither the claw nor the extraction may connect.
+        let mut action = neutral_for(&sim);
+        action.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::ACTION));
+        let p = sim.player(PlayerId(0)).unwrap();
+        assert!(p.alt() > 2 * PLAYER_HEIGHT_FP, "the walker is airborne");
+        let claws = held_with_claws(&sim, vec![claw_at(p.pos(), 0, CLAW_M)]);
+        sim.step(&action, Externals::crabs_only(&claws));
+        let p = sim.player(PlayerId(0)).unwrap();
+        assert_eq!(
+            p.status(),
+            PlayerStatus::Alive,
+            "a ground claw cannot reach a walker sailing far overhead"
+        );
+        // Let it land (no claws), then the same claw geometry downs a grounded walker.
+        let mut ticks = 0;
+        while sim.player(PlayerId(0)).unwrap().alt() > 0 {
+            let n = neutral_for(&sim);
+            step_scenery(&mut sim, &n);
+            ticks += 1;
+            assert!(ticks < 600, "the drop must land");
+        }
+        let p = sim.player(PlayerId(0)).unwrap();
+        let claws = held_with_claws(&sim, vec![claw_at(p.pos(), 0, CLAW_M)]);
+        sim.step(&neutral_for(&sim), Externals::crabs_only(&claws));
+        assert_eq!(
+            sim.player(PlayerId(0)).unwrap().status(),
+            PlayerStatus::Downed,
+            "grounded, the identical claw connects — the exemption was the altitude"
+        );
     }
 
     #[test]
@@ -1902,7 +2275,15 @@ mod tests {
         let both = |pilots: &[PlayerId]| {
             let mut m = BTreeMap::new();
             for &pid in pilots {
-                m.insert(pid, PilotPose { pos: crab, yaw: 7 });
+                m.insert(
+                    pid,
+                    PilotPose {
+                        pos: crab,
+                        yaw: 7,
+                        alt: 0,
+                        vel: Vel::default(),
+                    },
+                );
             }
             m
         };

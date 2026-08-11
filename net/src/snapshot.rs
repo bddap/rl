@@ -67,6 +67,11 @@ impl CoreSnapshot {
             out.extend_from_slice(&pos_bytes(player.pos()));
             out.extend_from_slice(&player.yaw().to_le_bytes());
             out.push(player.status().tag());
+            out.extend_from_slice(&player.alt().to_le_bytes());
+            let vel = player.vel();
+            out.extend_from_slice(&vel.x.to_le_bytes());
+            out.extend_from_slice(&vel.y.to_le_bytes());
+            out.extend_from_slice(&vel.z.to_le_bytes());
         }
 
         out.extend_from_slice(&(self.crabs.len() as u32).to_le_bytes());
@@ -104,7 +109,13 @@ impl CoreSnapshot {
             let pos = pos_from_bytes(r.take()?);
             let yaw = i32::from_le_bytes(r.take()?);
             let status = PlayerStatus::from_tag(r.byte()?).ok_or(SnapshotDecodeError::BadTag)?;
-            players.insert(id, Player::from_parts(pos, yaw, status));
+            let alt = i64::from_le_bytes(r.take()?);
+            let vel = crate::sim::Vel {
+                x: i64::from_le_bytes(r.take()?),
+                y: i64::from_le_bytes(r.take()?),
+                z: i64::from_le_bytes(r.take()?),
+            };
+            players.insert(id, Player::from_parts(pos, yaw, status, alt, vel));
         }
 
         let n_crabs = u32::from_le_bytes(r.take::<4>()?) as usize;
@@ -201,6 +212,19 @@ mod tests {
         ]);
         sim.step(&inputs, Externals::crabs_only(&posed));
         let mut snap = sim.core_snapshot();
+        // A mid-air walker with carried momentum (rl#355), so the roundtrip carries
+        // nonzero altitude/velocity — not just the all-zero spawn state.
+        let p = snap.players[&PlayerId(1)];
+        snap.players.insert(
+            PlayerId(1),
+            Player::from_parts(
+                p.pos(),
+                p.yaw(),
+                p.status(),
+                4321,
+                crate::sim::Vel { x: 9, y: -8, z: 7 },
+            ),
+        );
         // Server-stamped watermarks (`Sim::core_snapshot` leaves them empty) — nonempty here so
         // the roundtrip exercises the map encoding.
         snap.input_next = BTreeMap::from([(PlayerId(0), 7), (PlayerId(1), 0)]);

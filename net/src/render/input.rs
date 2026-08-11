@@ -68,6 +68,14 @@ pub(super) fn gather_input(
     }
 
     let mut action = held(Action::Extract);
+    // The on-foot movement stances (rl#355). Held-state like the axes — the sim owns
+    // the semantics (sprint scales pace, jump lifts off grounded, slide skids on
+    // momentum); a held jump auto-hops by design. `key_codes_for`, not `held`: sprint
+    // binds BOTH shifts and the first-key shorthand would drop the right one.
+    let held_any = |a| controls::key_codes_for(a).any(|k| keys.pressed(k));
+    let mut sprint = held_any(Action::Sprint);
+    let mut jump = held_any(Action::Jump);
+    let mut slide = held_any(Action::Slide);
     // Vehicle switching and restart are chords (rl#330): one code per vehicle plus an
     // exit code (X is de-overloaded — a bare tap does nothing), restart its own code —
     // no direct key or button remains for any of them.
@@ -112,6 +120,9 @@ pub(super) fn gather_input(
                 - gp.pressed(GamepadButton::DPadLeft) as i32) as f32;
         }
         action |= controls::gamepad_buttons_for(Action::Extract).any(|b| gp.pressed(b));
+        sprint |= controls::gamepad_buttons_for(Action::Sprint).any(|b| gp.pressed(b));
+        jump |= controls::gamepad_buttons_for(Action::Jump).any(|b| gp.pressed(b));
+        slide |= controls::gamepad_buttons_for(Action::Slide).any(|b| gp.pressed(b));
     }
     if let Some(mb) = controls::MouseInput::Left.mouse_button() {
         action |= mouse_buttons.pressed(mb);
@@ -121,6 +132,9 @@ pub(super) fn gather_input(
     pending.forward = forward.clamp(-1.0, 1.0);
     pending.yaw_delta -= d_yaw;
     pending.action |= action;
+    pending.sprint |= sprint;
+    pending.jump |= jump;
+    pending.slide |= slide;
 
     pitch.0 = (pitch.0 + d_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     yaw.0 = (yaw.0 - d_yaw).rem_euclid(std::f32::consts::TAU);
