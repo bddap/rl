@@ -84,8 +84,8 @@ fn valley_bed(ctx: &AmbientContext) -> f32 {
     ctx.grass * ctx.lush * near_ground(ctx)
 }
 
-/// Rock/scree beds: where the grass gives out — steep faces and the high band
-/// below the snowline (above it the wind synth owns the mix alone).
+/// Rock/scree beds: where the grass gives out — steep faces and the high band,
+/// gone under snow cover (there the wind synth owns the mix alone).
 fn mountain_bed(ctx: &AmbientContext) -> f32 {
     ctx.rocky * near_ground(ctx)
 }

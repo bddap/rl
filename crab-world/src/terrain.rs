@@ -405,6 +405,15 @@ pub mod biome {
     /// Elevation where snow starts / fully holds.
     pub(crate) const SNOWLINE_M: (f32, f32) = (350.0, 650.0);
 
+    /// 0..1 how much snow covers the ground: past the snowline AND gentle enough
+    /// to hold (snow slides off cliffs first). The ONE snow formula — the tint
+    /// and every placement weight share it, so decoration can never disagree
+    /// with where the ground is painted white.
+    pub(crate) fn snow_amount(h: f32, steep: f32) -> f32 {
+        smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h)
+            * (1.0 - smoothstep(SNOW_HOLD_STEEP.0, SNOW_HOLD_STEEP.1, steep))
+    }
+
     /// 0..1 chance weight that a grass tuft stands at elevation `h` on ground with
     /// up-normal `normal_y`: grass thins past the scree rim, is gone by the
     /// high-brown band, and never grows on rock-steep faces or under snow.
@@ -414,8 +423,7 @@ pub mod biome {
         let steep = 1.0 - normal_y;
         let low_enough = 1.0 - smoothstep(SCREE_M, HIGH_BROWN_M, h);
         let flat_enough = 1.0 - smoothstep(ROCK_STEEP.0, ROCK_STEEP.1, steep);
-        let snow_free = 1.0 - smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h);
-        low_enough * flat_enough * snow_free
+        low_enough * flat_enough * (1.0 - snow_amount(h, steep))
     }
 
     /// 0..1: green in the deep valleys, straw by the dry-grass band (the origin
@@ -429,15 +437,15 @@ pub mod biome {
 
     /// 0..1 weight of exposed rock/scree ground: rock-steep faces at any
     /// elevation, plus the scree→high-brown band where grass has thinned out —
-    /// gone again under snow (above the snowline the wind synth owns the mix).
+    /// gone again under snow cover (matching where the tint paints white, so
+    /// high cliffs too steep to hold snow stay rocky).
     /// `pub` beyond the crate: the ambience bus keys its sparse mountain beds on
     /// this, the complement of where [`tuft_weight`] grows grass.
     pub fn rocky_weight(h: f32, normal_y: f32) -> f32 {
         let steep = 1.0 - normal_y;
         let rock_face = smoothstep(ROCK_STEEP.0, ROCK_STEEP.1, steep);
         let high_band = smoothstep(SCREE_M, HIGH_BROWN_M, h);
-        let snow_free = 1.0 - smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h);
-        rock_face.max(high_band) * snow_free
+        rock_face.max(high_band) * (1.0 - snow_amount(h, steep))
     }
 
     /// 0..1 chance weight for a pebble: stonier toward (and above) the scree rim,
@@ -446,8 +454,7 @@ pub mod biome {
     pub(crate) fn pebble_weight(h: f32, normal_y: f32) -> f32 {
         let steep = 1.0 - normal_y;
         let holds = 1.0 - smoothstep(PEBBLE_HOLD_STEEP.0, PEBBLE_HOLD_STEEP.1, steep);
-        let snow_free = 1.0 - smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h);
-        (0.35 + 0.65 * smoothstep(LOWLAND_M, SCREE_M, h)) * holds * snow_free
+        (0.35 + 0.65 * smoothstep(LOWLAND_M, SCREE_M, h)) * holds * (1.0 - snow_amount(h, steep))
     }
 }
 
@@ -460,10 +467,7 @@ pub mod biome {
 /// kilometer-scale bands don't read as flat paint.
 #[cfg(feature = "render")]
 fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
-    use biome::{
-        DEEP_VALLEY_M, DRY_GRASS_M, HIGH_BROWN_M, LOWLAND_M, ROCK_STEEP, SCREE_M, SNOW_HOLD_STEEP,
-        SNOWLINE_M,
-    };
+    use biome::{DEEP_VALLEY_M, DRY_GRASS_M, HIGH_BROWN_M, LOWLAND_M, ROCK_STEEP, SCREE_M};
 
     // (elevation m, srgb color) stops, low → high (bake.py's hillshade palette).
     const LAND: [(f32, [f32; 3]); 5] = [
@@ -489,10 +493,7 @@ fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
     // Slope 0 → normal_y 1. Rock takes over from ~35° and owns ~55°+.
     let steep = 1.0 - normal_y;
     c = c.mix(&lin(ROCK), smoothstep(ROCK_STEEP.0, ROCK_STEEP.1, steep));
-    // Snowline: high AND not too steep (snow doesn't hold on cliffs).
-    let snow = smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h)
-        * (1.0 - smoothstep(SNOW_HOLD_STEEP.0, SNOW_HOLD_STEEP.1, steep));
-    c = c.mix(&lin(SNOW), snow);
+    c = c.mix(&lin(SNOW), biome::snow_amount(h, steep));
 
     // ±6% value jitter, deterministic per vertex.
     let jitter = 1.0 + 0.06 * (2.0 * rand01(hash3(row, col, 0)) - 1.0);
