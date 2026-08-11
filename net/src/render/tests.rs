@@ -124,7 +124,7 @@ fn world_maps_sim_frame_directly() {
         x: 2 * UNIT,
         z: 5 * UNIT,
     };
-    let v = world(p, 1.6);
+    let v = world(p, 1.6, super::RenderOrigin::default());
     assert_eq!(v, Vec3::new(2.0, 1.6, 5.0));
 }
 
@@ -520,7 +520,7 @@ fn camera_never_ends_a_frame_under_the_terrain() {
     let (x, z) = (37.0, -211.0);
     let ground = g.height(x, z);
     let mut cam = Transform::from_translation(Vec3::new(x, ground - 0.01, z));
-    clamp_camera_above_terrain(&mut cam, &g);
+    clamp_camera_above_terrain(&mut cam, &g, super::RenderOrigin::default());
     assert!(
         cam.translation.y >= ground + CAM_TERRAIN_CLEARANCE - 1e-6,
         "buried camera must be lifted clear of the sheet, got y={} vs ground={ground}",
@@ -531,7 +531,69 @@ fn camera_never_ends_a_frame_under_the_terrain() {
     let fly = Vec3::new(x, ground + 5.0, z);
     let rot = Quat::from_rotation_x(0.3);
     let mut cam = Transform::from_translation(fly).with_rotation(rot);
-    clamp_camera_above_terrain(&mut cam, &g);
+    clamp_camera_above_terrain(&mut cam, &g, super::RenderOrigin::default());
     assert_eq!(cam.translation, fly);
     assert_eq!(cam.rotation, rot);
+}
+
+/// The rl#354 pin: a walker's rendered eye path must advance UNIFORMLY at every
+/// locale on the tile. Absolute f32 world meters quantize at ~0.5–1.3 mm out at
+/// the rl#305 locales — a large fraction of the 4.7 mm per-tick walking step of
+/// the 0.051 m player — which juddered all nearby ground on foot. The render
+/// frame (subtract [`super::RenderOrigin`] on the i64 grid, sample terrain height
+/// at f64) keeps the step exact; the pre-fix absolute-f32 path is measured
+/// alongside to keep the pin honest about what it prevents.
+#[test]
+fn walker_eye_path_is_uniform_at_every_locale() {
+    use crate::sim::{PLAYER_SPEED, Pos};
+    let g = crab_world::terrain::TerrainGrid::gcr();
+    let ideal = PLAYER_SPEED as f64 / 100_000.0;
+    for (x0_m, z0_m) in [(3.0f64, -7.0f64), (-10318.9, -10006.1), (14800.0, 14800.0)] {
+        let origin = super::RenderOrigin(Pos::from_meters(x0_m as f32, z0_m as f32));
+        let mut pos = Pos {
+            x: (x0_m * 100_000.0) as i64,
+            z: (z0_m * 100_000.0) as i64,
+        };
+        let (mut worst_rel, mut worst_abs) = (0.0f64, 0.0f64);
+        let (mut prev_rel, _) = pos.rel_meters(origin.0);
+        let (mut prev_abs, _) = pos.to_meters();
+        let mut prev_y = {
+            let (ax, az) = pos.to_meters_f64();
+            g.height_f64(ax, az)
+        };
+        let mut worst_dy_err = 0.0f64;
+        for _ in 0..120 {
+            pos.x += PLAYER_SPEED; // walking straight +x, the sim's exact step
+            let (rx, _) = pos.rel_meters(origin.0);
+            let (ax_f32, _) = pos.to_meters();
+            let (ax, az) = pos.to_meters_f64();
+            let y = g.height_f64(ax, az);
+            worst_rel = worst_rel.max(((rx - prev_rel) as f64 - ideal).abs());
+            worst_abs = worst_abs.max(((ax_f32 - prev_abs) as f64 - ideal).abs());
+            // The eye's vertical step must track the true (f64) surface, not jump
+            // by the horizontal quantization times the local slope.
+            let dy_true = g.height_f64(ax, az) - g.height_f64(ax - ideal, az);
+            worst_dy_err = worst_dy_err.max(((y - prev_y) - dy_true).abs());
+            (prev_rel, prev_abs, prev_y) = (rx, ax_f32, y);
+        }
+        // Render-frame path: exact to the fixed-point grid (10 µm) everywhere.
+        assert!(
+            worst_rel < 2e-5,
+            "rel eye step off by {worst_rel} m at ({x0_m}, {z0_m})"
+        );
+        assert!(
+            worst_dy_err < 2e-5,
+            "eye height step off by {worst_dy_err} m"
+        );
+        // And the absolute-f32 path it replaced really is the judder: ≥ 0.5 mm of
+        // per-tick step error at the far locales. If this ever starts passing the
+        // rel bound, the pin has stopped measuring anything — revisit it.
+        if x0_m.abs() > 1000.0 {
+            assert!(
+                worst_abs > 5e-4,
+                "absolute-f32 step error only {worst_abs} m at ({x0_m}, {z0_m}) — \
+                 expected the rl#354 quantization this pin exists to document"
+            );
+        }
+    }
 }

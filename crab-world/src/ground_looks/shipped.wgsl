@@ -1,6 +1,6 @@
 // Procedural ground detail (bddap/rl#304) over the terrain mesh's vertex biome
-// tint. Everything is derived from the anchor-relative ground plane (in.uv,
-// rl#334) — no sampled texture, so no repeat period exists to spot from any
+// tint. Everything is derived from the anchor-relative ground plane
+// (world_position.xz, rl#334/rl#354) — no sampled texture, so no repeat period exists to spot from any
 // altitude. Octaves are faded by their
 // on-screen footprint (fwidth): the procedural analogue of mipmapping, so fine
 // detail exists on foot and at landing height (the rl#197 optic-flow duty the old
@@ -41,13 +41,14 @@ fn fragment(
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
     let wp = in.world_position.xyz;
-    // Ground-plane meters, but ANCHOR-relative (in.uv = world xz − the round's
-    // locale origin, rl#334) rather than raw world xz: world_position is an f32
-    // varying, whose ~1-2 mm quantization at the tile's ±15 km corners is the fine
-    // octaves' own scale — the detail dissolved into speckle that boiled whenever
-    // the eye moved. The anchor is constant per round, so the pattern stays glued
-    // to the ground; it re-rolls only across rounds, where the locale moves anyway.
-    let p = in.uv;
+    // Ground-plane meters, ANCHOR-relative (rl#334/rl#354): the terrain mesh's
+    // entity is translated by −anchor (the round's locale origin), so this varying
+    // is small — hence precise — near play. Raw world xz's ~1-2 mm quantization at
+    // the tile's ±15 km corners is the fine octaves' own scale — the detail
+    // dissolved into speckle that boiled whenever the eye moved. The anchor is
+    // constant per round, so the pattern stays glued to the ground; it re-rolls
+    // only across rounds, where the locale moves anyway.
+    let p = in.world_position.xz;
     // Ground meters per pixel at this fragment — the octave-fade driver.
     let fw = max(max(fwidth(p.x), fwidth(p.y)), 1e-4);
 

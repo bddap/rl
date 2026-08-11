@@ -258,17 +258,27 @@ impl TerrainGrid {
     /// diagonal, and this reproduces that split, so a point this fn puts ON the surface
     /// is on the physics surface. Clamps outside the tile (the edge continues flat).
     pub fn height(&self, x: f32, z: f32) -> f32 {
-        let u = ((x / self.extent_x() + 0.5) * (self.cols - 1) as f32)
-            .clamp(0.0, (self.cols - 1) as f32);
-        let v = ((z / self.extent_z() + 0.5) * (self.rows - 1) as f32)
-            .clamp(0.0, (self.rows - 1) as f32);
+        self.height_f64(x as f64, z as f64) as f32
+    }
+
+    /// [`Self::height`]'s one formula, in f64 — the entry the render path samples
+    /// through (rl#354): an f32 world coordinate is already quantized at ~0.5–1.3 mm
+    /// out at the rl#305 locales, a large fraction of the 0.051 m player's walking
+    /// step, so an eye height sampled through f32 stair-steps while the eye
+    /// translates. Callers with exact (fixed-point-derived) coordinates keep their
+    /// precision by entering here.
+    pub fn height_f64(&self, x: f64, z: f64) -> f64 {
+        let u = ((x / self.extent_x() as f64 + 0.5) * (self.cols - 1) as f64)
+            .clamp(0.0, (self.cols - 1) as f64);
+        let v = ((z / self.extent_z() as f64 + 0.5) * (self.rows - 1) as f64)
+            .clamp(0.0, (self.rows - 1) as f64);
         let col = (u as usize).min(self.cols - 2);
         let row = (v as usize).min(self.rows - 2);
-        let (fu, fv) = (u - col as f32, v - row as f32);
-        let h00 = self.at(row, col);
-        let h10 = self.at(row + 1, col);
-        let h01 = self.at(row, col + 1);
-        let h11 = self.at(row + 1, col + 1);
+        let (fu, fv) = (u - col as f64, v - row as f64);
+        let h00 = self.at(row, col) as f64;
+        let h10 = self.at(row + 1, col) as f64;
+        let h01 = self.at(row, col + 1) as f64;
+        let h11 = self.at(row + 1, col + 1) as f64;
         if fu + fv <= 1.0 {
             h00 + (h10 - h00) * fv + (h01 - h00) * fu
         } else {
@@ -331,21 +341,16 @@ impl TerrainGrid {
         let mut positions = Vec::with_capacity(rows * cols);
         let mut normals = Vec::with_capacity(rows * cols);
         let mut colors = Vec::with_capacity(rows * cols);
-        let mut uvs = Vec::with_capacity(rows * cols);
-        // UV carries anchor-relative ground-plane METERS, not a 0..1 texture map:
-        // the ground looks derive their procedural detail from it (`let p = in.uv`).
-        // Raw world xz spans ±15.3 km, where the f32 varying quantizes at ~1-2 mm and
-        // the fine octaves boil while the eye moves (rl#334); rebasing the UVs on
-        // the round's locale origin ([`crate::ground::GroundAnchor`]) keeps the
-        // coordinate small — hence precise — everywhere play happens. Built at
-        // anchor zero; [`crate::ground::apply_ground_anchor`] rewrites on change.
+        // No UV channel: the ground looks derive their procedural detail from
+        // `world_position.xz`, which [`crate::ground::apply_ground_anchor`] keeps
+        // anchor-relative — small, hence precise, everywhere play happens (rl#334,
+        // rl#354) — by translating the mesh's entity, not its vertices.
         for row in 0..rows {
             for col in 0..cols {
                 let x = (col as f32 / (cols - 1) as f32 - 0.5) * ex;
                 let z = (row as f32 / (rows - 1) as f32 - 0.5) * ez;
                 let h = self.at(row, col);
                 positions.push([x, h, z]);
-                uvs.push([x, z]);
                 let (c0, c1) = (col.saturating_sub(1), (col + 1).min(cols - 1));
                 let (r0, r1) = (row.saturating_sub(1), (row + 1).min(rows - 1));
                 let dhdx = (self.at(row, c1) - self.at(row, c0)) / (self.cell * (c1 - c0) as f32);
@@ -372,7 +377,6 @@ impl TerrainGrid {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_inserted_indices(Indices::U32(indices))
     }
 }

@@ -50,9 +50,9 @@ fn fragment(
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
     let wp = in.world_position.xyz;
-    // Anchor-relative ground meters (rl#334): raw world xz quantizes at the fine
-    // octaves' own scale out at the tile corners — see shipped.wgsl.
-    let p = in.uv;
+    // Anchor-relative ground meters (rl#334/rl#354: the mesh entity is translated
+    // by −anchor, so world_position.xz is small and precise near play).
+    let p = in.world_position.xz;
     // Ground meters per pixel at this fragment — the octave-fade driver.
     let fw = max(max(fwidth(p.x), fwidth(p.y)), 1e-4);
 

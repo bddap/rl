@@ -71,6 +71,7 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
     round_resource::<super::articulation::RemoteVehicle>(world, &mut scope);
     round_resource::<super::articulation::CrabPartWindows>(world, &mut scope);
     round_resource::<crab_world::bot::skin::CrabRenderPose>(world, &mut scope);
+    round_resource::<super::RenderOrigin>(world, &mut scope);
 
     // Round state MADE elsewhere during arm/play, not inserted here — its teardown still
     // lives in this one registry:
