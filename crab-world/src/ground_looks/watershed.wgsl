@@ -387,41 +387,22 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
             + vec3(0.35, 0.85, 0.90) * 1.4 * spore;
     }
 
-    // ── Near field: the rl#197 optic-flow duty, in every state ─────────────
-    // Grain is combed on turf and isotropic on mineral ground, muted where wet,
-    // gone inside water. Branch-gated so the near-fullscreen far ground never
-    // pays for the sub-decimeter tier. (Kept for stage 4(a)'s identical-output
-    // sweep; 4(b) keeps the structured parts and sets grain = dryish.)
+    // ── Near field: the structured tier the shared layer cannot carry ──────
+    // Combed fiber on turf and grass clumps ride ON the scaffold's isotropic
+    // grain/relief (grain = relief = dryish below — muted where wet, gone
+    // inside water, the same modulation the hand-rolled octaves had).
+    // Branch-gated so the near-fullscreen far ground never pays for it.
     let dryish = (1.0 - pud) * mix(1.0, 0.72, moist);
     let grain_f = footprint_fade(2.4, fw) * S.z * dryish;
     if grain_f > 0.003 {
-        var g = vnoise(p / 2.4, 31u) * footprint_fade(2.4, fw)
-            + vnoise(p / 0.8, 32u) * 0.8 * footprint_fade(0.8, fw)
-            + vnoise(p / 0.28, 33u) * 0.6 * footprint_fade(0.28, fw);
-        g = mix(g, streak(p, wind_d, 3.4, 0.5, 81u)
-            + 0.7 * streak(p, wind_d, 1.2, 0.18, 82u) * footprint_fade(0.18, fw), turf * 0.7);
-        // The 4.5 cm lattice is the first fine enough to feel the f32 floor: at
-        // the ±15 km map corners the ~1 mm ulp quantizes its interpolant.
-        let grit = footprint_fade(0.11, fw);
-        if grit > 0.001 {
-            g += vnoise(p / 0.11, 35u) * 0.45 * grit + vnoise(p / 0.045, 36u) * 0.3 * footprint_fade(0.045, fw);
-        }
+        let g = (streak(p, wind_d, 3.4, 0.5, 81u)
+            + 0.7 * streak(p, wind_d, 1.2, 0.18, 82u) * footprint_fade(0.18, fw)) * turf * 0.7;
         rgb *= 1.0 + 0.28 * g * grain_f;
         // Grass clumps: darker tufted patches where the ground grows.
         rgb *= 1.0 - 0.28 * grain_f * turf
             * smoothstep(0.15, 0.75, vnoise(p / 1.4, 34u)) * footprint_fade(1.4, fw);
     }
 
-    // Micro-relief: pocked soil, smoothed by moisture, flat on water. (Kept for
-    // 4(a); 4(b) hands it to the scaffold's relief layer via relief = dryish.)
-    let w_n = S.w * footprint_fade(0.45, fw) * dryish;
-    if w_n > 0.001 {
-        let step = 0.12;
-        let h0 = vnoise(p / 0.45, 51u);
-        let hx = vnoise((p + vec2(step, 0.0)) / 0.45, 51u);
-        let hz = vnoise((p + vec2(0.0, step)) / 0.45, 51u);
-        grad += vec2(hx - h0, hz - h0) / step * 0.06 * w_n;
-    }
     var n = ctx.n;
     if dot(grad, grad) > 1e-8 {
         n = normalize(n + vec3(-grad.x, 0.0, -grad.y));
@@ -436,7 +417,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     // moisture, drowned in puddles. Post-lighting additive radiance — the
     // scaffold adds it after apply_pbr_lighting.
     out.glow = sparkle(p, n, ctx.v, fw, S.z * (1.0 - pud), (0.35 + 0.65 * snow) * (0.35 + 0.65 * moist));
-    out.grain = 0.0;
-    out.relief = 0.0;
+    out.grain = dryish;
+    out.relief = dryish;
     return out;
 }

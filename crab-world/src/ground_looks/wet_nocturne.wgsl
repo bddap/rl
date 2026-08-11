@@ -85,37 +85,21 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         rough = mix(rough, 0.18, wet_micro * 0.9 * S.z);
     }
 
-    // Near-field grain: the rl#197 optic-flow duty — muted where wet (wet soil
-    // reads smoother), gone inside puddles. (Kept for stage 4(a)'s
-    // identical-output sweep; 4(b) deletes it and sets grain = dryish so the
-    // scaffold's adaptive layer inherits the same modulation.)
+    // Near-field grain and micro-relief are the scaffold's always-on layer,
+    // modulated exactly as the hand-rolled octaves were: muted where wet (wet
+    // soil reads smoother), gone inside puddles.
     let dryish = (1.0 - pud) * mix(1.0, 0.45, moist);
-    let fine = vnoise(p / 2.2, 119u) * footprint_fade(2.2, fw)
-        + vnoise(p / 0.7, 120u) * 0.7 * footprint_fade(0.7, fw);
-    rgb *= 1.0 + 0.22 * S.z * fine * dryish;
-
-    // Micro-relief normal: pocked dry soil, smoothed by moisture, flat on water.
-    var n = ctx.n;
-    let w_n = S.w * footprint_fade(0.5, fw) * dryish;
-    if w_n > 0.001 {
-        let step = 0.12;
-        let h0 = vnoise(p / 0.5, 121u);
-        let hx = vnoise((p + vec2(step, 0.0)) / 0.5, 121u);
-        let hz = vnoise((p + vec2(0.0, step)) / 0.5, 121u);
-        let grad = vec2(hx - h0, hz - h0) / step * 0.05;
-        n = normalize(n + w_n * vec3(-grad.x, 0.0, -grad.y));
-    }
 
     var out: GroundArt;
     out.rgb = rgb;
     out.roughness = rough;
-    out.n = n;
+    out.n = ctx.n;
     out.emissive = vec3(0.0);
     // Dew glints (rl::noise sparkle): near-field only (footprint-faded), boosted
     // on snow, drowned in puddles. Post-lighting additive radiance — the
     // scaffold adds it after apply_pbr_lighting.
-    out.glow = sparkle(p, n, ctx.v, fw, S.z * (1.0 - pud), 0.35 + 0.65 * snow);
-    out.grain = 0.0;
-    out.relief = 0.0;
+    out.glow = sparkle(p, ctx.n, ctx.v, fw, S.z * (1.0 - pud), 0.35 + 0.65 * snow);
+    out.grain = dryish;
+    out.relief = dryish;
     return out;
 }

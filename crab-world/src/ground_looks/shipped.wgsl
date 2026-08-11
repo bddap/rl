@@ -11,7 +11,6 @@
 #define_import_path rl::ground::looks::shipped
 
 #import rl::noise::{vnoise, footprint_fade}
-#import rl::ground::detail::{fine_color, relief_normal}
 #import rl::ground::art::{GroundCtx, GroundArt}
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
@@ -41,10 +40,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         + vnoise(p / 9.0, 22u) * 0.7 * footprint_fade(9.0, fw);
     rgb *= 1.0 + 0.35 * strengths.y * meso_n;
 
-    // Fine on-foot detail: the rl#324 adaptive descent. Stage 4(a) keeps this
-    // in-look call (grain = 0 below keeps the scaffold's layer inert) so the
-    // flip's sweep matches current output; 4(b) deletes it and flips grain to 1.
-    rgb *= 1.0 + fine_color(p, fw, 0.30 * strengths.z);
+    // Fine on-foot detail is the scaffold's always-on layer (grain = 1 below).
 
     // Grass clumps: darker tufted patches where the ground is vegetated.
     let tuft = smoothstep(0.15, 0.75, vnoise(p / 1.4, 34u)) * veg * footprint_fade(1.4, fw);
@@ -60,12 +56,10 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     var out: GroundArt;
     out.rgb = rgb;
     out.roughness = ctx.rough;
-    // Micro-relief detail normal: kept in-look for stage 4(a) (relief = 0 below),
-    // deleted in 4(b) where the scaffold's layer takes over.
-    out.n = relief_normal(p, fw, ctx.n, strengths.w);
+    out.n = ctx.n;
     out.emissive = vec3(0.0);
     out.glow = vec3(0.0);
-    out.grain = 0.0;
-    out.relief = 0.0;
+    out.grain = 1.0;
+    out.relief = 1.0;
     return out;
 }
