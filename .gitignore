@@ -30,3 +30,4 @@ __pycache__/
 
 # stray test/build output logs (do not commit)
 /*.log
+shots/
