@@ -14,3 +14,13 @@ on bothouse. `RL_TARGET_BALL=1`, flat-floor era, lavapipe headless render.
 - `reach1.0-iter1046.*` — Jun-28 03:19 brain that hit reach 1.0 at iter 1046
   (from ckpt-backup-pre-job650); normalizer is the Jul-01 lineage one (unpaired — closest surviving).
 - `era-jun28-*` — job-377 originals rendered ON 2026-06-28 (before/after the energy tax).
+
+Bisect probes (rl#351, post-shortlist):
+
+- `probe-a-8012a4f-endofbound.*` — Probe A end-of-bound render (2026-08-10): main
+  `8012a4f8` cold canary, `--terrain flat --band-max-m 9`, 24 h / 19.2M ticks.
+  Rendered with the pin's own `rl-demo` (built at `8012a4f8`), end-of-bound
+  checkpoint, seed 351, canonical GCR tile (the demo's only ground, rl#293 — same
+  locale family as chase-eval). Policy armed (mean|drive| 0.885) but no chase:
+  aimless downhill drift, reach 0.00. Verdict on the issue: confounded (1 rl#343
+  hard-fail), red-leaning.
