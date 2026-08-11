@@ -90,6 +90,17 @@ impl PoseWindow {
     pub(super) fn is_empty(&self) -> bool {
         self.buf[2].is_none()
     }
+
+    /// Ground speed of the newest tick interval, m/s — the wind-audio driver's
+    /// airspeed signal (rl#356). Tick-average (not staircase-corrected): audio only
+    /// needs the magnitude's trend, and the window's teleport/NaN guards already
+    /// keep spikes out. `None` until two poses arrive (engage grace, post-teleport).
+    pub(super) fn speed_mps(&self) -> Option<f32> {
+        let (Some((t1, p1)), Some((t2, p2))) = (self.buf[1], self.buf[2]) else {
+            return None;
+        };
+        Some(p1.pos.distance(p2.pos) / ((t2 - t1) as f32 * crate::sim::TICK_DT as f32))
+    }
 }
 
 #[cfg(test)]
