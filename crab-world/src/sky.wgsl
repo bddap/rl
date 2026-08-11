@@ -16,6 +16,7 @@
 // counterweight vanishes rather than being ported.
 
 #import bevy_pbr::mesh_view_bindings::view
+#import rl::noise::{hash3, rand01}
 
 struct SkyVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -102,22 +103,6 @@ fn value_noise(p: vec3<f32>) -> f32 {
 
 fn corner(i: vec3<i32>, dx: i32, dy: i32, dz: i32) -> f32 {
     return rand01(hash3(i + vec3(dx, dy, dz)));
-}
-
-// Same constants as sky.rs's hash3/rand01 (still live there for terrain/scatter);
-// bitcast matches Rust's `as u32` on negative cells.
-fn hash3(v: vec3<i32>) -> u32 {
-    var h = bitcast<u32>(v.x) * 0x8da6b343u
-        ^ bitcast<u32>(v.y) * 0xd8163841u
-        ^ bitcast<u32>(v.z) * 0xcb1ab31fu;
-    h ^= h >> 13u;
-    h *= 0x165667b1u;
-    h ^= h >> 16u;
-    return h;
-}
-
-fn rand01(h: u32) -> f32 {
-    return f32(h & 0x00ffffffu) / 16777216.0;
 }
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
