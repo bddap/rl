@@ -14,8 +14,11 @@
 
 #define_import_path rl::ground::looks::cracked_loam
 
+// strengths lanes here: x macro provinces, y meso cracks, z fine cobble (and
+// the scaffold's grain gain), w cobble detail normal (and the scaffold's
+// relief gain).
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade}
-#import rl::ground::art::{GroundCtx, GroundArt}
+#import rl::ground::art::{GroundCtx, GroundArt, default_art}
 
 struct Voro {
     f1: f32,   // distance to nearest feature point (cell units)
@@ -126,15 +129,10 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         }
     }
 
-    var out: GroundArt;
-    out.rgb = rgb;
-    out.roughness = ctx.rough;
-    out.n = n;
-    out.emissive = vec3(0.0);
-    out.glow = vec3(0.0);
     // The cobble above is structured near-field art, not the generic layer —
     // the scaffold's grain/relief ride on top at full strength.
-    out.grain = 1.0;
-    out.relief = 1.0;
+    var out = default_art(ctx);
+    out.rgb = rgb;
+    out.n = n;
     return out;
 }

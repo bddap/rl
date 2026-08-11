@@ -11,7 +11,7 @@
 #define_import_path rl::ground::looks::shipped
 
 #import rl::noise::{vnoise, footprint_fade}
-#import rl::ground::art::{GroundCtx, GroundArt}
+#import rl::ground::art::{GroundCtx, GroundArt, default_art}
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let p = ctx.p;
@@ -53,13 +53,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let strata = vnoise(vec2(ctx.wp.y / 7.0, (p.x + p.y) * 0.012), 41u);
     rgb *= 1.0 + 0.35 * strata_mask * strata * footprint_fade(7.0, ctx.fw_y);
 
-    var out: GroundArt;
+    var out = default_art(ctx);
     out.rgb = rgb;
-    out.roughness = ctx.rough;
-    out.n = ctx.n;
-    out.emissive = vec3(0.0);
-    out.glow = vec3(0.0);
-    out.grain = 1.0;
-    out.relief = 1.0;
     return out;
 }

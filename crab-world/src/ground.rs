@@ -129,21 +129,30 @@ macro_rules! ground_looks {
             $(bevy::shader::load_shader_library!(app, $file);)*
         }
 
-        /// Every variant's def must appear as exactly ONE `#ifdef` dispatch line in
-        /// the scaffold — zero means the look can never render (and, the chain
-        /// having no `#else`, fails pipeline creation only at RUNTIME, once someone
-        /// cycles onto it); two means one is dead text masking the other. Guarded
-        /// here at build time instead.
+        /// Every variant's dispatch must appear as exactly ONE whole
+        /// `#ifdef <def> / #import <its own module>::art / #endif` block in the
+        /// scaffold. Zero means the look can never render (and, the chain having
+        /// no `#else`, fails pipeline creation only at RUNTIME, once someone
+        /// cycles onto it); two means one is dead text masking the other; and
+        /// matching the WHOLE block — not just the `#ifdef` — catches the def
+        /// wrapping a NEIGHBOUR's import, which every Rust-side test would pass
+        /// while the look draws the wrong art. Guarded here at build time.
         #[cfg(test)]
         #[test]
         fn every_look_def_dispatches_in_the_scaffold() {
             let scaffold = include_str!("ground.wgsl");
             $(
-                let ifdef = concat!("#ifdef ", $def, "\n");
+                let stem = $file
+                    .trim_start_matches("ground_looks/")
+                    .trim_end_matches(".wgsl");
+                let block = format!(
+                    "#ifdef {}\n#import rl::ground::looks::{}::art\n#endif\n",
+                    $def, stem
+                );
                 assert_eq!(
-                    scaffold.matches(ifdef).count(),
+                    scaffold.matches(block.as_str()).count(),
                     1,
-                    concat!($def, " must dispatch exactly once in ground.wgsl")
+                    concat!($def, " must dispatch its own module exactly once in ground.wgsl")
                 );
             )*
         }
@@ -153,37 +162,41 @@ macro_rules! ground_looks {
         /// `every_look_renders_distinctly` stays green (params differ Rust-side
         /// regardless). Generated from the rows so a future family collapse is
         /// guarded the day it lands, not when someone remembers to add a test.
+        /// Comments are stripped first — a doc line mentioning `params[` must not
+        /// satisfy a guard about CODE.
         #[cfg(test)]
         #[test]
         fn shared_look_modules_read_their_params_row() {
             $(
                 if [$(stringify!($look)),+].len() > 1 {
+                    let code: String = include_str!($file)
+                        .lines()
+                        .map(|line| line.split("//").next().unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     assert!(
-                        include_str!($file).contains("params["),
+                        code.contains("params["),
                         concat!($file, " is shared by several looks but never reads params")
                     );
                 }
             )*
         }
 
-        /// The terrain mesh carries no UV channel (rl#354 — the ground plane is
-        /// `world_position.xz`, anchor-relative via the mesh transform), so the
-        /// scaffold reading `in.uv` would fail pipeline creation at RUNTIME.
-        /// Guarded here at build time instead; the look modules never see the
-        /// vertex output at all — `GroundCtx` is their whole input.
-        #[cfg(test)]
-        #[test]
-        fn no_look_reads_the_absent_uv_channel() {
-            assert!(
-                !include_str!("ground.wgsl").contains("in.uv"),
-                "ground.wgsl reads in.uv, which the terrain mesh no longer carries"
-            );
-            $(assert!(
-                !include_str!($file).contains("in.uv"),
-                concat!($file, " reads in.uv, which the terrain mesh no longer carries")
-            );)*
-        }
     };
+}
+
+/// The terrain mesh carries no UV channel (rl#354 — the ground plane is
+/// `world_position.xz`, anchor-relative via the mesh transform), so the scaffold
+/// reading `in.uv` would fail pipeline creation at RUNTIME. Guarded here at
+/// build time instead; the look modules never see the vertex output at all —
+/// `GroundCtx` is their whole input, so they need no per-file check.
+#[cfg(test)]
+#[test]
+fn scaffold_reads_no_absent_uv_channel() {
+    assert!(
+        !include_str!("ground.wgsl").contains("in.uv"),
+        "ground.wgsl reads in.uv, which the terrain mesh no longer carries"
+    );
 }
 
 ground_looks! {
@@ -320,10 +333,14 @@ impl GroundLook {
 }
 
 /// Strength knobs for the shader's layers, one uniform so a taste iteration is a
-/// constant tweak, not a shader rewrite. Defaults are the shipped look. The lanes
-/// have ONE global meaning (rl#333): x macro and y meso feed the look's `art()`;
-/// z grain and w relief are the scaffold-owned detail-layer gains, which a look
-/// modulates multiplicatively via `GroundArt.grain`/`.relief` — everything
+/// constant tweak, not a shader rewrite. Defaults are the shipped look (mirrored
+/// as `STRENGTH_DEFAULTS` in `ground_art.wgsl` for the looks that normalize
+/// against them — keep the two in sync). The lanes are four per-look intensity
+/// buckets whose SHIPPED meanings are x macro, y meso, z fine grain, w relief;
+/// z and w are additionally the scaffold's always-on detail-layer gains (rl#333),
+/// composed with the look's `GroundArt.grain`/`.relief` — so z/w never go dead,
+/// they always steer the shared layer even where a look also spends them on its
+/// own structure (each look's header documents its divergent lanes). Everything
 /// family-specific lives in [`GroundLook::params`] instead.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[bind_group_data(GroundLook)]
