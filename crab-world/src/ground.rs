@@ -505,6 +505,9 @@ impl Plugin for GroundMaterialPlugin {
         // `#define_import_path`), so the looks resolve it through the same naga_oil
         // composer their `bevy_pbr::` imports already ride.
         bevy::shader::load_shader_library!(app, "noise.wgsl");
+        // The always-on high-frequency detail layer (rl#333 seam 2) — same
+        // path-addressed mechanism, imported as `rl::ground::detail`.
+        bevy::shader::load_shader_library!(app, "ground_detail.wgsl");
         register_look_shaders(app);
         app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
             .insert_resource(self.initial)
