@@ -51,6 +51,12 @@ struct GroundCtx {
     // read any lane as its intensity bucket — the divergent lane meanings are
     // documented in each look's header.
     strengths: vec4<f32>,
+    // Virtual seconds since app start (bevy `globals.time`: pauses with the
+    // game, wraps hourly — expect a one-frame pop at the wrap; derive nothing
+    // stateful or ordered from it). The one animation clock a look reads; a
+    // look never imports bevy bindings itself (guarded by
+    // `look_modules_import_no_bevy_bindings`, ground.rs).
+    time: f32,
 }
 
 struct GroundArt {

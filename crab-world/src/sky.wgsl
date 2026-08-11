@@ -1,8 +1,9 @@
 // Procedural night sky (bddap/rl#325), evaluated per fragment over the whole
 // sphere — below the horizon too, so peeking past the terrain edge shows sky, not
 // void. Replaces the CPU-baked cubemap: resolution-independent (a star stays crisp
-// at any FOV or screen size), no texture memory, and animatable later via globals
-// if the nocturne direction wants twinkle.
+// at any FOV or screen size), no texture memory, and animatable via `globals.time`
+// (one more `mesh_view_bindings` import; virtual seconds, hourly wrap — the
+// proven-live clock, rl#353 stage 6) if the nocturne direction wants twinkle.
 //
 // One fullscreen triangle pinned to the far plane (reverse-Z: clip z = 0), the same
 // trick as bevy's own skybox pass, so coverage is total by construction and every

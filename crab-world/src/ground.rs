@@ -182,6 +182,29 @@ macro_rules! ground_looks {
             )*
         }
 
+        /// A look is a pure function of (ctx, params): the scaffold copies
+        /// everything a look may read — the rl#353 stage-6 animation clock
+        /// `ctx.time` included — out of the bevy bindings ONCE. A look importing
+        /// `bevy_pbr::` itself (mesh_view_bindings, pbr_functions…) would grow a
+        /// second, uncontracted input no swap test can see; the GroundCtx doc
+        /// (ground_art.wgsl) states the ban, this enforces it. Comments stripped
+        /// so prose may still NAME the banned path.
+        #[cfg(test)]
+        #[test]
+        fn look_modules_import_no_bevy_bindings() {
+            $(
+                let code: String = include_str!($file)
+                    .lines()
+                    .map(|line| line.split("//").next().unwrap_or(""))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    !code.contains("bevy_pbr::"),
+                    concat!($file, " imports bevy_pbr:: directly — a look's whole input is art(ctx, params); route new data through GroundCtx")
+                );
+            )*
+        }
+
     };
 }
 
