@@ -14,8 +14,11 @@
 
 #define_import_path rl::ground::looks::wet_nocturne
 
+// strengths lanes here: x moisture/sheen contrast, y puddles, z near-field
+// detail + dew sparkle (and the scaffold's grain gain), w the scaffold's
+// relief gain — all normalized to S = strengths / STRENGTH_DEFAULTS.
 #import rl::noise::{vnoise, footprint_fade, sparkle}
-#import rl::ground::art::{GroundCtx, GroundArt}
+#import rl::ground::art::{GroundCtx, GroundArt, STRENGTH_DEFAULTS, default_art}
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let wp = ctx.wp;
@@ -24,10 +27,10 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
 
     var rgb = ctx.base;
 
-    // Lane strengths normalized to the shipped defaults (0.55/0.35/0.45/0.6) —
-    // the constants below are tuned for S = 1 so a lane reads as a multiplier
-    // around the designed look, not a fraction of it.
-    let S = ctx.strengths / vec4(0.55, 0.35, 0.45, 0.6);
+    // Lane strengths normalized to the shipped defaults — the constants below
+    // are tuned for S = 1 so a lane reads as a multiplier around the designed
+    // look, not a fraction of it.
+    let S = ctx.strengths / STRENGTH_DEFAULTS;
 
     // Wet styling never touches snow.
     let snow = ctx.snow;
@@ -90,14 +93,14 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     // soil reads smoother), gone inside puddles.
     let dryish = (1.0 - pud) * mix(1.0, 0.45, moist);
 
-    var out: GroundArt;
+    var out = default_art(ctx);
     out.rgb = rgb;
     out.roughness = rough;
-    out.n = ctx.n;
-    out.emissive = vec3(0.0);
     // Dew glints (rl::noise sparkle): near-field only (footprint-faded), boosted
     // on snow, drowned in puddles. Post-lighting additive radiance — the
-    // scaffold adds it after apply_pbr_lighting.
+    // scaffold adds it after apply_pbr_lighting. Computed on the pre-relief
+    // normal: the scaffold's relief layer runs after art(), a known small drift
+    // from the deleted in-look micro-relief the old glints saw.
     out.glow = sparkle(p, ctx.n, ctx.v, fw, S.z * (1.0 - pud), 0.35 + 0.65 * snow);
     out.grain = dryish;
     out.relief = dryish;

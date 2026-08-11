@@ -13,8 +13,11 @@
 
 #define_import_path rl::ground::looks::wind_combed
 
+// strengths lanes here: x macro warm/cool drift, y meso comb streaks, z fine
+// combed fiber (and the scaffold's grain gain), w streak detail normal (and
+// the scaffold's relief gain).
 #import rl::noise::{vnoise, footprint_fade}
-#import rl::ground::art::{GroundCtx, GroundArt}
+#import rl::ground::art::{GroundCtx, GroundArt, default_art}
 
 // Anisotropic value noise: stretched to `along`×`across` meters in the comb
 // frame `d`, so one sample is a streak, not a blot.
@@ -108,13 +111,8 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         n = normalize(n + w_n * vec3(-perp.x * g, 0.0, -perp.y * g));
     }
 
-    var out: GroundArt;
+    var out = default_art(ctx);
     out.rgb = rgb;
-    out.roughness = ctx.rough;
     out.n = n;
-    out.emissive = vec3(0.0);
-    out.glow = vec3(0.0);
-    out.grain = 1.0;
-    out.relief = 1.0;
     return out;
 }

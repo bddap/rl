@@ -14,8 +14,10 @@
 
 #define_import_path rl::ground::looks::night_bloom
 
+// strengths lanes here: x vein glow, y macro + meso patchiness, z spore
+// density (and the scaffold's grain gain), w the scaffold's relief gain.
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade}
-#import rl::ground::art::{GroundCtx, GroundArt}
+#import rl::ground::art::{GroundCtx, GroundArt, default_art}
 
 // A vein field: 1 on the zero-set of a warped noise, falling off over `width`
 // (in noise-space units). The zero-set of smooth noise is a connected, branching
@@ -100,14 +102,8 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let emissive = vein_col * (params[1].w * artery_g + params[4].x * capil_g)
         + params[3].xyz * params[3].w * spore_g;
 
-    var out: GroundArt;
+    var out = default_art(ctx);
     out.rgb = rgb;
-    out.roughness = ctx.rough;
-    // Micro-relief is the scaffold's relief layer.
-    out.n = ctx.n;
     out.emissive = emissive;
-    out.glow = vec3(0.0);
-    out.grain = 1.0;
-    out.relief = 1.0;
     return out;
 }

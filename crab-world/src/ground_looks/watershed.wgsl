@@ -44,8 +44,12 @@
 
 #define_import_path rl::ground::looks::watershed
 
+// strengths lanes here: x macro provinces + moisture contrast, y meso structure
+// (strata/plates/comb), z near-field (cobble/fiber/dew, and the scaffold's
+// grain gain), w detail normal (ledges/cobble, and the scaffold's relief gain)
+// — all normalized to S = strengths / STRENGTH_DEFAULTS.
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade, sparkle}
-#import rl::ground::art::{GroundCtx, GroundArt}
+#import rl::ground::art::{GroundCtx, GroundArt, STRENGTH_DEFAULTS, default_art}
 
 // Anisotropic value noise: stretched to `along`×`across` meters in frame `d`,
 // so one sample is a streak, not a blot.
@@ -125,7 +129,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     // Lane strengths normalized to the shipped defaults, so every constant below
     // is tuned at S = 1 and a lane reads as a multiplier around the designed look
     // rather than a fraction of it.
-    let S = ctx.strengths / vec4(0.55, 0.35, 0.45, 0.6);
+    let S = ctx.strengths / STRENGTH_DEFAULTS;
 
     // The design axes (header comment above): uniform, so every gate below is
     // uniform control flow and a disabled language costs nothing.
@@ -408,14 +412,16 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         n = normalize(n + vec3(-grad.x, 0.0, -grad.y));
     }
 
-    var out: GroundArt;
+    var out = default_art(ctx);
     out.rgb = rgb;
     out.roughness = rough;
     out.n = n;
     out.emissive = emissive;
     // Dew glints (rl::noise sparkle): near-field only, boosted on snow AND
     // moisture, drowned in puddles. Post-lighting additive radiance — the
-    // scaffold adds it after apply_pbr_lighting.
+    // scaffold adds it after apply_pbr_lighting. Computed on the look-level
+    // normal: the scaffold's relief layer runs after art(), a known small drift
+    // from the deleted in-look micro-relief the old glints saw.
     out.glow = sparkle(p, n, ctx.v, fw, S.z * (1.0 - pud), (0.35 + 0.65 * snow) * (0.35 + 0.65 * moist));
     out.grain = dryish;
     out.relief = dryish;

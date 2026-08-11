@@ -14,8 +14,11 @@
 
 #define_import_path rl::ground::looks::patterned_ground
 
+// strengths lanes here: x plate mosaic (both tiers), y macro weathering,
+// z mudcracks (and the scaffold's grain gain), w crack grooves (and the
+// scaffold's relief gain).
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade}
-#import rl::ground::art::{GroundCtx, GroundArt}
+#import rl::ground::art::{GroundCtx, GroundArt, default_art}
 
 // Voronoi over jittered lattice cells: returns (F1, F2 − F1, cell hash).
 // F2 − F1 ≈ 0 on cell borders — the seam/crack driver; the hash gives each
@@ -121,13 +124,8 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         n = normalize(n + vec3(-grad.x, 0.0, -grad.y));
     }
 
-    var out: GroundArt;
+    var out = default_art(ctx);
     out.rgb = rgb;
-    out.roughness = ctx.rough;
     out.n = n;
-    out.emissive = vec3(0.0);
-    out.glow = vec3(0.0);
-    out.grain = 1.0;
-    out.relief = 1.0;
     return out;
 }
