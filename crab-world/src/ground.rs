@@ -33,51 +33,37 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 /// shape [`crate::crab_view::RenderMode`] uses, so there is one field to write and
 /// no wrapper to keep in sync.
 ///
-/// Each look is a whole fragment shader in `src/ground_looks/`, and the contract
-/// every one of those files keeps is:
+/// Each look is an `art()` MODULE in `src/ground_looks/` (the rl#333 flip): the
+/// one scaffold `ground.wgsl` owns `fn fragment`, builds the shared `GroundCtx`
+/// (anchor-relative ground plane, footprint, normals, view vector, biome tint +
+/// veg/snow masks, hydrology sample — documented field-by-field in
+/// `ground_art.wgsl`), dispatches to the selected look on the `LOOK_*` shader def
+/// pushed by [`GroundDetail::specialize`], applies the always-on high-frequency
+/// detail layer (`rl::ground::detail`, modulated by the look's `grain`/`relief`
+/// fields — a look cannot skip it, only turn it down in one reviewable line),
+/// then lighting, then the look's additive `glow`.
 ///
-/// Inputs (all set up by [`GroundMaterial`]):
-/// - `in: VertexOutput` (bevy_pbr forward io): `world_position.xz` is the ground
-///   plane in anchor-relative METERS (world xz − [`GroundAnchor`], rl#334/rl#354 —
-///   the mesh's entity is translated by −anchor, so the varying stays small and
-///   precise near play; raw world xz would quantize at ~1-2 mm out at the tile
-///   corners, the fine octaves' own scale, and the detail would boil while the eye
-///   moves). `world_position.y` is ABSOLUTE datum-shifted elevation (the anchor is
-///   xz-only) — coarse elevation bands stay on it. The world-mapped moisture uv
-///   must add the anchor back (`moisture_extent.zw`). `world_normal` is the smooth
-///   geometric normal. There is NO `uv` varying — the terrain mesh carries no UV
-///   channel. The per-vertex biome tint (hypsometric bands, see terrain.rs
-///   `biome`) arrives pre-multiplied into `pbr_input.material.base_color` via the
-///   mesh COLOR attribute.
-/// - `strengths: vec4<f32>` at `@group(#{MATERIAL_BIND_GROUP}) @binding(100)` — the
-///   ONE extension uniform, the taste-iteration knob set (defaults + meaning in
-///   [`GroundDetail`]). A look may reinterpret the lanes but must bind them at 100
-///   (the Rust side is `AsBindGroup` on that binding).
-/// - the hydrology bake at bindings 101 (texture, R wetness / G standing water),
-///   102 (sampler), 103 (world-extent uniform) — optional to declare; watershed is
-///   the consumer. World-mapped over the whole tile, so it cannot tile.
-/// - the look's aesthetic parameter row at binding 104 (`array<vec4f, 8>`, lanes
-///   documented on [`GroundLook::params`]) — optional to declare, REQUIRED for a
-///   shader several looks share: a variant is a param row, not a shader fork
-///   (the rl#333 seam). night_bloom and watershed are the consumers.
-///
-/// Rules (issue requirements, not style):
-/// - entry point stays `fn fragment`. Only the FORWARD main pass draws these files
-///   ([`GroundDetail::specialize`] leaves the prepass alone), so the
-///   `PREPASS_PIPELINE` fork they carry is inert — it just keeps the file valid if
-///   prepass wiring is ever added.
+/// The contract a look module keeps is the typed signature:
+/// `fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt`
+/// (`params` is the look's aesthetic row, [`GroundLook::params`] — a variant of a
+/// shared module is a row, never a fork), plus the rules the types can't hold
+/// (issue requirements, not style):
 /// - world-space procedural only: no REPEATED textures (the world-spanning
-///   hydrology bake above is the one sanctioned sample), and nothing that
+///   hydrology bake in `ctx.hydro` is the one sanctioned sample), and nothing that
 ///   lies about geometry — normal perturbation is fine, parallax/displacement is
 ///   NOT (the visual surface IS the collision heightfield).
-/// - octaves faded by their on-screen footprint (`fwidth`): fine detail must exist
+/// - octaves faded by their on-screen footprint (`ctx.fw`): structure must exist
 ///   on foot and at landing height — the rl#197 optic-flow cue the deleted checker
 ///   used to carry — without shimmering from the plane.
 /// - judge colors at rendered exposure (moon-sun + ambient are pre-exposed).
 ///
-/// To add a look: a file in `src/ground_looks/`, a variant here, and a row in
-/// [`ground_looks!`] — which is exhaustive over this enum, so a variant with no row
-/// is a compile error rather than a look nobody can reach.
+/// To add a look: an `art()` module in `src/ground_looks/`, a variant here, a row
+/// in [`ground_looks!`] — exhaustive over this enum, so a variant with no row is a
+/// compile error rather than a look nobody can reach — and the row's `#ifdef`
+/// dispatch line in `ground.wgsl` (guarded by
+/// `every_look_def_dispatches_in_the_scaffold`; the chain has no `#else`, so a
+/// missing line fails pipeline creation loudly instead of silently drawing
+/// Shipped).
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Reflect, clap::ValueEnum)]
 pub enum GroundLook {
     #[default]
@@ -108,84 +94,108 @@ pub enum GroundLook {
     NightBloomFiligree,
 }
 
-/// The one place a look's shader UUID and its file sit together. Split across a
-/// `match` and a separate registration call, they drift, and a look ends up drawing
-/// its neighbour's shader with every test still green. A macro because
-/// `load_internal_asset!` embeds via `include_str!` — the path must be a literal per
-/// look, so no loop over the variants can build the registration list.
+/// The scaffold — the ONE fragment shader every ground pipeline runs (rl#333):
+/// it builds `GroundCtx`, `#ifdef`-dispatches to the selected look's `art()`
+/// module, and applies the always-on detail layer. A const UUID handle because
+/// [`MaterialExtension::fragment_shader`] gets no world access to resolve a
+/// loaded path.
+const GROUND_SHADER_HANDLE: Handle<Shader> = uuid_handle!("b7c9d4e2-8f13-4a6b-9c05-2e7d81f3a924");
+
+/// The one place a look's dispatch def and its module file sit together. Split
+/// across a `match` and a separate registration call, they drift, and a look ends
+/// up drawing its neighbour's art with every test still green. A macro because
+/// registration and the guard tests embed via path literals — one per look, so no
+/// loop over the variants can build the list.
 macro_rules! ground_looks {
-    ($($($look:ident)|+ => $file:literal, $uuid:literal;)*) => {
+    ($($($look:ident)|+ => $file:literal, $def:literal;)*) => {
         impl GroundLook {
-            /// The look's shader. A const UUID handle rather than a loaded path
-            /// because [`MaterialExtension::specialize`] — the only place that can
-            /// repoint a pipeline's fragment stage — gets no world access to
-            /// resolve one. Valid only once [`GroundMaterialPlugin`] has registered
-            /// it, hence private. Several looks may share one shader (a row with
-            /// `A | B | …`) — those are parameter sets over it, told apart by
-            /// [`GroundLook::params`].
-            fn shader(self) -> Handle<Shader> {
+            /// The look's `#ifdef` dispatch def in `ground.wgsl`, pushed onto the
+            /// forward fragment stage by [`GroundDetail::specialize`] — which
+            /// `art()` import the scaffold resolves. Several looks may share one
+            /// def (a row with `A | B | …`) — those are parameter sets over one
+            /// module, told apart by [`GroundLook::params`].
+            fn shader_def(self) -> &'static str {
                 match self {
-                    $($(GroundLook::$look)|+ => uuid_handle!($uuid),)*
+                    $($(GroundLook::$look)|+ => $def,)*
                 }
             }
         }
 
-        /// Compiled in, not loaded: `include_str!` makes a missing or misnamed look
-        /// a BUILD error instead of a runtime "path not found" that un-renders the
-        /// ground.
+        /// Every look module registered on the shader composer, path-addressed via
+        /// its `#define_import_path` — the same naga_oil route the `bevy_pbr::`
+        /// imports ride. Embedded, so a missing or misnamed file is a BUILD error
+        /// instead of a runtime "path not found" that un-renders the ground.
         fn register_look_shaders(app: &mut App) {
-            $(load_internal_asset!(
-                app,
-                uuid_handle!($uuid),
-                concat!("ground_looks/", $file, ".wgsl"),
-                Shader::from_wgsl
-            );)*
+            $(bevy::shader::load_shader_library!(app, $file);)*
         }
 
-        /// A shader several looks share MUST read the params row (binding 104) —
-        /// otherwise every variant on it collapses onto one rendering while
+        /// Every variant's def must appear as exactly ONE `#ifdef` dispatch line in
+        /// the scaffold — zero means the look can never render (and, the chain
+        /// having no `#else`, fails pipeline creation only at RUNTIME, once someone
+        /// cycles onto it); two means one is dead text masking the other. Guarded
+        /// here at build time instead.
+        #[cfg(test)]
+        #[test]
+        fn every_look_def_dispatches_in_the_scaffold() {
+            let scaffold = include_str!("ground.wgsl");
+            $(
+                let ifdef = concat!("#ifdef ", $def, "\n");
+                assert_eq!(
+                    scaffold.matches(ifdef).count(),
+                    1,
+                    concat!($def, " must dispatch exactly once in ground.wgsl")
+                );
+            )*
+        }
+
+        /// A module several looks share MUST read its params row — otherwise every
+        /// variant on it collapses onto one rendering while
         /// `every_look_renders_distinctly` stays green (params differ Rust-side
         /// regardless). Generated from the rows so a future family collapse is
         /// guarded the day it lands, not when someone remembers to add a test.
         #[cfg(test)]
         #[test]
-        fn shared_shaders_read_the_params_binding() {
+        fn shared_look_modules_read_their_params_row() {
             $(
                 if [$(stringify!($look)),+].len() > 1 {
                     assert!(
-                        include_str!(concat!("ground_looks/", $file, ".wgsl"))
-                            .contains("@binding(104)"),
-                        concat!($file, ".wgsl is shared by several looks but never reads params")
+                        include_str!($file).contains("params["),
+                        concat!($file, " is shared by several looks but never reads params")
                     );
                 }
             )*
         }
 
         /// The terrain mesh carries no UV channel (rl#354 — the ground plane is
-        /// `world_position.xz`, anchor-relative via the mesh transform), so a look
-        /// reading `in.uv` would fail pipeline creation at RUNTIME, only once
-        /// someone cycles onto it. Guarded here at build time instead.
+        /// `world_position.xz`, anchor-relative via the mesh transform), so the
+        /// scaffold reading `in.uv` would fail pipeline creation at RUNTIME.
+        /// Guarded here at build time instead; the look modules never see the
+        /// vertex output at all — `GroundCtx` is their whole input.
         #[cfg(test)]
         #[test]
         fn no_look_reads_the_absent_uv_channel() {
+            assert!(
+                !include_str!("ground.wgsl").contains("in.uv"),
+                "ground.wgsl reads in.uv, which the terrain mesh no longer carries"
+            );
             $(assert!(
-                !include_str!(concat!("ground_looks/", $file, ".wgsl")).contains("in.uv"),
-                concat!($file, ".wgsl reads in.uv, which the terrain mesh no longer carries")
+                !include_str!($file).contains("in.uv"),
+                concat!($file, " reads in.uv, which the terrain mesh no longer carries")
             );)*
         }
     };
 }
 
 ground_looks! {
-    Shipped => "shipped", "9f2a7c14-3b6d-4e58-9a01-5c7d2e8f4b60";
+    Shipped => "ground_looks/shipped.wgsl", "LOOK_SHIPPED";
     NightBloom | NightBloomAurora | NightBloomEmber | NightBloomFrost
-        | NightBloomRose | NightBloomFiligree => "night_bloom", "6b0d3f57-92ac-41e8-b74d-0a3e5c81f296";
-    PatternedGround => "patterned_ground", "e83c1a06-5d4f-4b29-97e0-6c2b8d70a415";
-    WindCombed => "wind_combed", "2d795be8-0c31-4a76-8b5e-91f4a03d6c27";
-    CrackedLoam => "cracked_loam", "48a6f2d1-b90e-4c53-a812-7d05e9b34f6a";
-    WetNocturne => "wet_nocturne", "7fe15b83-2a4c-49d0-91b6-c3820e5a7d14";
+        | NightBloomRose | NightBloomFiligree => "ground_looks/night_bloom.wgsl", "LOOK_NIGHT_BLOOM";
+    PatternedGround => "ground_looks/patterned_ground.wgsl", "LOOK_PATTERNED_GROUND";
+    WindCombed => "ground_looks/wind_combed.wgsl", "LOOK_WIND_COMBED";
+    CrackedLoam => "ground_looks/cracked_loam.wgsl", "LOOK_CRACKED_LOAM";
+    WetNocturne => "ground_looks/wet_nocturne.wgsl", "LOOK_WET_NOCTURNE";
     Watershed | WatershedNaturalist | WatershedNocturne
-        => "watershed", "3a9d6c07-14be-4f82-a5c3-8e07b12d9f4b";
+        => "ground_looks/watershed.wgsl", "LOOK_WATERSHED";
 }
 
 impl GroundLook {
@@ -310,8 +320,11 @@ impl GroundLook {
 }
 
 /// Strength knobs for the shader's layers, one uniform so a taste iteration is a
-/// constant tweak, not a shader rewrite. Defaults are the shipped look; a look may
-/// reinterpret the lanes (see [`GroundLook`]).
+/// constant tweak, not a shader rewrite. Defaults are the shipped look. The lanes
+/// have ONE global meaning (rl#333): x macro and y meso feed the look's `art()`;
+/// z grain and w relief are the scaffold-owned detail-layer gains, which a look
+/// modulates multiplicatively via `GroundArt.grain`/`.relief` — everything
+/// family-specific lives in [`GroundLook::params`] instead.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[bind_group_data(GroundLook)]
 pub struct GroundDetail {
@@ -331,9 +344,8 @@ pub struct GroundDetail {
     /// world-mapped moisture uv adds this back.
     #[uniform(103)]
     pub moisture_extent: Vec4,
-    /// The look's aesthetic parameter row ([`GroundLook::params`]) — optional for
-    /// a shader to declare (`@binding(104)`); night_bloom and watershed are the
-    /// consumers.
+    /// The look's aesthetic parameter row ([`GroundLook::params`]), handed to its
+    /// `art()` by the scaffold; night_bloom and watershed are the consumers.
     #[uniform(104)]
     pub params: [Vec4; 8],
     /// Which look this material draws. Not a binding — it rides in the material to
@@ -364,11 +376,10 @@ impl From<&GroundDetail> for GroundLook {
 }
 
 impl MaterialExtension for GroundDetail {
-    /// A placeholder [`Self::specialize`] always overrides on the forward pass; it
-    /// exists because the descriptor needs a fragment stage before specialization
-    /// runs.
+    /// The scaffold — the same shader for every look; [`Self::specialize`] selects
+    /// the look by pushing its `LOOK_*` def, never by repointing the stage.
     fn fragment_shader() -> ShaderRef {
-        GroundLook::Shipped.shader().into()
+        GROUND_SHADER_HANDLE.into()
     }
 
     fn specialize(
@@ -381,10 +392,10 @@ impl MaterialExtension for GroundDetail {
             return Ok(());
         };
         // Bevy runs ONE specialize for both the forward and the prepass/shadow
-        // pipelines. A look shader is forward-only (it writes a deferred/lit
-        // output), so stamping it onto the prepass descriptor breaks the ground's
-        // shadow pass wherever the prepass carries a fragment stage — adapters
-        // without DEPTH_CLIP_CONTROL, which emulate unclipped depth in the shader.
+        // pipelines. The scaffold is forward-only (it writes a deferred/lit
+        // output; the prepass keeps bevy's own fragment where it carries one —
+        // adapters without DEPTH_CLIP_CONTROL, which emulate unclipped depth in
+        // the shader), so the look def belongs on the forward stage alone.
         // Match the DEF NAME, not a whole `ShaderDefVal`: were bevy ever to push it
         // with a different payload, an equality check would silently stop matching
         // and break shadows only on the adapters nobody tests on.
@@ -394,7 +405,13 @@ impl MaterialExtension for GroundDetail {
         if is_prepass {
             return Ok(());
         }
-        fragment.shader = key.bind_group_data.shader();
+        // The rl#333 dispatch: the def selects which look module's `art()` the
+        // scaffold imports. No def → no `art` symbol → pipeline creation fails
+        // loudly (the chain has no `#else`, so nothing can silently fall back).
+        fragment.shader_defs.push(bevy::shader::ShaderDefVal::Bool(
+            key.bind_group_data.shader_def().into(),
+            true,
+        ));
         Ok(())
     }
 }
@@ -509,7 +526,12 @@ impl Plugin for GroundMaterialPlugin {
         // The always-on high-frequency detail layer (rl#333 seam 2) — same
         // path-addressed mechanism, imported as `rl::ground::detail`.
         bevy::shader::load_shader_library!(app, "ground_detail.wgsl");
+        // The look contract types (`rl::ground::art`: GroundCtx / GroundArt).
+        bevy::shader::load_shader_library!(app, "ground_art.wgsl");
         register_look_shaders(app);
+        // The scaffold (rl#333 seam 3) — the one `fn fragment`, compiled in so a
+        // misnamed file is a BUILD error.
+        load_internal_asset!(app, GROUND_SHADER_HANDLE, "ground.wgsl", Shader::from_wgsl);
         app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
             .insert_resource(self.initial)
             .init_resource::<GroundAnchor>()
@@ -525,10 +547,10 @@ impl Plugin for GroundMaterialPlugin {
 mod tests {
     use super::*;
 
-    /// A copy-pasted UUID or param row would make two looks render identically —
+    /// A copy-pasted def or param row would make two looks render identically —
     /// the toggle would still "work" and the player would just never see one of
-    /// them. Identity is (shader, params): looks may share a shader on purpose
-    /// (parameter sets), never a shader AND a row.
+    /// them. Identity is (dispatch def, params): looks may share an `art()` module
+    /// on purpose (parameter sets), never a module AND a row.
     #[test]
     fn every_look_renders_distinctly() {
         let all = <GroundLook as clap::ValueEnum>::value_variants();
@@ -536,7 +558,7 @@ mod tests {
             .iter()
             .map(|l| {
                 (
-                    l.shader().id(),
+                    l.shader_def(),
                     l.params().map(|v| v.to_array().map(f32::to_bits)),
                 )
             })

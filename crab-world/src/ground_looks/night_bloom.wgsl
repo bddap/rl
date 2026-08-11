@@ -3,41 +3,19 @@
 // valleys carry bioluminescence: dendritic glowing veins threading the low wet
 // ground (from the plane they read as rivers of cold light), a drifting spore
 // speckle that resolves on foot, and a soft teal bloom-halo around the veins.
-// Rare vein knots flush magenta. Everything is derived from WORLD-SPACE
-// position — no sampled texture, so no repeat period exists to spot from any
-// altitude. Octaves are faded by their on-screen footprint (fwidth), so fine
-// detail exists on foot but never shimmers from the plane.
+// Rare vein knots flush magenta. Every night-bloom VARIANT is a parameter row
+// over this one shader (rl#329/rl#333) — palette, glow levels, vein
+// spacing/width, spore density are all params, never forks.
 //
-// One of the interchangeable looks in this directory; the contract every
-// file here keeps — inputs, binding 100, the `fragment` entry point — is
-// documented once on `GroundLook` in ground.rs. Every night-bloom VARIANT is a
-// parameter row over this one shader (binding 104, rl#329/rl#333) — palette,
-// glow levels, vein spacing/width, spore density are all params, never forks.
+// One of the interchangeable `art()` modules in this directory; the contract —
+// GroundCtx in, GroundArt out, the scaffold owns `fn fragment` and the detail
+// layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
+// (ground.rs).
 
-#import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
-}
-
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-    prepass_io::{VertexOutput, FragmentOutput},
-    pbr_deferred_functions::deferred_output,
-}
-#else
-#import bevy_pbr::{
-    forward_io::{VertexOutput, FragmentOutput},
-    pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
-}
-#endif
+#define_import_path rl::ground::looks::night_bloom
 
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade}
-
-// x: vein glow, y: macro patchiness, z: fine detail + spores, w: detail normal.
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> strengths: vec4<f32>;
-// The look's aesthetic parameter row — every night-bloom variant is a row over
-// this ONE shader. Lane meanings live on `GroundLook::params` in ground.rs.
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var<uniform> params: array<vec4<f32>, 8>;
+#import rl::ground::art::{GroundCtx, GroundArt}
 
 // A vein field: 1 on the zero-set of a warped noise, falling off over `width`
 // (in noise-space units). The zero-set of smooth noise is a connected, branching
@@ -46,24 +24,15 @@ fn vein(n: f32, width: f32) -> f32 {
     return 1.0 - smoothstep(0.0, width, abs(n));
 }
 
-@fragment
-fn fragment(
-    in: VertexOutput,
-    @builtin(front_facing) is_front: bool,
-) -> FragmentOutput {
-    var pbr_input = pbr_input_from_standard_material(in, is_front);
+fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
+    let p = ctx.p;
+    let fw = ctx.fw;
+    let strengths = ctx.strengths;
 
-    // Anchor-relative ground meters (rl#334/rl#354: the mesh entity is translated
-    // by −anchor, so world_position.xz is small and precise near play).
-    let p = in.world_position.xz;
-    // Ground meters per pixel at this fragment — the octave-fade driver.
-    let fw = max(max(fwidth(p.x), fwidth(p.y)), 1e-4);
+    var rgb = ctx.base;
 
-    var rgb = pbr_input.material.base_color.rgb;
-
-    // Vegetation mask from the biome tint's greenness — the bloom lives where
-    // things grow; mineral ground (scree/rock/snow) stays dark and quiet.
-    let veg = clamp((rgb.g - max(rgb.r, rgb.b)) * 6.0, 0.0, 1.0);
+    // The bloom lives where things grow; mineral ground stays dark and quiet.
+    let veg = ctx.veg;
 
     // Cool the base a step toward the variant's night tint so the warm moon
     // highlights and the glow both have somewhere to sit.
@@ -77,6 +46,8 @@ fn fragment(
     rgb *= 1.0 + 0.40 * strengths.y * macro_n * mix(0.4, 1.0, veg);
 
     // Meso mottling + fine detail: the optic-flow duty, unchanged in role.
+    // (Fine octaves kept for stage 4(a)'s identical-output sweep; 4(b) deletes
+    // them for the scaffold's adaptive layer.)
     let meso_n = vnoise(p / 26.0, 21u) * footprint_fade(26.0, fw)
         + vnoise(p / 9.0, 22u) * 0.7 * footprint_fade(9.0, fw);
     rgb *= 1.0 + 0.30 * strengths.y * meso_n;
@@ -135,15 +106,12 @@ fn fragment(
     // painted on it.
     let glow_total = artery_g + capil_g;
     rgb *= 1.0 - params[0].w * clamp(glow_total, 0.0, 1.0);
-    pbr_input.material.base_color = vec4(rgb, pbr_input.material.base_color.a);
     let emissive = vein_col * (params[1].w * artery_g + params[4].x * capil_g)
         + params[3].xyz * params[3].w * spore_g;
-    pbr_input.material.emissive = vec4(
-        pbr_input.material.emissive.rgb + emissive,
-        pbr_input.material.emissive.a,
-    );
 
-    // Detail normal: unchanged duty — moonlit micro-relief up close.
+    // Detail normal: moonlit micro-relief up close (kept for stage 4(a);
+    // 4(b) hands the duty to the scaffold's relief layer).
+    var n = ctx.n;
     let w_n = strengths.w * footprint_fade(0.45, fw);
     if w_n > 0.001 {
         let step = 0.12;
@@ -151,17 +119,16 @@ fn fragment(
         let hx = vnoise((p + vec2(step, 0.0)) / 0.45, 51u);
         let hz = vnoise((p + vec2(0.0, step)) / 0.45, 51u);
         let grad = vec2(hx - h0, hz - h0) / step * 0.06;
-        pbr_input.N = normalize(pbr_input.N + w_n * vec3(-grad.x, 0.0, -grad.y));
+        n = normalize(n + w_n * vec3(-grad.x, 0.0, -grad.y));
     }
 
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
-
-#ifdef PREPASS_PIPELINE
-    let out = deferred_output(in, pbr_input);
-#else
-    var out: FragmentOutput;
-    out.color = apply_pbr_lighting(pbr_input);
-    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
-#endif
+    var out: GroundArt;
+    out.rgb = rgb;
+    out.roughness = ctx.rough;
+    out.n = n;
+    out.emissive = emissive;
+    out.glow = vec3(0.0);
+    out.grain = 0.0;
+    out.relief = 0.0;
     return out;
 }

@@ -1,15 +1,4 @@
-// Procedural ground detail (bddap/rl#304) over the terrain mesh's vertex biome
-// tint. Everything is derived from WORLD-SPACE position — no sampled texture, so
-// no repeat period exists to spot from any altitude. Octaves are faded by their
-// on-screen footprint (fwidth): the procedural analogue of mipmapping, so fine
-// detail exists on foot and at landing height (the rl#197 optic-flow duty the old
-// checker carried) but never shimmers from the plane.
-//
-// One of the interchangeable looks in this directory; the contract every file
-// here keeps — inputs, binding 100, the `fragment` entry point — is documented
-// once on `GroundLook` in ground.rs.
-
-// ─── THIS LOOK: WATERSHED — the other six as ground states of ONE world ─────
+// Ground look: WATERSHED — the other six as ground states of ONE world.
 // The six competition entries were submitted as six worlds. They read as six
 // worlds because each let a DIFFERENT FIELD drive the surface. Given one shared
 // field stack they stop competing: each becomes the appearance of a different
@@ -28,61 +17,35 @@
 //
 // Moisture is the spine, and it is HYDROLOGICAL (rl#323): a bake over the same
 // height grid the mesh and collider come from — priority-flood ponding, D8 flow
-// accumulation, topographic wetness index (moisture.rs) — sampled here as a
-// world-mapped texture. Water literally pools at the local minima the player can
-// see and follows the drainage lines between them, so the wet/dry map a player
-// reads from the plane IS the terrain silhouette's consequence. That is what makes
-// six languages read as one place instead of six wallpapers: nothing is
-// decorative, every language is the visible consequence of where water is.
+// accumulation, topographic wetness index (moisture.rs) — sampled by the
+// scaffold as a world-mapped texture (ctx.hydro). Water literally pools at the
+// local minima the player can see and follows the drainage lines between them,
+// so the wet/dry map a player reads from the plane IS the terrain silhouette's
+// consequence. That is what makes six languages read as one place instead of
+// six wallpapers: nothing is decorative, every language is the visible
+// consequence of where water is.
 //
-// The partition is also the optimization. A fragment pays only for the state it is
-// in (region weights branch-gate each language), and the regions are hundreds of
-// meters wide, so a warp is almost always uniform across one branch.
+// The partition is also the optimization. A fragment pays only for the state it
+// is in (region weights branch-gate each language), and the regions are hundreds
+// of meters wide, so a warp is almost always uniform across one branch.
 //
 // patterned_ground is deliberately NOT a seventh language here: it is the same
 // domain-warped Voronoi mosaic as cracked_loam at a different scale, and
 // cracked_loam's carries the crack seams that couple to moisture. Its
 // contribution survives as the macro province hue below.
 //
-// strengths lanes: x macro provinces + moisture contrast, y meso structure
-// (strata/plates/comb), z near-field (cobble/grain/dew), w detail normal.
-// Constants are tuned at S = strengths/defaults = 1.
-#import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
-}
+// One of the interchangeable `art()` modules in this directory; the contract —
+// GroundCtx in, GroundArt out, the scaffold owns `fn fragment` and the detail
+// layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
+// (ground.rs). Designs B (naturalist) and C (nocturne) are param rows over this
+// one module (`GroundLook::params`), never forks. Watershed's own row is
+// all-ones: every use below multiplies or gates on a lane, so Design A renders
+// bit-identically to the pre-params shader.
 
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-    prepass_io::{VertexOutput, FragmentOutput},
-    pbr_deferred_functions::deferred_output,
-}
-#else
-#import bevy_pbr::{
-    forward_io::{VertexOutput, FragmentOutput},
-    pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
-}
-#endif
+#define_import_path rl::ground::looks::watershed
 
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade, sparkle}
-
-// x: macro provinces + moisture contrast, y: meso structure (strata/plates/comb),
-// z: near-field detail (cobble/grain/dew), w: detail normal.
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> strengths: vec4<f32>;
-
-// The hydrology bake (moisture.rs, rl#323): R wetness, G standing water. World-
-// mapped over the whole tile — uv = world_xz / extent + 0.5, the same transform
-// TerrainGrid::height uses — so it has no repeat period to spot from altitude.
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var moisture_tex: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var moisture_smp: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var<uniform> moisture_extent: vec4<f32>;
-
-// The look's parameter row (the rl#333 seam) — the rl#323 design axes, so
-// Designs B (naturalist) and C (nocturne) are rows over this one shader, never
-// forks of it. Lane meanings live on `GroundLook::params` (ground.rs).
-// Watershed's own row is all-ones: every use below multiplies or gates on a
-// lane, so Design A renders bit-identically to the pre-params shader.
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var<uniform> params: array<vec4<f32>, 8>;
+#import rl::ground::art::{GroundCtx, GroundArt}
 
 // Anisotropic value noise: stretched to `along`×`across` meters in frame `d`,
 // so one sample is a streak, not a blot.
@@ -149,31 +112,20 @@ fn strata_color(t: f32) -> vec3<f32> {
     return mix(slate, rust, smoothstep(0.0, 1.0, u - 3.0));
 }
 
-@fragment
-fn fragment(
-    in: VertexOutput,
-    @builtin(front_facing) is_front: bool,
-) -> FragmentOutput {
-    var pbr_input = pbr_input_from_standard_material(in, is_front);
+fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
+    let wp = ctx.wp;
+    let p = ctx.p;
+    let fw = ctx.fw;
+    let fw_y = ctx.fw_y;
 
-    let wp = in.world_position.xyz;
-    // Anchor-relative ground meters (rl#334/rl#354: the mesh entity is translated
-    // by −anchor, so world_position.xz is small and precise near play).
-    let p = in.world_position.xz;
-    // Ground meters per pixel at this fragment — the octave-fade driver. Both
-    // derivatives are taken here, in uniform control flow, because every fade
-    // below is consumed inside a region branch.
-    let fw = max(max(fwidth(p.x), fwidth(p.y)), 1e-4);
-    let fw_y = max(fwidth(wp.y), 1e-4);
-
-    let base = pbr_input.material.base_color.rgb;
+    let base = ctx.base;
     var rgb = base;
-    var rough = pbr_input.material.perceptual_roughness;
+    var rough = ctx.rough;
 
     // Lane strengths normalized to the shipped defaults, so every constant below
     // is tuned at S = 1 and a lane reads as a multiplier around the designed look
     // rather than a fraction of it.
-    let S = strengths / vec4(0.55, 0.35, 0.45, 0.6);
+    let S = ctx.strengths / vec4(0.55, 0.35, 0.45, 0.6);
 
     // The design axes (header comment above): uniform, so every gate below is
     // uniform control flow and a disabled language costs nothing.
@@ -183,25 +135,16 @@ fn fragment(
     let hue_tilt = params[0].w;
 
     // ── The shared field stack ─────────────────────────────────────────────
-    let n_geo = normalize(in.world_normal);
+    let n_geo = ctx.n_geo;
     let steep = 1.0 - n_geo.y;
-    // Vegetation from the biome tint's greenness — growth vs mineral ground.
-    let veg = clamp((base.g - max(base.r, base.b)) * 6.0, 0.0, 1.0);
-    // Band edges mirrored from terrain.rs `biome`, so shading follows the same
-    // elevation logic the vertex tint and the scatter placement already use.
-    let snow = smoothstep(350.0, 650.0, wp.y)          // SNOWLINE_M …
-        * (1.0 - smoothstep(0.18, 0.38, steep));       // … on SNOW_HOLD_STEEP
+    let veg = ctx.veg;
+    let snow = ctx.snow;
     let stony = smoothstep(-500.0, 100.0, wp.y);       // DRY_GRASS_M → SCREE_M
 
-    // MOISTURE — the spine, sampled from the hydrology bake: wetness that pooled
-    // at real local minima and ran down real drainage lines (moisture.rs). Noise
+    // MOISTURE — the spine, from the scaffold's hydrology-bake sample. Noise
     // only frays the wet/dry boundary — its gain peaks at the shoreline and dies
     // in the cores, so it can never move water uphill or invent a pond.
-    // The bake is world-mapped, so its uv needs ABSOLUTE world xz: wp.xz is
-    // anchor-relative (rl#354), and moisture_extent.zw carries the anchor to add
-    // back — tile-scale mapping is immune to the mm-scale quantization this costs.
-    let muv = (wp.xz + moisture_extent.zw) / moisture_extent.xy + 0.5;
-    let hydro = textureSampleLevel(moisture_tex, moisture_smp, muv, 0.0);
+    let hydro = ctx.hydro;
     let standing = hydro.g;
     let mwarp = vec2(vnoise(p / 300.0, 111u), vnoise((p + vec2(5.1, 1.7)) / 300.0, 112u)) * 90.0;
     let pm = p + mwarp;
@@ -418,6 +361,7 @@ fn fragment(
     // change of fiction into the payoff of the hydrology: life lights up where
     // the water collects. The veins share the moisture field's own domain warp
     // (`pm`), so the webs meander along the basins instead of across them.
+    var emissive = vec3(0.0);
     let bloom_w = clamp(wet_w * veg * smoothstep(0.45, 0.85, moist) * (1.0 - pud), 0.0, 1.0)
         * S.x * bloom_gain;
     if bloom_w > 0.003 {
@@ -439,18 +383,15 @@ fn fragment(
         // The ground under the glow darkens (soaked soil), so the light reads as
         // coming FROM the ground rather than painted on it.
         rgb *= 1.0 - 0.55 * clamp(artery + capil, 0.0, 1.0);
-        pbr_input.material.emissive = vec4(
-            pbr_input.material.emissive.rgb
-                + vein_col * (2.2 * artery + 1.0 * capil)
-                + vec3(0.35, 0.85, 0.90) * 1.4 * spore,
-            pbr_input.material.emissive.a,
-        );
+        emissive = vein_col * (2.2 * artery + 1.0 * capil)
+            + vec3(0.35, 0.85, 0.90) * 1.4 * spore;
     }
 
     // ── Near field: the rl#197 optic-flow duty, in every state ─────────────
     // Grain is combed on turf and isotropic on mineral ground, muted where wet,
     // gone inside water. Branch-gated so the near-fullscreen far ground never
-    // pays for the sub-decimeter tier.
+    // pays for the sub-decimeter tier. (Kept for stage 4(a)'s identical-output
+    // sweep; 4(b) keeps the structured parts and sets grain = dryish.)
     let dryish = (1.0 - pud) * mix(1.0, 0.72, moist);
     let grain_f = footprint_fade(2.4, fw) * S.z * dryish;
     if grain_f > 0.003 {
@@ -471,7 +412,8 @@ fn fragment(
             * smoothstep(0.15, 0.75, vnoise(p / 1.4, 34u)) * footprint_fade(1.4, fw);
     }
 
-    // Micro-relief: pocked soil, smoothed by moisture, flat on water.
+    // Micro-relief: pocked soil, smoothed by moisture, flat on water. (Kept for
+    // 4(a); 4(b) hands it to the scaffold's relief layer via relief = dryish.)
     let w_n = S.w * footprint_fade(0.45, fw) * dryish;
     if w_n > 0.001 {
         let step = 0.12;
@@ -480,27 +422,21 @@ fn fragment(
         let hz = vnoise((p + vec2(0.0, step)) / 0.45, 51u);
         grad += vec2(hx - h0, hz - h0) / step * 0.06 * w_n;
     }
+    var n = ctx.n;
     if dot(grad, grad) > 1e-8 {
-        pbr_input.N = normalize(pbr_input.N + vec3(-grad.x, 0.0, -grad.y));
+        n = normalize(n + vec3(-grad.x, 0.0, -grad.y));
     }
 
-    pbr_input.material.perceptual_roughness = rough;
-    pbr_input.material.base_color = vec4(rgb, pbr_input.material.base_color.a);
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
-
-#ifdef PREPASS_PIPELINE
-    let out = deferred_output(in, pbr_input);
-#else
-    var out: FragmentOutput;
-    out.color = apply_pbr_lighting(pbr_input);
-
+    var out: GroundArt;
+    out.rgb = rgb;
+    out.roughness = rough;
+    out.n = n;
+    out.emissive = emissive;
     // Dew glints (rl::noise sparkle): near-field only, boosted on snow AND
-    // moisture, drowned in puddles.
-    let boost = (0.35 + 0.65 * snow) * (0.35 + 0.65 * moist);
-    let glint = sparkle(p, pbr_input.N, pbr_input.V, fw, S.z * (1.0 - pud), boost);
-    out.color = vec4(out.color.rgb + glint, out.color.a);
-
-    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
-#endif
+    // moisture, drowned in puddles. Post-lighting additive radiance — the
+    // scaffold adds it after apply_pbr_lighting.
+    out.glow = sparkle(p, n, ctx.v, fw, S.z * (1.0 - pud), (0.35 + 0.65 * snow) * (0.35 + 0.65 * moist));
+    out.grain = 0.0;
+    out.relief = 0.0;
     return out;
 }
