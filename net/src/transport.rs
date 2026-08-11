@@ -38,7 +38,9 @@ use crate::snapshot::CoreSnapshot;
 // v22: Welcome carries the host's 17-byte SyncStamp (rl#336 — the joiner computes its
 // sync verdict with the one arbiter) and Refusal gained the MatchFull tag; a v21 peer
 // would reject the widened Welcome and the unknown tag.
-pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/22";
+// v23: snapshot players carry altitude + carried velocity (rl#355 — the on-foot
+// momentum state); a v22 peer would mis-frame every snapshot after the handshake.
+pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/23";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
 

@@ -111,26 +111,35 @@ pub(crate) const PLAYER_SPEED: i64 =
 /// Sprint pace (rl#355) — 1.8× walk, the common run multiplier. Feel knob.
 pub(crate) const SPRINT_SPEED: i64 = PLAYER_SPEED * 9 / 5;
 
-/// On-foot gravity, grid units per tick² — the SAME 9.81 m/s² the crafts fall under
-/// (`crab_world::physics::PHYSICS_GRAVITY`), so a plane-exit handoff (rl#355) keeps
-/// falling at the rate the cockpit taught the eye; a second gravity here would make
-/// the ballistic arc visibly change slope at the switch.
-const GRAVITY_PER_TICK2: i64 = (9.81 * UNIT as f64 / (TICK_HZ * TICK_HZ) as f64) as i64;
+/// On-foot gravity, grid units per tick² — folded from the ONE gravity the crafts fall
+/// under, so a plane-exit handoff (rl#355) keeps falling at the rate the cockpit
+/// taught the eye; a second 9.81 here would let a rapier retune silently change the
+/// ballistic arc's slope at the switch.
+const GRAVITY_PER_TICK2: i64 = (-crab_world::physics::PHYSICS_GRAVITY.y as f64 * UNIT as f64
+    / (TICK_HZ * TICK_HZ) as f64) as i64;
 
 /// Jump liftoff speed, grid units per tick: √(2·g·h) for an apex of h ≈ 1.5 player
 /// heights (0.077 m) under the shared gravity → 1.23 m/s. Feel knob; the airtime is
 /// ~0.25 s, snappy at this world's 0.051 m stature.
 const JUMP_SPEED: i64 = (1.23 * UNIT as f64 / TICK_HZ as f64) as i64;
 
-/// A slide sustains only above this pace — 1.3× walk, between walk and sprint, so a
-/// sprint (or any carried landing momentum) can slide but plain walking cannot fake
-/// one. Below it the skid ends and the axes take over again.
-const SLIDE_MIN_SPEED: i64 = PLAYER_SPEED * 13 / 10;
+/// A slide sustains only above this pace — 1.5× walk, between the √2×-walk a diagonal
+/// step reaches (the axes are direct-drive, not normalized) and sprint, so neither
+/// plain nor diagonal walking can fake a slide but any sprint (or carried landing
+/// momentum) can. Below it the skid ends and the axes take over again.
+const SLIDE_MIN_SPEED: i64 = PLAYER_SPEED * 3 / 2;
 
 /// Slide friction per tick, as a 63/64 decay: sprint pace (1.8×) reaches the
-/// [`SLIDE_MIN_SPEED`] cutoff (1.3×) in ~21 ticks ≈ 0.7 s of skid. Feel knob.
+/// [`SLIDE_MIN_SPEED`] cutoff (1.5×) in ~12 ticks ≈ 0.4 s of skid — and a plane-speed
+/// landing rides it out far longer. Feel knob.
 const SLIDE_KEEP_NUM: i64 = 63;
 const SLIDE_KEEP_DEN: i64 = 64;
+
+/// The tallest surface drop a grounded step absorbs, half a player height: a walk or
+/// slide whose tick crosses a steeper drop-off goes AIRBORNE from the old height
+/// (rl#355) instead of snapping down the face — one vertical regime with the jump, and
+/// a plane-speed slide launches off a crest instead of hugging it.
+const STEP_DOWN_MAX: i64 = PLAYER_HEIGHT_FP / 2;
 
 /// Test-driver step per tick, folded from the ONE measured speed
 /// ([`CRAB_CHARGE_SPEED_PER_S`], rl#257) so pursuit/grace tests exercise her honest
@@ -431,14 +440,27 @@ pub fn meters_to_grid(m: f32) -> i64 {
     (m * UNIT as f32) as i64
 }
 
+/// [`meters_to_grid`] at f64 — for heights that ride the f64 terrain sampler (rl#355).
+pub(crate) fn meters_to_grid_f64(m: f64) -> i64 {
+    (m * UNIT as f64) as i64
+}
+
+/// Meters-per-second onto the per-tick velocity grid — THE m/s → sim-velocity rule
+/// (rl#355), stated once so the craft-velocity bridge cannot drift from the sim's own
+/// speed constants.
+pub(crate) fn mps_to_grid_per_tick(mps: f64) -> i64 {
+    (mps * UNIT as f64 / TICK_HZ as f64) as i64
+}
+
 /// Terrain surface height under a sim point, grid units — the airborne walker's ground
-/// reference (rl#355). Samples the committed GCR bake (the ONE world every peer ships,
-/// already this sim's spawn-bounds source) at f64, the same entry the render path uses,
-/// so "landed" here is the surface the eye stands on.
-fn ground_at(pos: Pos) -> i64 {
+/// reference (rl#355), and the ONE sampling route: the craft-altitude bridge
+/// (`pilot_shadows`) reads it too, so the altitude handed off is measured against the
+/// same surface the sim will land the walker on. Samples the committed GCR bake (the
+/// one world every peer ships, already this sim's spawn-bounds source) at f64, the
+/// same entry the render path uses.
+pub(crate) fn ground_at(pos: Pos) -> i64 {
     let (x, z) = pos.to_meters_f64();
-    let h = crab_world::terrain::TerrainGrid::gcr().height_f64(x, z);
-    (h * UNIT as f64) as i64
+    meters_to_grid_f64(crab_world::terrain::TerrainGrid::gcr().height_f64(x, z))
 }
 
 /// A walker's carried velocity, grid units per tick (rl#355). `y` is vertical.
@@ -561,7 +583,8 @@ impl Crab {
 pub struct PilotPose {
     pub pos: Pos,
     pub yaw: i32,
-    /// Craft height above the terrain surface, grid units (≥ 0). Adopted into the
+    /// Craft height above the terrain surface, grid units — may be briefly negative
+    /// (a craft dipping through the sheet); the sim's adopt clamps. Mirrored into the
     /// walker every piloted tick so that stepping out mid-air resumes on foot AT the
     /// craft's altitude (rl#355).
     pub alt: i64,
@@ -954,6 +977,12 @@ impl Sim {
                 // above takes over from EXACTLY the craft's last state — no seam.
                 p.alt = pp.alt.max(0);
                 p.vel = pp.vel;
+                if p.alt == 0 {
+                    // Grounded ⇒ no vertical motion — the one invariant every other
+                    // grounded site (touchdown, walk, slide) also maintains; a craft
+                    // descending INTO the ground must not park a stale vy here.
+                    p.vel.y = 0;
+                }
             }
         }
 
@@ -1019,6 +1048,7 @@ impl Sim {
             return;
         }
 
+        let ground_before = ground_at(p.pos);
         let speed2 = dist2_i128(p.vel.x, p.vel.z);
         let min = SLIDE_MIN_SPEED as i128;
         if inp.pressed(buttons::SLIDE) && speed2 > min * min {
@@ -1027,36 +1057,46 @@ impl Sim {
             // walking pace. Look stays live (handled above), steering does not.
             p.vel.x = p.vel.x * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN;
             p.vel.z = p.vel.z * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN;
+            p.vel.y = 0;
             p.pos.x += p.vel.x;
             p.pos.z += p.vel.z;
-            return;
-        }
-
-        // Walking: direct-drive axes, sprint scales the pace. The step is recorded as
-        // the carried velocity so a jump (or slide entry) inherits walk/sprint speed.
-        let (sin, cos) = trig::sin_cos(p.yaw);
-        let strafe = inp.move_strafe as i64;
-        let forward = inp.move_forward as i64;
-        let vx = sin * forward + cos * strafe;
-        let vz = cos * forward - sin * strafe;
-        let denom = Input::AXIS_SCALE as i64 * trig::ONE as i64;
-        let speed = if inp.pressed(buttons::SPRINT) {
-            SPRINT_SPEED
         } else {
-            PLAYER_SPEED
-        };
-        p.vel.x = vx * speed / denom;
-        p.vel.z = vz * speed / denom;
-        p.vel.y = 0;
-        p.pos.x += p.vel.x;
-        p.pos.z += p.vel.z;
+            // Walking: direct-drive axes, sprint scales the pace. The step is recorded
+            // as the carried velocity so a jump (or slide entry) inherits walk/sprint
+            // speed.
+            let (sin, cos) = trig::sin_cos(p.yaw);
+            let strafe = inp.move_strafe as i64;
+            let forward = inp.move_forward as i64;
+            let vx = sin * forward + cos * strafe;
+            let vz = cos * forward - sin * strafe;
+            let denom = Input::AXIS_SCALE as i64 * trig::ONE as i64;
+            let speed = if inp.pressed(buttons::SPRINT) {
+                SPRINT_SPEED
+            } else {
+                PLAYER_SPEED
+            };
+            p.vel.x = vx * speed / denom;
+            p.vel.z = vz * speed / denom;
+            p.vel.y = 0;
+            p.pos.x += p.vel.x;
+            p.pos.z += p.vel.z;
+        }
         if inp.pressed(buttons::JUMP) {
-            // Liftoff — from walk AND sprint alike (rl#355). One grid unit (10 µm) of
-            // altitude flips the state machine to airborne; the real rise integrates
-            // next tick. Holding jump re-fires on every touchdown (auto-hop) — a feel
-            // choice, not an edge-detect omission.
+            // Liftoff — from walk, sprint AND slide alike (rl#355; a slide-jump keeps
+            // the skid's decayed momentum). One grid unit (10 µm) of altitude flips
+            // the state machine to airborne; the real rise integrates next tick.
+            // Holding jump re-fires on every touchdown (auto-hop) — a feel choice,
+            // not an edge-detect omission.
             p.vel.y = JUMP_SPEED;
             p.alt = 1;
+        } else {
+            // A grounded step absorbs terrain drops up to [`STEP_DOWN_MAX`]; past
+            // that the ground fell away — go airborne from the old height instead of
+            // snapping down the face, the same regime the jump lands through.
+            let drop = ground_before - ground_at(p.pos);
+            if drop > STEP_DOWN_MAX {
+                p.alt = drop;
+            }
         }
     }
 
@@ -1385,6 +1425,39 @@ mod tests {
             end,
             sim.player(PlayerId(0)).unwrap().pos(),
             "below the slide cutoff the skid is over — neutral axes hold still"
+        );
+    }
+
+    #[test]
+    fn slide_jump_lifts_off_with_the_skid_momentum() {
+        let mut sim = Sim::new(23, &players(1));
+        for _ in 0..5 {
+            let mut inputs = neutral_for(&sim);
+            inputs.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, buttons::SPRINT));
+            step_scenery(&mut sim, &inputs);
+        }
+        // One sliding tick, then jump out of the skid: the liftoff carries the
+        // DECAYED slide velocity, not a fresh axis step.
+        let mut slide = neutral_for(&sim);
+        slide.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::SLIDE));
+        step_scenery(&mut sim, &slide);
+        let skid = sim.player(PlayerId(0)).unwrap().vel();
+        let mut slide_jump = neutral_for(&sim);
+        slide_jump.insert(
+            PlayerId(0),
+            Input::new(0.0, 0.0, 0.0, buttons::SLIDE | buttons::JUMP),
+        );
+        step_scenery(&mut sim, &slide_jump);
+        let p = sim.player(PlayerId(0)).unwrap();
+        assert!(p.alt() > 0, "slide-jump lifts off");
+        assert_eq!(p.vel().y, JUMP_SPEED);
+        assert_eq!(
+            (p.vel().x, p.vel().z),
+            (
+                skid.x * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN,
+                skid.z * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN
+            ),
+            "the jump inherits the skid's decayed momentum"
         );
     }
 
