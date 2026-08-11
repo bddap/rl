@@ -420,8 +420,24 @@ pub mod biome {
 
     /// 0..1: green in the deep valleys, straw by the dry-grass band (the origin
     /// plateau's tufts read sun-bleached, matching its tan tint).
-    pub(crate) fn grass_dryness(h: f32) -> f32 {
+    /// `pub` beyond the crate: the ambience bus keys its wet-valley beds (frogs)
+    /// on the green side of this same ramp — the lush low greens are the closest
+    /// thing this terrain has to a moisture map.
+    pub fn grass_dryness(h: f32) -> f32 {
         smoothstep(LOWLAND_M, DRY_GRASS_M, h)
+    }
+
+    /// 0..1 weight of exposed rock/scree ground: rock-steep faces at any
+    /// elevation, plus the scree→high-brown band where grass has thinned out —
+    /// gone again under snow (above the snowline the wind synth owns the mix).
+    /// `pub` beyond the crate: the ambience bus keys its sparse mountain beds on
+    /// this, the complement of where [`tuft_weight`] grows grass.
+    pub fn rocky_weight(h: f32, normal_y: f32) -> f32 {
+        let steep = 1.0 - normal_y;
+        let rock_face = smoothstep(ROCK_STEEP.0, ROCK_STEEP.1, steep);
+        let high_band = smoothstep(SCREE_M, HIGH_BROWN_M, h);
+        let snow_free = 1.0 - smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h);
+        rock_face.max(high_band) * snow_free
     }
 
     /// 0..1 chance weight for a pebble: stonier toward (and above) the scree rim,
