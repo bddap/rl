@@ -100,7 +100,11 @@ mod tests {
 
         let mut wrong_rate = wav_bytes(&[0i16; 8]);
         wrong_rate[24..28].copy_from_slice(&48_000u32.to_le_bytes());
-        assert!(parse_mono_44k(&wrong_rate).unwrap_err().contains("48000 Hz"));
+        assert!(
+            parse_mono_44k(&wrong_rate)
+                .unwrap_err()
+                .contains("48000 Hz")
+        );
 
         assert!(parse_mono_44k(b"not audio at all").is_err());
     }
