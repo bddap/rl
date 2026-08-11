@@ -73,6 +73,7 @@ fn world(pos: Pos, y: f32, origin: RenderOrigin) -> Vec3 {
 const MAX_YAW_PER_TICK_RADIANS: f32 =
     crate::sim::MAX_YAW_TURNS_PER_TICK as f32 / trig::TURN as f32 * std::f32::consts::TAU;
 
+mod ambience;
 mod app;
 mod articulation;
 mod audio;
@@ -88,6 +89,7 @@ mod screenshot;
 #[cfg(test)]
 mod tests;
 mod vehicle_view;
+mod wav;
 
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use audio::ExternalBus;
