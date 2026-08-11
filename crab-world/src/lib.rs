@@ -38,6 +38,10 @@ pub mod debug_overlay;
 pub mod frame_telemetry;
 #[cfg(feature = "render")]
 pub mod ground;
+/// The d-pad instrument (rl#359): code entry sounds notes; wired by
+/// [`chord::install_chords`].
+#[cfg(feature = "render")]
+pub mod instrument;
 #[cfg(feature = "render")]
 pub mod moisture;
 #[cfg(feature = "render")]
@@ -50,6 +54,8 @@ pub mod screenshot;
 /// because the `net` crate's GCR app builders add its [`sky::NightSkyPlugin`] too.
 #[cfg(feature = "render")]
 pub mod sky;
+#[cfg(feature = "render")]
+pub mod wav;
 
 #[derive(Resource, Clone, Copy)]
 pub struct Visuals(pub bool);

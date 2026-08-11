@@ -100,6 +100,9 @@ pub fn build_windowed_app(
                 super::articulation::sample_crab_part_poses,
                 reconcile_avatars,
                 apply_transforms,
+                // Bus writer before every bus reader, same frame: the code-entry
+                // muffle (rl#359) lands on wind and beds as one mix move.
+                super::audio::drive_muffle,
                 super::audio::drive_wind,
                 super::ambience::update_context,
                 super::ambience::drive_layers,

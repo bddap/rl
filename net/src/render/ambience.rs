@@ -20,7 +20,7 @@ use std::sync::Arc;
 use bevy::audio::{AddAudioSource, Decodable, PlaybackSettings};
 use bevy::prelude::*;
 
-use super::audio::{AtomicF32, ExternalBus, SAMPLE_RATE, WIND_MASTER};
+use super::audio::{AtomicF32, ExternalBus, Muffle, SAMPLE_RATE, WIND_MASTER};
 use super::driver::{GameState, LocalVehicle, RenderClock};
 use crab_world::sky::smoothstep;
 use crab_world::terrain::{Terrain, biome};
@@ -48,6 +48,9 @@ struct LayerDef {
     level: f32,
     /// Bus → 0..1 activation.
     gain: fn(&AmbientContext) -> f32,
+    /// Per-sound external-bus policy (rl#359): an `Exempt` bed would bleed through
+    /// the code-entry muffle. Nothing is exempted yet.
+    muffle: Muffle,
 }
 
 /// Ground beds are heard on grassy terrain, fade out by ~60 m up (a low pass over
@@ -67,11 +70,13 @@ const LAYERS: [LayerDef; 2] = [
         file: "ambience/grassland-birds.wav",
         level: 0.35 * WIND_MASTER,
         gain: grass_bed,
+        muffle: Muffle::Duck,
     },
     LayerDef {
         file: "ambience/crickets.wav",
         level: 0.5 * WIND_MASTER,
         gain: grass_bed,
+        muffle: Muffle::Duck,
     },
 ];
 
@@ -145,7 +150,7 @@ pub(super) fn install(app: &mut App) {
 
 fn load_bed(def: &LayerDef) -> Arc<[f32]> {
     let path = crab_world::assets::bevy_asset_path().join(def.file);
-    match super::wav::read_mono_44k(&path) {
+    match crab_world::wav::read_mono_44k(&path) {
         Ok(mut pcm) => {
             seal_loop(&mut pcm);
             pcm.into()
@@ -336,18 +341,24 @@ impl Iterator for AmbienceStream {
         self.bus_gain += (self.targets.bus_gain.load() - self.bus_gain) * Self::GLIDE_BUS;
         self.cutoff += (self.targets.bus_lowpass_hz.load() - self.cutoff) * Self::GLIDE_BUS;
 
-        let mut s = 0.0;
+        // Ducked layers ride the bus gain + lowpass; an exempt layer (none yet)
+        // joins after the filter, untouched by the muffle.
+        let (mut ducked, mut exempt) = (0.0, 0.0);
         for i in 0..LAYERS.len() {
             self.acts[i] += (self.targets.acts[i].load() - self.acts[i]) * Self::GLIDE_ACT;
             let bed = &self.beds[i];
             if bed.is_empty() {
                 continue;
             }
-            s += bed[self.cursors[i]] * self.acts[i];
+            let v = bed[self.cursors[i]] * self.acts[i];
+            match LAYERS[i].muffle {
+                Muffle::Duck => ducked += v,
+                Muffle::Exempt => exempt += v,
+            }
             self.cursors[i] = (self.cursors[i] + 1) % bed.len();
         }
-        self.lp += (s * self.bus_gain - self.lp) * self.lp_a;
-        Some(self.lp.clamp(-1.0, 1.0))
+        self.lp += (ducked * self.bus_gain - self.lp) * self.lp_a;
+        Some((self.lp + exempt).clamp(-1.0, 1.0))
     }
 }
 
@@ -499,6 +510,6 @@ mod tests {
         }
         std::fs::create_dir_all(&dir).unwrap();
         let path = std::path::Path::new(&dir).join("ambience-context-sweep.wav");
-        std::fs::write(path, super::super::wav::wav_bytes(&pcm)).unwrap();
+        std::fs::write(path, crab_world::wav::wav_bytes(&pcm)).unwrap();
     }
 }
