@@ -22,7 +22,7 @@ use bevy::audio::{AddAudioSource, Decodable, PlaybackSettings};
 use bevy::prelude::*;
 
 use super::app::AppPhase;
-use crate::controls::{self, Action};
+use crate::controls::{self, Action, GcrControls};
 use crab_world::wav;
 
 /// Memory/attention bound for one take; the thread stops itself at the cap even if
@@ -77,6 +77,10 @@ pub(super) struct VoiceUx {
     phase: Phase,
     /// Transient status line + time left to show it.
     flash: Option<(String, f32)>,
+    /// The modal just closed but a confirm/discard input is still physically held:
+    /// jump/slide/brake are level-triggered `pressed()` reads, so without this the
+    /// A that saved the note would hop the character on the very next frame.
+    linger: bool,
 }
 
 impl Default for VoiceUx {
@@ -84,15 +88,17 @@ impl Default for VoiceUx {
         Self {
             phase: Phase::Idle,
             flash: None,
+            linger: false,
         }
     }
 }
 
 impl VoiceUx {
-    /// While the review modal is up, South/East belong to keep/discard — the input
-    /// gatherer consults this to keep the same press out of jump/slide/brake.
-    pub(super) fn modal(&self) -> bool {
-        matches!(self.phase, Phase::Review { .. })
+    /// While the review modal is up — or its closing press is still held — the
+    /// confirm/discard inputs belong to the modal: the input gatherer consults this
+    /// to keep them out of jump/slide/brake.
+    pub(super) fn gameplay_gated(&self) -> bool {
+        matches!(self.phase, Phase::Review { .. }) || self.linger
     }
 }
 
@@ -177,9 +183,10 @@ fn spawn_voice_hud(mut commands: Commands) {
         });
 }
 
-/// Short human name for an action's first bound gamepad button + keyboard key, for
-/// the modal's prompt line — derived from the binding table so a rebind can't make
-/// the prompt lie.
+/// Short text name for an action's first bound gamepad button + keyboard key, for
+/// the modal's prompt line. The button identity comes from the binding table; the
+/// label text is local shorthand covering exactly the buttons the modal uses ("?"
+/// would flag a rebind that outgrows it — extend the match then).
 fn prompt_chip(action: Action) -> String {
     let pad = controls::gamepad_buttons_for(action)
         .next()
@@ -214,15 +221,19 @@ fn drive_voice(
     mut clips: ResMut<Assets<VoiceClip>>,
     playback: Query<Entity, With<VoicePlayback>>,
 ) {
-    let tapped = |a: Action| {
-        controls::key_codes_for(a).any(|k| keys.just_pressed(k))
-            || gamepads
-                .iter()
-                .any(|gp| controls::gamepad_buttons_for(a).any(|b| gp.just_pressed(b)))
-    };
-    let record = tapped(Action::VoiceRecord);
-    let confirm = tapped(Action::MenuConfirm);
-    let discard = tapped(Action::MenuBack);
+    use crab_world::controls::{just_pressed, pressed};
+    let record = just_pressed::<GcrControls>(Action::VoiceRecord, &keys, &gamepads);
+    let confirm = just_pressed::<GcrControls>(Action::MenuConfirm, &keys, &gamepads);
+    let discard = just_pressed::<GcrControls>(Action::MenuBack, &keys, &gamepads);
+
+    if voice.linger
+        && !pressed::<GcrControls>(Action::MenuConfirm, &keys, &gamepads)
+        && !pressed::<GcrControls>(Action::MenuBack, &keys, &gamepads)
+    {
+        // Cleared here (after gather_input) — the gate stays up through the release
+        // frame, which only costs one extra suppressed frame.
+        voice.linger = false;
+    }
 
     if let Some((_, left)) = &mut voice.flash {
         *left -= time.delta_secs();
@@ -300,10 +311,12 @@ fn drive_voice(
                 stop_playback(&mut commands, &playback);
                 voice.flash = Some((msg, FLASH_SECS));
                 voice.phase = Phase::Idle;
+                voice.linger = true;
             } else if discard {
                 stop_playback(&mut commands, &playback);
                 voice.flash = Some(("voice note discarded".into(), FLASH_SECS));
                 voice.phase = Phase::Idle;
+                voice.linger = true;
             } else if record {
                 // Replay the take from the top.
                 stop_playback(&mut commands, &playback);
@@ -334,6 +347,7 @@ fn cancel_voice(
     stop_playback(&mut commands, &playback);
     voice.phase = Phase::Idle;
     voice.flash = None;
+    voice.linger = false;
     for mut vis in &mut hud {
         *vis = Visibility::Hidden;
     }
@@ -388,25 +402,24 @@ fn update_voice_hud(
     }
 }
 
-/// Where confirmed takes land: `$RL_VOICE_DIR`, else the XDG data dir beside the
-/// chord map. `None` (no HOME at all) fails the save, not the boot.
+/// Where confirmed takes land: `$RL_VOICE_DIR`, else [`super::data_dir`] +
+/// `voice`. `None` (no HOME at all) fails the save, not the boot.
 fn voice_dir() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("RL_VOICE_DIR") {
         return Some(PathBuf::from(d));
     }
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-    Some(base.join("giant-crab-rescue/voice"))
+    Some(super::data_dir()?.join("voice"))
 }
 
 fn save_take(samples: &[i16]) -> Result<PathBuf, String> {
     let dir = voice_dir().ok_or("no $HOME to save under")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Millis, not secs: rename() clobbers an existing name, and two quick takes can
+    // land in the same second.
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
-        .as_secs();
+        .as_millis();
     let path = dir.join(format!("voice-{stamp}.wav"));
     // Temp + rename so stage 2's pickup can never read a half-written wav.
     let tmp = path.with_extension("tmp");
@@ -441,11 +454,12 @@ fn capture_take(stop: mpsc::Receiver<()>) -> Result<Take, String> {
     let src_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
 
-    // The callback downmixes to mono f32 and appends; capacity for the whole cap so
-    // a long take never reallocates inside the audio callback.
+    // The callback downmixes to mono f32 and appends; capacity for the whole cap
+    // (~23 MB at 48 kHz) so a long take never reallocates inside the real-time
+    // audio callback.
     let cap_samples = (src_rate as u64 * MAX_TAKE.as_secs()) as usize;
     let buf = Arc::new(std::sync::Mutex::new(Vec::<f32>::with_capacity(
-        cap_samples.min(src_rate as usize * 8),
+        cap_samples,
     )));
     let err: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
 

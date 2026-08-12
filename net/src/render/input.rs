@@ -74,14 +74,14 @@ pub(super) fn gather_input(
     // momentum); a held jump auto-hops by design. `key_codes_for`, not `held`: sprint
     // binds BOTH shifts and the first-key shorthand would drop the right one.
     let held_any = |a| controls::key_codes_for(a).any(|k| keys.pressed(k));
-    // While the voice-review modal is up (rl#378) the pad's South/East ARE
-    // keep/discard, so their jump/slide/brake readings go quiet — same shape as the
-    // chord-typing gate above. Keyboard stays live: confirm/discard ride Enter/Esc
-    // there, which never collide with Space/C.
-    let reviewing = voice.modal();
+    // While the voice-review modal is up (rl#378) — or its closing press is still
+    // held — confirm/discard own their inputs on BOTH devices (MenuConfirm rides
+    // Space as well as Enter), so jump/slide/brake go quiet — same shape as the
+    // chord-typing gate above.
+    let reviewing = voice.gameplay_gated();
     let mut sprint = held_any(Action::Sprint);
-    let mut jump = held_any(Action::Jump);
-    let mut slide = held_any(Action::Slide);
+    let mut jump = !reviewing && held_any(Action::Jump);
+    let mut slide = !reviewing && held_any(Action::Slide);
     // Vehicle switching and restart are chords (rl#330): one code per vehicle plus an
     // exit code (X is de-overloaded — a bare tap does nothing), restart its own code —
     // no direct key or button remains for any of them.

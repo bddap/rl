@@ -212,16 +212,12 @@ impl DiscoveredCodes {
 }
 
 /// The windowed client's save location: `$RL_CHORD_MAP_FILE`, else
-/// `$XDG_DATA_HOME|~/.local/share` + `giant-crab-rescue/discovered-codes.txt`.
-/// `None` (no HOME at all) runs the map unpersisted rather than refusing to boot.
+/// [`super::data_dir`] + `discovered-codes.txt`.
 pub fn default_save_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("RL_CHORD_MAP_FILE") {
         return Some(PathBuf::from(p));
     }
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-    Some(base.join("giant-crab-rescue/discovered-codes.txt"))
+    Some(super::data_dir()?.join("discovered-codes.txt"))
 }
 
 // ---------------------------------------------------------------------------
