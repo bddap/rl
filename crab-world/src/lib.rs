@@ -109,18 +109,22 @@ pub struct RenderArgs {
     /// Moon compass direction, degrees around +Y (rl#374). Setting this (or
     /// elevation) freezes sky motion so the pose holds; add --moon-timescale
     /// to move anyway.
-    #[arg(long, env = "RL_MOON_AZIMUTH_DEG", allow_hyphen_values = true)]
+    #[arg(long, env = "RL_MOON_AZIMUTH_DEG", allow_hyphen_values = true,
+          value_parser = parse_finite_f32)]
     pub moon_azimuth_deg: Option<f32>,
     /// Moon height above the horizon, degrees (90 = zenith). Freezes sky
     /// motion like --moon-azimuth-deg.
-    #[arg(long, env = "RL_MOON_ELEVATION_DEG", allow_hyphen_values = true)]
+    #[arg(long, env = "RL_MOON_ELEVATION_DEG", allow_hyphen_values = true,
+          value_parser = parse_finite_f32)]
     pub moon_elevation_deg: Option<f32>,
     /// Moonlight + disc hue, degrees on the HSL wheel.
-    #[arg(long, env = "RL_MOON_HUE_DEG", allow_hyphen_values = true)]
+    #[arg(long, env = "RL_MOON_HUE_DEG", allow_hyphen_values = true,
+          value_parser = parse_finite_f32)]
     pub moon_hue_deg: Option<f32>,
     /// Moon phase, wrapping [0, 1): 0 = new, 0.5 = full. Drives luminosity.
     /// Live even with motion on — the sweep advances it from here.
-    #[arg(long, env = "RL_MOON_PHASE", allow_hyphen_values = true)]
+    #[arg(long, env = "RL_MOON_PHASE", allow_hyphen_values = true,
+          value_parser = parse_finite_f32)]
     pub moon_phase: Option<f32>,
     /// Sky-motion timescale, sim seconds per real second (rl#374); default 24
     /// (a day-length moon traversal per real hour). 0 freezes the sky. Finite
