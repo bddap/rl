@@ -80,6 +80,9 @@ fn finish_offscreen_app(
 ) {
     crab_world::controls::install_overlay(app, &controls);
     crab_world::chord::install_chords::<GcrControls>(app);
+    // The rl#358 combo map, unpersisted by default — an evidence shot must never
+    // write the real save; `--chord-map-file` overrides the resource after build.
+    super::chord_map::install(app, None);
     app.add_systems(
         PreUpdate,
         drive_chord_script
@@ -141,11 +144,15 @@ impl PilotScript {
 /// menu-filtering, and dispatch path, not a UI fork.
 #[derive(Resource, Clone)]
 pub struct ChordScript {
-    hold_from: u64,
-    /// `None`: never released — the menu stays open into the shot.
-    release_at: Option<u64>,
+    /// Modifier hold windows `(from, to)`; `to = None` holds into the shot. Multiple
+    /// windows let one clip enter SEVERAL codes (release executes each) — the rl#358
+    /// map-growth evidence needs back-to-back discoveries.
+    holds: Vec<(u64, Option<u64>)>,
     /// (frame, direction) code taps; each key is pressed for exactly one frame.
     taps: Vec<(u64, crab_world::chord::ChordDir)>,
+    /// Frames at which to tap the chord-map layout-cycle key (M, rl#358) — the
+    /// live-switch evidence input.
+    cycles: Vec<u64>,
     frame: u64,
 }
 
@@ -156,11 +163,23 @@ impl ChordScript {
         taps: Vec<(u64, crab_world::chord::ChordDir)>,
     ) -> Self {
         Self {
-            hold_from,
-            release_at,
+            holds: vec![(hold_from, release_at)],
             taps,
+            cycles: Vec::new(),
             frame: 0,
         }
+    }
+
+    /// Additional modifier hold windows beyond the first.
+    pub fn with_holds(mut self, holds: Vec<(u64, Option<u64>)>) -> Self {
+        self.holds.extend(holds);
+        self
+    }
+
+    /// See [`ChordScript::cycles`].
+    pub fn with_layout_cycles(mut self, cycles: Vec<u64>) -> Self {
+        self.cycles = cycles;
+        self
     }
 }
 
@@ -173,8 +192,11 @@ fn drive_chord_script(
         return;
     };
     script.frame += 1;
-    let held =
-        script.frame >= script.hold_from && script.release_at.is_none_or(|r| script.frame < r);
+    let frame = script.frame;
+    let held = script
+        .holds
+        .iter()
+        .any(|&(from, to)| frame >= from && to.is_none_or(|r| frame < r));
     if held {
         // Idempotent while already pressed — just_pressed fires only on the edge.
         mouse.press(crab_world::chord::CHORD_MODIFIER_MOUSE);
@@ -194,6 +216,13 @@ fn drive_chord_script(
         if script.frame == at {
             keys.press(crab_world::chord::dir_key(dir));
         }
+    }
+    // Layout-cycle taps ride the same release-before-press ordering as the code taps.
+    if script.cycles.iter().any(|&at| script.frame == at + 1) {
+        keys.release(KeyCode::KeyM);
+    }
+    if script.cycles.iter().any(|&at| script.frame == at) {
+        keys.press(KeyCode::KeyM);
     }
 }
 
