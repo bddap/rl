@@ -128,6 +128,12 @@ impl Default for AtomicF32 {
 /// (ambience.rs) tops its band here too.
 pub(super) const FULL_WIND_MPS: f32 = 4.5;
 
+/// The plane airstream's level under [`WIND_MASTER`] — the ONE plane-wind knob.
+/// In the cockpit the wind sits UNDER the engine and the speed roar, not on top
+/// of the mix (owner acceptance call, rl#357); body and whistle both ride the
+/// gain this scales, so it moves the whole airstream together.
+pub(super) const PLANE_WIND_LEVEL: f32 = 0.5;
+
 /// The ship's audible-band ceiling, m/s — it never nears plane speeds (sustained
 /// top ~2.5, a dive slightly past), so its wind and thruster layers normalize
 /// over this lower band to keep cruising present.
@@ -266,7 +272,7 @@ pub(super) fn profile(kind: Option<VehicleKind>, speed_mps: f32) -> [f32; 5] {
     match kind {
         None => [MASTER * n.powf(1.4), 300.0 + 2200.0 * n, 0.0, 0.0, 0.5],
         Some(VehicleKind::Plane) => [
-            MASTER * n.powf(1.3),
+            MASTER * PLANE_WIND_LEVEL * n.powf(1.3),
             600.0 + 3400.0 * n,
             900.0 + 2100.0 * n,
             0.4 * n * n,
