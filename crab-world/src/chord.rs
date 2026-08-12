@@ -12,7 +12,7 @@
 use std::fmt::Debug;
 
 /// One step of a chord code: a d-pad direction on pad, WASD on keyboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ChordDir {
     Up,
     Down,

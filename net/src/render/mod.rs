@@ -78,6 +78,7 @@ mod app;
 mod articulation;
 mod audio;
 mod brain_swap;
+pub mod chord_map;
 mod controls_sync;
 mod driver;
 mod input;

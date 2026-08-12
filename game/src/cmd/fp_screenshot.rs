@@ -63,6 +63,22 @@ pub(crate) struct Args {
     /// (e.g. `45:U,55:L`).
     #[arg(long, value_delimiter = ',')]
     chord_taps: Vec<String>,
+    /// Extra modifier hold windows beyond --chord-hold-at/--chord-release-at:
+    /// `from:to` pairs, `to` empty for never-release (e.g. `120:180,220:`) — lets one
+    /// clip enter several codes (rl#358 map-growth evidence).
+    #[arg(long, value_delimiter = ',')]
+    chord_holds: Vec<String>,
+    /// Tap the chord-map layout-cycle key (M) at these frames (rl#358 live-switch
+    /// evidence).
+    #[arg(long, value_delimiter = ',')]
+    map_cycle_at: Vec<u64>,
+    /// Pin the chord map's starting layout: hyperbolic | zoomquad | hyperatlas.
+    #[arg(long)]
+    chord_map_layout: Option<String>,
+    /// Load/persist the shot's discovered-code set here (default: unpersisted,
+    /// empty — an evidence shot must never touch the real save).
+    #[arg(long)]
+    chord_map_file: Option<std::path::PathBuf>,
 
     /// Capture this many frames as `<out-stem>.NNNN.png` instead of one shot —
     /// evidence clips for the animated ground looks (assemble with ffmpeg).
@@ -129,16 +145,57 @@ pub(crate) fn run(args: Args) -> Result<()> {
                 dup.1
             );
         }
-        app.insert_resource(render::ChordScript::new(
-            hold_at,
-            args.chord_release_at,
-            taps,
-        ));
-    } else if !args.chord_taps.is_empty() || args.chord_release_at.is_some() {
-        anyhow::bail!("--chord-taps/--chord-release-at need --chord-hold-at");
+        let holds = args
+            .chord_holds
+            .iter()
+            .map(|spec| parse_hold(spec))
+            .collect::<Result<Vec<_>>>()?;
+        app.insert_resource(
+            render::ChordScript::new(hold_at, args.chord_release_at, taps)
+                .with_holds(holds)
+                .with_layout_cycles(args.map_cycle_at.clone()),
+        );
+    } else if !args.chord_taps.is_empty()
+        || args.chord_release_at.is_some()
+        || !args.chord_holds.is_empty()
+        || !args.map_cycle_at.is_empty()
+    {
+        anyhow::bail!(
+            "--chord-taps/--chord-release-at/--chord-holds/--map-cycle-at need --chord-hold-at"
+        );
+    }
+    if args.chord_map_layout.is_some() || args.chord_map_file.is_some() {
+        let layout = args
+            .chord_map_layout
+            .as_deref()
+            .map(render::chord_map::MapLayout::from_id)
+            .transpose()
+            .map_err(anyhow::Error::msg)?
+            .unwrap_or(render::chord_map::MapLayout::Hyperbolic);
+        app.insert_resource(render::chord_map::ChordMapState::new(layout));
+        if let Some(file) = args.chord_map_file {
+            app.insert_resource(render::chord_map::DiscoveredCodes::load(Some(file)));
+        }
     }
     app.run();
     Ok(())
+}
+
+fn parse_hold(spec: &str) -> Result<(u64, Option<u64>)> {
+    let (from, to) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("chord hold {spec:?} is not from:to"))?;
+    let from: u64 = from.parse()?;
+    let to = if to.is_empty() {
+        None
+    } else {
+        let to: u64 = to.parse()?;
+        if to <= from {
+            anyhow::bail!("chord hold {spec:?} releases before it holds");
+        }
+        Some(to)
+    };
+    Ok((from, to))
 }
 
 fn parse_chord_tap(spec: &str) -> Result<(u64, crab_world::chord::ChordDir)> {

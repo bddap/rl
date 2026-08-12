@@ -62,6 +62,8 @@ pub fn build_windowed_app(
     // wiring of the overlay to drift.
     crab_world::controls::install_overlay::<GcrControls>(&mut app, &Default::default());
     crab_world::chord::install_chords::<GcrControls>(&mut app);
+    // The d-pad combo map (rl#358): discovered-only, persisted per save.
+    super::chord_map::install(&mut app, super::chord_map::default_save_path());
     // Outside Playing every chord dispatcher is gated off, so a capture there could
     // only pop the context menu and promise commands whose release does nothing —
     // keep the capture Idle instead (right after it would have opened, so no Update
