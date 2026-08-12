@@ -34,10 +34,11 @@ use crate::controls::{GCR_CHORDS, GcrControls};
 
 /// The layout under A/B — THE experiment seam. After the owner picks by feel, the
 /// losing variants die and this enum collapses to the winner.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum MapLayout {
     /// Poincaré-disk glide, minimal dress: luminous direction-colored edges, the
     /// motion is the code.
+    #[default]
     Hyperbolic,
     /// Nested d-pad quadrants: each press dives into the quadrant that holds the
     /// code, rooms live at their address.
@@ -48,7 +49,7 @@ pub enum MapLayout {
 }
 
 impl MapLayout {
-    pub fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
             MapLayout::Hyperbolic => "hyperbolic glide",
             MapLayout::ZoomQuad => "zoom quadrants",
@@ -107,6 +108,12 @@ fn opposite(d: ChordDir) -> ChordDir {
     }
 }
 
+/// The layout-cycle inputs while the map is open — ONE source, read by the live
+/// system and the fp-screenshot evidence script alike (a re-declared copy would let
+/// a retune here silently turn the scripted evidence tap into a dead key).
+pub const LAYOUT_CYCLE_KEY: KeyCode = KeyCode::KeyM;
+const LAYOUT_CYCLE_PAD: GamepadButton = GamepadButton::RightThumb;
+
 fn code_to_str(code: &[ChordDir]) -> String {
     code.iter()
         .map(|d| match d {
@@ -118,7 +125,9 @@ fn code_to_str(code: &[ChordDir]) -> String {
         .collect()
 }
 
-fn code_from_str(s: &str) -> Option<Vec<ChordDir>> {
+/// THE `UDLR`-letters ↔ code codec (save files, CLI tap specs) — the one alphabet;
+/// parse callers elsewhere (fp-screenshot) go through this, never a second match.
+pub fn code_from_str(s: &str) -> Option<Vec<ChordDir>> {
     s.trim()
         .chars()
         .map(|c| match c {
@@ -142,17 +151,32 @@ pub struct DiscoveredCodes {
 }
 
 impl DiscoveredCodes {
-    pub fn load(file: Option<PathBuf>) -> Self {
+    pub fn load(mut file: Option<PathBuf>) -> Self {
         let mut codes = BTreeSet::new();
-        if let Some(path) = &file
-            && let Ok(text) = std::fs::read_to_string(path)
-        {
-            for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                match code_from_str(line) {
-                    Some(code) => {
-                        codes.insert(code);
+        if let Some(path) = &file {
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                        match code_from_str(line) {
+                            Some(code) => {
+                                codes.insert(code);
+                            }
+                            None => {
+                                warn!("chord-map save {}: bad line {line:?}", path.display())
+                            }
+                        }
                     }
-                    None => warn!("chord-map save {}: bad line {line:?}", path.display()),
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // a fresh save
+                Err(e) => {
+                    // A transient read failure must NOT masquerade as a fresh save —
+                    // the next discovery would rewrite the file from the empty set
+                    // and erase every prior one. Run unpersisted instead.
+                    warn!(
+                        "chord-map save {} unreadable ({e}); running unpersisted",
+                        path.display()
+                    );
+                    file = None;
                 }
             }
         }
@@ -167,10 +191,14 @@ impl DiscoveredCodes {
         }
         if let Some(path) = &self.file {
             let body: String = self.codes.iter().map(|c| code_to_str(c) + "\n").collect();
+            // Temp-file + rename: an in-place truncate-and-write torn by a crash
+            // would drop the tail codes and the NEXT save would make that permanent.
+            let tmp = path.with_extension("tmp");
             let write = path
                 .parent()
                 .map_or(Ok(()), std::fs::create_dir_all)
-                .and_then(|()| std::fs::write(path, body));
+                .and_then(|()| std::fs::write(&tmp, body))
+                .and_then(|()| std::fs::rename(&tmp, path));
             if let Err(e) = write {
                 warn!("chord-map save {} failed: {e}", path.display());
             }
@@ -230,11 +258,7 @@ impl MapTree {
         };
         for code in discovered {
             let leaf = tree.insert_path(code);
-            tree.nodes[leaf].command = GCR_CHORDS
-                .entries()
-                .iter()
-                .find(|e| e.code == code.as_slice())
-                .map(|e| e.label);
+            tree.nodes[leaf].command = GCR_CHORDS.entry(code).map(|e| e.label);
             // The whole prefix chain is discovered structure.
             let mut n = Some(leaf);
             while let Some(i) = n {
@@ -363,48 +387,35 @@ const HYPER_COMPRESS: f32 = 0.55;
 /// puts the parent AND the `D` child of `UU` both below it), both stay collinear —
 /// direction stays true — and the parent leg is pushed farther out to keep the two
 /// nodes distinct.
+/// How much farther the parent leg reaches when it shares a direction with a child.
+const BACKEDGE_PUSH: f32 = 1.85;
+
 fn layout_hyperbolic(tree: &MapTree, focus: usize) -> Vec<Vec2> {
     let mut pos = vec![Vec2::ZERO; tree.nodes.len()];
     let mut seen = vec![false; tree.nodes.len()];
     seen[focus] = true;
-    // (node, heading: outward screen angle, back-edge nominal angle at node)
+    // (node, heading: outward screen angle, back-edge nominal angle at node,
+    // compression). The focus seeds the queue as its own "arrival": heading 0 with
+    // back-nominal −π and NO compression makes `screen` come out as exactly the
+    // nominal button angle — the one placement body serves the exact focus ring and
+    // the compressed deeper wedges alike.
     let mut queue = std::collections::VecDeque::new();
-    let focus_edges = tree.edges(focus);
-    for &(nb, ang, back) in &focus_edges {
-        let is_parent = tree.nodes[focus].parent.is_some_and(|(p, _)| p == nb);
-        let collides = is_parent
-            && focus_edges
-                .iter()
-                .any(|&(o, oa, _)| o != nb && (oa - ang).abs() < 1e-3);
-        let step = if collides {
-            HYPER_STEP * 1.85
-        } else {
-            HYPER_STEP
-        };
-        let z = step * Vec2::new(ang.cos(), ang.sin());
-        pos[nb] = z;
-        seen[nb] = true;
-        let heading = {
-            let b = recenter(z, Vec2::ZERO);
-            b.y.atan2(b.x) + std::f32::consts::PI
-        };
-        queue.push_back((nb, heading, back));
-    }
-    while let Some((n, heading, back_nominal)) = queue.pop_front() {
+    queue.push_back((focus, 0.0f32, -std::f32::consts::PI, 1.0f32));
+    while let Some((n, heading, back_nominal, compress)) = queue.pop_front() {
         let edges = tree.edges(n);
         for &(nb, ang, back) in &edges {
             if seen[nb] {
                 continue;
             }
             let rel = wrap_angle(ang - (back_nominal + std::f32::consts::PI));
-            let screen = heading + rel * HYPER_COMPRESS;
+            let screen = heading + rel * compress;
             let is_parent = tree.nodes[n].parent.is_some_and(|(p, _)| p == nb);
             let collides = is_parent
                 && edges
                     .iter()
                     .any(|&(o, oa, _)| o != nb && !seen[o] && (oa - ang).abs() < 1e-3);
             let step = if collides {
-                HYPER_STEP * 1.85
+                HYPER_STEP * BACKEDGE_PUSH
             } else {
                 HYPER_STEP
             };
@@ -415,7 +426,7 @@ fn layout_hyperbolic(tree: &MapTree, focus: usize) -> Vec<Vec2> {
                 let b = recenter(z, pos[n]);
                 b.y.atan2(b.x) + std::f32::consts::PI
             };
-            queue.push_back((nb, heading_nb, back));
+            queue.push_back((nb, heading_nb, back, HYPER_COMPRESS));
         }
     }
     pos
@@ -453,19 +464,31 @@ fn quad_view(focus: &[ChordDir]) -> Rect {
 // CPU canvas — the one painter both disk layouts and the quadrants draw with.
 // ---------------------------------------------------------------------------
 
-pub(crate) const CANVAS_PX: usize = 460;
+const CANVAS_PX: usize = 460;
 const DISK_SCALE: f32 = 0.46 * CANVAS_PX as f32;
 const CANVAS_CENTER: Vec2 = Vec2::new(CANVAS_PX as f32 / 2.0, CANVAS_PX as f32 / 2.0);
+
+/// An inclusive canvas-clamped pixel span; empty ranges come out inverted and the
+/// `for` loops simply don't run.
+fn clamp_span(lo: f32, hi: f32) -> (i32, i32) {
+    (
+        (lo.floor() as i32).max(0),
+        (hi.ceil() as i32).min(CANVAS_PX as i32 - 1),
+    )
+}
 
 struct Canvas {
     px: Vec<u8>,
 }
 
 impl Canvas {
-    fn new() -> Self {
-        Self {
-            px: vec![0; CANVAS_PX * CANVAS_PX * 4],
-        }
+    /// Recycles `buf` (the previous frame's image data) — the ~850KB buffer
+    /// round-trips between the Image asset and the painter instead of being
+    /// reallocated every open frame.
+    fn new(mut buf: Vec<u8>) -> Self {
+        buf.clear();
+        buf.resize(CANVAS_PX * CANVAS_PX * 4, 0);
+        Self { px: buf }
     }
 
     fn fill(&mut self, c: [u8; 4]) {
@@ -491,12 +514,15 @@ impl Canvas {
     /// Anti-aliased thick segment via distance-to-segment over its bounding box.
     fn line(&mut self, a: Vec2, b: Vec2, width: f32, c: [u8; 3], alpha: f32) {
         let r = width / 2.0 + 1.0;
-        let (x0, x1) = (a.x.min(b.x) - r, a.x.max(b.x) + r);
-        let (y0, y1) = (a.y.min(b.y) - r, a.y.max(b.y) + r);
+        // Clamp every scan range to the canvas: a zoomquad ancestor rect at deep
+        // focus maps to a ~10^5-px box, and iterating it (even with blend()'s
+        // per-pixel reject) is a multi-ms stall per frame.
+        let (x0, x1) = clamp_span(a.x.min(b.x) - r, a.x.max(b.x) + r);
+        let (y0, y1) = clamp_span(a.y.min(b.y) - r, a.y.max(b.y) + r);
         let ab = b - a;
         let len2 = ab.length_squared().max(1e-6);
-        for y in y0.floor() as i32..=y1.ceil() as i32 {
-            for x in x0.floor() as i32..=x1.ceil() as i32 {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
                 let p = Vec2::new(x as f32, y as f32);
                 let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
                 let d = (p - (a + ab * t)).length();
@@ -516,8 +542,10 @@ impl Canvas {
 
     fn annulus(&mut self, center: Vec2, r0: f32, r1: f32, c: [u8; 3], alpha: f32) {
         let r = r1 + 1.0;
-        for y in (center.y - r).floor() as i32..=(center.y + r).ceil() as i32 {
-            for x in (center.x - r).floor() as i32..=(center.x + r).ceil() as i32 {
+        let (x0, x1) = clamp_span(center.x - r, center.x + r);
+        let (y0, y1) = clamp_span(center.y - r, center.y + r);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
                 let d = (Vec2::new(x as f32, y as f32) - center).length();
                 let cov = (r1 + 0.5 - d).clamp(0.0, 1.0) * (d - r0 + 0.5).clamp(0.0, 1.0);
                 self.blend(x, y, c, cov * alpha);
@@ -527,8 +555,10 @@ impl Canvas {
 
     /// A soft radial splash — the atlas district tints.
     fn soft_disc(&mut self, center: Vec2, radius: f32, c: [u8; 3], alpha: f32) {
-        for y in (center.y - radius).floor() as i32..=(center.y + radius).ceil() as i32 {
-            for x in (center.x - radius).floor() as i32..=(center.x + radius).ceil() as i32 {
+        let (x0, x1) = clamp_span(center.x - radius, center.x + radius);
+        let (y0, y1) = clamp_span(center.y - radius, center.y + radius);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
                 let d = (Vec2::new(x as f32, y as f32) - center).length() / radius;
                 if d < 1.0 {
                     let t = 1.0 - d * d;
@@ -607,6 +637,9 @@ const DISTRICTS: [(&[ChordDir], &str, [u8; 3]); 5] = [
 /// node bloom in.
 const LINGER_ACCEPTED_S: f32 = 2.4;
 const LINGER_UNKNOWN_S: f32 = 0.8;
+/// Sized above the worst case: every registry command discovered (24) plus every
+/// district name (5). Overflow drops the lowest-anchored labels silently — grow
+/// this with the registry.
 const LABEL_POOL: usize = 34;
 
 #[derive(Resource)]
@@ -642,7 +675,7 @@ impl ChordMapState {
 
 impl Default for ChordMapState {
     fn default() -> Self {
-        Self::new(MapLayout::Hyperbolic)
+        Self::new(MapLayout::default())
     }
 }
 
@@ -778,6 +811,10 @@ fn drive_chord_map(
             state.linger = LINGER_UNKNOWN_S;
         }
     }
+    // A live capture holds the map open DIRECTLY — not via the linger timer, which
+    // a single ≥100ms frame would outrun, closing the map mid-entry and resetting
+    // the glide exactly when a slow frame made it most confusing.
+    let capturing = chords.entered().is_some();
     if let Some(entered) = chords.entered() {
         if !state.was_open {
             // Fresh open: start the glide from the root pose, not wherever the last
@@ -787,11 +824,10 @@ fn drive_chord_map(
             state.bloom = None;
         }
         state.focus = entered.to_vec();
-        state.linger = state.linger.max(0.1);
         state.was_open = true;
     }
     state.linger = (state.linger - dt).max(0.0);
-    let open = state.linger > 0.0;
+    let open = capturing || state.linger > 0.0;
     if !open {
         state.was_open = false;
     }
@@ -802,10 +838,8 @@ fn drive_chord_map(
 
     // Live layout cycling — the A/B switch, reachable without leaving the map.
     if open
-        && (keys.just_pressed(KeyCode::KeyM)
-            || pads
-                .iter()
-                .any(|gp| gp.just_pressed(GamepadButton::RightThumb)))
+        && (keys.just_pressed(LAYOUT_CYCLE_KEY)
+            || pads.iter().any(|gp| gp.just_pressed(LAYOUT_CYCLE_PAD)))
     {
         state.layout = state.layout.next();
     }
@@ -838,7 +872,10 @@ fn drive_chord_map(
         .index_of(&focus_code)
         .expect("the entered path was just inserted into the tree");
 
-    let mut canvas = Canvas::new();
+    let Some(image) = images.get_mut(&canvas_handle.0) else {
+        return;
+    };
+    let mut canvas = Canvas::new(image.data.take().unwrap_or_default());
     canvas.fill([6, 8, 13, 235]);
     let alpha = state.visible;
     let mut label_reqs: Vec<LabelReq> = Vec::new();
@@ -1045,9 +1082,7 @@ fn drive_chord_map(
         }
     }
 
-    if let Some(image) = images.get_mut(&canvas_handle.0) {
-        image.data = Some(canvas.px);
-    }
+    image.data = Some(canvas.px);
 
     // De-overlap: a sparse map crowds labels around the hub — nudge later labels
     // down until nothing horizontally-close sits within a line height.
