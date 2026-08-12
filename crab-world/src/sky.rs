@@ -13,14 +13,20 @@ pub const NIGHT_CLEAR: Color = Color::srgb(0.02, 0.03, 0.09);
 /// (`sky.wgsl`) evaluates the sky per pixel over the whole sphere — full wrap below
 /// the horizon, resolution-independent stars, no cubemap bake or texture memory.
 /// The look's math lives in the shader; the Rust side only spawns the triangle.
-pub struct NightSkyPlugin;
+///
+/// Carries the moon's boot knobs as a plugin field (same idiom as
+/// `ArenaWorldPlugin { ground_look }`): a surface cannot get a sky without
+/// stating its moon, so the disc and its light can never be forgotten apart.
+pub struct NightSkyPlugin {
+    pub moon: crate::moon::Moon,
+}
 
 const SKY_SHADER: Handle<Shader> = uuid_handle!("4f6b0e29-8d17-4c52-b3a9-7e04d1c68f5a");
 
 impl Plugin for NightSkyPlugin {
     fn build(&self, app: &mut App) {
         load_internal_asset!(app, SKY_SHADER, "sky.wgsl", Shader::from_wgsl);
-        app.add_plugins(crate::moon::MoonPlugin)
+        app.add_plugins(crate::moon::MoonPlugin { moon: self.moon })
             .add_plugins(MaterialPlugin::<StarSkyMaterial>::default())
             .add_systems(Startup, spawn_sky)
             .add_systems(Update, sync_moon_uniforms);
@@ -37,7 +43,7 @@ struct StarSkyMaterial {
     moon_dir_phase: Vec4,
     /// rgb: moon tint (srgb); w: illuminated fraction (halo strength).
     #[uniform(1)]
-    moon_color_lum: Vec4,
+    moon_color_frac: Vec4,
 }
 
 impl StarSkyMaterial {
@@ -45,7 +51,7 @@ impl StarSkyMaterial {
         let c = moon.color().to_srgba();
         Self {
             moon_dir_phase: moon.direction().extend(moon.phase.rem_euclid(1.0)),
-            moon_color_lum: Vec4::new(c.red, c.green, c.blue, moon.illuminated_fraction()),
+            moon_color_frac: Vec4::new(c.red, c.green, c.blue, moon.illuminated_fraction()),
         }
     }
 }

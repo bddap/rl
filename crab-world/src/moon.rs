@@ -72,7 +72,9 @@ impl Moon {
     /// Phase-driven luminosity. Cubic in the illuminated fraction — a quarter
     /// moon is ~1/10 of full, matching the real moon's strongly superlinear
     /// brightness curve — over a small earthshine floor so a new-moon world is
-    /// dark but not a void (ambient starlight stays separate).
+    /// dark but not a void (ambient starlight stays separate). Distinct from
+    /// the disc's 0.1 dark-limb floor in `sky.wgsl` — that one is albedo on the
+    /// visible disc, this one is light on the world; they need not match.
     pub fn illuminance(&self) -> f32 {
         let f = self.illuminated_fraction();
         FULL_MOON_LUX * (0.02 + 0.98 * f.powi(3))
@@ -84,27 +86,31 @@ impl Moon {
 struct MoonLight;
 
 /// Spawns the moon's directional light and keeps it tracking the [`Moon`]
-/// resource. Added by `NightSkyPlugin` — every surface with a sky has the moon,
-/// and only those.
-pub struct MoonPlugin;
+/// resource, whose boot value it carries (a plugin field, so no surface can add
+/// the moon and forget its knobs). Added by `NightSkyPlugin` — every surface
+/// with a sky has the moon, and only those.
+pub struct MoonPlugin {
+    pub moon: Moon,
+}
 
 impl Plugin for MoonPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Moon>()
+        app.insert_resource(self.moon)
             .add_systems(Startup, spawn_moon_light)
             .add_systems(Update, sync_moon_light);
     }
 }
 
-fn spawn_moon_light(mut commands: Commands, moon: Res<Moon>) {
+/// Structure only — every Moon-derived value (illuminance, color, direction)
+/// comes from [`sync_moon_light`], the ONE Moon→light mapping, which runs
+/// before the first render (the just-inserted resource is `is_changed`).
+fn spawn_moon_light(mut commands: Commands) {
     // Cascades stretched from the ~150 m default to mountain scale: the vista
     // world's 30 m grid pitch makes coarse far cascades invisible (rl#281 st 3).
     commands.spawn((
         MoonLight,
         DirectionalLight {
             shadows_enabled: true,
-            illuminance: moon.illuminance(),
-            color: moon.color(),
             ..default()
         },
         bevy::light::CascadeShadowConfigBuilder {
@@ -113,7 +119,6 @@ fn spawn_moon_light(mut commands: Commands, moon: Res<Moon>) {
             ..default()
         }
         .build(),
-        Transform::default().looking_to(-moon.direction(), Vec3::Y),
     ));
 }
 

@@ -23,7 +23,7 @@
 // world-space unit vector toward the moon / phase [0,1) (0 new, 0.5 full). The
 // second: srgb moon tint / illuminated fraction (drives the halo).
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> moon_dir_phase: vec4<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> moon_color_lum: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> moon_color_frac: vec4<f32>;
 
 struct SkyVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -68,12 +68,12 @@ fn moon(dir: vec3<f32>) -> vec4<f32> {
     if cosang < 0.0 {
         return vec4(0.0);
     }
-    let tint = moon_color_lum.rgb;
-    let lum = moon_color_lum.w;
-    // Halo: soft glow around the disc, scaled by luminosity so a new moon
-    // carries no false glow.
+    let tint = moon_color_frac.rgb;
+    let frac = moon_color_frac.w;
+    // Halo: soft glow around the disc, scaled by the illuminated fraction so a
+    // new moon carries no false glow.
     let ang = acos(clamp(cosang, -1.0, 1.0));
-    let halo = tint * (0.22 * lum * exp(-pow(ang / (MOON_RADIUS * 5.0), 2.0)));
+    let halo = tint * (0.22 * frac * exp(-pow(ang / (MOON_RADIUS * 5.0), 2.0)));
 
     // Disc-local frame (up-choice guarded against a zenith moon).
     let ref_up = select(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), abs(md.y) > 0.99);
@@ -93,7 +93,8 @@ fn moon(dir: vec3<f32>) -> vec4<f32> {
     // Surface: value-noise mare patches over fine albedo mottling.
     let mottle = 0.78 + 0.22 * value_noise(n * 6.0);
     let mare = 1.0 - 0.30 * smoothstep(0.45, 0.75, value_noise(n * 2.3 + vec3(7.0)));
-    // 0.1 floor = earthshine: the dark side stays faintly visible.
+    // 0.1 floor: earthshine keeps the dark limb faintly visible on the DISC —
+    // distinct from moon.rs's 0.02 illuminance floor (light on the world).
     let disc = tint * ((0.1 + 0.9 * lit) * mottle * mare);
     // Soft rim for antialiasing.
     let edge = 1.0 - smoothstep(0.9, 1.0, r2);

@@ -95,7 +95,6 @@ impl Plugin for DemoPlugin {
         );
         graph::register(app, self.graph, self.graph_shot.clone());
         self.overrides.apply_rng_and_ball(app);
-        app.add_plugins(crate::sky::NightSkyPlugin);
         crate::controls::install_overlay(app, &self.controls);
         // Chord-code command input (rl#330): the capture, the held-modifier menu, and
         // every discrete verb's dispatch edge. No reset gate — the demo has no phase
@@ -173,7 +172,6 @@ impl Plugin for ScreenshotPlugin {
             self.overrides.random_policy,
         );
         app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
-        app.add_plugins(crate::sky::NightSkyPlugin);
         if let Some((action, part)) = self.rig_pose {
             app.insert_resource(rig_pose::RigPose::new(action, part))
                 .init_resource::<rig_pose::RigPosePin>()
