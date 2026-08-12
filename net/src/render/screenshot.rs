@@ -369,6 +369,7 @@ fn capture_when_settled(
     target: Res<ShotTarget>,
     mut progress: ResMut<ShotProgress>,
     mut exit: MessageWriter<AppExit>,
+    moon: Res<crab_world::moon::Moon>,
 ) {
     let Some(frame) = screenshot::advance_capture(&mut progress, cfg.settle, &mut exit) else {
         return;
@@ -383,8 +384,9 @@ fn capture_when_settled(
         return;
     };
     // Sequence capture: frame `settle + k*every` is shot number k. Time advances
-    // ManualDuration(TICK_DT) per render frame, so `every` ticks = every/60 s of
-    // shader time between shots — deterministic, replayable animation evidence.
+    // ManualDuration(TICK_DT) per render frame, so `every` render frames =
+    // every*TICK_DT s of shader time between shots — deterministic, replayable
+    // animation evidence.
     let since_settle = frame - cfg.settle;
     let every = every.max(1);
     if !since_settle.is_multiple_of(every) {
@@ -393,8 +395,14 @@ fn capture_when_settled(
     let shot = since_settle / every;
     let path = cfg.path.with_extension(format!("{shot:04}.png"));
     screenshot::save_target_to(&mut commands, &target, path.clone());
+    // The moon pose rides the log so a time-lapse clip's provenance (which sky
+    // pose each frame captured, rl#374) is auditable from the run output.
     info!(
-        "fp screenshot: anim frame {shot}/{count} at render frame {frame} -> {}",
+        "fp screenshot: anim frame {shot}/{count} at render frame {frame} \
+         (moon az {:.1} el {:.1} phase {:.3}) -> {}",
+        moon.azimuth_deg,
+        moon.elevation_deg,
+        moon.phase,
         path.display()
     );
     if shot + 1 >= count {

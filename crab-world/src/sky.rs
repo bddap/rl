@@ -30,7 +30,7 @@ impl Plugin for NightSkyPlugin {
         app.add_plugins(crate::moon::MoonPlugin { moon: self.moon })
             .add_plugins(MaterialPlugin::<StarSkyMaterial>::default())
             .add_systems(Startup, spawn_sky)
-            .add_systems(Update, sync_moon_uniforms);
+            .add_systems(Update, sync_moon_uniforms.after(crate::moon::MoonMotionSet));
     }
 }
 
