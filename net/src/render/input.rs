@@ -164,7 +164,9 @@ pub(super) fn gather_input(
                     - nth_key(Action::PlaneThrottle, 1) as i32 as f32,
             )
         },
-        match_vel: nth_key(Action::MatchVelocity, 0),
+        // Space is MenuConfirm's second key, so the modal gate covers the keyboard
+        // brake too, same as jump/slide above.
+        match_vel: !reviewing && nth_key(Action::MatchVelocity, 0),
         ..default()
     };
     if grabbed {

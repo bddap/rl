@@ -231,7 +231,10 @@ fn drive_voice(
         && !pressed::<GcrControls>(Action::MenuBack, &keys, &gamepads)
     {
         // Cleared here (after gather_input) — the gate stays up through the release
-        // frame, which only costs one extra suppressed frame.
+        // frame, which only costs one extra suppressed frame. Action-level, so a
+        // Space held since before a pad-closed modal keeps the gate up until full
+        // release (known, accepted: it self-corrects on release + re-press, and
+        // per-input tracking wouldn't pay for the frame it saves).
         voice.linger = false;
     }
 
