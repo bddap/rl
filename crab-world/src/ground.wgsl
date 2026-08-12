@@ -109,7 +109,9 @@ fn fragment(
     // The always-on detail layer (rl#333 seam 2): the guaranteed floor under
     // every look's art. grain/relief are the look's multiplicative modulation.
     var rgb = a.rgb;
-    rgb *= 1.0 + fine_color(p, fw, strengths.z * a.grain);
+    // max(): the octave stack's extreme negative tail can sum past -1, and a
+    // negative multiplier inverts color under lighting — floor at black.
+    rgb *= max(1.0 + fine_color(p, fw, strengths.z * a.grain), 0.0);
     pbr_input.material.base_color = vec4(rgb, pbr_input.material.base_color.a);
     pbr_input.material.perceptual_roughness = a.roughness;
     pbr_input.material.emissive = vec4(

@@ -44,10 +44,10 @@ fn fine_color(p: vec2<f32>, fw: f32, gain: f32) -> f32 {
         fine_n += vnoise(q / wl, seed) * amp * fade;
         q = ROT * q;
         wl /= 3.0;
-        // 0.82/octave (was 0.72 until rl#353 stage 7): with the steeper decay
-        // the spectrum peaked at the 2.6 m octave and the on-foot ground read as
-        // meter-scale blotch with faint grain — the fine octaves the descent
-        // pays for need enough relative weight to register as texture.
+        // 0.82/octave (rl#353 stage 7): a steeper decay peaks the spectrum at
+        // the 2.6 m octave and on-foot ground reads as meter-scale blotch with
+        // faint grain. The slower decay tilts weight toward the fine octaves —
+        // and raises total near-field contrast with it, which is intended.
         amp *= 0.82;
         seed += 1u;
     }
