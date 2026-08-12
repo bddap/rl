@@ -7,7 +7,7 @@
 //   STATES — a soft partition; a fragment is in exactly one
 //   slope                  →  bare streaked scree
 //   moisture, dry end      →  cracked clay plates, cobble  cracked_loam
-//   moisture, wet end      →  soaked basins, puddles       wet_nocturne
+//   moisture, wet end      →  soaked basins, puddles
 //   moisture, wettest+veg  →  bioluminescent vein webs     night_bloom
 //
 //   FIELDS — global modulations that ride ON the partition
@@ -38,8 +38,8 @@
 // GroundCtx in, GroundArt out, the scaffold owns `fn fragment` and the detail
 // layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
 // (ground.rs). Designs B (naturalist) and C (nocturne) are param rows over this
-// one module (`GroundLook::params`), never forks. Watershed's own row is
-// all-ones: every use below multiplies or gates on a lane.
+// one module (`GroundLook::params`), never forks. Watershed's own row turns
+// every design axis on: each use below multiplies or gates on a lane.
 
 #define_import_path rl::ground::looks::watershed
 
