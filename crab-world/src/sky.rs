@@ -12,7 +12,8 @@ pub const NIGHT_CLEAR: Color = Color::srgb(0.02, 0.03, 0.09);
 /// Procedural night sky (rl#325): one fullscreen triangle whose fragment shader
 /// (`sky.wgsl`) evaluates the sky per pixel over the whole sphere — full wrap below
 /// the horizon, resolution-independent stars, no cubemap bake or texture memory.
-/// The look's math lives in the shader; the Rust side only spawns the triangle.
+/// The look's math lives in the shader; the Rust side spawns the triangle and
+/// feeds it the moon uniforms.
 ///
 /// Carries the moon's boot knobs as a plugin field (same idiom as
 /// `ArenaWorldPlugin { ground_look }`): a surface cannot get a sky without
