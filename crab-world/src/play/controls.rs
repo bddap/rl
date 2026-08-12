@@ -150,11 +150,6 @@ impl ControlScheme for DemoControls {
         DemoAction::RevealControls
     }
 
-    // The demo never resets the capture — chords are live in its one context.
-    fn context_shows_chords(_ctx: DemoContext) -> bool {
-        true
-    }
-
     fn key_glyph(key: DemoKey) -> Glyph {
         match key {
             DemoKey::Tab => Glyph::Icon("controls/keyboard_tab.png"),
@@ -369,22 +364,19 @@ mod tests {
         );
     }
 
-    /// Stage 4 (rl#330): the demo legend shows every chord verb, rendered from
-    /// [`DEMO_CHORDS`] itself — modifier glyph then one chip per code step.
+    /// The owner's rl#358 pick (2026-08-12): chord codes have no textual lookup
+    /// surface — the demo legend never lists a chord entry either.
     #[test]
-    fn legend_renders_chord_rows_from_the_registry() {
-        use crate::chord::{dir_text, modifier_glyph};
-        use crate::controls::{Device, Glyph, legend};
+    fn legend_shows_no_chord_rows() {
+        use crate::controls::{Device, legend};
         for device in [Device::KeyboardMouse, Device::Gamepad] {
             let lines = legend::<DemoControls>(DemoContext::Inspect, device);
             for e in DEMO_CHORDS.entries() {
-                let line = lines
-                    .iter()
-                    .find(|l| l.label == e.label)
-                    .unwrap_or_else(|| panic!("{device:?} legend omits {:?}", e.label));
-                let mut want = vec![modifier_glyph(device)];
-                want.extend(e.code.iter().map(|&d| Glyph::Label(dir_text(d, device))));
-                assert_eq!(line.glyphs, want);
+                assert!(
+                    !lines.iter().any(|l| l.label == e.label),
+                    "{device:?} legend leaks chord code {:?}",
+                    e.label
+                );
             }
         }
     }

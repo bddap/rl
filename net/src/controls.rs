@@ -318,12 +318,6 @@ impl ControlScheme for GcrControls {
         Action::RevealControls
     }
 
-    // The capture is reset outside Playing (render/app.rs) and the d-pad is the nav
-    // input there — the menu legend advertising dead codes would lie.
-    fn context_shows_chords(ctx: GcrContext) -> bool {
-        ctx != GcrContext::Menu
-    }
-
     fn key_glyph(key: Key) -> Glyph {
         Glyph::Icon(match key {
             Key::W => "controls/keyboard_w.png",
@@ -973,15 +967,10 @@ mod tests {
                 let lines = legend::<GcrControls>(ctx, device);
                 let rows = GcrControls::context_rows(ctx);
                 for line in &lines {
-                    let Some(row) = rows.iter().find(|r| r.label == line.label) else {
-                        // Not a binding row: must be a chord row (checked below).
-                        assert!(
-                            GCR_CHORDS.entries().iter().any(|e| e.label == line.label),
-                            "legend line {:?} matches no row and no chord entry",
-                            line.label
-                        );
-                        continue;
-                    };
+                    let row = rows
+                        .iter()
+                        .find(|r| r.label == line.label)
+                        .unwrap_or_else(|| panic!("legend line {:?} matches no row", line.label));
                     let b = binding::<GcrControls>(row.action).unwrap();
                     assert_eq!(line.glyphs, b.glyphs(device));
                     assert!(!line.glyphs.is_empty(), "{:?} shows no glyph", row.action);
@@ -990,34 +979,22 @@ mod tests {
         }
     }
 
-    /// Stage 4 (rl#330): every in-round legend shows the chord verbs, rendered from
-    /// [`GCR_CHORDS`] itself — modifier glyph then one chip per code step; the menu
-    /// context shows none (the capture is reset there and the d-pad is nav).
+    /// The owner's rl#358 pick (2026-08-12): chord codes have NO textual lookup —
+    /// the legend never lists a chord entry; codes appear only on the combo map,
+    /// discovered by play.
     #[test]
-    fn legend_renders_chord_rows_from_the_registry() {
-        use crab_world::chord::{dir_text, modifier_glyph};
-        for ctx in [GcrContext::OnFoot, GcrContext::Plane, GcrContext::Ship] {
+    fn legend_shows_no_chord_rows() {
+        for ctx in ALL_CONTEXTS {
             for device in [Device::KeyboardMouse, Device::Gamepad] {
                 let lines = legend::<GcrControls>(ctx, device);
                 for e in GCR_CHORDS.entries() {
-                    let line = lines
-                        .iter()
-                        .find(|l| l.label == e.label)
-                        .unwrap_or_else(|| panic!("{ctx:?}/{device:?} omits {:?}", e.label));
-                    let mut want = vec![modifier_glyph(device)];
-                    want.extend(e.code.iter().map(|&d| Glyph::Label(dir_text(d, device))));
-                    assert_eq!(line.glyphs, want);
-                    assert!(!line.hold, "chord rows carry no Hold prefix");
+                    assert!(
+                        !lines.iter().any(|l| l.label == e.label),
+                        "{ctx:?}/{device:?} legend leaks chord code {:?}",
+                        e.label
+                    );
                 }
             }
-        }
-        let menu = legend::<GcrControls>(GcrContext::Menu, Device::Gamepad);
-        for e in GCR_CHORDS.entries() {
-            assert!(
-                !menu.iter().any(|l| l.label == e.label),
-                "menu legend advertises dead code {:?}",
-                e.label
-            );
         }
     }
 

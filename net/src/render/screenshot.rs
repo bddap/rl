@@ -160,9 +160,6 @@ pub struct ChordScript {
     holds: Vec<(u64, Option<u64>)>,
     /// (frame, direction) code taps; each key is pressed for exactly one frame.
     taps: Vec<(u64, crab_world::chord::ChordDir)>,
-    /// Frames at which to tap the chord-map layout-cycle key (M, rl#358) — the
-    /// live-switch evidence input.
-    cycles: Vec<u64>,
     frame: u64,
 }
 
@@ -175,7 +172,6 @@ impl ChordScript {
         Self {
             holds: vec![(hold_from, release_at)],
             taps,
-            cycles: Vec::new(),
             frame: 0,
         }
     }
@@ -183,12 +179,6 @@ impl ChordScript {
     /// Additional modifier hold windows beyond the first.
     pub fn with_holds(mut self, holds: Vec<(u64, Option<u64>)>) -> Self {
         self.holds.extend(holds);
-        self
-    }
-
-    /// See [`ChordScript::cycles`].
-    pub fn with_layout_cycles(mut self, cycles: Vec<u64>) -> Self {
-        self.cycles = cycles;
         self
     }
 }
@@ -226,13 +216,6 @@ fn drive_chord_script(
         if script.frame == at {
             keys.press(crab_world::chord::dir_key(dir));
         }
-    }
-    // Layout-cycle taps ride the same release-before-press ordering as the code taps.
-    if script.cycles.iter().any(|&at| script.frame == at + 1) {
-        keys.release(super::chord_map::LAYOUT_CYCLE_KEY);
-    }
-    if script.cycles.iter().any(|&at| script.frame == at) {
-        keys.press(super::chord_map::LAYOUT_CYCLE_KEY);
     }
 }
 
