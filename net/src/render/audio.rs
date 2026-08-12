@@ -124,8 +124,14 @@ impl Default for AtomicF32 {
 
 /// Full-wind airspeed, m/s — the plane's full-throttle terminal (~4.5 m/s, the
 /// fastest thing in the game; see `PLANE` in crab-world's vehicle.rs). At or above
-/// it the wind is at full roar in every context.
-const FULL_WIND_MPS: f32 = 4.5;
+/// it the wind is at full roar in every context. The plane engine layer
+/// (ambience.rs) tops its band here too.
+pub(super) const FULL_WIND_MPS: f32 = 4.5;
+
+/// The ship's audible-band ceiling, m/s — it never nears plane speeds (sustained
+/// top ~2.5, a dive slightly past), so its wind and thruster layers normalize
+/// over this lower band to keep cruising present.
+pub(super) const SHIP_TOP_MPS: f32 = 3.0;
 
 /// One target parameter set, f32s bit-stored in atomics — the frame-rate ECS writer
 /// and the audio-thread reader share this with no lock on the audio path.
@@ -133,19 +139,10 @@ const FULL_WIND_MPS: f32 = 4.5;
 pub(super) struct WindTargets([AtomicF32; 5]);
 
 impl WindTargets {
-    pub(super) fn store(
-        &self,
-        gain: f32,
-        cutoff_hz: f32,
-        whistle_hz: f32,
-        whistle_gain: f32,
-        gust: f32,
-    ) {
-        for (slot, v) in self
-            .0
-            .iter()
-            .zip([gain, cutoff_hz, whistle_hz, whistle_gain, gust])
-        {
+    /// `[gain, cutoff_hz, whistle_hz, whistle_gain, gust_depth]` — the array
+    /// [`profile`] produces, stored whole so callers can't transpose a pair.
+    pub(super) fn store(&self, params: [f32; 5]) {
+        for (slot, v) in self.0.iter().zip(params) {
             slot.store(v);
         }
     }
@@ -189,7 +186,7 @@ pub(super) fn spawn_wind(
     channel: Res<WindChannel>,
 ) {
     // Start the round silent regardless of how the last one ended.
-    channel.0.store(0.0, 400.0, 0.0, 0.0, 0.0);
+    channel.0.store([0.0, 400.0, 0.0, 0.0, 0.0]);
     commands.spawn((
         WindAudio,
         AudioPlayer(assets.add(WindNoise(channel.0.clone()))),
@@ -203,14 +200,15 @@ pub(super) fn despawn_wind(
     wind: Query<Entity, With<WindAudio>>,
     channel: Res<WindChannel>,
 ) {
-    channel.0.store(0.0, 400.0, 0.0, 0.0, 0.0);
+    channel.0.store([0.0, 400.0, 0.0, 0.0, 0.0]);
     for e in &wind {
         commands.entity(e).despawn();
     }
 }
 
-/// The listener's speed, m/s — the one speed every speed-driven sound reads
-/// (wind timbre here, the movement/engine layers in ambience.rs).
+/// The wind's airspeed, m/s — all three axes on foot (falling roars, rl#355).
+/// The ambience bus projects its own GAIT speed instead (horizontal on foot):
+/// same craft arm, different on-foot physics, deliberately not shared.
 pub(super) fn local_speed_mps(state: &GameState, vehicle: &LocalVehicle) -> f32 {
     match vehicle {
         // The walker's sim velocity is per-tick grid units, all three axes (falling
@@ -243,7 +241,7 @@ pub(super) fn drive_wind(
     let (gain, cutoff) = bus.shape(gain, cutoff, WIND_MUFFLE);
     channel
         .0
-        .store(gain, cutoff, whistle_hz, whistle_gain, gust);
+        .store([gain, cutoff, whistle_hz, whistle_gain, gust]);
 }
 
 /// Timbre map: context + airspeed → `[gain, cutoff_hz, whistle_hz, whistle_gain,
@@ -262,7 +260,7 @@ pub(super) fn profile(kind: Option<VehicleKind>, speed_mps: f32) -> [f32; 5] {
         Some(VehicleKind::Plane) => (0.5, FULL_WIND_MPS),
         // The ship never nears plane speeds — its band tops out lower so cruising
         // still has presence.
-        Some(VehicleKind::Ship) => (0.2, 3.0),
+        Some(VehicleKind::Ship) => (0.2, SHIP_TOP_MPS),
     };
     let n = ((speed_mps - floor) / (ceil - floor)).clamp(0.0, 1.0);
     match kind {
@@ -424,8 +422,7 @@ mod tests {
     /// Render one second at a held context+speed, discarding a glide-in lead.
     fn settled_rms(kind: Option<VehicleKind>, speed: f32) -> f32 {
         let targets = Arc::new(WindTargets::default());
-        let [g, c, wh, wg, gu] = profile(kind, speed);
-        targets.store(g, c, wh, wg, gu);
+        targets.store(profile(kind, speed));
         let mut s = WindStream::new(targets);
         let _ = rms(&mut s, SAMPLE_RATE as usize / 2);
         rms(&mut s, SAMPLE_RATE as usize)
@@ -453,8 +450,7 @@ mod tests {
     fn plane_brighter_than_ship() {
         let zcr = |kind| {
             let targets = Arc::new(WindTargets::default());
-            let [g, c, wh, wg, gu] = profile(kind, 3.0);
-            targets.store(g, c, wh, wg, gu);
+            targets.store(profile(kind, 3.0));
             let mut s = WindStream::new(targets);
             let lead = SAMPLE_RATE as usize / 2;
             let _ = s.by_ref().take(lead).count();
@@ -496,8 +492,7 @@ mod tests {
                 // Hold still for 1 s, ramp to full over 5 s, hold 2 s.
                 let t = i as f32 / SAMPLE_RATE as f32;
                 let speed = ((t - 1.0) / 5.0).clamp(0.0, 1.0) * FULL_WIND_MPS;
-                let [g, c, wh, wg, gu] = profile(kind, speed);
-                targets.store(g, c, wh, wg, gu);
+                targets.store(profile(kind, speed));
                 pcm.push((s.next().unwrap() * i16::MAX as f32) as i16);
             }
             let path = std::path::Path::new(&dir).join(format!("{name}.wav"));
