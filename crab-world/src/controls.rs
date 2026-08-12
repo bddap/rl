@@ -45,14 +45,6 @@ pub trait ControlScheme: 'static + Send + Sync {
 
     fn reveal_action() -> Self::Action;
 
-    /// Whether `ctx`'s legend shows the chord-command rows (rl#330 stage 4). A context
-    /// where the chord system is inert (GCR's menu — the capture is reset outside
-    /// Playing, and the d-pad IS the nav input there) answers false so the legend
-    /// doesn't advertise dead codes. No default: this mirrors where the surface wires
-    /// `reset_chords`, which nothing can check — so each scheme states the claim
-    /// explicitly, same rule as the empty registry.
-    fn context_shows_chords(ctx: Self::Context) -> bool;
-
     fn key_glyph(key: Self::Key) -> Glyph;
     fn pad_glyph(pad: Self::Pad) -> Glyph;
     fn mouse_glyph(mouse: Self::Mouse) -> Glyph;
@@ -151,7 +143,7 @@ pub struct LegendLine {
 }
 
 pub fn legend<S: ControlScheme + ?Sized>(ctx: S::Context, device: Device) -> Vec<LegendLine> {
-    let mut lines: Vec<LegendLine> = S::context_rows(ctx)
+    let lines: Vec<LegendLine> = S::context_rows(ctx)
         .iter()
         .filter_map(|row| {
             let b = binding::<S>(row.action).expect(
@@ -168,26 +160,9 @@ pub fn legend<S: ControlScheme + ?Sized>(ctx: S::Context, device: Device) -> Vec
             })
         })
         .collect();
-    // The chord-command rows, straight from the registry (rl#330 stage 4): modifier
-    // glyph + one chip per code step, label from the entry — the same table the
-    // held-modifier menu executes from, so the legend can't lie about a code.
-    if S::context_shows_chords(ctx) {
-        lines.extend(S::chords().entries().iter().map(|e| {
-            LegendLine {
-                label: e.label,
-                // Not `hold: true` — that prefix belongs to the label ("Hold Controls");
-                // the modifier-then-taps grammar is carried by the glyph chips.
-                hold: false,
-                glyphs: std::iter::once(crate::chord::modifier_glyph(device))
-                    .chain(
-                        e.code
-                            .iter()
-                            .map(|&d| Glyph::Label(crate::chord::dir_text(d, device))),
-                    )
-                    .collect(),
-            }
-        }));
-    }
+    // No chord-command rows: since the owner's rl#358 pick (2026-08-12) chord codes
+    // have no textual lookup surface anywhere — codes are DISCOVERED by playing, and
+    // the combo map is the one place they appear.
     lines
 }
 
@@ -265,16 +240,6 @@ pub fn assert_scheme_well_formed<S: ControlScheme + ?Sized>(
             rows.iter().any(|r| r.action == S::reveal_action()),
             "context {ctx:?} omits the reveal control — the overlay couldn't be opened there"
         );
-        if S::context_shows_chords(ctx) {
-            for e in S::chords().entries() {
-                assert!(
-                    rows.iter().all(|r| r.label != e.label),
-                    "context {ctx:?} row label {:?} collides with a chord entry's — \
-                     the legend would show two indistinguishable lines",
-                    e.label
-                );
-            }
-        }
     }
     for device in [Device::KeyboardMouse, Device::Gamepad] {
         assert!(
@@ -298,11 +263,6 @@ pub fn icon_asset_paths<S: ControlScheme + ?Sized>() -> Vec<&'static str> {
             for glyph in b.glyphs(device) {
                 push(glyph);
             }
-        }
-    }
-    if !S::chords().entries().is_empty() {
-        for device in [Device::KeyboardMouse, Device::Gamepad] {
-            push(crate::chord::modifier_glyph(device));
         }
     }
     paths
@@ -947,9 +907,6 @@ mod tests {
             }
         }
         fn reveal_action() {}
-        fn context_shows_chords(_: TestCtx) -> bool {
-            true
-        }
         fn key_glyph(_: ()) -> Glyph {
             Glyph::Label("k")
         }

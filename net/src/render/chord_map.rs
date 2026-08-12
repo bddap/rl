@@ -1,83 +1,42 @@
 //! The d-pad combo map (rl#358): a spatial, DISCOVERED-ONLY presentation of the chord
-//! code space, shown while a code is being entered (the held-modifier capture) and for
-//! a short linger after a code resolves so the growth moment is visible.
+//! code space, shown full-screen while a code is being entered (the held-modifier
+//! capture) and for a short linger after a code resolves so the growth moment is
+//! visible. Since the owner's post-playtest pick (2026-08-12) this IS the only code
+//! surface — the textual chord menu is gone, and look-and-feel iterates here.
 //!
-//! Owner directives (rl#358, 2026-08-11) this module is built around:
+//! The layout is the circular zoom-quadrant space from the winning design submission
+//! (`proposal/dpad-map-zoomquad`): every node is a circle, its four children nested
+//! inside it in the d-pad directions, so a code's address IS its position and each
+//! press dives one circle deeper while ancestors ghost past the edges. Button-true by
+//! construction. Owner directives built in:
 //! - **Discovered-only**: the map renders codes the player has PLAYED (accepted
-//!   resolutions), persisted per save file — no greyed-out future branches, no teasers.
-//!   The satisfaction is watching the map grow more complex over time.
-//! - **Button-true directions** (hyperbolic variants): the map re-roots on the current
-//!   node every press — the four NEXT steps and the back-edge always leave the focus in
-//!   their physical button directions; only older path segments bend.
-//!
-//! This is a sanctioned three-way experiment population (one seam, [`MapLayout`]): the
-//! owner A/Bs the three layouts IN GAME — cycled live with M / right-stick-click while
-//! the map is open — and the losers get deleted down to the enum afterwards. Shared
-//! data model (discovered tree), shared input, three projection/paint impls.
+//!   resolutions), persisted per save file — no teasers. The satisfaction is watching
+//!   the map grow more complex over time.
+//! - **Sparse-space rendering** (rl#380): codes are uncapped and the space is sparsely
+//!   populated, so fork options are sized by discovered-path density — the sole known
+//!   continuation renders large, undiscovered directions are quiet seed rings.
+//! - **Text-free as possible**: no header, no legend; the one text concession is a
+//!   discovered room's command label once its circle is big enough to read as a place.
 //!
 //! Rendering is a CPU-painted canvas ([`Canvas`] → `Image` → UI node) plus a pooled set
 //! of UI text labels — no egui (the offscreen evidence app has none) and no gizmos (no
 //! 2D camera), so the same path draws in the windowed client and in fp-screenshot
-//! evidence captures.
+//! evidence captures. Geometry runs in f64: node radii shrink exponentially with code
+//! depth, and with uncapped codes f32 loses the child offsets to rounding around
+//! depth 14.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
+use bevy::math::DVec2;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crab_world::chord::{ChordDir, Chords};
 
 use crate::controls::{GCR_CHORDS, GcrControls};
-
-/// The layout under A/B — THE experiment seam. After the owner picks by feel, the
-/// losing variants die and this enum collapses to the winner.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum MapLayout {
-    /// Poincaré-disk glide, minimal dress: luminous direction-colored edges, the
-    /// motion is the code.
-    #[default]
-    Hyperbolic,
-    /// Nested d-pad quadrants: each press dives into the quadrant that holds the
-    /// code, rooms live at their address.
-    ZoomQuad,
-    /// The hyperbolic atlas: same disk, dressed as a place — district tints,
-    /// landmark names, pitch glyphs on edges, the entered code on a staff.
-    HyperAtlas,
-}
-
-impl MapLayout {
-    fn label(self) -> &'static str {
-        match self {
-            MapLayout::Hyperbolic => "hyperbolic glide",
-            MapLayout::ZoomQuad => "zoom quadrants",
-            MapLayout::HyperAtlas => "hyperbolic atlas",
-        }
-    }
-
-    fn next(self) -> Self {
-        match self {
-            MapLayout::Hyperbolic => MapLayout::ZoomQuad,
-            MapLayout::ZoomQuad => MapLayout::HyperAtlas,
-            MapLayout::HyperAtlas => MapLayout::Hyperbolic,
-        }
-    }
-
-    /// CLI id → layout (`--chord-map-layout`); an unknown id is an error naming the
-    /// valid ids, same contract as `--show-controls-context` (rl#275).
-    pub fn from_id(id: &str) -> Result<Self, String> {
-        match id {
-            "hyperbolic" => Ok(MapLayout::Hyperbolic),
-            "zoomquad" => Ok(MapLayout::ZoomQuad),
-            "hyperatlas" => Ok(MapLayout::HyperAtlas),
-            _ => Err(format!(
-                "chord-map layout {id:?} is unknown; want one of: hyperbolic, zoomquad, hyperatlas"
-            )),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Discovered set — the per-save persistent record of played codes.
@@ -98,21 +57,6 @@ fn dir_index(d: ChordDir) -> usize {
         ChordDir::Right => 3,
     }
 }
-
-fn opposite(d: ChordDir) -> ChordDir {
-    match d {
-        ChordDir::Up => ChordDir::Down,
-        ChordDir::Down => ChordDir::Up,
-        ChordDir::Left => ChordDir::Right,
-        ChordDir::Right => ChordDir::Left,
-    }
-}
-
-/// The layout-cycle inputs while the map is open — ONE source, read by the live
-/// system and the fp-screenshot evidence script alike (a re-declared copy would let
-/// a retune here silently turn the scripted evidence tap into a dead key).
-pub const LAYOUT_CYCLE_KEY: KeyCode = KeyCode::KeyM;
-const LAYOUT_CYCLE_PAD: GamepadButton = GamepadButton::RightThumb;
 
 fn code_to_str(code: &[ChordDir]) -> String {
     code.iter()
@@ -221,17 +165,19 @@ pub fn default_save_path() -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// The discovered tree — shared data model for all three layouts.
+// The discovered tree.
 // ---------------------------------------------------------------------------
 
 struct MapNode {
     code: Vec<ChordDir>,
     children: [Option<usize>; 4],
-    parent: Option<(usize, ChordDir)>,
     /// The registered command's label, shown ONLY once discovered.
     command: Option<&'static str>,
     /// On the live entered path only — not (yet) part of the discovered map.
     provisional: bool,
+    /// Discovered (non-provisional) nodes in this subtree, self included — the
+    /// rl#380 density weight that sizes fork options.
+    weight: usize,
 }
 
 struct MapTree {
@@ -240,29 +186,50 @@ struct MapTree {
 
 impl MapTree {
     /// Every prefix of every discovered code, plus the live entered path as
-    /// provisional nodes — the focus must exist on the map for re-rooting to mean
-    /// anything, even while typing into undiscovered space.
+    /// provisional nodes — the focus must exist on the map to zoom to, even while
+    /// typing into undiscovered space.
     fn build(discovered: &BTreeSet<Vec<ChordDir>>, entered: &[ChordDir]) -> Self {
         let mut tree = Self {
             nodes: vec![MapNode {
                 code: Vec::new(),
                 children: [None; 4],
-                parent: None,
                 command: None,
                 provisional: true,
+                weight: 0,
             }],
         };
         for code in discovered {
             let leaf = tree.insert_path(code);
             tree.nodes[leaf].command = GCR_CHORDS.entry(code).map(|e| e.label);
-            // The whole prefix chain is discovered structure.
-            let mut n = Some(leaf);
-            while let Some(i) = n {
-                tree.nodes[i].provisional = false;
-                n = tree.nodes[i].parent.map(|(p, _)| p);
+        }
+        // The whole prefix chain of every discovered code is discovered structure;
+        // marking parents along insert_path would miss prefixes inserted late.
+        let discovered_paths: Vec<usize> =
+            discovered.iter().filter_map(|c| tree.index_of(c)).collect();
+        for leaf in discovered_paths {
+            let mut at = leaf;
+            loop {
+                tree.nodes[at].provisional = false;
+                match tree.parent_of(at) {
+                    Some(p) => at = p,
+                    None => break,
+                }
             }
         }
         tree.insert_path(entered);
+        // Weights bottom-up: children have larger indices than parents (insert
+        // order), so a reverse scan accumulates each subtree before its parent
+        // consumes it.
+        for i in (0..tree.nodes.len()).rev() {
+            let own = usize::from(!tree.nodes[i].provisional);
+            let kids: usize = tree.nodes[i]
+                .children
+                .iter()
+                .flatten()
+                .map(|&c| tree.nodes[c].weight)
+                .sum();
+            tree.nodes[i].weight = own + kids;
+        }
         tree
     }
 
@@ -278,9 +245,9 @@ impl MapTree {
                     self.nodes.push(MapNode {
                         code: child_code,
                         children: [None; 4],
-                        parent: Some((at, d)),
                         command: None,
                         provisional: true,
+                        weight: 0,
                     });
                     let c = self.nodes.len() - 1;
                     self.nodes[at].children[slot] = Some(c);
@@ -299,170 +266,102 @@ impl MapTree {
         Some(at)
     }
 
-    /// Undirected edges at `n`: `(neighbor, nominal angle at n, nominal angle of the
-    /// edge back at the neighbor)`. Nominal angles are the button-true compass
-    /// directions: a child via press `d` leaves at `d`'s angle; the parent sits
-    /// opposite the press that created `n`.
-    fn edges(&self, n: usize) -> Vec<(usize, f32, f32)> {
-        let mut out = Vec::new();
-        if let Some((p, d)) = self.nodes[n].parent {
-            out.push((p, dir_angle(opposite(d)), dir_angle(d)));
-        }
-        for d in DIRS {
-            if let Some(c) = self.nodes[n].children[dir_index(d)] {
-                out.push((c, dir_angle(d), dir_angle(opposite(d))));
-            }
-        }
-        out
+    fn parent_of(&self, n: usize) -> Option<usize> {
+        let code = &self.nodes[n].code;
+        let (last, prefix) = code.split_last()?;
+        let p = self
+            .index_of(prefix)
+            .expect("every node's prefix chain is in the tree");
+        debug_assert_eq!(self.nodes[p].children[dir_index(*last)], Some(n));
+        Some(p)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Hyperbolic layout (Poincaré disk), re-rooted on the focus.
+// Circular zoom-quadrant geometry — the winning submission's space.
 // ---------------------------------------------------------------------------
 
 /// Canvas-space (y down) unit vector of a button direction.
-fn dir_vec(d: ChordDir) -> Vec2 {
+fn dir_vec(d: ChordDir) -> DVec2 {
     match d {
-        ChordDir::Up => Vec2::new(0.0, -1.0),
-        ChordDir::Down => Vec2::new(0.0, 1.0),
-        ChordDir::Left => Vec2::new(-1.0, 0.0),
-        ChordDir::Right => Vec2::new(1.0, 0.0),
+        ChordDir::Up => DVec2::new(0.0, -1.0),
+        ChordDir::Down => DVec2::new(0.0, 1.0),
+        ChordDir::Left => DVec2::new(-1.0, 0.0),
+        ChordDir::Right => DVec2::new(1.0, 0.0),
     }
 }
 
-fn dir_angle(d: ChordDir) -> f32 {
-    let v = dir_vec(d);
-    v.y.atan2(v.x)
+/// Child circle radius, in parent radii — the submission mock's SHRINK.
+const CIRCLE_SHRINK: f64 = 0.36;
+/// Child center offset from the parent center, in parent radii (mock STEP). A
+/// density-boosted child instead nestles at `1 - radius` so it stays inside the
+/// parent circle.
+const CIRCLE_STEP: f64 = 0.62;
+/// Fork-density size range (rl#380): a child's shrink is scaled by
+/// `MIN + SPAN * weight_share`, so the sole known continuation at a fork renders
+/// large and thin branches stay small.
+const DENSITY_SCALE_MIN: f64 = 0.55;
+const DENSITY_SCALE_SPAN: f64 = 0.95;
+/// Undiscovered-direction seed rings: fraction of the nominal child radius, and the
+/// minimum on-screen radius of the parent before seeds appear at all (quiet space).
+const SEED_SHRINK: f64 = 0.40;
+const SEED_MIN_PARENT_PX: f64 = 130.0;
+
+/// A node circle in world space (root = unit circle at the origin).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Circle {
+    center: DVec2,
+    radius: f64,
 }
 
-fn wrap_angle(a: f32) -> f32 {
-    let mut a = a % std::f32::consts::TAU;
-    if a > std::f32::consts::PI {
-        a -= std::f32::consts::TAU;
-    }
-    if a < -std::f32::consts::PI {
-        a += std::f32::consts::TAU;
-    }
-    a
-}
-
-// Complex arithmetic on Vec2 (x + iy) — enough Möbius machinery for the disk.
-fn cmul(a: Vec2, b: Vec2) -> Vec2 {
-    Vec2::new(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x)
-}
-
-fn conj(a: Vec2) -> Vec2 {
-    Vec2::new(a.x, -a.y)
-}
-
-fn cdiv(a: Vec2, b: Vec2) -> Vec2 {
-    cmul(a, conj(b)) / b.length_squared().max(1e-12)
-}
-
-/// The Möbius translation taking 0 → a, applied to z.
-fn mobius(a: Vec2, z: Vec2) -> Vec2 {
-    cdiv(a + z, Vec2::X + cmul(conj(a), z))
-}
-
-/// z as seen from a recentered on the origin: the translation taking a → 0.
-fn recenter(a: Vec2, z: Vec2) -> Vec2 {
-    cdiv(z - a, Vec2::X - cmul(conj(a), z))
-}
-
-/// Euclidean offset of a one-press step when the source node sits at the origin.
-const HYPER_STEP: f32 = 0.48;
-/// Angular compression for edges past the focus ring — keeps a subtree inside its
-/// outward wedge so re-rooted branches can't fold back over each other. The focus's
-/// OWN edges are exact by construction (the button-true requirement).
-const HYPER_COMPRESS: f32 = 0.55;
-
-/// Positions (disk coords, |z| < 1) for every tree node, re-rooted so the focus sits
-/// at the origin with every one of its exits leaving in its physical button
-/// direction. When a child and the back-edge share a direction (a code like `UUD`
-/// puts the parent AND the `D` child of `UU` both below it), both stay collinear —
-/// direction stays true — and the parent leg is pushed farther out to keep the two
-/// nodes distinct.
-/// How much farther the parent leg reaches when it shares a direction with a child.
-const BACKEDGE_PUSH: f32 = 1.85;
-
-fn layout_hyperbolic(tree: &MapTree, focus: usize) -> Vec<Vec2> {
-    let mut pos = vec![Vec2::ZERO; tree.nodes.len()];
-    let mut seen = vec![false; tree.nodes.len()];
-    seen[focus] = true;
-    // (node, heading: outward screen angle, back-edge nominal angle at node,
-    // compression). The focus seeds the queue as its own "arrival": heading 0 with
-    // back-nominal −π and NO compression makes `screen` come out as exactly the
-    // nominal button angle — the one placement body serves the exact focus ring and
-    // the compressed deeper wedges alike.
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back((focus, 0.0f32, -std::f32::consts::PI, 1.0f32));
-    while let Some((n, heading, back_nominal, compress)) = queue.pop_front() {
-        let edges = tree.edges(n);
-        for &(nb, ang, back) in &edges {
-            if seen[nb] {
-                continue;
-            }
-            let rel = wrap_angle(ang - (back_nominal + std::f32::consts::PI));
-            let screen = heading + rel * compress;
-            let is_parent = tree.nodes[n].parent.is_some_and(|(p, _)| p == nb);
-            let collides = is_parent
-                && edges
-                    .iter()
-                    .any(|&(o, oa, _)| o != nb && !seen[o] && (oa - ang).abs() < 1e-3);
-            let step = if collides {
-                HYPER_STEP * BACKEDGE_PUSH
-            } else {
-                HYPER_STEP
-            };
-            let z = mobius(pos[n], step * Vec2::new(screen.cos(), screen.sin()));
-            pos[nb] = z;
-            seen[nb] = true;
-            let heading_nb = {
-                let b = recenter(z, pos[n]);
-                b.y.atan2(b.x) + std::f32::consts::PI
-            };
-            queue.push_back((nb, heading_nb, back, HYPER_COMPRESS));
+/// The rl#380 density scale of each child at a fork: share of the fork's discovered
+/// weight, floored so a provisional (live-typed) child still has a visible circle.
+fn child_scales(tree: &MapTree, n: usize) -> [f64; 4] {
+    let w = |c: Option<usize>| c.map_or(0, |c| tree.nodes[c].weight.max(1));
+    let total: usize = tree.nodes[n].children.iter().map(|&c| w(c)).sum();
+    let mut scales = [1.0; 4];
+    for (slot, &c) in tree.nodes[n].children.iter().enumerate() {
+        if c.is_some() && total > 0 {
+            scales[slot] = DENSITY_SCALE_MIN + DENSITY_SCALE_SPAN * (w(c) as f64 / total as f64);
         }
     }
-    pos
+    scales
 }
 
-// ---------------------------------------------------------------------------
-// ZoomQuad layout — nested d-pad quadrants; the address IS the position.
-// ---------------------------------------------------------------------------
-
-/// Child scale per depth; the four children sit in a d-pad diamond inside the parent.
-const QUAD_SCALE: f32 = 0.34;
-/// Child center offset from the parent center, as a fraction of the parent size.
-const QUAD_OFFSET: f32 = 0.30;
-/// How much of the view the focus square fills — the rest is the parent ghosting
-/// past the edges.
-const QUAD_FOCUS_FILL: f32 = 0.58;
-
-/// A code's room in unit space (root = the unit square, y down so Up is up).
-fn quad_rect(code: &[ChordDir]) -> Rect {
-    let mut center = Vec2::splat(0.5);
-    let mut size = 1.0;
-    for &d in code {
-        center += dir_vec(d) * (size * QUAD_OFFSET);
-        size *= QUAD_SCALE;
+/// Every node's circle, root-down. The child offset is capped at `1 - child_radius`
+/// parent radii so a density-boosted circle nestles inward instead of poking out of
+/// its parent — containment is what makes the address readable.
+fn layout_circles(tree: &MapTree) -> Vec<Circle> {
+    let mut circles = vec![
+        Circle {
+            center: DVec2::ZERO,
+            radius: 1.0,
+        };
+        tree.nodes.len()
+    ];
+    // Parents precede children in node order (insert_path appends), so one forward
+    // pass sees every parent's circle before its children need it.
+    for n in 0..tree.nodes.len() {
+        let parent = circles[n];
+        let scales = child_scales(tree, n);
+        for (slot, &child) in tree.nodes[n].children.iter().enumerate() {
+            let Some(c) = child else { continue };
+            let shrink = CIRCLE_SHRINK * scales[slot];
+            let step = CIRCLE_STEP.min(1.0 - shrink);
+            circles[c] = Circle {
+                center: parent.center + dir_vec(DIRS[slot]) * (parent.radius * step),
+                radius: parent.radius * shrink,
+            };
+        }
     }
-    Rect::from_center_size(center, Vec2::splat(size))
-}
-
-fn quad_view(focus: &[ChordDir]) -> Rect {
-    let r = quad_rect(focus);
-    Rect::from_center_size(r.center(), r.size() / QUAD_FOCUS_FILL)
+    circles
 }
 
 // ---------------------------------------------------------------------------
-// CPU canvas — the one painter both disk layouts and the quadrants draw with.
+// CPU canvas.
 // ---------------------------------------------------------------------------
 
-const CANVAS_PX: usize = 460;
-const DISK_SCALE: f32 = 0.46 * CANVAS_PX as f32;
-const CANVAS_CENTER: Vec2 = Vec2::new(CANVAS_PX as f32 / 2.0, CANVAS_PX as f32 / 2.0);
+const CANVAS_PX: usize = 800;
 
 /// An inclusive canvas-clamped pixel span; empty ranges come out inverted and the
 /// `for` loops simply don't run.
@@ -478,7 +377,7 @@ struct Canvas {
 }
 
 impl Canvas {
-    /// Recycles `buf` (the previous frame's image data) — the ~850KB buffer
+    /// Recycles `buf` (the previous frame's image data) — the ~2.5MB buffer
     /// round-trips between the Image asset and the painter instead of being
     /// reallocated every open frame.
     fn new(mut buf: Vec<u8>) -> Self {
@@ -507,27 +406,6 @@ impl Canvas {
         self.px[i + 3] = ((da + (1.0 - da) * a) * 255.0) as u8;
     }
 
-    /// Anti-aliased thick segment via distance-to-segment over its bounding box.
-    fn line(&mut self, a: Vec2, b: Vec2, width: f32, c: [u8; 3], alpha: f32) {
-        let r = width / 2.0 + 1.0;
-        // Clamp every scan range to the canvas: a zoomquad ancestor rect at deep
-        // focus maps to a ~10^5-px box, and iterating it (even with blend()'s
-        // per-pixel reject) is a multi-ms stall per frame.
-        let (x0, x1) = clamp_span(a.x.min(b.x) - r, a.x.max(b.x) + r);
-        let (y0, y1) = clamp_span(a.y.min(b.y) - r, a.y.max(b.y) + r);
-        let ab = b - a;
-        let len2 = ab.length_squared().max(1e-6);
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                let p = Vec2::new(x as f32, y as f32);
-                let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
-                let d = (p - (a + ab * t)).length();
-                let cov = (width / 2.0 + 0.5 - d).clamp(0.0, 1.0);
-                self.blend(x, y, c, cov * alpha);
-            }
-        }
-    }
-
     fn disc(&mut self, center: Vec2, radius: f32, c: [u8; 3], alpha: f32) {
         self.annulus(center, 0.0, radius, c, alpha);
     }
@@ -536,48 +414,36 @@ impl Canvas {
         self.annulus(center, radius - width / 2.0, radius + width / 2.0, c, alpha);
     }
 
+    /// Anti-aliased annulus, visiting only the band's own rows and, per row, only the
+    /// span(s) inside the outer edge and outside the inner hole. A zoomed-out
+    /// ancestor ring can be 10^5 px across — iterating its full bounding box (the
+    /// naive rasterizer) is a multi-ms stall per ring, while its on-canvas band is a
+    /// few thousand pixels.
     fn annulus(&mut self, center: Vec2, r0: f32, r1: f32, c: [u8; 3], alpha: f32) {
-        let r = r1 + 1.0;
-        let (x0, x1) = clamp_span(center.x - r, center.x + r);
-        let (y0, y1) = clamp_span(center.y - r, center.y + r);
+        let (y0, y1) = clamp_span(center.y - r1 - 1.0, center.y + r1 + 1.0);
         for y in y0..=y1 {
-            for x in x0..=x1 {
-                let d = (Vec2::new(x as f32, y as f32) - center).length();
-                let cov = (r1 + 0.5 - d).clamp(0.0, 1.0) * (d - r0 + 0.5).clamp(0.0, 1.0);
-                self.blend(x, y, c, cov * alpha);
+            let dy = y as f32 - center.y;
+            let out2 = (r1 + 1.0) * (r1 + 1.0) - dy * dy;
+            if out2 <= 0.0 {
+                continue;
             }
-        }
-    }
-
-    /// A soft radial splash — the atlas district tints.
-    fn soft_disc(&mut self, center: Vec2, radius: f32, c: [u8; 3], alpha: f32) {
-        let (x0, x1) = clamp_span(center.x - radius, center.x + radius);
-        let (y0, y1) = clamp_span(center.y - radius, center.y + radius);
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                let d = (Vec2::new(x as f32, y as f32) - center).length() / radius;
-                if d < 1.0 {
-                    let t = 1.0 - d * d;
-                    self.blend(x, y, c, alpha * t * t);
+            let half_out = out2.sqrt();
+            let hole2 = (r0 - 1.0).max(0.0).powi(2) - dy * dy;
+            let mut spans = [(center.x - half_out, center.x + half_out), (0.0, -1.0)];
+            if hole2 > 0.0 {
+                let half_in = hole2.sqrt();
+                spans = [
+                    (center.x - half_out, center.x - half_in),
+                    (center.x + half_in, center.x + half_out),
+                ];
+            }
+            for (lo, hi) in spans {
+                let (x0, x1) = clamp_span(lo, hi);
+                for x in x0..=x1 {
+                    let d = (Vec2::new(x as f32, y as f32) - center).length();
+                    let cov = (r1 + 0.5 - d).clamp(0.0, 1.0) * (d - r0 + 0.5).clamp(0.0, 1.0);
+                    self.blend(x, y, c, cov * alpha);
                 }
-            }
-        }
-    }
-
-    fn rect_stroke(&mut self, r: Rect, width: f32, c: [u8; 3], alpha: f32) {
-        let (a, b) = (r.min, r.max);
-        self.line(a, Vec2::new(b.x, a.y), width, c, alpha);
-        self.line(Vec2::new(b.x, a.y), b, width, c, alpha);
-        self.line(b, Vec2::new(a.x, b.y), width, c, alpha);
-        self.line(Vec2::new(a.x, b.y), a, width, c, alpha);
-    }
-
-    fn rect_fill(&mut self, r: Rect, c: [u8; 3], alpha: f32) {
-        let (x0, x1) = clamp_span(r.min.x, r.max.x - 1.0);
-        let (y0, y1) = clamp_span(r.min.y, r.max.y - 1.0);
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                self.blend(x, y, c, alpha);
             }
         }
     }
@@ -592,41 +458,11 @@ fn dir_color(d: ChordDir) -> [u8; 3] {
     }
 }
 
-/// rl#359: each direction is a note; rung index on the 4-rung pitch glyph, L lowest.
-fn pitch(d: ChordDir) -> usize {
-    match d {
-        ChordDir::Left => 0,
-        ChordDir::Down => 1,
-        ChordDir::Right => 2,
-        ChordDir::Up => 3,
-    }
+/// A code's family color — the submission mock tints a whole wing by its first
+/// press, so "the sky wing is blue" reads at every depth.
+fn family_color(code: &[ChordDir]) -> [u8; 3] {
+    code.first().map_or([150, 158, 172], |&d| dir_color(d))
 }
-
-/// The hyperatlas's named districts — a name appears once a discovery lies DEEPER
-/// than the district's gate node (≥2 discovered nodes under the prefix).
-const DISTRICTS: [(&[ChordDir], &str, [u8; 3]); 5] = [
-    (&[ChordDir::Up], "Sky Harbor", [46, 96, 128]),
-    (
-        &[ChordDir::Up, ChordDir::Up],
-        "Render Observatory",
-        [70, 80, 140],
-    ),
-    (
-        &[ChordDir::Down, ChordDir::Up],
-        "Night-Bloom Garden",
-        [128, 62, 118],
-    ),
-    (
-        &[ChordDir::Down, ChordDir::Left],
-        "Loam Quarter",
-        [120, 88, 44],
-    ),
-    (
-        &[ChordDir::Down, ChordDir::Right],
-        "The Watershed",
-        [34, 108, 98],
-    ),
-];
 
 // ---------------------------------------------------------------------------
 // Live state + systems.
@@ -636,56 +472,51 @@ const DISTRICTS: [(&[ChordDir], &str, [u8; 3]); 5] = [
 /// node bloom in.
 const LINGER_ACCEPTED_S: f32 = 2.4;
 const LINGER_UNKNOWN_S: f32 = 0.8;
-/// Sized above the worst case: every registry command discovered (24) plus every
-/// district name (5). Overflow drops the lowest-anchored labels silently — grow
-/// this with the registry.
-const LABEL_POOL: usize = 34;
+/// Room labels on screen at once; only circles big enough to read as places get
+/// one, so the visible set stays small. Overflow drops labels silently.
+const LABEL_POOL: usize = 12;
+/// A discovered room's label appears once its circle is this big on the canvas —
+/// the text-free directive's one concession, gated to the zoomed-in reading.
+const LABEL_MIN_RADIUS_PX: f64 = 90.0;
+/// How much of the view the focus circle's diameter fills — the rest is ancestors
+/// ghosting past the edges.
+const FOCUS_FILL: f64 = 0.58;
 
 #[derive(Resource)]
 pub struct ChordMapState {
-    pub layout: MapLayout,
     visible: f32,
     linger: f32,
     focus: Vec<ChordDir>,
-    /// Animated disk positions, keyed by code — both hyperbolic variants glide
-    /// through it (the interpolation IS the Möbius-recenter animation).
-    hyper_pos: HashMap<Vec<ChordDir>, Vec2>,
-    /// Animated zoomquad camera, unit space.
-    view: Rect,
+    /// Animated camera: world center + view width (world units per canvas side).
+    view_center: DVec2,
+    view_size: f64,
     /// The just-discovered code and its age — drives the bloom highlight.
     bloom: Option<(Vec<ChordDir>, f32)>,
     was_open: bool,
 }
 
-impl ChordMapState {
-    pub fn new(layout: MapLayout) -> Self {
+impl Default for ChordMapState {
+    fn default() -> Self {
         Self {
-            layout,
             visible: 0.0,
             linger: 0.0,
             focus: Vec::new(),
-            hyper_pos: HashMap::new(),
-            view: Rect::from_center_size(Vec2::splat(0.5), Vec2::ONE),
+            view_center: DVec2::ZERO,
+            view_size: ROOT_VIEW_SIZE,
             bloom: None,
             was_open: false,
         }
     }
 }
 
-impl Default for ChordMapState {
-    fn default() -> Self {
-        Self::new(MapLayout::default())
-    }
-}
+/// The root view: the unit circle's diameter at [`FOCUS_FILL`].
+const ROOT_VIEW_SIZE: f64 = 2.0 / FOCUS_FILL;
 
 #[derive(Resource)]
 struct ChordMapCanvas(Handle<Image>);
 
 #[derive(Component)]
 struct ChordMapPanel;
-
-#[derive(Component)]
-struct ChordMapHeader;
 
 #[derive(Component)]
 struct ChordMapLabel;
@@ -713,35 +544,30 @@ fn spawn_chord_map(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     );
     let handle = images.add(image);
     commands.insert_resource(ChordMapCanvas(handle.clone()));
+    // Full-screen (the owner's 2026-08-12 amendment): a dark backdrop over the whole
+    // window with the square canvas letterboxed to the short screen edge, so circles
+    // stay circles on any aspect ratio.
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(24.0),
-                top: Val::Px(96.0),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(Val::Px(10.0)),
-                row_gap: Val::Px(6.0),
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 display: Display::None,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.03, 0.05, 0.78)),
+            BackgroundColor(Color::srgba(0.015, 0.02, 0.04, 0.88)),
             ChordMapPanel,
         ))
         .with_children(|panel| {
-            panel.spawn((
-                Text::new(""),
-                TextFont {
-                    font_size: 15.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.85, 0.87, 0.8)),
-                ChordMapHeader,
-            ));
             panel
                 .spawn(Node {
-                    width: Val::Px(CANVAS_PX as f32),
-                    height: Val::Px(CANVAS_PX as f32),
+                    height: Val::Percent(100.0),
+                    aspect_ratio: Some(1.0),
                     ..default()
                 })
                 .with_children(|frame| {
@@ -749,52 +575,59 @@ fn spawn_chord_map(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                         ImageNode::new(handle),
                         Node {
                             position_type: PositionType::Absolute,
-                            width: Val::Px(CANVAS_PX as f32),
-                            height: Val::Px(CANVAS_PX as f32),
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
                             ..default()
                         },
                     ));
+                    // Label anchors are percent-of-frame with a centering flex
+                    // wrapper, so they track the canvas at any window size with no
+                    // pixel math against the laid-out node.
                     for _ in 0..LABEL_POOL {
-                        frame.spawn((
-                            Text::new(""),
-                            TextFont {
-                                font_size: 13.0,
-                                ..default()
-                            },
-                            TextColor(Color::srgba(0.9, 0.9, 0.85, 1.0)),
-                            Node {
-                                position_type: PositionType::Absolute,
-                                display: Display::None,
-                                ..default()
-                            },
-                            ChordMapLabel,
-                        ));
+                        frame
+                            .spawn((
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    width: Val::Percent(40.0),
+                                    justify_content: JustifyContent::Center,
+                                    display: Display::None,
+                                    ..default()
+                                },
+                                ChordMapLabel,
+                            ))
+                            .with_children(|wrap| {
+                                wrap.spawn((
+                                    Text::new(""),
+                                    TextFont {
+                                        font_size: 16.0,
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgba(0.92, 0.92, 0.86, 1.0)),
+                                ));
+                            });
                     }
                 });
         });
 }
 
-/// One label to place this frame: canvas px anchor, text, srgba color.
+/// One label to place this frame: canvas px anchor (label centers under it), text.
 struct LabelReq {
     at: Vec2,
-    text: String,
-    color: Color,
-    centered: bool,
+    text: &'static str,
+    alpha: f32,
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn drive_chord_map(
     time: Res<Time>,
     chords: Res<Chords<GcrControls>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    pads: Query<&Gamepad>,
     mut discovered: ResMut<DiscoveredCodes>,
     mut state: ResMut<ChordMapState>,
     canvas_handle: Res<ChordMapCanvas>,
     mut images: ResMut<Assets<Image>>,
     mut panel: Query<&mut Node, (With<ChordMapPanel>, Without<ChordMapLabel>)>,
-    mut header: Query<&mut Text, (With<ChordMapHeader>, Without<ChordMapLabel>)>,
-    mut labels: Query<(&mut Node, &mut Text, &mut TextColor), With<ChordMapLabel>>,
+    mut labels: Query<(&mut Node, &Children), With<ChordMapLabel>>,
+    mut texts: Query<(&mut Text, &mut TextColor)>,
 ) {
     let dt = time.delta_secs();
 
@@ -812,17 +645,14 @@ fn drive_chord_map(
     }
     // A live capture holds the map open DIRECTLY — not via the linger timer, which
     // a single ≥100ms frame would outrun, closing the map mid-entry and resetting
-    // the glide exactly when a slow frame made it most confusing. `capturing()`,
-    // not `entered().is_some()`: a poisoned (overflowed) capture has no honest
-    // prefix but the modifier is still held — the map stays up, frozen on the last
-    // honest focus, matching the chord menu's cancel hint.
+    // the zoom exactly when a slow frame made it most confusing.
     let capturing = chords.capturing();
     if let Some(entered) = chords.entered() {
         if !state.was_open {
-            // Fresh open: start the glide from the root pose, not wherever the last
+            // Fresh open: start the zoom from the root pose, not wherever the last
             // linger left off.
-            state.hyper_pos.clear();
-            state.view = Rect::from_center_size(Vec2::splat(0.5), Vec2::ONE);
+            state.view_center = DVec2::ZERO;
+            state.view_size = ROOT_VIEW_SIZE;
             state.bloom = None;
         }
         state.focus = entered.to_vec();
@@ -838,14 +668,6 @@ fn drive_chord_map(
         *age += dt;
     }
 
-    // Live layout cycling — the A/B switch, reachable without leaving the map.
-    if open
-        && (keys.just_pressed(LAYOUT_CYCLE_KEY)
-            || pads.iter().any(|gp| gp.just_pressed(LAYOUT_CYCLE_PAD)))
-    {
-        state.layout = state.layout.next();
-    }
-
     let Ok(mut panel_node) = panel.single_mut() else {
         return;
     };
@@ -857,268 +679,148 @@ fn drive_chord_map(
     }
     panel_node.display = Display::Flex;
 
-    if let Ok(mut text) = header.single_mut() {
-        let want = format!(
-            "chord map · {}   ({} found · M / R3: next layout)",
-            state.layout.label(),
-            discovered.codes().len()
-        );
-        if text.0 != want {
-            text.0 = want;
-        }
-    }
-
     let focus_code = state.focus.clone();
     let tree = MapTree::build(discovered.codes(), &focus_code);
     let focus = tree
         .index_of(&focus_code)
         .expect("the entered path was just inserted into the tree");
+    let circles = layout_circles(&tree);
+
+    // Camera glide toward the focus circle, zoom in log space so a multi-level dive
+    // moves at constant perceived speed.
+    let target_center = circles[focus].center;
+    let target_size = 2.0 * circles[focus].radius / FOCUS_FILL;
+    let ease = 1.0 - (-dt as f64 * 9.0).exp();
+    let center_step = (target_center - state.view_center) * ease;
+    state.view_center += center_step;
+    state.view_size =
+        (state.view_size.ln() + (target_size.ln() - state.view_size.ln()) * ease).exp();
+    let view_center = state.view_center;
+    let scale = CANVAS_PX as f64 / state.view_size;
+    // World → canvas px in f64; only the view-relative offset drops to f32, so deep
+    // circles keep their sub-radius precision.
+    let to_px = |p: DVec2| -> Vec2 {
+        let rel = (p - view_center) * scale;
+        Vec2::new(
+            rel.x as f32 + CANVAS_PX as f32 / 2.0,
+            rel.y as f32 + CANVAS_PX as f32 / 2.0,
+        )
+    };
 
     let Some(image) = images.get_mut(&canvas_handle.0) else {
         return;
     };
     let mut canvas = Canvas::new(image.data.take().unwrap_or_default());
-    canvas.fill([6, 8, 13, 235]);
+    canvas.fill([6, 8, 13, 242]);
     let alpha = state.visible;
     let mut label_reqs: Vec<LabelReq> = Vec::new();
 
-    match state.layout {
-        MapLayout::Hyperbolic | MapLayout::HyperAtlas => {
-            let atlas = state.layout == MapLayout::HyperAtlas;
-            let target = layout_hyperbolic(&tree, focus);
-            // Glide: every node eases toward its re-rooted position; a new node
-            // grows out of its parent's current position.
-            let ease = 1.0 - (-dt * 9.0).exp();
-            let mut animated = vec![Vec2::ZERO; tree.nodes.len()];
-            for (i, node) in tree.nodes.iter().enumerate() {
-                let spawn_at = node
-                    .parent
-                    .and_then(|(p, _)| state.hyper_pos.get(&tree.nodes[p].code))
-                    .copied()
-                    .unwrap_or(target[i]);
-                let cur = state.hyper_pos.get(&node.code).copied().unwrap_or(spawn_at);
-                animated[i] = cur + (target[i] - cur) * ease;
-            }
-            state.hyper_pos = tree
-                .nodes
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.code.clone(), animated[i]))
-                .collect();
-            let to_px = |z: Vec2| CANVAS_CENTER + z * DISK_SCALE;
-
-            canvas.ring(CANVAS_CENTER, DISK_SCALE, 1.5, [46, 54, 70], 0.6 * alpha);
-            if atlas {
-                for (prefix, name, color) in DISTRICTS {
-                    let members: Vec<Vec2> = tree
-                        .nodes
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, n)| !n.provisional && n.code.starts_with(prefix))
-                        .map(|(i, _)| to_px(animated[i]))
-                        .collect();
-                    // The district exists once something DEEPER than its gate is found.
-                    if members.len() < 2 {
-                        continue;
-                    }
-                    for &m in &members {
-                        canvas.soft_disc(m, 46.0, color, 0.16 * alpha);
-                    }
-                    let centroid = members.iter().sum::<Vec2>() / members.len() as f32;
-                    label_reqs.push(LabelReq {
-                        at: centroid + Vec2::new(0.0, -30.0),
-                        text: name.to_string(),
-                        color: Color::srgba(
-                            color[0] as f32 / 160.0,
-                            color[1] as f32 / 160.0,
-                            color[2] as f32 / 160.0,
-                            0.75 * alpha,
-                        ),
-                        centered: true,
-                    });
-                }
-            }
-
-            for (i, node) in tree.nodes.iter().enumerate() {
-                let Some((p, d)) = node.parent else {
-                    continue;
-                };
-                let (a, b) = (to_px(animated[p]), to_px(animated[i]));
-                let on_path = focus_code.starts_with(&node.code) || i == focus;
-                let dim = if node.provisional {
-                    0.35
-                } else if on_path {
-                    1.0
-                } else {
-                    0.7
-                };
-                let depth_fade = 1.0 / (1.0 + 0.12 * node.code.len() as f32);
-                let width = if on_path { 3.0 } else { 2.0 };
-                canvas.line(a, b, width, dir_color(d), dim * depth_fade * alpha);
-                if atlas && !node.provisional {
-                    // Pitch glyph: 4 rungs at the edge midpoint, the step's note lit.
-                    let mid = (a + b) / 2.0;
-                    for rung in 0..4 {
-                        let at = mid + Vec2::new(0.0, 6.0 - 4.0 * rung as f32);
-                        let lit = rung == pitch(d);
-                        canvas.disc(
-                            at,
-                            if lit { 2.0 } else { 1.2 },
-                            if lit { dir_color(d) } else { [120, 125, 135] },
-                            (if lit { 0.9 } else { 0.4 }) * alpha,
-                        );
-                    }
-                }
-            }
-            for (i, node) in tree.nodes.iter().enumerate() {
-                let at = to_px(animated[i]);
-                if node.provisional {
-                    canvas.ring(at, 4.0, 1.5, [150, 155, 165], 0.6 * alpha);
-                } else if node.command.is_some() {
-                    let r = if atlas { 6.5 } else { 5.5 };
-                    canvas.disc(at, r, [235, 232, 218], 0.95 * alpha);
-                } else {
-                    canvas.disc(at, 3.0, [150, 160, 175], 0.8 * alpha);
-                }
-                if let Some(label) = node.command
-                    && animated[i].length() < 0.94
-                {
-                    label_reqs.push(LabelReq {
-                        at: at + Vec2::new(9.0, -8.0),
-                        text: label.to_string(),
-                        color: Color::srgba(0.9, 0.9, 0.85, 0.9 * alpha),
-                        centered: false,
-                    });
-                }
-            }
-            canvas.ring(to_px(animated[focus]), 11.0, 2.0, [240, 235, 210], alpha);
-            if let Some((code, age)) = &state.bloom
-                && let Some(i) = tree.index_of(code)
+    // Shallow-first (node order): deep circles draw over ancestor ghosts.
+    for (i, node) in tree.nodes.iter().enumerate() {
+        let c = circles[i];
+        let px_r = c.radius * scale;
+        let at = to_px(c.center);
+        let off_canvas = at.x + px_r as f32 + 1.0 < 0.0
+            || at.y + px_r as f32 + 1.0 < 0.0
+            || at.x - px_r as f32 - 1.0 > CANVAS_PX as f32
+            || at.y - px_r as f32 - 1.0 > CANVAS_PX as f32;
+        if px_r < 2.5 || off_canvas {
+            continue;
+        }
+        let color = family_color(&node.code);
+        // Huge ancestor rings ghost past the edges instead of shouting.
+        let ghost = if px_r > CANVAS_PX as f64 * 0.6 {
+            0.3
+        } else {
+            1.0
+        };
+        let stroke = (px_r / 40.0).clamp(1.5, 4.0) as f32;
+        if node.provisional {
+            canvas.ring(at, px_r as f32, stroke, [150, 155, 165], 0.45 * alpha);
+        } else {
+            canvas.ring(
+                at,
+                px_r as f32,
+                stroke,
+                color,
+                (0.75 * ghost * alpha) as f32,
+            );
+        }
+        if node.command.is_some() && !node.provisional {
+            // A discovered room: a filled heart, the submission's landmark mark.
+            let rr = (px_r * 0.28).min(px_r - 1.0) as f32;
+            canvas.disc(at, rr, color, 0.55 * ghost as f32 * alpha);
+            canvas.disc(at, rr * 0.45, [235, 232, 218], 0.9 * ghost as f32 * alpha);
+            if px_r > LABEL_MIN_RADIUS_PX
+                && let Some(label) = node.command
             {
-                let t = (age / 1.2).min(1.0);
-                canvas.ring(
-                    to_px(animated[i]),
-                    12.0 + t * 30.0,
-                    2.5,
-                    [255, 240, 180],
-                    (1.0 - t) * alpha,
-                );
-            }
-            if atlas {
-                // The entered code as a melody on a tiny staff, bottom-left.
-                let base = Vec2::new(20.0, CANVAS_PX as f32 - 16.0);
-                canvas.line(
-                    base,
-                    base + Vec2::new(14.0 * 8.0, 0.0),
-                    1.0,
-                    [70, 76, 90],
-                    0.7 * alpha,
-                );
-                for (i, &d) in focus_code.iter().enumerate() {
-                    let at = base + Vec2::new(6.0 + 14.0 * i as f32, -6.0 - 7.0 * pitch(d) as f32);
-                    canvas.disc(at, 3.0, dir_color(d), 0.9 * alpha);
-                }
+                label_reqs.push(LabelReq {
+                    at: at + Vec2::new(0.0, rr + 10.0),
+                    text: label,
+                    alpha: 0.9 * alpha,
+                });
             }
         }
-        MapLayout::ZoomQuad => {
-            let target = quad_view(&focus_code);
-            let ease = 1.0 - (-dt * 9.0).exp();
-            let center = state.view.center() + (target.center() - state.view.center()) * ease;
-            // Zoom in log space so a multi-level dive glides at constant speed.
-            let size = state.view.size().x.max(1e-6).ln()
-                + (target.size().x.max(1e-6).ln() - state.view.size().x.max(1e-6).ln()) * ease;
-            state.view = Rect::from_center_size(center, Vec2::splat(size.exp()));
-            let view = state.view;
-            let to_px = |p: Vec2| (p - view.min) / view.size().x.max(1e-9) * CANVAS_PX as f32;
-
-            for (i, node) in tree.nodes.iter().enumerate() {
-                let r = quad_rect(&node.code);
-                let px = Rect {
-                    min: to_px(r.min),
-                    max: to_px(r.max),
-                };
-                let w = px.size().x;
-                if w < 5.0
-                    || px.max.x < 0.0
-                    || px.max.y < 0.0
-                    || px.min.x > CANVAS_PX as f32
-                    || px.min.y > CANVAS_PX as f32
-                {
+        if i == focus {
+            canvas.ring(at, px_r as f32 + 5.0, 2.5, [240, 235, 210], alpha);
+        }
+        if let Some((code, age)) = &state.bloom
+            && *code == node.code
+        {
+            let t = (age / 1.2).min(1.0);
+            canvas.ring(
+                at,
+                px_r as f32 + 6.0 + t * 40.0,
+                3.0,
+                [255, 240, 180],
+                (1.0 - t) * alpha,
+            );
+        }
+        // Undiscovered directions as quiet seed rings (rl#380: empty space stays
+        // quiet) — only inside a discovered circle that's big on screen, so the
+        // sparse space whispers "it keeps going" without teasing content.
+        if !node.provisional && px_r > SEED_MIN_PARENT_PX {
+            for (slot, &child) in node.children.iter().enumerate() {
+                if child.is_some() {
                     continue;
                 }
-                let last = node.code.last().copied();
-                let tint = last.map_or([90, 96, 110], dir_color);
-                if node.provisional {
-                    canvas.rect_stroke(px, 1.5, [150, 155, 165], 0.45 * alpha);
-                } else if node.command.is_some() {
-                    canvas.rect_fill(px, tint, 0.10 * alpha);
-                    canvas.rect_stroke(px, 2.0, tint, 0.85 * alpha);
-                } else {
-                    canvas.rect_stroke(px, 1.5, tint, 0.5 * alpha);
-                }
-                if i == focus {
-                    canvas.rect_stroke(px.inflate(3.0), 2.5, [240, 235, 210], alpha);
-                }
-                if let Some((code, age)) = &state.bloom
-                    && *code == node.code
-                {
-                    let t = (age / 1.2).min(1.0);
-                    canvas.rect_stroke(
-                        px.inflate(3.0 + t * 22.0),
-                        2.5,
-                        [255, 240, 180],
-                        (1.0 - t) * alpha,
-                    );
-                }
-                if let Some(label) = node.command
-                    && w > 84.0
-                {
-                    label_reqs.push(LabelReq {
-                        at: px.center(),
-                        text: label.to_string(),
-                        color: Color::srgba(0.92, 0.92, 0.86, 0.9 * alpha),
-                        centered: true,
-                    });
-                }
+                let sr = c.radius * CIRCLE_SHRINK * SEED_SHRINK;
+                let sc = c.center + dir_vec(DIRS[slot]) * (c.radius * CIRCLE_STEP);
+                canvas.ring(
+                    to_px(sc),
+                    (sr * scale) as f32,
+                    1.0,
+                    [120, 128, 140],
+                    0.12 * alpha,
+                );
             }
         }
     }
 
     image.data = Some(canvas.px);
 
-    // De-overlap: a sparse map crowds labels around the hub — nudge later labels
-    // down until nothing horizontally-close sits within a line height.
-    label_reqs.sort_by(|a, b| a.at.y.total_cmp(&b.at.y));
-    for i in 1..label_reqs.len() {
-        for j in 0..i {
-            let dx = (label_reqs[i].at.x - label_reqs[j].at.x).abs();
-            let dy = label_reqs[i].at.y - label_reqs[j].at.y;
-            if dx < 110.0 && dy.abs() < 14.0 {
-                label_reqs[i].at.y = label_reqs[j].at.y + 14.0;
-            }
-        }
-    }
-
+    // Labels: percent-anchored wrappers (each centers its text), nearest-first so
+    // pool overflow drops the farthest.
     let mut pool = labels.iter_mut();
     for req in label_reqs.into_iter().take(LABEL_POOL) {
-        let Some((mut node, mut text, mut color)) = pool.next() else {
+        let Some((mut node, children)) = pool.next() else {
             break;
         };
-        // No measured text size pre-layout; approximate centering by glyph count.
-        let offset = if req.centered {
-            Vec2::new(req.text.len() as f32 * 3.4, 8.0)
-        } else {
-            Vec2::ZERO
-        };
-        node.left = Val::Px(req.at.x - offset.x);
-        node.top = Val::Px(req.at.y - offset.y);
+        // The wrapper is 40% wide and centers its content: anchor its center on the
+        // canvas point.
+        node.left = Val::Percent((req.at.x / CANVAS_PX as f32 * 100.0) - 20.0);
+        node.top = Val::Percent(req.at.y / CANVAS_PX as f32 * 100.0);
         node.display = Display::Flex;
-        if text.0 != req.text {
-            text.0 = req.text;
+        if let Some(&child) = children.first()
+            && let Ok((mut text, mut color)) = texts.get_mut(child)
+        {
+            if text.0 != req.text {
+                text.0 = req.text.to_string();
+            }
+            color.0 = Color::srgba(0.92, 0.92, 0.86, req.alpha);
         }
-        color.0 = req.color;
     }
-    for (mut node, _, _) in pool {
+    for (mut node, _) in pool {
         if node.display != Display::None {
             node.display = Display::None;
         }
@@ -1180,134 +882,77 @@ mod tests {
         assert!(tree.index_of(&[U, R]).is_none(), "no teaser branches");
     }
 
-    /// The button-true requirement (rl#358 owner directive): every exit of the FOCUS
-    /// leaves in exactly its physical button direction.
+    /// The circular address scheme: children nest inside the parent circle in their
+    /// d-pad direction, strictly contained, shrinking with depth — button-true by
+    /// construction.
     #[test]
-    fn hyperbolic_focus_exits_match_button_directions() {
-        let tree = MapTree::build(&set(&[&[U, U, U], &[U, U, D], &[U, L], &[D, D]]), &[U, U]);
-        let focus = tree.index_of(&[U, U]).unwrap();
-        let pos = layout_hyperbolic(&tree, focus);
-        assert!(pos[focus].length() < 1e-6, "focus sits at the center");
-        for (child_code, d) in [(vec![U, U, U], U), (vec![U, U, D], D)] {
-            let c = tree.index_of(&child_code).unwrap();
-            let v = pos[c].normalize();
-            let want = dir_vec(d);
+    fn circles_nest_in_button_directions() {
+        let tree = MapTree::build(&set(&[&[U], &[D], &[L], &[R], &[D, U], &[D, U, U, U]]), &[]);
+        let circles = layout_circles(&tree);
+        for d in DIRS {
+            let c = circles[tree.index_of(&[d]).unwrap()];
+            let delta = c.center.normalize();
+            assert!(delta.dot(dir_vec(d)) > 0.999, "{d:?} circle off-axis");
             assert!(
-                v.dot(want) > 0.999,
-                "child {child_code:?} leaves at {v:?}, want {want:?}"
+                c.center.length() + c.radius <= 1.0 + 1e-9,
+                "{d:?} circle escapes its parent"
             );
         }
-        // Back-edge reads true too: focus UU was entered by pressing U from U, so U
-        // (the parent) sits in the Down direction.
-        let parent = tree.index_of(&[U]).unwrap();
-        assert!(pos[parent].normalize().dot(dir_vec(D)) > 0.999);
-    }
-
-    /// When a child and the back-edge share a direction (UU's parent is down AND its
-    /// D child is down), both stay collinear — direction never lies — with the
-    /// parent pushed farther out so the nodes stay distinct.
-    #[test]
-    fn hyperbolic_backedge_collision_stays_true_but_separates() {
-        let tree = MapTree::build(&set(&[&[U, U, D]]), &[U, U]);
-        let focus = tree.index_of(&[U, U]).unwrap();
-        let pos = layout_hyperbolic(&tree, focus);
-        let child = tree.index_of(&[U, U, D]).unwrap();
-        let parent = tree.index_of(&[U]).unwrap();
-        assert!(pos[child].normalize().dot(dir_vec(D)) > 0.999);
-        assert!(pos[parent].normalize().dot(dir_vec(D)) > 0.999);
+        let deep = circles[tree.index_of(&[D, U, U, U]).unwrap()];
+        let mid = circles[tree.index_of(&[D, U]).unwrap()];
         assert!(
-            pos[parent].length() > pos[child].length() + 0.1,
-            "parent {} vs child {}",
-            pos[parent].length(),
-            pos[child].length()
+            (deep.center - mid.center).length() + deep.radius <= mid.radius + 1e-9,
+            "a room must sit inside every ancestor circle"
         );
+        assert!(deep.radius < mid.radius);
     }
 
-    /// Every placed node stays inside the open disk (Poincaré positions are only
-    /// meaningful there), across a deep discovered tree.
+    /// rl#380 density sizing: at a fork whose only known continuation is one
+    /// direction, that child renders LARGER than a sibling on an evenly-split fork —
+    /// and every density-boosted circle still nests inside its parent.
     #[test]
-    fn hyperbolic_positions_stay_in_the_disk() {
-        let codes: Vec<Vec<ChordDir>> = GCR_CHORDS
-            .entries()
-            .iter()
-            .map(|e| e.code.to_vec())
-            .collect();
-        let all: BTreeSet<_> = codes.into_iter().collect();
-        for focus_code in [vec![], vec![D], vec![D, U, U], vec![U, U, D, D, L, R]] {
-            let tree = MapTree::build(&all, &focus_code);
-            let focus = tree.index_of(&focus_code).unwrap();
-            let pos = layout_hyperbolic(&tree, focus);
-            for (i, z) in pos.iter().enumerate() {
-                // Strictly inside the open disk — far nodes crowd the rim
-                // exponentially (that's the projection working), so the bound is
-                // the model's, not a pixel margin.
-                assert!(
-                    z.length() < 1.0,
-                    "node {:?} at {z:?} escaped the disk (focus {focus_code:?})",
-                    tree.nodes[i].code
-                );
-            }
-        }
-    }
-
-    /// Distinct codes land on distinct places — the re-rooted layout must not fold
-    /// two nodes onto one point (the failure the naive globally-true layout has).
-    #[test]
-    fn hyperbolic_positions_are_distinct() {
-        let all: BTreeSet<_> = GCR_CHORDS
-            .entries()
-            .iter()
-            .map(|e| e.code.to_vec())
-            .collect();
-        let tree = MapTree::build(&all, &[]);
-        let pos = layout_hyperbolic(&tree, 0);
-        for i in 0..pos.len() {
-            for j in i + 1..pos.len() {
-                assert!(
-                    (pos[i] - pos[j]).length() > 1e-3,
-                    "{:?} and {:?} collide at {:?}",
-                    tree.nodes[i].code,
-                    tree.nodes[j].code,
-                    pos[i]
-                );
-            }
+    fn sole_known_fork_child_renders_larger() {
+        // Root forks evenly (U and D each carry one code); D's subtree then has a
+        // sole continuation (DU) three deep.
+        let tree = MapTree::build(&set(&[&[U, L], &[D, U, U, U]]), &[]);
+        let circles = layout_circles(&tree);
+        let even = circles[tree.index_of(&[U]).unwrap()];
+        let sole = circles[tree.index_of(&[D, U]).unwrap()];
+        let d = circles[tree.index_of(&[D]).unwrap()];
+        // DU is D's only child → full share; U splits the root with D → half share.
+        assert!(
+            sole.radius / d.radius > even.radius / 1.0 + 0.1,
+            "sole continuation {:.3} of parent vs even fork {:.3}",
+            sole.radius / d.radius,
+            even.radius
+        );
+        for (i, c) in circles.iter().enumerate().skip(1) {
+            let parent = circles[tree.parent_of(i).unwrap()];
+            assert!(
+                (c.center - parent.center).length() + c.radius <= parent.radius + 1e-9,
+                "{:?} escapes its parent",
+                tree.nodes[i].code
+            );
         }
     }
 
-    /// The quadrant address scheme: children sit in their d-pad direction inside the
-    /// parent, nested strictly (a room is contained by every ancestor).
+    /// Uncapped codes (rl#380): a deep address keeps a distinct, positive-radius
+    /// circle strictly inside its parent — the f64 geometry doesn't collapse where
+    /// f32 would (child offsets fall below f32 epsilon around depth 14).
     #[test]
-    fn quad_rects_nest_in_button_directions() {
-        for d in DIRS {
-            let child = quad_rect(&[d]);
-            let root = quad_rect(&[]);
-            let delta = (child.center() - root.center()).normalize();
-            assert!(delta.dot(dir_vec(d)) > 0.999, "{d:?} room off-axis");
-            assert!(root.contains(child.min) && root.contains(child.max));
+    fn deep_codes_keep_distinct_circles() {
+        let code: Vec<ChordDir> = (0..24).map(|i| [U, R, D, L][i % 4]).collect();
+        let tree = MapTree::build(&set(&[&code]), &[]);
+        let circles = layout_circles(&tree);
+        for depth in 1..=24 {
+            let i = tree.index_of(&code[..depth]).unwrap();
+            let p = tree.parent_of(i).unwrap();
+            let (c, parent) = (circles[i], circles[p]);
+            assert!(c.radius > 0.0, "depth {depth} radius collapsed");
+            assert!(
+                (c.center - parent.center).length() > c.radius * 0.1,
+                "depth {depth} lost its offset from the parent"
+            );
         }
-        let deep = quad_rect(&[D, U, U, U]);
-        let mid = quad_rect(&[D, U]);
-        assert!(mid.contains(deep.min) && mid.contains(deep.max));
-        assert!(deep.size().x < mid.size().x);
-    }
-
-    #[test]
-    fn layout_ids_round_trip_and_cycle_covers_all() {
-        for (id, l) in [
-            ("hyperbolic", MapLayout::Hyperbolic),
-            ("zoomquad", MapLayout::ZoomQuad),
-            ("hyperatlas", MapLayout::HyperAtlas),
-        ] {
-            assert_eq!(MapLayout::from_id(id), Ok(l));
-        }
-        assert!(MapLayout::from_id("nope").is_err());
-        let mut l = MapLayout::Hyperbolic;
-        let mut seen = Vec::new();
-        for _ in 0..3 {
-            seen.push(l);
-            l = l.next();
-        }
-        assert_eq!(l, MapLayout::Hyperbolic);
-        assert_eq!(seen.len(), 3);
     }
 }
