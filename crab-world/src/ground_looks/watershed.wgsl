@@ -5,7 +5,7 @@
 // ground STATE in one place.
 //
 //   STATES — a soft partition; a fragment is in exactly one
-//   slope                  →  exposed banded rock
+//   slope                  →  bare streaked scree
 //   moisture, dry end      →  cracked clay plates, cobble  cracked_loam
 //   moisture, wet end      →  soaked basins, puddles       wet_nocturne
 //   moisture, wettest+veg  →  bioluminescent vein webs     night_bloom
@@ -39,14 +39,13 @@
 // layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
 // (ground.rs). Designs B (naturalist) and C (nocturne) are param rows over this
 // one module (`GroundLook::params`), never forks. Watershed's own row is
-// all-ones: every use below multiplies or gates on a lane, so Design A renders
-// bit-identically to the pre-params shader.
+// all-ones: every use below multiplies or gates on a lane.
 
 #define_import_path rl::ground::looks::watershed
 
 // strengths lanes here: x macro provinces + moisture contrast, y meso structure
-// (strata/plates/comb), z near-field (cobble/fiber/dew, and the scaffold's
-// grain gain), w detail normal (ledges/cobble, and the scaffold's relief gain)
+// (plates/comb/scree flow), z near-field (cobble/fiber/dew, and the scaffold's
+// grain gain), w detail normal (cobble, and the scaffold's relief gain)
 // — all normalized to S = strengths / STRENGTH_DEFAULTS.
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade, sparkle}
 #import rl::ground::art::{GroundCtx, GroundArt, STRENGTH_DEFAULTS, default_art}
@@ -97,30 +96,10 @@ fn vein(n: f32, width: f32) -> f32 {
     return 1.0 - smoothstep(0.0, width, abs(n));
 }
 
-// The strata palette, cyclic: rust → ochre → bone → slate-violet → rust. Linear
-// RGB, dim enough that moon-sun + ambient exposure lands them as deep mineral
-// color, not paint.
-fn strata_color(t: f32) -> vec3<f32> {
-    let rust = vec3(0.44, 0.15, 0.07);
-    let ochre = vec3(0.58, 0.35, 0.11);
-    let bone = vec3(0.62, 0.54, 0.40);
-    let slate = vec3(0.13, 0.12, 0.24);
-    let u = fract(t) * 4.0;
-    if u < 1.0 {
-        return mix(rust, ochre, smoothstep(0.0, 1.0, u));
-    } else if u < 2.0 {
-        return mix(ochre, bone, smoothstep(0.0, 1.0, u - 1.0));
-    } else if u < 3.0 {
-        return mix(bone, slate, smoothstep(0.0, 1.0, u - 2.0));
-    }
-    return mix(slate, rust, smoothstep(0.0, 1.0, u - 3.0));
-}
-
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let wp = ctx.wp;
     let p = ctx.p;
     let fw = ctx.fw;
-    let fw_y = ctx.fw_y;
 
     let base = ctx.base;
     var rgb = base;
@@ -135,8 +114,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     // uniform control flow and a disabled language costs nothing.
     let bloom_gain = params[0].x;
     let cellular = params[0].y;
-    let strata_chroma = params[0].z;
-    let hue_tilt = params[0].w;
+    let hue_tilt = params[0].z;
 
     // ── The shared field stack ─────────────────────────────────────────────
     let n_geo = ctx.n_geo;
@@ -227,41 +205,13 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         rgb *= vec3(1.0 + 0.12 * comb * comb_w, 1.0 + 0.04 * comb * comb_w, 1.0 - 0.08 * comb * comb_w);
     }
 
-    // ── STATE: rock — exposed banded sediment on the steeps ────────────────
-    // Elevation-keyed strata, warped so layers buckle and fold. Confined to
-    // slopes: this is the one palette in the set that is not green, and it lands
-    // exactly where the biome tint is already rock, so it reads as the mountain
-    // showing its bones rather than as paint spilled over the meadows.
+    // ── STATE: rock — bare scree on the steeps ─────────────────────────────
+    // The biome's own rock tint carries the color; the wind field on rock
+    // becomes downslope scree streaking, so the steeps share the meadows'
+    // directional language.
     if rock_w > 0.003 {
-        let warp = vnoise(p / 730.0, 63u) * 14.0 + vnoise(p / 173.0, 64u) * 5.0
-            + vnoise(p / 47.0, 65u) * 1.8;
-        let band_t = (wp.y + warp + (p.x + p.y) * 0.012) / 88.0;
-        var strata_rgb = strata_color(band_t);
-        // Design C: fable-1 reduced to value-only banding — the layers stay
-        // legible, the one non-green palette stops arguing with the cool grade.
-        strata_rgb = mix(
-            vec3(dot(strata_rgb, vec3(0.2126, 0.7152, 0.0722))),
-            strata_rgb,
-            strata_chroma,
-        );
-        // Sub-layers inside each color band: the "close enough to count them" tier.
-        let sub = vnoise(vec2(band_t * 32.0, (p.x - p.y) * 0.02), 66u);
-        strata_rgb *= 1.0 + 0.28 * sub * footprint_fade(11.0, fw_y);
-        // Luminance-matched so the strata replace hue/chroma but stay lit by the
-        // same pre-exposed moonlight through the PBR pipe.
-        let lum = 0.35 + 0.65 * length(base) / 0.55;
-        rgb = mix(rgb, strata_rgb * lum, clamp(rock_w * S.y * 0.95 * mix(1.0, 0.5, veg), 0.0, 1.0));
-        // Sediment flow-lines: the wind field on rock becomes downslope scree
-        // streaking, so the steeps share the meadows' directional language.
         let flow = streak(p, wind_d, 26.0, 3.2, 67u) * footprint_fade(3.2, fw);
         rgb *= 1.0 + 0.22 * flow * rock_w * S.y;
-        // Band-edge ledge relief: derivative of a soft sawtooth in the strata
-        // coordinate, so grazing moonlight draws the layers without geometry.
-        let ledge = footprint_fade(12.0, fw_y) * S.w * rock_w;
-        if ledge > 0.001 {
-            let down = normalize(vec2(n_geo.x, n_geo.z) + vec2(1e-5));
-            grad += down * sin(band_t * 6.28318 * 4.0) * 0.05 * ledge * steep;
-        }
         rough = mix(rough, 0.95, rock_w * 0.5);
     }
 

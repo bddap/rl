@@ -14,9 +14,9 @@
 
 #define_import_path rl::ground::looks::patterned_ground
 
-// strengths lanes here: x plate mosaic (both tiers), y macro weathering,
-// z mudcracks (and the scaffold's grain gain), w crack grooves (and the
-// scaffold's relief gain).
+// strengths lanes here: x plate mosaic (both tiers), y unused, z mudcracks
+// (and the scaffold's grain gain), w crack grooves (and the scaffold's
+// relief gain).
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade}
 #import rl::ground::art::{GroundCtx, GroundArt, default_art}
 
@@ -84,11 +84,6 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let meso_fade = footprint_fade(14.0, fw);
     rgb *= 1.0 + (0.16 * (meso.z - 0.5) - 0.22 * (1.0 - smoothstep(0.0, 0.10, meso.y)))
         * strengths.x * meso_fade;
-
-    // ── Macro weathering (hundreds of meters) ──────────────────────────────
-    // Value-only stain across plates so the mosaic never reads as flat paint.
-    let macro_n = vnoise(p / 560.0, 11u) * 0.6 + vnoise(p / 150.0, 12u) * 0.4;
-    rgb *= 1.0 + 0.30 * strengths.y * macro_n;
 
     // ── Tier 3: mudcracks (~1.2 m) — the on-foot read ──────────────────────
     // Fine isotropic grain is the scaffold's always-on layer (grain = 1 below).

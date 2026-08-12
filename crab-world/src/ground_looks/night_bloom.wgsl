@@ -14,7 +14,7 @@
 
 #define_import_path rl::ground::looks::night_bloom
 
-// strengths lanes here: x vein glow, y macro + meso patchiness, z spore
+// strengths lanes here: x vein glow, y meso patchiness, z spore
 // density (and the scaffold's grain gain), w the scaffold's relief gain.
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade}
 #import rl::ground::art::{GroundCtx, GroundArt, default_art}
@@ -39,13 +39,6 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     // Cool the base a step toward the variant's night tint so the warm moon
     // highlights and the glow both have somewhere to sit.
     rgb *= params[0].xyz;
-
-    // Macro patchiness (hundreds of meters) — kept from the round-2 look but
-    // biased cool/dark: dim mist-shadow patches instead of warm soil.
-    let macro_n = vnoise(p / 620.0, 11u) * 0.5
-        + vnoise(p / 210.0, 12u) * 0.35
-        + vnoise(p / 90.0, 13u) * 0.15;
-    rgb *= 1.0 + 0.40 * strengths.y * macro_n * mix(0.4, 1.0, veg);
 
     // Meso mottling: the mid-range octave gap. Fine on-foot detail is the
     // scaffold's always-on layer (grain = 1 below).

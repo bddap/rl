@@ -20,19 +20,8 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
 
     var rgb = ctx.base;
 
-    // Vegetation mask: full patchiness on grass, muted on scree/rock/snow
-    // (mineral ground varies less than growth does).
+    // Vegetation mask: tufts grow only where the biome tints growth.
     let veg = ctx.veg;
-
-    // Macro patchiness (hundreds of meters): kills the banded-paint read from the
-    // plane. A warm/cool hue drift, not just value, so patches look like different
-    // growth and soil rather than shadow.
-    let macro_n = vnoise(p / 620.0, 11u) * 0.5
-        + vnoise(p / 210.0, 12u) * 0.35
-        + vnoise(p / 90.0, 13u) * 0.15;
-    let warm = macro_n * strengths.x * mix(0.4, 1.0, veg);
-    rgb *= vec3(1.0 + 0.25 * warm, 1.0 + 0.05 * warm, 1.0 - 0.18 * warm);
-    rgb *= 1.0 + 0.50 * warm;
 
     // Meso mottling (tens of meters): the mid-range octave gap between biome bands
     // and on-foot detail.
