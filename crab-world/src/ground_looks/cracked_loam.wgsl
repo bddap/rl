@@ -17,7 +17,7 @@
 // strengths lanes here: x macro provinces, y meso cracks, z fine cobble (and
 // the scaffold's grain gain), w cobble detail normal (and the scaffold's
 // relief gain).
-#import rl::noise::{hash2, rand01, vnoise, footprint_fade, voronoi, Voro}
+#import rl::noise::{vnoise, footprint_fade, voronoi, cell_rand}
 #import rl::ground::art::{GroundCtx, GroundArt, default_art}
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
@@ -42,8 +42,8 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     // ── macro provinces (420 m): faint polygonal geology from the plane ──
     // Per-cell tone, washed with plain noise so borders never read vector-hard.
     let pv = voronoi(p / 420.0, 100u);
-    let prov = rand01(hash2(pv.id, 101u)) - 0.5;
-    let prov_hue = rand01(hash2(pv.id, 102u)) - 0.5;
+    let prov = cell_rand(pv, 101u) - 0.5;
+    let prov_hue = cell_rand(pv, 102u) - 0.5;
     let m_tone = mix(vnoise(p / 260.0, 103u), prov * 1.6, 0.6) * strengths.x;
     rgb *= 1.0 + 0.20 * m_tone;
     rgb *= vec3(1.0 + 0.09 * prov_hue * strengths.x, 1.0, 1.0 - 0.09 * prov_hue * strengths.x);
@@ -61,8 +61,8 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     // Seams on dry ground are shadowed red-brown soil, not gray paint.
     rgb = mix(rgb, rgb * vec3(1.15, 0.80, 0.70), clamp(seam, 0.0, 1.0) * 0.35);
     // Per-cell tint: a patchwork of soil and growth, never a uniform wash.
-    let ch = rand01(hash2(mv.id, 94u)) - 0.5;
-    let ch2 = rand01(hash2(mv.id, 95u)) - 0.5;
+    let ch = cell_rand(mv, 94u) - 0.5;
+    let ch2 = cell_rand(mv, 95u) - 0.5;
     let meso_f = footprint_fade(8.0, fw);
     rgb *= 1.0 + 0.32 * ch * strengths.y * meso_f;
     rgb *= vec3(1.0 + 0.10 * ch2 * strengths.y * meso_f, 1.0 + 0.02 * ch2 * strengths.y * meso_f, 1.0);
@@ -82,7 +82,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         let dome = 1.0 - smoothstep(0.0, 0.5, cv.dist);
         rgb *= 1.0 + 0.22 * cobble_amt * dome * cob_f;
         // Per-stone tone so the cobble isn't one material repeated.
-        let st = rand01(hash2(cv.id, 99u)) - 0.5;
+        let st = cell_rand(cv, 99u) - 0.5;
         rgb *= 1.0 + 0.24 * st * cobble_amt * cob_f;
         // Detail normal: stones bulge — height falls with f1, so the perturbed
         // normal tilts down the f1 gradient, outward from each stone's center.
