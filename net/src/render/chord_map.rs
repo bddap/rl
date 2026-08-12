@@ -577,8 +577,10 @@ impl Canvas {
     }
 
     fn rect_fill(&mut self, r: Rect, c: [u8; 3], alpha: f32) {
-        for y in r.min.y.max(0.0) as i32..=(r.max.y.min(CANVAS_PX as f32 - 1.0)) as i32 {
-            for x in r.min.x.max(0.0) as i32..=(r.max.x.min(CANVAS_PX as f32 - 1.0)) as i32 {
+        let (x0, x1) = clamp_span(r.min.x, r.max.x - 1.0);
+        let (y0, y1) = clamp_span(r.min.y, r.max.y - 1.0);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
                 self.blend(x, y, c, alpha);
             }
         }
@@ -604,7 +606,8 @@ fn pitch(d: ChordDir) -> usize {
     }
 }
 
-/// The hyperatlas's named districts — shown once ANY code inside is discovered.
+/// The hyperatlas's named districts — a name appears once a discovery lies DEEPER
+/// than the district's gate node (≥2 discovered nodes under the prefix).
 const DISTRICTS: [(&[ChordDir], &str, [u8; 3]); 5] = [
     (&[ChordDir::Up], "Sky Harbor", [46, 96, 128]),
     (
@@ -813,8 +816,11 @@ fn drive_chord_map(
     }
     // A live capture holds the map open DIRECTLY — not via the linger timer, which
     // a single ≥100ms frame would outrun, closing the map mid-entry and resetting
-    // the glide exactly when a slow frame made it most confusing.
-    let capturing = chords.entered().is_some();
+    // the glide exactly when a slow frame made it most confusing. `capturing()`,
+    // not `entered().is_some()`: a poisoned (overflowed) capture has no honest
+    // prefix but the modifier is still held — the map stays up, frozen on the last
+    // honest focus, matching the chord menu's cancel hint.
+    let capturing = chords.capturing();
     if let Some(entered) = chords.entered() {
         if !state.was_open {
             // Fresh open: start the glide from the root pose, not wherever the last
