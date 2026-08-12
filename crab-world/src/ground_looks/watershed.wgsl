@@ -47,54 +47,8 @@
 // (plates/comb/scree flow), z near-field (cobble/fiber/dew, and the scaffold's
 // grain gain), w detail normal (cobble, and the scaffold's relief gain)
 // — all normalized to S = strengths / STRENGTH_DEFAULTS.
-#import rl::noise::{hash2, rand01, vnoise, footprint_fade, sparkle}
+#import rl::noise::{hash2, rand01, vnoise, footprint_fade, sparkle, streak, voronoi, Voro, vein, wind_dir}
 #import rl::ground::art::{GroundCtx, GroundArt, STRENGTH_DEFAULTS, default_art}
-
-// Anisotropic value noise: stretched to `along`×`across` meters in frame `d`,
-// so one sample is a streak, not a blot.
-fn streak(p: vec2<f32>, d: vec2<f32>, along: f32, across: f32, seed: u32) -> f32 {
-    let q = vec2(dot(p, d) / along, dot(p, vec2(-d.y, d.x)) / across);
-    return vnoise(q, seed);
-}
-
-struct Voro {
-    f1: f32,   // distance to nearest feature point (cell units)
-    edge: f32, // F2-F1: ~0 on a cell border
-    id: vec2<i32>,
-}
-
-// Jittered-grid Voronoi, 3x3 search (F2 correctness needs the full ring).
-fn voronoi(p: vec2<f32>, seed: u32) -> Voro {
-    let i = vec2<i32>(floor(p));
-    let f = fract(p);
-    var f1 = 8.0;
-    var f2 = 8.0;
-    var id = vec2<i32>(0, 0);
-    for (var dy = -1; dy <= 1; dy++) {
-        for (var dx = -1; dx <= 1; dx++) {
-            let cell = i + vec2<i32>(dx, dy);
-            let h = hash2(cell, seed);
-            let pt = vec2<f32>(f32(dx), f32(dy))
-                + vec2<f32>(rand01(h), rand01(h ^ 0x9e3779b9u)) - f;
-            let dd = dot(pt, pt);
-            if dd < f1 {
-                f2 = f1;
-                f1 = dd;
-                id = cell;
-            } else if dd < f2 {
-                f2 = dd;
-            }
-        }
-    }
-    let d1 = sqrt(f1);
-    return Voro(d1, sqrt(f2) - d1, id);
-}
-
-// 1 on the zero-set of a smooth field, falling off over `width`. The zero-set of
-// smooth noise is a connected branching web — dendritic without any simulation.
-fn vein(n: f32, width: f32) -> f32 {
-    return 1.0 - smoothstep(0.0, width, abs(n));
-}
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let wp = ctx.wp;
@@ -134,24 +88,9 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let fray = hydro.r * (1.0 - hydro.r) * 4.0;
     let moist = clamp(hydro.r + (m_fbm - 0.5) * 0.55 * fray, 0.0, 1.0) * (1.0 - snow);
 
-    // WIND — the shared direction field: a slowly turning angle, bent onto the
-    // slope contour as faces steepen (wind and gravity comb the same way there).
-    // Contour is sign-ambiguous — align it with the wind before blending so the
-    // two never cancel. cross(up, N).xz = (N.z, -N.x).
-    let wind_a = 3.14159265 * (vnoise(p / 700.0, 61u) * 0.7 + vnoise(p / 230.0, 62u) * 0.55);
-    var wind_d = vec2(cos(wind_a), sin(wind_a));
-    let contour_w = smoothstep(0.04, 0.22, steep);
-    if contour_w > 0.001 {
-        var cd = vec2(n_geo.z, -n_geo.x);
-        let cl = length(cd);
-        if cl > 1e-4 {
-            cd = cd / cl;
-            if dot(cd, wind_d) < 0.0 {
-                cd = -cd;
-            }
-            wind_d = normalize(mix(wind_d, cd, contour_w));
-        }
-    }
+    // WIND — the shared direction field (rl::noise wind_dir): the same wind,
+    // by construction, that combs wind_combed.
+    let wind_d = wind_dir(p, n_geo);
 
     // ── The partition ──────────────────────────────────────────────────────
     // Three ground states, weights summing to 1. Soft everywhere, so the
@@ -236,7 +175,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         let meso_f = footprint_fade(8.0, fw) * dry_w * S.y * mix(0.22, 1.0, 1.0 - turf);
         let ch = rand01(hash2(mv.id, 94u)) - 0.5;
         rgb *= 1.0 + 0.30 * ch * meso_f;
-        rgb *= 1.0 + 0.14 * (1.0 - smoothstep(0.0, 0.45, mv.f1)) * meso_f;
+        rgb *= 1.0 + 0.14 * (1.0 - smoothstep(0.0, 0.45, mv.dist)) * meso_f;
 
         // Cobble (0.55 m): fist-sized stones underfoot on stony/bare ground.
         let cob_f = footprint_fade(0.55, fw) * S.z * mix(0.45, 1.0, max(stony, 1.0 - turf)) * bare;
@@ -245,16 +184,16 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
             let cp = (p + cwarp) / 0.55;
             let cv = voronoi(cp, 98u);
             rgb *= 1.0 - 0.55 * cob_f * (1.0 - smoothstep(0.0, 0.22, cv.edge));
-            rgb *= 1.0 + 0.22 * cob_f * (1.0 - smoothstep(0.0, 0.5, cv.f1));
+            rgb *= 1.0 + 0.22 * cob_f * (1.0 - smoothstep(0.0, 0.5, cv.dist));
             rgb *= 1.0 + 0.24 * cob_f * (rand01(hash2(cv.id, 99u)) - 0.5);
             // Stones bulge: height falls with f1, so the normal tilts outward
             // from each stone's center down the f1 gradient.
             let w_n = S.w * cob_f;
             if w_n > 0.001 {
                 let step = 0.14;
-                let fx = voronoi(cp + vec2(step / 0.55, 0.0), 98u).f1;
-                let fz = voronoi(cp + vec2(0.0, step / 0.55), 98u).f1;
-                grad -= (vec2(fx, fz) - cv.f1) / step * 0.05 * w_n;
+                let fx = voronoi(cp + vec2(step / 0.55, 0.0), 98u).dist;
+                let fz = voronoi(cp + vec2(0.0, step / 0.55), 98u).dist;
+                grad -= (vec2(fx, fz) - cv.dist) / step * 0.05 * w_n;
             }
         }
     }

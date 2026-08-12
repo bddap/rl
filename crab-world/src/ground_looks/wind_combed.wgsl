@@ -16,15 +16,8 @@
 // strengths lanes here: x unused, y meso comb streaks, z fine combed fiber
 // (and the scaffold's grain gain), w streak detail normal (and the scaffold's
 // relief gain).
-#import rl::noise::{vnoise, footprint_fade}
+#import rl::noise::{footprint_fade, streak, wind_dir}
 #import rl::ground::art::{GroundCtx, GroundArt, default_art}
-
-// Anisotropic value noise: stretched to `along`×`across` meters in the comb
-// frame `d`, so one sample is a streak, not a blot.
-fn streak(p: vec2<f32>, d: vec2<f32>, along: f32, across: f32, seed: u32) -> f32 {
-    let q = vec2(dot(p, d) / along, dot(p, vec2(-d.y, d.x)) / across);
-    return vnoise(q, seed);
-}
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let p = ctx.p;
@@ -36,24 +29,8 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let n_geo = ctx.n_geo;
     let steep = 1.0 - n_geo.y;
 
-    // The comb direction: a wind angle from two low-frequency octaves, blended
-    // toward the slope-contour direction as the face steepens. Contour is
-    // sign-ambiguous — align it with the wind before blending so the two never
-    // cancel. cross(up, N).xz = (N.z, -N.x).
-    let wind_a = 3.14159265 * (vnoise(p / 700.0, 61u) * 0.7 + vnoise(p / 230.0, 62u) * 0.55);
-    var d = vec2(cos(wind_a), sin(wind_a));
-    let contour_w = smoothstep(0.04, 0.22, steep);
-    if contour_w > 0.001 {
-        var cd = vec2(n_geo.z, -n_geo.x);
-        let cl = length(cd);
-        if cl > 1e-4 {
-            cd = cd / cl;
-            if dot(cd, d) < 0.0 {
-                cd = -cd;
-            }
-            d = normalize(mix(d, cd, contour_w));
-        }
-    }
+    // The comb direction: the shared wind field (rl::noise wind_dir).
+    let d = wind_dir(p, n_geo);
 
     // Meso comb streaks (tens of meters, direction-locked): the look's spine.
     // The ACROSS wavelength drives the footprint fade — that is the axis that
