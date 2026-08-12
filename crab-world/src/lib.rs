@@ -106,18 +106,26 @@ pub struct RenderArgs {
     /// the keybind does.
     #[arg(long, env = "RL_GROUND_LOOK", value_enum)]
     pub ground_look: Option<ground::GroundLook>,
-    /// Moon compass direction, degrees around +Y (rl#374).
+    /// Moon compass direction, degrees around +Y (rl#374). Setting this (or
+    /// elevation) freezes sky motion so the pose holds; add --moon-timescale
+    /// to move anyway.
     #[arg(long, env = "RL_MOON_AZIMUTH_DEG", allow_hyphen_values = true)]
     pub moon_azimuth_deg: Option<f32>,
-    /// Moon height above the horizon, degrees (90 = zenith).
+    /// Moon height above the horizon, degrees (90 = zenith). Freezes sky
+    /// motion like --moon-azimuth-deg.
     #[arg(long, env = "RL_MOON_ELEVATION_DEG", allow_hyphen_values = true)]
     pub moon_elevation_deg: Option<f32>,
     /// Moonlight + disc hue, degrees on the HSL wheel.
     #[arg(long, env = "RL_MOON_HUE_DEG", allow_hyphen_values = true)]
     pub moon_hue_deg: Option<f32>,
     /// Moon phase, wrapping [0, 1): 0 = new, 0.5 = full. Drives luminosity.
+    /// Live even with motion on — the sweep advances it from here.
     #[arg(long, env = "RL_MOON_PHASE", allow_hyphen_values = true)]
     pub moon_phase: Option<f32>,
+    /// Sky-motion timescale, sim seconds per real second (rl#374); default 24
+    /// (a day-length moon traversal per real hour). 0 freezes the sky.
+    #[arg(long, env = "RL_MOON_TIMESCALE", allow_hyphen_values = true)]
+    pub moon_timescale: Option<f32>,
 }
 
 #[cfg(feature = "render")]
@@ -132,7 +140,6 @@ impl RenderArgs {
         if let Some(reason) = mesh_err {
             mesh_fallback::log_fallback(surface, reason);
         }
-        let moon = moon::Moon::default();
         BootView {
             render_mode: self.render_mode.unwrap_or(if mesh_err.is_some() {
                 crab_view::RenderMode::Colliders
@@ -140,12 +147,26 @@ impl RenderArgs {
                 crab_view::RenderMode::Mesh
             }),
             ground_look: self.ground_look.unwrap_or_default(),
-            moon: moon::Moon {
-                azimuth_deg: self.moon_azimuth_deg.unwrap_or(moon.azimuth_deg),
-                elevation_deg: self.moon_elevation_deg.unwrap_or(moon.elevation_deg),
-                hue_deg: self.moon_hue_deg.unwrap_or(moon.hue_deg),
-                phase: self.moon_phase.unwrap_or(moon.phase),
-            },
+            moon: self.boot_moon(),
+        }
+    }
+
+    /// The boot [`moon::Moon`]: defaults overlaid with whatever knobs were
+    /// passed. An explicit pose (azimuth or elevation) implies a frozen sky —
+    /// motion would overwrite the posed angles on the first frame, so unless
+    /// the timescale is ALSO explicit, posing zeroes it (self-correcting: you
+    /// asked for that pose, you keep it).
+    fn boot_moon(self) -> moon::Moon {
+        let moon = moon::Moon::default();
+        let posed = self.moon_azimuth_deg.is_some() || self.moon_elevation_deg.is_some();
+        moon::Moon {
+            azimuth_deg: self.moon_azimuth_deg.unwrap_or(moon.azimuth_deg),
+            elevation_deg: self.moon_elevation_deg.unwrap_or(moon.elevation_deg),
+            hue_deg: self.moon_hue_deg.unwrap_or(moon.hue_deg),
+            phase: self.moon_phase.unwrap_or(moon.phase),
+            timescale: self
+                .moon_timescale
+                .unwrap_or(if posed { 0.0 } else { moon.timescale }),
         }
     }
 }
@@ -336,5 +357,34 @@ fn parse_effort_weight(s: &str) -> Result<f32, String> {
         Ok(v)
     } else {
         Err(format!("{v} is not a finite non-negative weight"))
+    }
+}
+
+#[cfg(all(test, feature = "render"))]
+mod render_args_tests {
+    use super::*;
+
+    /// An explicit moon pose freezes the sky unless the timescale is also
+    /// explicit — motion would otherwise overwrite the posed flag on the
+    /// first frame, a silent no-op of what the user typed.
+    #[test]
+    fn posing_the_moon_freezes_motion() {
+        assert_eq!(
+            RenderArgs::default().boot_moon().timescale,
+            moon::DEFAULT_TIMESCALE
+        );
+        let posed = RenderArgs {
+            moon_elevation_deg: Some(40.0),
+            ..Default::default()
+        }
+        .boot_moon();
+        assert_eq!((posed.timescale, posed.elevation_deg), (0.0, 40.0));
+        let posed_moving = RenderArgs {
+            moon_azimuth_deg: Some(100.0),
+            moon_timescale: Some(moon::DEFAULT_TIMESCALE),
+            ..Default::default()
+        }
+        .boot_moon();
+        assert_eq!(posed_moving.timescale, moon::DEFAULT_TIMESCALE);
     }
 }

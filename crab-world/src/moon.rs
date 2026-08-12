@@ -15,6 +15,27 @@ const FULL_MOON_LUX: f32 = 9500.0;
 const MOON_SATURATION: f32 = 1.0;
 const MOON_LIGHTNESS: f32 = 0.925;
 
+/// Sky motion (rl#374 motion stage) — sim seconds per real second. 24 means a
+/// day-length traversal passes in one real hour and the ~29.5-day synodic phase
+/// cycle in ~29.5 real hours (the epic's "1/24 timescale").
+pub const DEFAULT_TIMESCALE: f32 = 24.0;
+const DAY_SECONDS: f64 = 86_400.0;
+const SYNODIC_SECONDS: f64 = 29.530588 * DAY_SECONDS;
+
+/// The traversal path's anchor is the default (pre-moon-light) pose: the moon
+/// "rises" there, so a freshly booted moving sky starts exactly where the
+/// static stage-1 moon stood and departs smoothly.
+const RISE_AZIMUTH_DEG: f32 = 43.8;
+/// The elevation floor: the traversal never dips below this, so the moon never
+/// sets and never grazes low enough for the missing far-field terrain shadows
+/// to read as wrong. It equals the default elevation — the shipped stage-1
+/// look already proved this height sound.
+const ELEVATION_FLOOR_DEG: f32 = 21.5;
+const PEAK_ELEVATION_DEG: f32 = 60.0;
+/// How far the azimuth travels in one crossing before turning back — half the
+/// sky, like a real moon's rise-to-set sweep.
+const TRAVERSAL_SWEEP_DEG: f32 = 180.0;
+
 /// The moon's runtime-tweakable knobs. Mutate the resource and everything moon
 /// follows on the next frame: the disc, the light direction, the tint, the
 /// luminosity. Angles are degrees (what you'd type on a flag).
@@ -31,6 +52,12 @@ pub struct Moon {
     /// Synodic phase, wrapping [0, 1): 0 = new, 0.5 = full. Drives luminosity
     /// and the disc's terminator.
     pub phase: f32,
+    /// Sky-motion speed, sim seconds per real second (rl#374): the traversal
+    /// and the phase sweep both run this much faster than reality. 0 freezes
+    /// the sky, which is what makes the azimuth/elevation knobs holdable —
+    /// while moving, motion owns them. Phase stays a live offset either way
+    /// (motion advances it incrementally).
+    pub timescale: f32,
 }
 
 impl Default for Moon {
@@ -39,10 +66,11 @@ impl Default for Moon {
     /// full moon carries the same illuminance.
     fn default() -> Self {
         Self {
-            azimuth_deg: 43.8,
-            elevation_deg: 21.5,
+            azimuth_deg: RISE_AZIMUTH_DEG,
+            elevation_deg: ELEVATION_FLOOR_DEG,
             hue_deg: 220.0,
             phase: 0.5,
+            timescale: DEFAULT_TIMESCALE,
         }
     }
 }
@@ -81,6 +109,59 @@ impl Moon {
     }
 }
 
+/// Sim seconds along the traversal path since boot. Separate from [`Moon`] so
+/// the path parameter accumulates in f64 (frame-sized increments on a f32
+/// would stall once t grows) and so a manual knob write can't teleport the
+/// clock.
+#[derive(Resource, Default)]
+struct MoonClock {
+    t: f64,
+}
+
+/// Where the back-and-forth traversal puts the moon `t` sim-seconds after
+/// boot. The moon crosses half the sky in half a day (rise-to-"set", like a
+/// real moon's night), then — to skip daytime — travels back along the same
+/// arc instead of setting: azimuth is a day-period triangle wave, elevation an
+/// arc from the floor up to the peak and back within each crossing, so it
+/// never leaves `[ELEVATION_FLOOR_DEG, PEAK_ELEVATION_DEG]`.
+fn traversal_angles(t: f64) -> (f32, f32) {
+    let day = (t / DAY_SECONDS).rem_euclid(1.0);
+    let s = (1.0 - (2.0 * day - 1.0).abs()) as f32;
+    let az = RISE_AZIMUTH_DEG + TRAVERSAL_SWEEP_DEG * s;
+    let el = ELEVATION_FLOOR_DEG
+        + (PEAK_ELEVATION_DEG - ELEVATION_FLOOR_DEG) * (std::f32::consts::PI * s).sin();
+    (az, el)
+}
+
+/// One motion tick: advance the clock by `real_dt` scaled by the timescale
+/// knob, sweep the phase realistically (one synodic cycle per
+/// [`SYNODIC_SECONDS`] of sim time — incrementally, so a manual phase write
+/// persists as an offset), and put the moon on the traversal path. Pure so the
+/// motion contract is testable without an `App`.
+fn step(moon: &mut Moon, clock: &mut MoonClock, real_dt: f64) {
+    if moon.timescale == 0.0 {
+        return; // Frozen means FROZEN: a manual pose must survive, not snap to the path.
+    }
+    let dt = real_dt * moon.timescale as f64;
+    clock.t += dt;
+    moon.phase = ((moon.phase as f64 + dt / SYNODIC_SECONDS).rem_euclid(1.0)) as f32;
+    (moon.azimuth_deg, moon.elevation_deg) = traversal_angles(clock.t);
+}
+
+/// Runs [`drive_moon_motion`]; the light and sky-uniform syncs order after it
+/// so a frame's disc and light see that same frame's motion.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MoonMotionSet;
+
+fn drive_moon_motion(time: Res<Time>, mut clock: ResMut<MoonClock>, mut moon: ResMut<Moon>) {
+    // step() gates on timescale itself; this outer read-only check keeps a frozen
+    // sky from tripping change detection (DerefMut marks the resource changed).
+    if moon.timescale == 0.0 {
+        return;
+    }
+    step(&mut moon, &mut clock, time.delta_secs_f64());
+}
+
 /// Marks the one moon-driven [`DirectionalLight`].
 #[derive(Component)]
 struct MoonLight;
@@ -96,8 +177,15 @@ pub struct MoonPlugin {
 impl Plugin for MoonPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(self.moon)
+            .init_resource::<MoonClock>()
             .add_systems(Startup, spawn_moon_light)
-            .add_systems(Update, sync_moon_light);
+            .add_systems(
+                Update,
+                (
+                    drive_moon_motion.in_set(MoonMotionSet),
+                    sync_moon_light.after(MoonMotionSet),
+                ),
+            );
     }
 }
 
@@ -172,6 +260,90 @@ mod tests {
             quarter > 0.05 * FULL_MOON_LUX && quarter < 0.2 * FULL_MOON_LUX,
             "quarter moon {quarter}"
         );
+    }
+
+    /// The traversal never sets and never leaves the elevation floor/peak
+    /// band, across several days of sim time (the epic's never-setting
+    /// contract). Azimuth stays within the one back-and-forth sweep.
+    #[test]
+    fn traversal_never_sets() {
+        let mut t = 0.0;
+        while t < 3.0 * DAY_SECONDS {
+            let (az, el) = traversal_angles(t);
+            assert!(
+                (ELEVATION_FLOOR_DEG - 1e-3..=PEAK_ELEVATION_DEG + 1e-3).contains(&el),
+                "elevation {el} out of band at t={t}"
+            );
+            assert!(
+                (RISE_AZIMUTH_DEG..=RISE_AZIMUTH_DEG + TRAVERSAL_SWEEP_DEG).contains(&az),
+                "azimuth {az} outside the sweep at t={t}"
+            );
+            t += 97.0; // Prime-ish stride so samples don't alias the path's period.
+        }
+    }
+
+    /// Boot continuity: at t=0 the path stands exactly on the default pose, so
+    /// switching motion on does not jump the shipped stage-1 look.
+    #[test]
+    fn traversal_starts_at_the_default_pose() {
+        let moon = Moon::default();
+        assert_eq!(
+            traversal_angles(0.0),
+            (moon.azimuth_deg, moon.elevation_deg)
+        );
+    }
+
+    /// Back-and-forth: the return crossing retraces the outbound arc — the
+    /// pose at `DAY - t` mirrors the pose at `t`, and mid-crossing is the far
+    /// end of the sweep at the floor.
+    #[test]
+    fn traversal_is_a_ping_pong() {
+        for t in [0.1, 0.25, 0.4] {
+            let t = t * DAY_SECONDS;
+            assert_eq!(traversal_angles(t), traversal_angles(DAY_SECONDS - t));
+        }
+        let (az, el) = traversal_angles(0.5 * DAY_SECONDS);
+        assert!((az - (RISE_AZIMUTH_DEG + TRAVERSAL_SWEEP_DEG)).abs() < 1e-3);
+        assert!((el - ELEVATION_FLOOR_DEG).abs() < 1e-3);
+    }
+
+    /// The phase sweep is realistic-but-accelerated: at the default 24×
+    /// timescale, one real hour advances the phase by 24 h / synodic month.
+    #[test]
+    fn phase_sweeps_at_the_synodic_rate() {
+        let mut moon = Moon::default();
+        let mut clock = MoonClock::default();
+        step(&mut moon, &mut clock, 3600.0);
+        let want = 0.5 + (24.0 * 3600.0 / SYNODIC_SECONDS) as f32;
+        assert!(
+            (moon.phase - want).abs() < 1e-5,
+            "phase {} != {want}",
+            moon.phase
+        );
+        assert_eq!(clock.t, 24.0 * 3600.0);
+    }
+
+    /// Timescale 0 freezes the sky completely — the manual-pose escape hatch.
+    #[test]
+    fn timescale_zero_freezes() {
+        let mut moon = Moon {
+            timescale: 0.0,
+            azimuth_deg: 100.0,
+            elevation_deg: 40.0,
+            ..default()
+        };
+        let mut clock = MoonClock::default();
+        step(&mut moon, &mut clock, 3600.0);
+        assert_eq!(
+            moon,
+            Moon {
+                timescale: 0.0,
+                azimuth_deg: 100.0,
+                elevation_deg: 40.0,
+                ..default()
+            }
+        );
+        assert_eq!(clock.t, 0.0);
     }
 
     /// Hue wraps rather than panicking or saturating.
