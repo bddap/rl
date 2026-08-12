@@ -132,24 +132,8 @@ fn setup_arena_visuals(
         return;
     }
 
-    // A vista world (rl#281 stage 3) gets a low, cool moon-sun for long relief
-    // shadows, plus cascades stretched from the ~150 m default to mountain scale
-    // (30 m grid pitch makes coarse far cascades invisible).
-    commands.spawn((
-        DirectionalLight {
-            shadows_enabled: true,
-            illuminance: 9500.0,
-            color: Color::srgb(0.85, 0.90, 1.0),
-            ..default()
-        },
-        bevy::light::CascadeShadowConfigBuilder {
-            maximum_distance: 9000.0,
-            first_cascade_far_bound: 20.0,
-            ..default()
-        }
-        .build(),
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.5, 0.7, 0.0)),
-    ));
+    // The directional light is the moon's (`crate::moon`, via NightSkyPlugin);
+    // only the ambient starlight floor lives here.
     commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.75, 0.82, 1.0),
         brightness: 400.0,

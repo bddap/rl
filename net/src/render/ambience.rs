@@ -163,7 +163,7 @@ fn ship_thruster(ctx: &AmbientContext) -> f32 {
 }
 
 /// All beds are gated on biome only, never time: the world is PERMANENTLY night
-/// (a static `NightSkyPlugin` sky, one fixed moon-sun light — no time-of-day
+/// (a `NightSkyPlugin` sky lit by the knob-driven moon — no time-of-day
 /// exists anywhere in sim or render), so a "night" gate would be constant-true.
 /// Deliberate crossfade for beds and engines; fast tracking for gait-keyed
 /// layers (see [`LayerDef::glide_tau_s`]).

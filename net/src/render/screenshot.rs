@@ -21,7 +21,7 @@ pub fn build_screenshot_app(
     controls: ControlsOverrides<GcrControls>,
     pack: Input,
 ) -> App {
-    let mut app = offscreen_app_scaffold(view.ground_look);
+    let mut app = offscreen_app_scaffold(view);
     let armed_crab = nn_crab.map(|policy| (policy, seed_round_crabs(&mut client, 1)));
     let coord = coordinator(None, client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
@@ -41,7 +41,7 @@ pub fn build_net_screenshot_app(
     view: crab_world::BootView,
     controls: ControlsOverrides<GcrControls>,
 ) -> App {
-    let mut app = offscreen_app_scaffold(view.ground_look);
+    let mut app = offscreen_app_scaffold(view);
     let spawns = seed_round_crabs(&mut client, 1);
     let coord = coordinator(Some(net), client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
@@ -50,7 +50,7 @@ pub fn build_net_screenshot_app(
     app
 }
 
-fn offscreen_app_scaffold(ground_look: crab_world::ground::GroundLook) -> App {
+fn offscreen_app_scaffold(view: crab_world::BootView) -> App {
     let mut app = App::new();
     app.add_plugins(crab_world::app_boot::base_plugins(None));
     // The screenshot app has no menu: its round is installed before the first frame, so it is
@@ -62,8 +62,11 @@ fn offscreen_app_scaffold(ground_look: crab_world::ground::GroundLook) -> App {
     app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
         Duration::from_secs_f64(1.0 / 60.0),
     ));
+    app.insert_resource(view.moon);
     app.add_plugins(crab_world::sky::NightSkyPlugin);
-    app.add_plugins(crab_world::physics::ArenaWorldPlugin { ground_look });
+    app.add_plugins(crab_world::physics::ArenaWorldPlugin {
+        ground_look: view.ground_look,
+    });
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_secs_f64(TICK_DT),
     ));

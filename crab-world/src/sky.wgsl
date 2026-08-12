@@ -19,6 +19,12 @@
 #import bevy_pbr::mesh_view_bindings::view
 #import rl::noise::{hash3, rand01}
 
+// The moon knobs (crate::moon::Moon, synced by sky.rs). xyz/w of the first:
+// world-space unit vector toward the moon / phase [0,1) (0 new, 0.5 full). The
+// second: srgb moon tint / illuminated fraction (drives the halo).
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> moon_dir_phase: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> moon_color_lum: vec4<f32>;
+
 struct SkyVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) ndc: vec2<f32>,
@@ -33,11 +39,65 @@ fn vertex(@builtin(vertex_index) vertex_index: u32) -> SkyVertexOutput {
 
 @fragment
 fn fragment(in: SkyVertexOutput) -> @location(0) vec4<f32> {
-    // z flipped to keep the shipped star layout: the old pass sampled its cubemap
-    // left-handed (bevy negates z), so the baked sky appeared as sky_color(x,y,-z).
-    let dir = ray_direction(in.ndc) * vec3(1.0, 1.0, -1.0);
-    let c = base_gradient(dir) + milky_way(dir) + star(dir);
+    // The moon lives in TRUE world space — its disc must sit where the
+    // DirectionalLight says it is. The stars keep the shipped layout, whose z is
+    // flipped: the old pass sampled its cubemap left-handed (bevy negates z), so
+    // the baked sky appeared as sky_color(x,y,-z).
+    let wdir = ray_direction(in.ndc);
+    let dir = wdir * vec3(1.0, 1.0, -1.0);
+    let m = moon(wdir);
+    // The disc occludes the star field behind it (m.a is disc coverage).
+    let c = (base_gradient(dir) + milky_way(dir) + star(dir)) * (1.0 - m.a) + m.rgb;
     return vec4(srgb_to_linear(clamp(c, vec3(0.0), vec3(1.0))), 1.0);
+}
+
+// Stylized apparent radius (radians). The real moon's 0.26 degrees reads as a dot;
+// this is a hero moon.
+const MOON_RADIUS: f32 = 0.055;
+
+// The moon disc + halo, evaluated in true world space. Returns rgb (authored
+// srgb, like every sky layer) and disc coverage in a for star occlusion.
+//
+// Phase shading is a virtual sun in the disc's local frame: a point on the moon
+// sphere has normal n = (u, v, z), the sun sits at angle alpha = 2*pi*phase in
+// the u/z plane, and lit-ness is a SOFT STEP on n·s rather than Lambert — a full
+// moon is flat-bright to the limb (opposition), not a shaded ball.
+fn moon(dir: vec3<f32>) -> vec4<f32> {
+    let md = moon_dir_phase.xyz;
+    let cosang = dot(dir, md);
+    if cosang < 0.0 {
+        return vec4(0.0);
+    }
+    let tint = moon_color_lum.rgb;
+    let lum = moon_color_lum.w;
+    // Halo: soft glow around the disc, scaled by luminosity so a new moon
+    // carries no false glow.
+    let ang = acos(clamp(cosang, -1.0, 1.0));
+    let halo = tint * (0.22 * lum * exp(-pow(ang / (MOON_RADIUS * 5.0), 2.0)));
+
+    // Disc-local frame (up-choice guarded against a zenith moon).
+    let ref_up = select(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), abs(md.y) > 0.99);
+    let t1 = normalize(cross(md, ref_up));
+    let t2 = cross(md, t1);
+    let sr = sin(MOON_RADIUS);
+    let u = dot(dir, t1) / sr;
+    let v = dot(dir, t2) / sr;
+    let r2 = u * u + v * v;
+    if r2 >= 1.0 {
+        return vec4(halo, 0.0);
+    }
+    let n = vec3(u, v, sqrt(1.0 - r2));
+    let alpha = 6.2831853 * moon_dir_phase.w;
+    let sun = vec3(sin(alpha), 0.0, -cos(alpha));
+    let lit = smoothstep(0.0, 0.2, dot(n, sun));
+    // Surface: value-noise mare patches over fine albedo mottling.
+    let mottle = 0.78 + 0.22 * value_noise(n * 6.0);
+    let mare = 1.0 - 0.30 * smoothstep(0.45, 0.75, value_noise(n * 2.3 + vec3(7.0)));
+    // 0.1 floor = earthshine: the dark side stays faintly visible.
+    let disc = tint * ((0.1 + 0.9 * lit) * mottle * mare);
+    // Soft rim for antialiasing.
+    let edge = 1.0 - smoothstep(0.9, 1.0, r2);
+    return vec4(mix(halo, disc, edge), edge);
 }
 
 // The fragment's view-space position IS the ray direction (camera at the origin);
