@@ -14,6 +14,7 @@ render = [
     "bevy/default",
     "bevy_rapier3d/default",
     "dep:bevy_egui",
+    "dep:cpal",
 ]
 
 enhanced-determinism = ["crab-world/enhanced-determinism"]
@@ -30,6 +31,9 @@ bevy = { workspace = true, features = [
 ] }
 bevy_rapier3d = { workspace = true, features = ["dim3"] }
 bevy_egui = { workspace = true, optional = true }
+# Mic capture for voice notes (rl#378). Already in the tree transitively via
+# bevy_audio → rodio, so this adds no new crate to the build.
+cpal = { version = "0.15", optional = true }
 rand.workspace = true
 serde.workspace = true
 bincode.workspace = true
