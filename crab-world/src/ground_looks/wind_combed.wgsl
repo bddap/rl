@@ -13,9 +13,9 @@
 
 #define_import_path rl::ground::looks::wind_combed
 
-// strengths lanes here: x macro warm/cool drift, y meso comb streaks, z fine
-// combed fiber (and the scaffold's grain gain), w streak detail normal (and
-// the scaffold's relief gain).
+// strengths lanes here: x unused, y meso comb streaks, z fine combed fiber
+// (and the scaffold's grain gain), w streak detail normal (and the scaffold's
+// relief gain).
 #import rl::noise::{vnoise, footprint_fade}
 #import rl::ground::art::{GroundCtx, GroundArt, default_art}
 
@@ -32,9 +32,6 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let strengths = ctx.strengths;
 
     var rgb = ctx.base;
-
-    // Combs read strongest on growth, muted on scree/rock/snow.
-    let veg = ctx.veg;
 
     let n_geo = ctx.n_geo;
     let steep = 1.0 - n_geo.y;
@@ -57,16 +54,6 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
             d = normalize(mix(d, cd, contour_w));
         }
     }
-
-    // Macro warm/cool drift (hundreds of meters): kills the banded-paint read
-    // from the plane. A hue drift, not just value, so patches look like
-    // different growth and soil rather than shadow.
-    let macro_n = vnoise(p / 620.0, 11u) * 0.5
-        + vnoise(p / 210.0, 12u) * 0.35
-        + vnoise(p / 90.0, 13u) * 0.15;
-    let warm = macro_n * strengths.x * mix(0.4, 1.0, veg);
-    rgb *= vec3(1.0 + 0.22 * warm, 1.0 + 0.05 * warm, 1.0 - 0.16 * warm);
-    rgb *= 1.0 + 0.50 * warm;
 
     // Meso comb streaks (tens of meters, direction-locked): the look's spine.
     // The ACROSS wavelength drives the footprint fade — that is the axis that

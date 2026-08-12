@@ -98,11 +98,6 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         label: "Ground: cracked loam",
     },
     ChordEntry {
-        code: &[ChordDir::Down, ChordDir::Right, ChordDir::Up],
-        action: Action::GroundWetNocturne,
-        label: "Ground: wet nocturne",
-    },
-    ChordEntry {
         code: &[ChordDir::Down, ChordDir::Right, ChordDir::Down],
         action: Action::GroundWatershed,
         label: "Ground: watershed",
@@ -179,7 +174,6 @@ pub enum Action {
     GroundPatternedGround,
     GroundWindCombed,
     GroundCrackedLoam,
-    GroundWetNocturne,
     GroundWatershed,
     GroundWatershedNaturalist,
     GroundWatershedNocturne,
@@ -723,7 +717,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 47] = [
+    const ALL_ACTIONS: [Action; 46] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -746,7 +740,6 @@ mod tests {
         Action::GroundPatternedGround,
         Action::GroundWindCombed,
         Action::GroundCrackedLoam,
-        Action::GroundWetNocturne,
         Action::GroundWatershed,
         Action::GroundWatershedNaturalist,
         Action::GroundWatershedNocturne,
@@ -934,7 +927,6 @@ mod tests {
                 | Action::GroundPatternedGround
                 | Action::GroundWindCombed
                 | Action::GroundCrackedLoam
-                | Action::GroundWetNocturne
                 | Action::GroundWatershed
                 | Action::GroundWatershedNaturalist
                 | Action::GroundWatershedNocturne

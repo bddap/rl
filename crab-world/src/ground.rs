@@ -72,14 +72,13 @@ pub enum GroundLook {
     PatternedGround,
     WindCombed,
     CrackedLoam,
-    WetNocturne,
     Watershed,
     // rl#323's two alternative designs over the SAME watershed shader (rows in
     // [`GroundLook::params`], the rl#333 seam — a design is a param set, never a
     // fork). Naturalist = Design B: A minus the bloom (no emissive anywhere) and
     // minus fable-3's province hue — the safe subset. WatershedNocturne = Design C:
-    // wet + bloom + comb with zero Voronoi and value-only strata — the
-    // fiction-forward subset. All three cycle under G / L3; the owner picks in play.
+    // wet + bloom + comb with zero Voronoi — the fiction-forward subset. All three
+    // cycle under G / L3; the owner picks in play.
     WatershedNaturalist,
     WatershedNocturne,
     // The night-bloom parameter sets (owner request 2026-08-01: "more variants of
@@ -229,7 +228,6 @@ ground_looks! {
     PatternedGround => "ground_looks/patterned_ground.wgsl", "LOOK_PATTERNED_GROUND";
     WindCombed => "ground_looks/wind_combed.wgsl", "LOOK_WIND_COMBED";
     CrackedLoam => "ground_looks/cracked_loam.wgsl", "LOOK_CRACKED_LOAM";
-    WetNocturne => "ground_looks/wet_nocturne.wgsl", "LOOK_WET_NOCTURNE";
     Watershed | WatershedNaturalist | WatershedNocturne
         => "ground_looks/watershed.wgsl", "LOOK_WATERSHED";
 }
@@ -253,8 +251,7 @@ impl GroundLook {
     /// - `[0]` x bloom gain (fable-2's emissive web; 0 = no emissive anywhere),
     ///   y cellular structure (provinces + plates + cobble) — a GATE (> 0.5), not
     ///   a gain: off skips every Voronoi call,
-    ///   z strata chroma (1 = full carved-strata palette, 0 = value-only),
-    ///   w province hue tilt (fable-3's per-plate identity; inert when y is off —
+    ///   z province hue tilt (fable-3's per-plate identity; inert when y is off —
     ///   the hue lives on the province cells)
     pub fn params(self) -> [Vec4; 8] {
         let zero = [Vec4::ZERO; 8];
@@ -273,27 +270,22 @@ impl GroundLook {
             p[5] = Vec4::new(widths[0], widths[1], widths[2], 0.0);
             p
         };
-        let wshed = |bloom: f32, cellular: f32, chroma: f32, hue: f32| {
+        let wshed = |bloom: f32, cellular: f32, hue: f32| {
             let mut p = zero;
-            p[0] = Vec4::new(bloom, cellular, chroma, hue);
+            p[0] = Vec4::new(bloom, cellular, hue, 0.0);
             p
         };
         match self {
-            Self::Shipped
-            | Self::PatternedGround
-            | Self::WindCombed
-            | Self::CrackedLoam
-            | Self::WetNocturne => zero,
+            Self::Shipped | Self::PatternedGround | Self::WindCombed | Self::CrackedLoam => zero,
             // rl#323 Design A — every axis on. All-ones is load-bearing: the
-            // shader multiplies/gates on these lanes, so this row renders
-            // bit-identically to the pre-params watershed.
-            Self::Watershed => wshed(1.0, 1.0, 1.0, 1.0),
+            // shader multiplies/gates on these lanes.
+            Self::Watershed => wshed(1.0, 1.0, 1.0),
             // Design B, NATURALIST — A minus fable-2 (bloom) and fable-3
             // (province hue): no emissive anywhere, no change to the fiction.
-            Self::WatershedNaturalist => wshed(0.0, 1.0, 1.0, 0.0),
-            // Design C, NOCTURNE BLOOM — wet + bloom + comb; both cellular
-            // languages dropped (zero Voronoi) and the strata value-only.
-            Self::WatershedNocturne => wshed(1.0, 0.0, 0.0, 0.0),
+            Self::WatershedNaturalist => wshed(0.0, 1.0, 0.0),
+            // Design C, NOCTURNE BLOOM — wet + bloom + comb; the cellular
+            // languages dropped (zero Voronoi).
+            Self::WatershedNocturne => wshed(1.0, 0.0, 0.0),
             // The original night bloom, constants unchanged.
             Self::NightBloom => row(
                 [0.70, 0.88, 0.98, 0.55],

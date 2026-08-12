@@ -46,9 +46,6 @@
 #ifdef LOOK_CRACKED_LOAM
 #import rl::ground::looks::cracked_loam::art
 #endif
-#ifdef LOOK_WET_NOCTURNE
-#import rl::ground::looks::wet_nocturne::art
-#endif
 #ifdef LOOK_WATERSHED
 #import rl::ground::looks::watershed::art
 #endif
