@@ -1,4 +1,6 @@
-// rl::noise — the one copy of the procedural-noise helpers (rl#333 seam 1).
+// rl::noise — the one copy of the procedural-noise helpers (rl#333 seam 1) and
+// of the shared ground-look fields built on them (sparkle, wind_dir, cell_rand:
+// helpers with baked art-direction constants that more than one look reads).
 // Every ground look and sky.wgsl import from here.
 // History's warning, and this module's reason to exist: as per-file copies these
 // drifted twice (the rl#324 quintic fix reached 1 of 14 looks) — a fix here is
@@ -76,9 +78,7 @@ fn streak(p: vec2<f32>, d: vec2<f32>, along: f32, across: f32, seed: u32) -> f32
 }
 
 // The F1 member is `dist`, not `f1`: naga_oil 0.20 breaks a cross-module member
-// named `f1` — importers fail naga validation with "invalid field accessor `f1`"
-// (the in-module copies this fold replaced never crossed a module edge, so the
-// name was safe there).
+// named `f1` — importers fail naga validation with "invalid field accessor `f1`".
 struct Voro {
     dist: f32, // F1: distance to nearest feature point (cell units)
     edge: f32, // F2-F1: ~0 on a cell border
@@ -86,8 +86,7 @@ struct Voro {
 }
 
 // Jittered-grid Voronoi, 3x3 search (F2 correctness needs the full ring).
-// Per-cell identity is `id`: hash it with a caller-owned seed for stable
-// per-cell tones (e.g. rand01(hash2(v.id, seed))).
+// Per-cell identity is `id`; derive stable per-cell tones via cell_rand below.
 fn voronoi(p: vec2<f32>, seed: u32) -> Voro {
     let i = vec2<i32>(floor(p));
     let f = fract(p);
@@ -112,6 +111,13 @@ fn voronoi(p: vec2<f32>, seed: u32) -> Voro {
     }
     let d1 = sqrt(f1);
     return Voro(d1, sqrt(f2) - d1, id);
+}
+
+// Seeded per-cell random in [0, 1) from a Voro hit — plate/province/stone tones.
+// Named cell_rand, not cell_id: the identity is v.id; this is a random DERIVED
+// from it, and callers often use several per cell (distinct seeds).
+fn cell_rand(v: Voro, seed: u32) -> f32 {
+    return rand01(hash2(v.id, seed));
 }
 
 // 1 on the zero-set of a smooth field, falling off over `width`. The zero-set of

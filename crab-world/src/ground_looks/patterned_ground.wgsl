@@ -17,13 +17,8 @@
 // strengths lanes here: x plate mosaic (both tiers), y unused, z mudcracks
 // (and the scaffold's grain gain), w crack grooves (and the scaffold's
 // relief gain).
-#import rl::noise::{hash2, rand01, vnoise, footprint_fade, voronoi, Voro}
+#import rl::noise::{vnoise, footprint_fade, voronoi, cell_rand}
 #import rl::ground::art::{GroundCtx, GroundArt, default_art}
-
-// Per-cell identity in [0, 1) from a Voro hit — the plate hue/value driver.
-fn cell_id(v: Voro, seed: u32) -> f32 {
-    return rand01(hash2(v.id, seed));
-}
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let p = ctx.p;
@@ -42,7 +37,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let plate = voronoi(p / 120.0 + warp, 91u);
     // Per-plate identity: hue tilt (warm soil ↔ cool growth ↔ pale silt) and a
     // value step, so adjacent plates always separate.
-    let hue = cell_id(plate, 94u);
+    let hue = cell_rand(plate, 94u);
     let tilt = vec3(
         0.70 + 0.75 * hue,
         0.88 + 0.24 * abs(hue - 0.5),
@@ -59,7 +54,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     // ── Tier 2: meso plates (~14 m) — the claw-height stepping-stone read ──
     let meso = voronoi(p / 14.0 + warp * 3.0, 92u);
     let meso_fade = footprint_fade(14.0, fw);
-    rgb *= 1.0 + (0.16 * (cell_id(meso, 95u) - 0.5) - 0.22 * (1.0 - smoothstep(0.0, 0.10, meso.edge)))
+    rgb *= 1.0 + (0.16 * (cell_rand(meso, 95u) - 0.5) - 0.22 * (1.0 - smoothstep(0.0, 0.10, meso.edge)))
         * strengths.x * meso_fade;
 
     // ── Tier 3: mudcracks (~1.2 m) — the on-foot read ──────────────────────
@@ -73,7 +68,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         crack *= mix(1.0, 0.35, veg);
         rgb *= 1.0 - 0.38 * strengths.z * crack;
         // Slight per-polygon value so shards read individually.
-        rgb *= 1.0 + 0.10 * (cell_id(mud, 96u) - 0.5) * strengths.z * crack_fade;
+        rgb *= 1.0 + 0.10 * (cell_rand(mud, 96u) - 0.5) * strengths.z * crack_fade;
     }
 
     // ── Normals: crack grooves ─────────────────────────────────────────────

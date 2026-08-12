@@ -47,7 +47,7 @@
 // (plates/comb/scree flow), z near-field (cobble/fiber/dew, and the scaffold's
 // grain gain), w detail normal (cobble, and the scaffold's relief gain)
 // — all normalized to S = strengths / STRENGTH_DEFAULTS.
-#import rl::noise::{hash2, rand01, vnoise, footprint_fade, sparkle, streak, voronoi, Voro, vein, wind_dir}
+#import rl::noise::{hash2, rand01, vnoise, footprint_fade, sparkle, streak, voronoi, cell_rand, vein, wind_dir}
 #import rl::ground::art::{GroundCtx, GroundArt, STRENGTH_DEFAULTS, default_art}
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
@@ -122,8 +122,8 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     var prov_hue = 0.0;
     if cellular > 0.5 {
         let pv = voronoi(p / 420.0, 100u);
-        let prov = rand01(hash2(pv.id, 101u)) - 0.5;
-        prov_hue = (rand01(hash2(pv.id, 102u)) - 0.5) * hue_tilt;
+        let prov = cell_rand(pv, 101u) - 0.5;
+        prov_hue = (cell_rand(pv, 102u) - 0.5) * hue_tilt;
         m_tone = mix(m_tone, prov * 1.6, 0.6);
     }
     m_tone *= S.x;
@@ -173,7 +173,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         // Weighted toward bare ground so turf keeps only a whisper of the mosaic
         // — a cell tone under grass, never a honeycomb over it.
         let meso_f = footprint_fade(8.0, fw) * dry_w * S.y * mix(0.22, 1.0, 1.0 - turf);
-        let ch = rand01(hash2(mv.id, 94u)) - 0.5;
+        let ch = cell_rand(mv, 94u) - 0.5;
         rgb *= 1.0 + 0.30 * ch * meso_f;
         rgb *= 1.0 + 0.14 * (1.0 - smoothstep(0.0, 0.45, mv.dist)) * meso_f;
 
@@ -185,7 +185,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
             let cv = voronoi(cp, 98u);
             rgb *= 1.0 - 0.55 * cob_f * (1.0 - smoothstep(0.0, 0.22, cv.edge));
             rgb *= 1.0 + 0.22 * cob_f * (1.0 - smoothstep(0.0, 0.5, cv.dist));
-            rgb *= 1.0 + 0.24 * cob_f * (rand01(hash2(cv.id, 99u)) - 0.5);
+            rgb *= 1.0 + 0.24 * cob_f * (cell_rand(cv, 99u) - 0.5);
             // Stones bulge: height falls with f1, so the normal tilts outward
             // from each stone's center down the f1 gradient.
             let w_n = S.w * cob_f;
