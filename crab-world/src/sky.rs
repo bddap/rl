@@ -20,13 +20,49 @@ const SKY_SHADER: Handle<Shader> = uuid_handle!("4f6b0e29-8d17-4c52-b3a9-7e04d1c
 impl Plugin for NightSkyPlugin {
     fn build(&self, app: &mut App) {
         load_internal_asset!(app, SKY_SHADER, "sky.wgsl", Shader::from_wgsl);
-        app.add_plugins(MaterialPlugin::<StarSkyMaterial>::default())
-            .add_systems(Startup, spawn_sky);
+        app.add_plugins(crate::moon::MoonPlugin)
+            .add_plugins(MaterialPlugin::<StarSkyMaterial>::default())
+            .add_systems(Startup, spawn_sky)
+            .add_systems(Update, sync_moon_uniforms);
     }
 }
 
+/// Uniforms carry the [`crate::moon::Moon`] knobs to the shader. Colors are
+/// authored srgb like every constant in `sky.wgsl` (the shader converts to
+/// linear at the end).
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
-struct StarSkyMaterial {}
+struct StarSkyMaterial {
+    /// xyz: world-space unit vector toward the moon; w: phase [0, 1).
+    #[uniform(0)]
+    moon_dir_phase: Vec4,
+    /// rgb: moon tint (srgb); w: illuminated fraction (halo strength).
+    #[uniform(1)]
+    moon_color_lum: Vec4,
+}
+
+impl StarSkyMaterial {
+    fn from_moon(moon: &crate::moon::Moon) -> Self {
+        let c = moon.color().to_srgba();
+        Self {
+            moon_dir_phase: moon.direction().extend(moon.phase.rem_euclid(1.0)),
+            moon_color_lum: Vec4::new(c.red, c.green, c.blue, moon.illuminated_fraction()),
+        }
+    }
+}
+
+/// Follow the moon knobs: any change to the resource re-uploads the sky's
+/// uniforms next frame (same change-gating as the light sync in `moon.rs`).
+fn sync_moon_uniforms(
+    moon: Res<crate::moon::Moon>,
+    mut materials: ResMut<Assets<StarSkyMaterial>>,
+) {
+    if !moon.is_changed() {
+        return;
+    }
+    for (_, material) in materials.iter_mut() {
+        *material = StarSkyMaterial::from_moon(&moon);
+    }
+}
 
 impl Material for StarSkyMaterial {
     fn vertex_shader() -> ShaderRef {
@@ -46,6 +82,7 @@ fn spawn_sky(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StarSkyMaterial>>,
+    moon: Res<crate::moon::Moon>,
 ) {
     let mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -54,7 +91,7 @@ fn spawn_sky(
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; 3]);
     commands.spawn((
         Mesh3d(meshes.add(mesh)),
-        MeshMaterial3d(materials.add(StarSkyMaterial {})),
+        MeshMaterial3d(materials.add(StarSkyMaterial::from_moon(&moon))),
         NoFrustumCulling,
         NotShadowCaster,
     ));

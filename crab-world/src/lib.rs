@@ -44,6 +44,9 @@ pub mod ground;
 pub mod instrument;
 #[cfg(feature = "render")]
 pub mod moisture;
+/// The moon — THE light source (rl#374). Its plugin rides [`sky::NightSkyPlugin`].
+#[cfg(feature = "render")]
+pub mod moon;
 #[cfg(feature = "render")]
 pub mod play;
 #[cfg(feature = "render")]
@@ -103,6 +106,18 @@ pub struct RenderArgs {
     /// the keybind does.
     #[arg(long, env = "RL_GROUND_LOOK", value_enum)]
     pub ground_look: Option<ground::GroundLook>,
+    /// Moon compass direction, degrees around +Y (rl#374).
+    #[arg(long, env = "RL_MOON_AZIMUTH_DEG", allow_hyphen_values = true)]
+    pub moon_azimuth_deg: Option<f32>,
+    /// Moon height above the horizon, degrees (90 = zenith).
+    #[arg(long, env = "RL_MOON_ELEVATION_DEG", allow_hyphen_values = true)]
+    pub moon_elevation_deg: Option<f32>,
+    /// Moonlight + disc hue, degrees on the HSL wheel.
+    #[arg(long, env = "RL_MOON_HUE_DEG", allow_hyphen_values = true)]
+    pub moon_hue_deg: Option<f32>,
+    /// Moon phase, wrapping [0, 1): 0 = new, 0.5 = full. Drives luminosity.
+    #[arg(long, env = "RL_MOON_PHASE", allow_hyphen_values = true)]
+    pub moon_phase: Option<f32>,
 }
 
 #[cfg(feature = "render")]
@@ -117,6 +132,7 @@ impl RenderArgs {
         if let Some(reason) = mesh_err {
             mesh_fallback::log_fallback(surface, reason);
         }
+        let moon = moon::Moon::default();
         BootView {
             render_mode: self.render_mode.unwrap_or(if mesh_err.is_some() {
                 crab_view::RenderMode::Colliders
@@ -124,6 +140,12 @@ impl RenderArgs {
                 crab_view::RenderMode::Mesh
             }),
             ground_look: self.ground_look.unwrap_or_default(),
+            moon: moon::Moon {
+                azimuth_deg: self.moon_azimuth_deg.unwrap_or(moon.azimuth_deg),
+                elevation_deg: self.moon_elevation_deg.unwrap_or(moon.elevation_deg),
+                hue_deg: self.moon_hue_deg.unwrap_or(moon.hue_deg),
+                phase: self.moon_phase.unwrap_or(moon.phase),
+            },
         }
     }
 }
@@ -135,6 +157,8 @@ impl RenderArgs {
 pub struct BootView {
     pub render_mode: crab_view::RenderMode,
     pub ground_look: ground::GroundLook,
+    /// Boot values for the moon knobs (rl#374); the resource stays live-tweakable.
+    pub moon: moon::Moon,
 }
 
 /// A view knob whose states ARE the values of its CLI flag. Blanket, so it names the
