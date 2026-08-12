@@ -49,21 +49,40 @@ pub(super) struct AmbientContext {
     pub rocky: f32,
     /// Listener height above the terrain, meters.
     pub alt_m: f32,
-    /// Listener speed, m/s ([`super::audio::local_speed_mps`] — the same speed
-    /// the wind timbre rides), driving the movement and engine layers.
+    /// Listener speed, m/s, driving the movement and engine layers: horizontal
+    /// gait on foot (vertical motion is the wind's business, not footsteps'),
+    /// the craft pose window's speed when flying.
     pub speed_mps: f32,
     /// Vehicle context (`None` = on foot).
     pub vehicle: Option<VehicleKind>,
 }
 
+/// How a bed is made loop-clean at load: `Blend` equal-power-crossfades the tail
+/// into the head — right for steady texture, but on transient material (footsteps)
+/// it superimposes unrelated events into a double-hit at every wrap — so such an
+/// asset is cut to start/end inside a between-events gap and `Splice`d untouched.
+#[derive(Clone, Copy)]
+enum Seal {
+    Blend,
+    Splice,
+}
+
 struct LayerDef {
     /// Loop file under the asset root's `assets/` (see scripts/fetch-ambience.sh).
     file: &'static str,
-    /// Full-context level, as a fraction of the wind's master ceiling so the
-    /// beds sit under the loudest thing in the outdoor mix by construction.
+    /// Amplitude at full activation. The beds key off [`WIND_MASTER`] so the
+    /// ambient background scales with the wind ceiling; the stage-3 layers are
+    /// plain measured amplitudes (see the table comment) and may exceed 1 only
+    /// while `level × activation × asset peak` stays under the mixer's clamp.
     level: f32,
     /// Bus → 0..1 activation.
     gain: fn(&AmbientContext) -> f32,
+    /// Activation glide τ, seconds: beds and engines crossfade deliberately
+    /// (0.4 s), gait-keyed layers must track the player's stops — a 0.4 s tail
+    /// fires audible phantom steps after halting, so they release in 60 ms.
+    glide_tau_s: f32,
+    /// Loop-seal policy at load.
+    seal: Seal,
     /// Per-sound external-bus policy (rl#359): an `Exempt` bed would bleed through
     /// the code-entry muffle. Nothing is exempted yet.
     muffle: Muffle,
@@ -101,10 +120,11 @@ fn walk_mps() -> f32 {
     crate::sim::PLAYER_SPEED as f32 / crate::sim::UNIT as f32 * crate::sim::TICK_HZ as f32
 }
 
-/// On-foot movement: grounded (the jump apex is ~1.5 player heights ≈ 0.08 m in
-/// this miniature world, so the fade sits inside it — steps cut out mid-air) and
-/// moving, ramping in from a quarter of walking pace to full at walk.
-fn on_foot_move(ctx: &AmbientContext) -> f32 {
+/// Footsteps, any walkable ground: grounded (the jump apex is ~1.5 player
+/// heights ≈ 0.08 m in this miniature world, so the fade sits inside it — steps
+/// cut out mid-air) and moving, ramping in from a quarter of walking pace to
+/// full at walk (sprint holds full, it does not get louder).
+fn footsteps(ctx: &AmbientContext) -> f32 {
     if ctx.vehicle.is_some() {
         return 0.0;
     }
@@ -112,111 +132,131 @@ fn on_foot_move(ctx: &AmbientContext) -> f32 {
     grounded * smoothstep(0.25 * walk_mps(), walk_mps(), ctx.speed_mps)
 }
 
-/// Footsteps: any walkable ground — the neutral movement layer under the swish.
-fn footsteps(ctx: &AmbientContext) -> f32 {
-    on_foot_move(ctx)
-}
-
 /// Grass swish: legs brushing through the tufts, so it lives exactly where the
 /// tufts grow, on top of the neutral footsteps.
 fn grass_swish(ctx: &AmbientContext) -> f32 {
-    ctx.grass * on_foot_move(ctx)
+    ctx.grass * footsteps(ctx)
 }
 
-/// Engine loops: full presence the moment the craft is boarded — an engine idles
-/// audibly — with speed adding the top of the band. Board/exit crossfades on the
-/// activation glide like every layer. Each craft normalizes speed over its own
-/// audible band, matching the wind profile's (audio.rs).
+/// An engine's presence the moment its craft is boarded — it idles audibly;
+/// speed adds the rest of the band.
+const ENGINE_IDLE: f32 = 0.6;
+
+/// Engine loops: board/exit crossfades on the activation glide like every layer.
+/// Each craft normalizes speed over its own audible band, the same ceilings its
+/// wind profile uses (audio.rs).
 fn engine(ctx: &AmbientContext, kind: VehicleKind, top_mps: f32) -> f32 {
     if ctx.vehicle != Some(kind) {
         return 0.0;
     }
-    0.6 + 0.4 * (ctx.speed_mps / top_mps).clamp(0.0, 1.0)
+    ENGINE_IDLE + (1.0 - ENGINE_IDLE) * (ctx.speed_mps / top_mps).clamp(0.0, 1.0)
 }
 
-/// Plane: the prop buzz, up to the full-throttle terminal (audio.rs FULL_WIND).
+/// Plane: the prop buzz, up to the full-throttle terminal.
 fn plane_engine(ctx: &AmbientContext) -> f32 {
-    engine(ctx, VehicleKind::Plane, 4.5)
+    engine(ctx, VehicleKind::Plane, super::audio::FULL_WIND_MPS)
 }
 
-/// Ship: the hover thrusters' hum, over the ship's own lower band (its wind
-/// profile tops out at 3 m/s for the same reason).
+/// Ship: the hover thrusters' hum, over the ship's own lower band.
 fn ship_thruster(ctx: &AmbientContext) -> f32 {
-    engine(ctx, VehicleKind::Ship, 3.0)
+    engine(ctx, VehicleKind::Ship, super::audio::SHIP_TOP_MPS)
 }
 
 /// All beds are gated on biome only, never time: the world is PERMANENTLY night
 /// (a static `NightSkyPlugin` sky, one fixed moon-sun light — no time-of-day
 /// exists anywhere in sim or render), so a "night" gate would be constant-true.
+/// Deliberate crossfade for beds and engines; fast tracking for gait-keyed
+/// layers (see [`LayerDef::glide_tau_s`]).
+const BED_GLIDE_S: f32 = 0.4;
+const GAIT_GLIDE_S: f32 = 0.06;
+
 /// If a day/night cycle ever lands, it multiplies into the gain maps here.
-/// Levels are the stage-3 deliberate mix pass, set from measured solo RMS in the
-/// evidence scenario (see docs/evidence/rl357-stage3): beds sit in a band under
-/// the wind ceiling, the listener's own movement reads just above the beds, and
-/// the engines are the loudest layer — still under the full-speed wind.
+///
+/// Levels are the stage-3 deliberate mix pass, set from each asset's measured
+/// integrated loudness (a scalar gain shifts LUFS by exactly 20·log10(gain)):
+/// beds key off the wind ceiling as a band of background texture; movement
+/// (steps −30.7 LUFS mastered, swish −26.8) lands a few dB above the bed stack
+/// so the listener's own sounds read as foreground without drowning the world;
+/// engines are mastered hot (−19.0 / −19.6 LUFS, loudnorm I=−16 — steady hums
+/// take it) so full activation lands ~−18 LUFS, over the ship's ~−21 LUFS wind
+/// rumble and the plane's cruise wind. The loudest SAMPLED layer is an engine;
+/// the −8 LUFS full-throttle wind roar overtakes everything by design — speed
+/// drowns the motor. Headroom is budgeted on the worst-case SUM: walking a lush
+/// valley stacks four beds (Σ 0.72) + steps 0.7 + swish 0.35 ≈ 1.77 of level,
+/// but the beds' instantaneous amplitude sits far under their ~0.84 true peaks,
+/// so a step transient (0.7 × 0.84 ≈ 0.59) plus swish and beds stays clear of
+/// the mixer's ±1 clamp except on vanishing coincident-peak alignments.
 const LAYERS: [LayerDef; 9] = [
     LayerDef {
         file: "ambience/grassland-birds.wav",
         level: 0.35 * WIND_MASTER,
         gain: grass_bed,
+        glide_tau_s: BED_GLIDE_S,
+        seal: Seal::Blend,
         muffle: Muffle::Duck,
     },
     LayerDef {
         file: "ambience/crickets.wav",
         level: 0.5 * WIND_MASTER,
         gain: grass_bed,
+        glide_tau_s: BED_GLIDE_S,
+        seal: Seal::Blend,
         muffle: Muffle::Duck,
     },
     LayerDef {
         file: "ambience/valley-frogs.wav",
         level: 0.45 * WIND_MASTER,
         gain: valley_bed,
+        glide_tau_s: BED_GLIDE_S,
+        seal: Seal::Blend,
         muffle: Muffle::Duck,
     },
     LayerDef {
         file: "ambience/grass-rustle.wav",
         level: 0.3 * WIND_MASTER,
         gain: grass_bed,
+        glide_tau_s: BED_GLIDE_S,
+        seal: Seal::Blend,
         muffle: Muffle::Duck,
     },
     LayerDef {
         file: "ambience/mountain-birds.wav",
         level: 0.3 * WIND_MASTER,
         gain: mountain_bed,
+        glide_tau_s: BED_GLIDE_S,
+        seal: Seal::Blend,
         muffle: Muffle::Duck,
     },
-    // Stage-3 layers: plain amplitudes, not ×WIND_MASTER — these are set against
-    // each asset's MEASURED mastering to hit a mix target, not parked at a
-    // fraction of the wind ceiling. Movement (steps −30.7 LUFS mastered, swish
-    // −26.8) lands ~6 dB above the bed stack: the listener's own sounds read as
-    // foreground without drowning the world. Engines are mastered hot (−19.0 /
-    // −19.6 LUFS, I=−16 loudnorm — steady hums take it without clipping) so full
-    // activation lands ~−18 LUFS: clearly over the ship's ~−21 LUFS wind rumble
-    // and over the plane's cruise wind, while the −8 LUFS full-throttle roar
-    // still wins — speed drowns the motor, which is the point of the roar.
-    // Amplitude × activation stays under the asset's ~0.84 true peak, so the
-    // mixer's clamp never bites.
     LayerDef {
         file: "ambience/footsteps.wav",
-        level: 1.0,
+        level: 0.7,
         gain: footsteps,
+        glide_tau_s: GAIT_GLIDE_S,
+        seal: Seal::Splice,
         muffle: Muffle::Duck,
     },
     LayerDef {
         file: "ambience/grass-swish.wav",
-        level: 0.5,
+        level: 0.35,
         gain: grass_swish,
+        glide_tau_s: GAIT_GLIDE_S,
+        seal: Seal::Blend,
         muffle: Muffle::Duck,
     },
     LayerDef {
         file: "ambience/plane-engine.wav",
         level: 1.15,
         gain: plane_engine,
+        glide_tau_s: BED_GLIDE_S,
+        seal: Seal::Blend,
         muffle: Muffle::Duck,
     },
     LayerDef {
         file: "ambience/ship-thruster.wav",
-        level: 1.25,
+        level: 1.15,
         gain: ship_thruster,
+        glide_tau_s: BED_GLIDE_S,
+        seal: Seal::Blend,
         muffle: Muffle::Duck,
     },
 ];
@@ -293,7 +333,9 @@ fn load_bed(def: &LayerDef) -> Arc<[f32]> {
     let path = crab_world::assets::bevy_asset_path().join(def.file);
     match crab_world::wav::read_mono_44k(&path) {
         Ok(mut pcm) => {
-            seal_loop(&mut pcm);
+            if let Seal::Blend = def.seal {
+                seal_loop(&mut pcm);
+            }
             pcm.into()
         }
         Err(e) => {
@@ -366,21 +408,28 @@ pub(super) fn update_context(
         Absolute(f32),
     }
     // Absolute world xz for the terrain sampler (render-frame coordinates are
-    // anchor-relative and must never touch it — rl#354).
-    let (x, z, alt) = match &*vehicle {
+    // anchor-relative and must never touch it — rl#354). Speed here is the GAIT
+    // speed, not the wind's `local_speed_mps`: on foot only the horizontal
+    // components count — a standing jump moves at ~8.7× walking pace vertically,
+    // which is wind, not footsteps.
+    let (x, z, alt, speed_mps) = match &*vehicle {
         LocalVehicle::OnFoot => {
             let Some(p) = state.client.sim().player(state.client.me()) else {
                 *ctx = AmbientContext::default();
                 return;
             };
             let (x, z) = p.pos().to_meters_f64();
+            let v = p.vel();
+            let gait = ((v.x as f32).hypot(v.z as f32)) / crate::sim::UNIT as f32
+                * crate::sim::TICK_HZ as f32;
             (
                 x,
                 z,
                 Alt::AboveGround(p.alt() as f32 / crate::sim::UNIT as f32),
+                gait,
             )
         }
-        LocalVehicle::Flying { .. } => {
+        LocalVehicle::Flying { poses, .. } => {
             let Some(pose) = vehicle.cockpit_sample(clock.tick, clock.frac) else {
                 *ctx = AmbientContext::default();
                 return;
@@ -389,6 +438,7 @@ pub(super) fn update_context(
                 pose.pos.x as f64,
                 pose.pos.z as f64,
                 Alt::Absolute(pose.pos.y),
+                poses.speed_mps().unwrap_or(0.0),
             )
         }
     };
@@ -408,7 +458,7 @@ pub(super) fn update_context(
         lush: 1.0 - biome::grass_dryness(h),
         rocky: biome::rocky_weight(h, normal_y),
         alt_m,
-        speed_mps: super::audio::local_speed_mps(&state, &vehicle),
+        speed_mps,
         vehicle: vehicle.kind(),
     };
 }
@@ -446,12 +496,14 @@ pub(super) struct AmbienceStream {
 impl AmbienceStream {
     /// Samples between coefficient refreshes — same tradeoff as the wind's block.
     const BLOCK: u32 = 64;
-    /// Activation glide: τ ≈ 0.4 s — a deliberate, audible crossfade (the wind's
-    /// 60 ms would jump-cut an ambience bed).
-    const GLIDE_ACT: f32 = 1.0 / (0.4 * SAMPLE_RATE as f32);
     /// Bus glide: the wind's 60 ms, so one combo-entry duck lands on the beds and
     /// the wind as a single mix move instead of two staggered ones.
     const GLIDE_BUS: f32 = 1.0 / (0.060 * SAMPLE_RATE as f32);
+
+    /// Per-layer activation glide coefficient from its declared τ.
+    fn glide_act(i: usize) -> f32 {
+        1.0 / (LAYERS[i].glide_tau_s * SAMPLE_RATE as f32)
+    }
 
     fn new(targets: Arc<AmbienceTargets>, beds: [Arc<[f32]>; LAYERS.len()]) -> Self {
         Self {
@@ -489,7 +541,7 @@ impl Iterator for AmbienceStream {
         // joins after the filter, untouched by the muffle.
         let (mut ducked, mut exempt) = (0.0, 0.0);
         for i in 0..LAYERS.len() {
-            self.acts[i] += (self.targets.acts[i].load() - self.acts[i]) * Self::GLIDE_ACT;
+            self.acts[i] += (self.targets.acts[i].load() - self.acts[i]) * Self::glide_act(i);
             let bed = &self.beds[i];
             if bed.is_empty() {
                 continue;
@@ -611,11 +663,35 @@ mod tests {
         assert!((pcm[0] - tail_first).abs() < 1e-4);
     }
 
-    fn one_bed_stream(pcm: Vec<f32>) -> (Arc<AmbienceTargets>, AmbienceStream) {
+    fn one_bed_stream_at(i: usize, pcm: Vec<f32>) -> (Arc<AmbienceTargets>, AmbienceStream) {
         let targets = Arc::<AmbienceTargets>::default();
         let mut beds: [Arc<[f32]>; LAYERS.len()] = std::array::from_fn(|_| Arc::from([]));
-        beds[0] = pcm.into();
+        beds[i] = pcm.into();
         (targets.clone(), AmbienceStream::new(targets, beds))
+    }
+
+    fn one_bed_stream(pcm: Vec<f32>) -> (Arc<AmbienceTargets>, AmbienceStream) {
+        one_bed_stream_at(0, pcm)
+    }
+
+    /// The footsteps layer (a gait layer) releases in its declared 60 ms — a
+    /// stop leaves no phantom step tail — where a bed at the same point in its
+    /// fade is still clearly audible.
+    #[test]
+    fn gait_layer_releases_fast() {
+        let steps_i = LAYERS
+            .iter()
+            .position(|l| l.file.contains("footsteps"))
+            .unwrap();
+        let release_at_300ms = |i: usize| {
+            let (targets, mut s) = one_bed_stream_at(i, vec![0.5; 64]);
+            targets.acts[i].store(0.8);
+            let _ = s.by_ref().take(3 * SAMPLE_RATE as usize).count();
+            targets.acts[i].store(0.0);
+            s.by_ref().nth((0.3 * SAMPLE_RATE as f32) as usize).unwrap()
+        };
+        assert!(release_at_300ms(steps_i) < 0.01);
+        assert!(release_at_300ms(0) > 0.1);
     }
 
     #[test]
@@ -805,14 +881,22 @@ mod tests {
             t if t < 14.0 => (1.8 * walk, 0.0, None),
             t if t < 22.0 => {
                 let n = ((t - 14.0) / 5.0).min(1.0);
-                (4.5 * n, 40.0 * n, Some(VehicleKind::Plane))
+                (
+                    super::super::audio::FULL_WIND_MPS * n,
+                    40.0 * n,
+                    Some(VehicleKind::Plane),
+                )
             }
             t if t < 28.0 => (2.5, 10.0, Some(VehicleKind::Ship)),
             _ => (walk, 0.0, None),
         };
+        // The whole flight stays over the lush valley: the gain maps (canopy
+        // halving, altitude fade) decide what survives boarding — the scenario
+        // must not pre-silence the beds, or the render never exercises the
+        // loudest engine+beds combination the level pass is accountable for.
         let ctx = AmbientContext {
-            grass: if vehicle.is_some() { 0.0 } else { 1.0 },
-            lush: if vehicle.is_some() { 0.0 } else { 1.0 },
+            grass: 1.0,
+            lush: 1.0,
             rocky: 0.0,
             alt_m,
             speed_mps: speed,
@@ -839,19 +923,16 @@ mod tests {
             eprintln!("beds absent — run scripts/fetch-ambience.sh first");
             return;
         }
-        // Stage 2's rough placement levels (its landed LAYERS values), the four
-        // stage-3 layers muted — the historical snapshot the A/B is against.
-        let before: [f32; LAYERS.len()] = [
-            0.35 * WIND_MASTER,
-            0.5 * WIND_MASTER,
-            0.45 * WIND_MASTER,
-            0.3 * WIND_MASTER,
-            0.3 * WIND_MASTER,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ];
+        // "Before" is the stage-2 mix: today's bed levels (the level pass left
+        // the beds where stage 2 placed them) with the four stage-3 layers,
+        // which sit last in the table, muted.
+        let before: [f32; LAYERS.len()] = std::array::from_fn(|i| {
+            if i < LAYERS.len() - 4 {
+                LAYERS[i].level
+            } else {
+                0.0
+            }
+        });
         let after: [f32; LAYERS.len()] = std::array::from_fn(|i| LAYERS[i].level);
         for (name, levels) in [("mix-before.wav", before), ("mix-after.wav", after)] {
             let amb_targets = Arc::<AmbienceTargets>::default();
@@ -865,8 +946,7 @@ mod tests {
                 for ((def, slot), level) in LAYERS.iter().zip(&amb_targets.acts).zip(levels) {
                     slot.store(level * (def.gain)(&ctx));
                 }
-                let [g, c, wh, wg, gu] = super::super::audio::profile(ctx.vehicle, speed);
-                wind_targets.store(g, c, wh, wg, gu);
+                wind_targets.store(super::super::audio::profile(ctx.vehicle, speed));
                 let s = (amb.next().unwrap() + wind.next().unwrap()).clamp(-1.0, 1.0);
                 pcm.push((s * i16::MAX as f32) as i16);
             }
