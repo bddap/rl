@@ -109,13 +109,20 @@ impl Moon {
     }
 }
 
-/// Sim seconds along the traversal path since boot. Separate from [`Moon`] so
-/// the path parameter accumulates in f64 (frame-sized increments on a f32
-/// would stall once t grows) and so a manual knob write can't teleport the
-/// clock.
+/// The motion accumulators, separate from [`Moon`] so they run in f64:
+/// frame-sized increments on a f32 stall outright (at 60 fps a ≲5× timescale's
+/// phase increment rounds to zero ulps) or accumulate double-digit rate bias.
+/// A manual knob write can't teleport the clock.
 #[derive(Resource, Default)]
 struct MoonClock {
+    /// Sim seconds along the traversal path since boot.
     t: f64,
+    /// Phase accumulator — the f64 twin of [`Moon::phase`].
+    phase: f64,
+    /// What `phase` last projected into [`Moon::phase`]: a mismatch means a
+    /// manual write landed since, which re-seeds the accumulator (the
+    /// manual-write-persists-as-an-offset contract).
+    projected: f32,
 }
 
 /// Where the back-and-forth traversal puts the moon `t` sim-seconds after
@@ -135,16 +142,22 @@ fn traversal_angles(t: f64) -> (f32, f32) {
 
 /// One motion tick: advance the clock by `real_dt` scaled by the timescale
 /// knob, sweep the phase realistically (one synodic cycle per
-/// [`SYNODIC_SECONDS`] of sim time — incrementally, so a manual phase write
-/// persists as an offset), and put the moon on the traversal path. Pure so the
-/// motion contract is testable without an `App`.
+/// [`SYNODIC_SECONDS`] of sim time — from the f64 accumulator, re-seeded by
+/// any manual phase write so the write persists as an offset), and put the
+/// moon on the traversal path. Pure so the motion contract is testable
+/// without an `App`.
 fn step(moon: &mut Moon, clock: &mut MoonClock, real_dt: f64) {
     if moon.timescale == 0.0 {
         return; // Frozen means FROZEN: a manual pose must survive, not snap to the path.
     }
     let dt = real_dt * moon.timescale as f64;
     clock.t += dt;
-    moon.phase = ((moon.phase as f64 + dt / SYNODIC_SECONDS).rem_euclid(1.0)) as f32;
+    if moon.phase != clock.projected {
+        clock.phase = moon.phase as f64;
+    }
+    clock.phase = (clock.phase + dt / SYNODIC_SECONDS).rem_euclid(1.0);
+    moon.phase = clock.phase as f32;
+    clock.projected = moon.phase;
     (moon.azimuth_deg, moon.elevation_deg) = traversal_angles(clock.t);
 }
 
@@ -321,6 +334,46 @@ mod tests {
             moon.phase
         );
         assert_eq!(clock.t, 24.0 * 3600.0);
+    }
+
+    /// Frame-sized increments must actually accumulate: an f32 phase
+    /// accumulator stalls at low timescales (a realistic-rate increment
+    /// rounds to zero f32 ulps near phase 0.5) — the f64 accumulator in
+    /// [`MoonClock`] is the fix, and this pins its worst case: one real
+    /// minute of 60 fps frames at timescale 1.
+    #[test]
+    fn phase_accumulates_frame_sized_steps() {
+        let mut moon = Moon {
+            timescale: 1.0,
+            ..default()
+        };
+        let mut clock = MoonClock::default();
+        for _ in 0..3600 {
+            step(&mut moon, &mut clock, 1.0 / 60.0);
+        }
+        let want = 0.5 + (60.0 / SYNODIC_SECONDS) as f32;
+        assert!(
+            (moon.phase - want).abs() < 1e-6,
+            "phase {} != {want}",
+            moon.phase
+        );
+    }
+
+    /// A manual phase write mid-flight persists as an offset: the f64
+    /// accumulator re-seeds from the written value instead of overwriting it
+    /// with its own history.
+    #[test]
+    fn manual_phase_write_persists_as_offset() {
+        let mut moon = Moon::default();
+        let mut clock = MoonClock::default();
+        step(&mut moon, &mut clock, 60.0);
+        moon.phase = 0.25; // A song poses the phase.
+        step(&mut moon, &mut clock, 60.0);
+        assert!(
+            moon.phase > 0.25 && moon.phase < 0.26,
+            "phase {} lost the manual write",
+            moon.phase
+        );
     }
 
     /// Timescale 0 freezes the sky completely — the manual-pose escape hatch.

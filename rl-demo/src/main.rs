@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use clap::builder::FalseyValueParser;
 use clap::{Parser, Subcommand};
 use crab_world::controls::{ControlsOverlayArgs, ControlsOverrides};
-use crab_world::{CheckpointArgs, RenderArgs, bot, physics, play};
+use crab_world::{CheckpointArgs, RenderArgs, bot, parse_finite_f32, physics, play};
 
 /// Watch the trained crab: a live demo window, a still, or a rendered video.
 #[derive(Parser, Debug)]
@@ -184,15 +184,6 @@ fn parse_vec3(s: &str) -> Result<Vec3, String> {
     match parts.as_slice() {
         [x, y, z] => Ok(Vec3::new(*x, *y, *z)),
         _ => Err(format!("expected X,Y,Z (got {} components)", parts.len())),
-    }
-}
-
-fn parse_finite_f32(s: &str) -> Result<f32, String> {
-    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
-    if v.is_finite() {
-        Ok(v)
-    } else {
-        Err(format!("{v} is not finite"))
     }
 }
 

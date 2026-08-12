@@ -116,7 +116,12 @@ fn finish_offscreen_app(
                 sync_controls_context.before(update_controls_ui::<GcrControls>),
                 capture_when_settled,
             )
-                .chain(),
+                .chain()
+                // After the sky-motion step, like the light/uniform syncs: the
+                // capture log's moon-pose provenance must name the pose the
+                // frame RENDERED, not last frame's (visible at time-lapse
+                // timescales).
+                .after(crab_world::moon::MoonMotionSet),
         );
     super::render_mode::register(app, render_mode);
 }

@@ -123,9 +123,24 @@ pub struct RenderArgs {
     #[arg(long, env = "RL_MOON_PHASE", allow_hyphen_values = true)]
     pub moon_phase: Option<f32>,
     /// Sky-motion timescale, sim seconds per real second (rl#374); default 24
-    /// (a day-length moon traversal per real hour). 0 freezes the sky.
-    #[arg(long, env = "RL_MOON_TIMESCALE", allow_hyphen_values = true)]
+    /// (a day-length moon traversal per real hour). 0 freezes the sky. Finite
+    /// only: this knob feeds the motion clock's ACCUMULATOR, where one NaN/inf
+    /// frame is permanent, not a one-frame glitch — so it dies at parse.
+    #[arg(long, env = "RL_MOON_TIMESCALE", allow_hyphen_values = true,
+          value_parser = parse_finite_f32)]
     pub moon_timescale: Option<f32>,
+}
+
+/// A finite f32 CLI value — NaN/inf die at parse, t=0 (the rl#275 standard),
+/// instead of poisoning whatever consumes them. THE one implementation
+/// (rl-demo's vec/pose parsing imports it too).
+pub fn parse_finite_f32(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if v.is_finite() {
+        Ok(v)
+    } else {
+        Err(format!("{v} is not finite"))
+    }
 }
 
 #[cfg(feature = "render")]
