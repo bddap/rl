@@ -54,10 +54,10 @@ fn footprint_fade(wavelength: f32, fw: f32) -> f32 {
 // finest octave the descent keeps still spans ~5+ pixels per wavelength. Letting
 // octaves ride down toward Nyquist (footprint_fade's window) turns the fine tail
 // into per-pixel salt noise — grain must stay coarse enough to read as surface.
-// The window sat at (0.05, 0.125) — an ~8 px floor — until rl#353 stage 7: on
-// foot that ceiling kept the finest visible grain at ~4 cm, and the owner read
-// the ground as "not high enough frequency" up close. 1.5× finer (same 2.5×
-// edge ratio) buys a third-finer near field while staying above the salt line.
+// Window tuning (rl#353 stage 7): an 8 px floor caps the finest visible grain
+// on foot at ~4 cm, which reads as low-frequency up close — this window (2.5×
+// edge ratio) trades down to ~5.3 px, a third-finer near field, still above
+// the salt line.
 fn grain_fade(wavelength: f32, fw: f32) -> f32 {
     return 1.0 - smoothstep(wavelength * 0.075, wavelength * 0.1875, fw);
 }
