@@ -71,7 +71,9 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
             let log_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
                 &logger_provider,
             )
-            .with_filter(tracing_subscriber::filter::filter_fn(not_otel_internal));
+            .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+                exportable_target(meta.target())
+            }));
             opentelemetry::global::set_meter_provider(meter_provider.clone());
 
             tracing_subscriber::registry()
@@ -99,14 +101,24 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
     }
 }
 
-fn not_otel_internal(meta: &tracing::Metadata<'_>) -> bool {
-    let t = meta.target();
+/// Whether a record with this `tracing` target belongs in the OTLP export (it always
+/// still reaches stderr). Excluded:
+///
+/// - The export pipeline's own crates — exporting their records feeds back into export.
+/// - gilrs's force-feedback module. No rl surface plays rumble, but bevy_gilrs 0.18
+///   hardcodes ff ON, so gilrs holds a second fd per gamepad and pokes it every 50ms
+///   tick; when a Bluetooth pad sleeps, the ticks that race the Disconnected event hit
+///   the deleted node and log expected ENODEV at ERROR (upstream's own Drop impl
+///   treats ENODEV as expected), firing a fleet-error per controller sleep (tv,
+///   2026-08-11). Reconnect self-heals: gilrs re-opens the device with the fresh node.
+fn exportable_target(t: &str) -> bool {
     !(t.starts_with("opentelemetry")
         || t.starts_with("hyper")
         || t.starts_with("reqwest")
         || t.starts_with("h2")
         || t.starts_with("tonic")
-        || t.starts_with("tower"))
+        || t.starts_with("tower")
+        || (t.starts_with("gilrs") && t.ends_with("::ff")))
 }
 
 fn resolve_endpoint(otel: bool) -> Option<String> {
@@ -194,4 +206,29 @@ fn host_name() -> String {
 
 pub fn meter() -> opentelemetry::metrics::Meter {
     opentelemetry::global::meter("rl")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exportable_target;
+
+    #[test]
+    fn export_filter_drops_pipeline_and_ff_noise_only() {
+        for t in [
+            "opentelemetry_sdk::logs",
+            "hyper::client",
+            "gilrs_core::platform::platform::ff",
+            "gilrs::ff",
+        ] {
+            assert!(!exportable_target(t), "{t} should be dropped");
+        }
+        for t in [
+            "gilrs_core::platform::platform::gamepad", // connect/disconnect stays visible
+            "gilrs::mapping",
+            "net::crab_slot",
+            "wgpu_hal",
+        ] {
+            assert!(exportable_target(t), "{t} should export");
+        }
+    }
 }
