@@ -92,6 +92,16 @@ mod tests;
 mod vehicle_view;
 mod voice;
 
+/// The windowed client's per-save data dir: `$XDG_DATA_HOME|~/.local/share` +
+/// `giant-crab-rescue`. `None` (no HOME at all) means callers run unpersisted
+/// rather than refusing to boot.
+fn data_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+    Some(base.join("giant-crab-rescue"))
+}
+
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use audio::ExternalBus;
 pub use render_mode::RenderMode;
