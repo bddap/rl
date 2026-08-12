@@ -219,10 +219,10 @@ fn drive_chord_script(
     }
     // Layout-cycle taps ride the same release-before-press ordering as the code taps.
     if script.cycles.iter().any(|&at| script.frame == at + 1) {
-        keys.release(KeyCode::KeyM);
+        keys.release(super::chord_map::LAYOUT_CYCLE_KEY);
     }
     if script.cycles.iter().any(|&at| script.frame == at) {
-        keys.press(KeyCode::KeyM);
+        keys.press(super::chord_map::LAYOUT_CYCLE_KEY);
     }
 }
 

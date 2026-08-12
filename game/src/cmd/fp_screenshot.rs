@@ -150,6 +150,27 @@ pub(crate) fn run(args: Args) -> Result<()> {
             .iter()
             .map(|spec| parse_hold(spec))
             .collect::<Result<Vec<_>>>()?;
+        // The script holds the modifier on ANY covering window, so windows that
+        // touch or overlap silently merge into one capture and the release edge —
+        // the thing that executes the code — never fires between them. Demand a
+        // ≥1-frame gap, in order, and a released primary window before extras.
+        if !holds.is_empty() && args.chord_release_at.is_none() {
+            anyhow::bail!("--chord-holds needs --chord-release-at to close the first window");
+        }
+        let mut windows = vec![(hold_at, args.chord_release_at)];
+        windows.extend(holds.iter().copied());
+        for pair in windows.windows(2) {
+            let (prev, next) = (pair[0], pair[1]);
+            match prev.1 {
+                Some(end) if next.0 > end => {}
+                _ => anyhow::bail!(
+                    "chord hold windows must be in order with a ≥1-frame gap \
+                     (got {:?} then {:?}) — touching windows merge into one capture",
+                    prev,
+                    next
+                ),
+            }
+        }
         app.insert_resource(
             render::ChordScript::new(hold_at, args.chord_release_at, taps)
                 .with_holds(holds)
@@ -171,7 +192,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             .map(render::chord_map::MapLayout::from_id)
             .transpose()
             .map_err(anyhow::Error::msg)?
-            .unwrap_or(render::chord_map::MapLayout::Hyperbolic);
+            .unwrap_or_default();
         app.insert_resource(render::chord_map::ChordMapState::new(layout));
         if let Some(file) = args.chord_map_file {
             app.insert_resource(render::chord_map::DiscoveredCodes::load(Some(file)));
@@ -199,15 +220,12 @@ fn parse_hold(spec: &str) -> Result<(u64, Option<u64>)> {
 }
 
 fn parse_chord_tap(spec: &str) -> Result<(u64, crab_world::chord::ChordDir)> {
-    use crab_world::chord::ChordDir;
     let (frame, dir) = spec
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("chord tap {spec:?} is not frame:dir"))?;
-    let dir = match dir {
-        "U" => ChordDir::Up,
-        "D" => ChordDir::Down,
-        "L" => ChordDir::Left,
-        "R" => ChordDir::Right,
+    // One UDLR alphabet — the chord map's codec, not a second letter match.
+    let dir = match render::chord_map::code_from_str(dir).as_deref() {
+        Some([d]) => *d,
         _ => anyhow::bail!("chord tap dir {dir:?} is not U|D|L|R"),
     };
     Ok((frame.parse()?, dir))

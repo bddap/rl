@@ -60,7 +60,13 @@ impl<A: Copy + PartialEq + Debug> ChordRegistry<A> {
 
     /// The command a completed code executes; `None` (an unregistered code) is a no-op.
     pub fn lookup(&self, code: &[ChordDir]) -> Option<A> {
-        self.0.iter().find(|e| e.code == code).map(|e| e.action)
+        self.entry(code).map(|e| e.action)
+    }
+
+    /// The full entry for a code — THE one code matcher; readers needing the label
+    /// (the combo map, rl#358) go through this rather than re-scanning entries.
+    pub fn entry(&self, code: &[ChordDir]) -> Option<&'static ChordEntry<A>> {
+        self.0.iter().find(|e| e.code == code)
     }
 
     /// Every entry, in table order — the stage-4 legend renders from this.
