@@ -271,7 +271,7 @@ fn boot(common: &Common, driver: Driver) -> (App, otel::OtelGuard) {
     }
 
     app.insert_resource(bot::NumEnvs(1))
-        .insert_resource(view.moon)
+        .add_plugins(crab_world::sky::NightSkyPlugin { moon: view.moon })
         .add_plugins(physics::CrabPhysicsPlugin)
         .add_plugins(physics::ArenaWorldPlugin {
             ground_look: view.ground_look,

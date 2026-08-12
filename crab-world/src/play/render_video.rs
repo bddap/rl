@@ -73,7 +73,6 @@ impl Plugin for RenderVideoPlugin {
             self.overrides.random_policy,
         );
         self.overrides.apply_rng_and_ball(app);
-        app.add_plugins(crate::sky::NightSkyPlugin);
         app.insert_resource(ShotConfig {
             path: self.path.clone(),
             settle: 0,

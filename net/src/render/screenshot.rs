@@ -62,8 +62,7 @@ fn offscreen_app_scaffold(view: crab_world::BootView) -> App {
     app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
         Duration::from_secs_f64(1.0 / 60.0),
     ));
-    app.insert_resource(view.moon);
-    app.add_plugins(crab_world::sky::NightSkyPlugin);
+    app.add_plugins(crab_world::sky::NightSkyPlugin { moon: view.moon });
     app.add_plugins(crab_world::physics::ArenaWorldPlugin {
         ground_look: view.ground_look,
     });

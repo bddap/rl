@@ -47,8 +47,7 @@ pub fn build_windowed_app(
         mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
         ..default()
     })));
-    app.insert_resource(view.moon);
-    app.add_plugins(crab_world::sky::NightSkyPlugin);
+    app.add_plugins(crab_world::sky::NightSkyPlugin { moon: view.moon });
     super::audio::install(&mut app);
     super::ambience::install(&mut app);
     app.add_plugins(crab_world::physics::ArenaWorldPlugin {
