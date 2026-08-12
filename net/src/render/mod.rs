@@ -90,6 +90,7 @@ mod screenshot;
 #[cfg(test)]
 mod tests;
 mod vehicle_view;
+mod voice;
 
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use audio::ExternalBus;
