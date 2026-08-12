@@ -277,8 +277,8 @@ impl GroundLook {
         };
         match self {
             Self::Shipped | Self::PatternedGround | Self::WindCombed | Self::CrackedLoam => zero,
-            // rl#323 Design A — every axis on. All-ones is load-bearing: the
-            // shader multiplies/gates on these lanes.
+            // rl#323 Design A — every axis on, load-bearing: the shader
+            // multiplies/gates on these lanes.
             Self::Watershed => wshed(1.0, 1.0, 1.0),
             // Design B, NATURALIST — A minus fable-2 (bloom) and fable-3
             // (province hue): no emissive anywhere, no change to the fiction.
@@ -351,7 +351,8 @@ impl GroundLook {
 /// constant tweak, not a shader rewrite. Defaults are the shipped look (mirrored
 /// as `STRENGTH_DEFAULTS` in `ground_art.wgsl` for the looks that normalize
 /// against them — keep the two in sync). The lanes are four per-look intensity
-/// buckets whose SHIPPED meanings are x macro, y meso, z fine grain, w relief;
+/// buckets: x macro structure (provinces/plate mosaic — unused by shipped,
+/// night_bloom, wind_combed), y meso, z fine grain, w relief;
 /// z and w are additionally the scaffold's always-on detail-layer gains (rl#333),
 /// composed with the look's `GroundArt.grain`/`.relief` — so z/w never go dead,
 /// they always steer the shared layer even where a look also spends them on its
@@ -360,7 +361,7 @@ impl GroundLook {
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[bind_group_data(GroundLook)]
 pub struct GroundDetail {
-    /// x: macro patchiness (hundreds of m), y: meso mottling (tens of m),
+    /// x: macro structure (hundreds of m), y: meso mottling (tens of m),
     /// z: fine on-foot detail, w: detail-normal strength.
     #[uniform(100)]
     pub strengths: Vec4,

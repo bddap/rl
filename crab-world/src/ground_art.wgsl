@@ -44,8 +44,8 @@ struct GroundCtx {
     // The hydrology bake sample at this fragment (moisture.rs, rl#323):
     // R wetness, G standing water.
     hydro: vec4<f32>,
-    // The strengths uniform (binding 100) — four per-look intensity lanes whose
-    // SHIPPED-look meanings are x macro, y meso, z fine grain, w relief. z and w
+    // The strengths uniform (binding 100) — four per-look intensity lanes:
+    // x macro structure, y meso, z fine grain, w relief. z and w
     // are additionally the scaffold's detail-layer gains (composed with the
     // look's grain/relief fields); a look with structure of its own may also
     // read any lane as its intensity bucket — the divergent lane meanings are
