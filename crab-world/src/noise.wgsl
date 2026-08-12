@@ -68,6 +68,81 @@ fn grain_fade(wavelength: f32, fw: f32) -> f32 {
 // angle itself fails: 2×137.5° mod 90° = 5°, a visibly axis-aligned octave).
 const ROT: mat2x2<f32> = mat2x2<f32>(0.5646, 0.8254, -0.8254, 0.5646);
 
+// Anisotropic value noise: stretched to `along`×`across` meters in frame `d`,
+// so one sample is a streak, not a blot.
+fn streak(p: vec2<f32>, d: vec2<f32>, along: f32, across: f32, seed: u32) -> f32 {
+    let q = vec2(dot(p, d) / along, dot(p, vec2(-d.y, d.x)) / across);
+    return vnoise(q, seed);
+}
+
+// The F1 member is `dist`, not `f1`: naga_oil 0.20 breaks a cross-module member
+// named `f1` — importers fail naga validation with "invalid field accessor `f1`"
+// (the in-module copies this fold replaced never crossed a module edge, so the
+// name was safe there).
+struct Voro {
+    dist: f32, // F1: distance to nearest feature point (cell units)
+    edge: f32, // F2-F1: ~0 on a cell border
+    id: vec2<i32>,
+}
+
+// Jittered-grid Voronoi, 3x3 search (F2 correctness needs the full ring).
+// Per-cell identity is `id`: hash it with a caller-owned seed for stable
+// per-cell tones (e.g. rand01(hash2(v.id, seed))).
+fn voronoi(p: vec2<f32>, seed: u32) -> Voro {
+    let i = vec2<i32>(floor(p));
+    let f = fract(p);
+    var f1 = 8.0;
+    var f2 = 8.0;
+    var id = vec2<i32>(0, 0);
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let cell = i + vec2<i32>(dx, dy);
+            let h = hash2(cell, seed);
+            let pt = vec2<f32>(f32(dx), f32(dy))
+                + vec2<f32>(rand01(h), rand01(h ^ 0x9e3779b9u)) - f;
+            let dd = dot(pt, pt);
+            if dd < f1 {
+                f2 = f1;
+                f1 = dd;
+                id = cell;
+            } else if dd < f2 {
+                f2 = dd;
+            }
+        }
+    }
+    let d1 = sqrt(f1);
+    return Voro(d1, sqrt(f2) - d1, id);
+}
+
+// 1 on the zero-set of a smooth field, falling off over `width`. The zero-set of
+// smooth noise is a connected branching web — dendritic without any simulation.
+fn vein(n: f32, width: f32) -> f32 {
+    return 1.0 - smoothstep(0.0, width, abs(n));
+}
+
+// The shared wind-direction field (seeds 61u/62u — one wind for every look that
+// reads it): a slowly turning angle, bent onto the slope contour as faces
+// steepen (wind and gravity comb the same way there). Contour is sign-ambiguous
+// — align it with the wind before blending so the two never cancel.
+// cross(up, N).xz = (N.z, -N.x).
+fn wind_dir(p: vec2<f32>, n_geo: vec3<f32>) -> vec2<f32> {
+    let wind_a = 3.14159265 * (vnoise(p / 700.0, 61u) * 0.7 + vnoise(p / 230.0, 62u) * 0.55);
+    var d = vec2(cos(wind_a), sin(wind_a));
+    let contour_w = smoothstep(0.04, 0.22, 1.0 - n_geo.y);
+    if contour_w > 0.001 {
+        var cd = vec2(n_geo.z, -n_geo.x);
+        let cl = length(cd);
+        if cl > 1e-4 {
+            cd = cd / cl;
+            if dot(cd, d) < 0.0 {
+                cd = -cd;
+            }
+            d = normalize(mix(d, cd, contour_w));
+        }
+    }
+    return d;
+}
+
 // Dew glints: sparse bright points on a 0.4 m jittered grid, cool moonlit white.
 // Additive POST-lighting radiance — a glint is a glint, not a brighter patch of
 // albedo. The grid size and its footprint fade live HERE, coupled — a caller

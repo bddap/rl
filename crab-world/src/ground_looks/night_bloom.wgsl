@@ -16,15 +16,8 @@
 
 // strengths lanes here: x vein glow, y meso patchiness, z spore
 // density (and the scaffold's grain gain), w the scaffold's relief gain.
-#import rl::noise::{hash2, rand01, vnoise, footprint_fade}
+#import rl::noise::{hash2, rand01, vnoise, footprint_fade, vein}
 #import rl::ground::art::{GroundCtx, GroundArt, default_art}
-
-// A vein field: 1 on the zero-set of a warped noise, falling off over `width`
-// (in noise-space units). The zero-set of smooth noise is a connected, branching
-// web — dendritic without any simulation.
-fn vein(n: f32, width: f32) -> f32 {
-    return 1.0 - smoothstep(0.0, width, abs(n));
-}
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let p = ctx.p;
