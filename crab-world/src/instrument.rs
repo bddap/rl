@@ -231,7 +231,9 @@ fn heldbreath_resolve(scale: &Scale, code: &[ChordDir], accepted: bool) -> Vec<N
         });
         notes
     } else {
-        let depth = code.len();
+        // The ACCUMULATED tension: what the deepest note actually sounded carried
+        // (index len−1), not one step past it.
+        let depth = code.len().saturating_sub(1);
         let (detune, crush) = (
             MAX_DETUNE_CENTS * tension_detune(depth),
             tension_crush(depth),
@@ -596,7 +598,8 @@ mod tests {
     /// Not a test — the rl#359 evidence generator: renders a real chord entry
     /// (every press through the live scheme, then the resolution) to WAV, at frame
     /// timings matching the fp-screenshot chord script, for muxing with the frame
-    /// capture. `DPAD_EVIDENCE_DIR=docs/evidence/rl359 cargo test -p crab-world
+    /// capture. From the REPO root (cargo test's cwd is the crate dir):
+    /// `DPAD_EVIDENCE_DIR=$PWD/docs/evidence/rl359 cargo test -p crab-world
     /// --features render dpad_evidence -- --ignored`
     #[test]
     #[ignore = "artifact generator, not a check"]
