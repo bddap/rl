@@ -241,10 +241,10 @@ mod tests {
             controls::GCR_CHORDS
                 .entries()
                 .iter()
-                .filter(|e| e.label.starts_with("Moon: "))
+                .filter(|e| e.code.starts_with(controls::MOON_FAMILY))
                 .count(),
             MoonSong::ALL.len(),
-            "registry has a Moon: entry no song claims"
+            "registry has a ^v-family entry no song claims"
         );
     }
 

@@ -16,6 +16,10 @@ pub struct GcrControls;
 /// longer than every other — one stray tap after any registered code can never end
 /// the round (the chord replacement for the old timed hold-to-quit guard; a couch kid
 /// mashing d-pad stays in the round).
+/// The moon-song family root (rl#374): every `^v…` code is a moon song and vice
+/// versa — the one structural key both family-shape tests filter on.
+pub const MOON_FAMILY: &[ChordDir] = &[ChordDir::Up, ChordDir::Down];
+
 pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
     ChordEntry {
         code: &[ChordDir::Up, ChordDir::Left],
@@ -975,7 +979,7 @@ mod tests {
     #[test]
     fn moon_family_is_exactly_the_moon_songs() {
         for e in GCR_CHORDS.entries() {
-            let in_family = e.code.starts_with(&[ChordDir::Up, ChordDir::Down]);
+            let in_family = e.code.starts_with(MOON_FAMILY);
             let is_song = e.label.starts_with("Moon: ");
             assert_eq!(in_family, is_song, "{:?} misfiled", e.action);
             if is_song {
