@@ -81,6 +81,12 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 6)]
     anim_every: u32,
 
+    /// Board a vehicle at this frame (repeatable, same foot→plane→ship→foot order as
+    /// `net-screenshot`) and hold full forward drive while piloting — single-process
+    /// flight evidence (rl#379: a clip at the plane's top speed needs no second peer).
+    #[arg(long, value_name = "FRAME", value_parser = clap::value_parser!(u64).range(1..))]
+    pilot_toggle_at: Vec<u64>,
+
     /// Match seed — picks the run's spawn locale on the tile (rl#305), so evidence
     /// shots can target a specific coordinate regime (e.g. the far-corner f32
     /// precision band, rl#334).
@@ -112,8 +118,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
     if args.debug_overlay {
         app.insert_resource(crab_world::debug_overlay::DebugOverlay { visible: true });
     }
-    if let Some(walk_at) = args.walk_at {
-        app.insert_resource(render::PilotScript::new(Vec::new(), Some(walk_at)));
+    if !args.pilot_toggle_at.is_empty() || args.walk_at.is_some() {
+        app.insert_resource(render::PilotScript::new(args.pilot_toggle_at, args.walk_at));
     }
     if let Some(hold_at) = args.chord_hold_at {
         let taps = args

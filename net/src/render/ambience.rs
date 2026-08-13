@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(plane_engine(&in_plane), 0.6);
         assert_eq!(
             plane_engine(&AmbientContext {
-                speed_mps: 4.5,
+                speed_mps: super::super::audio::FULL_WIND_MPS,
                 ..in_plane
             }),
             1.0
