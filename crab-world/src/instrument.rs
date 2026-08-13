@@ -77,7 +77,7 @@ pub struct NoteSpec {
     pub freq_hz: f32,
     /// Twin-voice spread: the two voices sit ± half this apart.
     pub detune_cents: f32,
-    /// Amplitude time constant τ — the note rings ~6τ.
+    /// Amplitude time constant τ — the note rings ~7τ.
     pub decay_s: f32,
     /// 0..1: upper-partial level (1 = glassy chime, 0 = pure dark fundamental).
     pub brightness: f32,
@@ -124,16 +124,26 @@ fn heldbreath_step(d: ChordDir) -> i32 {
     }
 }
 
-/// Fold the path to the melody's current degree. Starts one octave above the root
-/// (mid register); each step clamps to ~3 octaves, so an uncapped code (rl#380)
-/// pins at the edge instead of walking off the piano.
-fn heldbreath_degree(scale: &Scale, path: impl IntoIterator<Item = ChordDir>) -> i32 {
+/// The melody's walk: the degree after each press in turn. THE one walk — the
+/// press pitch is its last element and the accepted chord is derived from its
+/// trace, so both stay one function. Starts one octave above the root (mid
+/// register, [`HOME_DEGREE`]); each step clamps to ~3 octaves, so an uncapped
+/// code (rl#380) pins at the edge instead of walking off the piano.
+fn heldbreath_walk(
+    scale: &Scale,
+    path: impl IntoIterator<Item = ChordDir>,
+) -> impl Iterator<Item = i32> {
     let n = scale.degrees.len() as i32;
-    let mut deg = n;
-    for d in path {
-        deg = (deg + heldbreath_step(d)).clamp(0, 3 * n - 1);
-    }
-    deg
+    path.into_iter().scan(n, move |deg, d| {
+        *deg = (*deg + heldbreath_step(d)).clamp(0, 3 * n - 1);
+        Some(*deg)
+    })
+}
+
+/// Where the walk begins and every accepted code resolves: one octave above the
+/// root, i.e. degree `n`.
+fn home_degree(scale: &Scale) -> i32 {
+    scale.degrees.len() as i32
 }
 
 /// Region = first press of a code: it shades the whole phrase's brightness
@@ -169,7 +179,9 @@ const MAX_DETUNE_CENTS: f32 = 48.0;
 fn heldbreath_press(scale: &Scale, prefix: &[ChordDir], press: ChordDir) -> NoteSpec {
     let depth = prefix.len();
     let first = prefix.first().copied().unwrap_or(press);
-    let deg = heldbreath_degree(scale, prefix.iter().copied().chain([press]));
+    let deg = heldbreath_walk(scale, prefix.iter().copied().chain([press]))
+        .last()
+        .unwrap_or_else(|| home_degree(scale));
     NoteSpec {
         onset_s: 0.0,
         freq_hz: scale.freq(deg),
@@ -194,19 +206,31 @@ fn heldbreath_press(scale: &Scale, prefix: &[ChordDir], press: ChordDir) -> Note
 /// detune+crush and damping early — the breath is not released.
 fn heldbreath_resolve(scale: &Scale, code: &[ChordDir], accepted: bool) -> Vec<NoteSpec> {
     let n = scale.degrees.len() as i32;
-    let home = n; // one octave above the root: where the walk begins
+    let home = home_degree(scale);
     if accepted {
-        let mut deg = n;
         let mut visited: Vec<i32> = Vec::new();
-        for &d in code {
-            deg = (deg + heldbreath_step(d)).clamp(0, 3 * n - 1);
-            if !visited.contains(&deg) {
+        for deg in heldbreath_walk(scale, code.iter().copied()) {
+            if deg != home && !visited.contains(&deg) {
                 visited.push(deg);
             }
         }
-        visited.retain(|&d| d != home);
-        let tail_start = visited.len().saturating_sub(4);
-        let strum = &visited[tail_start..];
+        // Semitone value of a degree — for spacing the chord, since hirajoshi has
+        // semitone adjacencies (B-C, E-F) that would cluster when a mono-direction
+        // code visits neighbors.
+        let semi = |i: i32| 12 * i.div_euclid(n) + scale.degrees[i.rem_euclid(n) as usize] as i32;
+        // Up to four of the melody's most recent distinct degrees, each ≥2 semitones
+        // from every other chord member, kept in visit order — the code's own notes,
+        // voiced as a chord rather than a smear.
+        let mut strum: Vec<i32> = Vec::new();
+        for &d in visited.iter().rev() {
+            if strum.len() == 4 {
+                break;
+            }
+            if strum.iter().all(|&e| (semi(d) - semi(e)).abs() >= 2) {
+                strum.push(d);
+            }
+        }
+        strum.reverse();
         let mut notes: Vec<NoteSpec> = strum
             .iter()
             .enumerate()
@@ -217,7 +241,7 @@ fn heldbreath_resolve(scale: &Scale, code: &[ChordDir], accepted: bool) -> Vec<N
                 decay_s: 0.28,
                 brightness: 0.7,
                 crush: 0.0,
-                gain: 0.7,
+                gain: 0.6,
             })
             .collect();
         notes.push(NoteSpec {
@@ -227,7 +251,7 @@ fn heldbreath_resolve(scale: &Scale, code: &[ChordDir], accepted: bool) -> Vec<N
             decay_s: 0.45,
             brightness: 0.85,
             crush: 0.0,
-            gain: 1.0,
+            gain: 0.85,
         });
         notes
     } else {
@@ -286,9 +310,14 @@ struct NoteVoice {
     partials: Vec<(f32, f32, f32, f32)>,
     attack_samples: f32,
     gain: f32,
-    /// Bitcrush: sample-hold length in samples (1 = clean) and quantization levels.
-    crush_hold: u32,
-    crush_levels: f32,
+    /// Bitcrush stage, `None` = clean — unrepresentable rather than sentinel-guarded.
+    crush: Option<CrushState>,
+}
+
+/// Sample-hold decimation + amplitude quantization state for one crushed note.
+struct CrushState {
+    hold: u32,
+    levels: f32,
     held: f32,
     hold_left: u32,
 }
@@ -301,30 +330,41 @@ impl NoteVoice {
         let sr = SAMPLE_RATE as f32;
         let start = (spec.onset_s * sr) as u64;
         let spread = (spec.detune_cents / 2400.0).exp2();
+        let brightness = spec.brightness.clamp(0.0, 1.0);
+        let crush_amt = spec.crush.clamp(0.0, 1.0);
         let mut partials = Vec::with_capacity(PARTIALS.len() * 2);
+        // Brightness is realized the way the PLAYGROUND realized it — a lowpass at
+        // freq·(2+8·brightness) over fixed partial gains — because that filter is
+        // nearly transparent over these partials: the owner's timbre regions are
+        // SUBTLE shades, and mapping brightness straight onto partial gains
+        // over-realized them ~4× (reviewer finding).
+        let cutoff_mult = 2.0 + 8.0 * brightness;
         for (k, mult) in PARTIALS.iter().enumerate() {
-            // τ_k shrinks with partial order; amplitude follows brightness.
+            // τ_k shrinks with partial order, so the tail mellows like a real pluck.
             let tau = spec.decay_s / (1.0 + 0.9 * k as f32);
             let decay = (-1.0 / (tau * sr)).exp();
-            let amp = match k {
-                0 => 1.0,
-                1 => 0.6 * spec.brightness,
-                _ => 0.35 * spec.brightness * spec.brightness,
-            };
-            for voice in [spread, 1.0 / spread] {
+            // Playground per-partial gains through a 2-pole lowpass magnitude.
+            let base = [1.0, 0.25, 0.08][k];
+            let amp = base / (1.0 + (mult / cutoff_mult).powi(4)).sqrt();
+            // Unequal twins (playground: 1.0/0.7): equal voices beat to a full
+            // null at the spread's period; these never cancel.
+            for (voice, level) in [(spread, 0.58), (1.0 / spread, 0.42)] {
                 let hz = spec.freq_hz * mult * voice;
-                partials.push((0.0, std::f32::consts::TAU * hz / sr, amp * 0.5, decay));
+                partials.push((0.0, std::f32::consts::TAU * hz / sr, amp * level, decay));
             }
         }
         // Crush intensity → decimation + quantization. The 25% entry point (the
         // owner-spec'd pop-in) holds every 3rd sample (~15 kHz) at ~10 bits —
         // clearly audible grit; full crush is ~3.7 kHz at 4 bits.
-        let (crush_hold, crush_levels) = if spec.crush > 0.0 {
-            let bits = 12.0 - 8.0 * spec.crush;
-            (1 + (spec.crush * 11.0) as u32, (bits - 1.0).exp2())
-        } else {
-            (1, 0.0)
-        };
+        let crush = (crush_amt > 0.0).then(|| {
+            let bits = 12.0 - 8.0 * crush_amt;
+            CrushState {
+                hold: 1 + (crush_amt * 11.0) as u32,
+                levels: (bits - 1.0).exp2(),
+                held: 0.0,
+                hold_left: 0,
+            }
+        });
         Self {
             start,
             // Ring ~7τ of the slowest partial, then the envelope is < 1e-3.
@@ -332,10 +372,7 @@ impl NoteVoice {
             partials,
             attack_samples: 0.003 * sr,
             gain: spec.gain,
-            crush_hold,
-            crush_levels,
-            held: 0.0,
-            hold_left: 0,
+            crush,
         }
     }
 
@@ -350,16 +387,22 @@ impl NoteVoice {
             *phase = (*phase + *inc) % std::f32::consts::TAU;
             *amp *= *decay;
         }
-        let s = s * attack * self.gain;
-        if self.crush_hold <= 1 {
-            return s;
-        }
-        if self.hold_left == 0 {
-            self.held = (s * self.crush_levels).round() / self.crush_levels;
-            self.hold_left = self.crush_hold;
-        }
-        self.hold_left -= 1;
-        self.held
+        let s = s * attack;
+        // Crush PRE-gain: the quantization grid rides the note's own amplitude, so
+        // the live-phrase attenuation (which scales `gain` with polyphony) can't
+        // change how coarse the tension layer sounds.
+        let s = match &mut self.crush {
+            None => s,
+            Some(c) => {
+                if c.hold_left == 0 {
+                    c.held = (s * c.levels).round() / c.levels;
+                    c.hold_left = c.hold;
+                }
+                c.hold_left -= 1;
+                c.held
+            }
+        };
+        s * self.gain
     }
 }
 
@@ -555,6 +598,16 @@ mod tests {
                 "exhale lands the home octave"
             );
         }
+        // A mono-direction code walks semitone-adjacent hirajoshi degrees; the
+        // chord must space them out, never sound a semitone cluster.
+        let mono = chord(&[Right, Right, Right, Right]);
+        let strum = &mono[..mono.len() - 1];
+        for (i, x) in strum.iter().enumerate() {
+            for y in &strum[i + 1..] {
+                let semis = 12.0 * (x.freq_hz / y.freq_hz).log2().abs();
+                assert!(semis >= 1.9, "cluster in the derived chord: {semis} semis");
+            }
+        }
     }
 
     /// Unknown keeps the held breath: half-step-off pitch (the one out-of-scale
@@ -586,7 +639,9 @@ mod tests {
         assert_eq!(samples.len() as u64, expected);
         assert!(samples.len() < 10 * SAMPLE_RATE as usize, "runaway tail");
         let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-        assert!(peak <= 1.0);
+        // Strictly inside the clamp — `peak <= 1.0` would be a tautology (the
+        // stream clamps), so require headroom to prove nothing actually clipped.
+        assert!(peak < 0.99, "phrase rides the clamp: peak {peak}");
         assert!(peak > 0.05, "inaudible phrase, peak {peak}");
         // The tail has decayed — no click at the hard stop.
         let tail = samples[samples.len() - 100..]
