@@ -64,6 +64,9 @@ const PLANE: VehicleParams = VehicleParams {
     pitch_torque: 0.2,
     roll_torque: 0.3,
     yaw_torque: 0.1,
+    // Full control authority just below the ~2.9 m/s level-flight speed, so cruise
+    // and everything above it keeps the tuned feel (rl#382).
+    control_speed_full: 2.5,
 };
 
 const SHIP_AIM_TORQUE: f32 = 0.015;
@@ -92,6 +95,7 @@ const SHIP: VehicleParams = VehicleParams {
     pitch_torque: SHIP_AIM_TORQUE,
     roll_torque: SHIP_AIM_TORQUE * 0.25,
     yaw_torque: SHIP_AIM_TORQUE,
+    control_speed_full: 0.0,
 };
 
 /// How far above the boarding spot's ground point the craft's collider bottom
@@ -111,6 +115,11 @@ struct VehicleParams {
     pitch_torque: f32,
     roll_torque: f32,
     yaw_torque: f32,
+    /// Airspeed at which aerodynamic control surfaces reach full torque authority.
+    /// Authority scales with dynamic pressure, (|v|/this)² capped at 1 — a
+    /// near-stationary plane cannot yaw/pitch/roll in place (rl#382). 0 ⇒ the
+    /// controls are thrusters, not surfaces (ship): full authority at any speed.
+    control_speed_full: f32,
 }
 
 /// Discriminants are the wire bytes (0 reserved for "no craft" in the pilot-intent frame).
@@ -669,11 +678,21 @@ fn apply_vehicle_forces(
 
         ef.force = thrust + lift + drag + grip;
 
-        let body_torque = Vec3::new(
-            -control.pitch * p.pitch_torque,
-            control.yaw * p.yaw_torque,
-            -control.roll * p.roll_torque,
-        );
+        // Surface torque comes from airflow over the control surfaces — dynamic
+        // pressure ~ ½ρv² — so scale by (|v|/full-authority speed)², capped at 1.
+        // Total |v|, not the forward component: a diving or tail-sliding craft still
+        // has airflow over its surfaces, so it stays recoverable (rl#382).
+        let authority = if p.control_speed_full > 0.0 {
+            (speed * speed / (p.control_speed_full * p.control_speed_full)).min(1.0)
+        } else {
+            1.0
+        };
+        let body_torque = authority
+            * Vec3::new(
+                -control.pitch * p.pitch_torque,
+                control.yaw * p.yaw_torque,
+                -control.roll * p.roll_torque,
+            );
         ef.torque = rot * body_torque - velocity.angular * p.angular_drag;
     }
 }
@@ -1011,9 +1030,12 @@ mod tests {
         );
     }
 
+    // The pitch/yaw sign tests fly at 3 m/s (≥ full-authority speed): control
+    // surfaces are aerodynamic, so a standstill craft has no authority (rl#382) —
+    // the zero-speed behavior is pinned by `control_authority_scales_with_airspeed`.
     #[test]
     fn positive_pitch_raises_the_nose() {
-        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::ZERO);
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
         set_cmd(&mut app, |c| c.pitch = 1.0);
         for _ in 0..10 {
             app.update();
@@ -1027,7 +1049,7 @@ mod tests {
 
     #[test]
     fn positive_yaw_turns_nose_right() {
-        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::ZERO);
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
         set_cmd(&mut app, |c| c.yaw = 1.0);
         for _ in 0..10 {
             app.update();
@@ -1041,7 +1063,8 @@ mod tests {
 
     #[test]
     fn pitch_input_loops_the_craft_without_autoright() {
-        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::ZERO);
+        // Flying start — a standstill craft has no surface authority (rl#382).
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
         set_cmd(&mut app, |c| c.pitch = 1.0);
         let mut went_inverted = false;
         for _ in 0..240 {
@@ -1114,6 +1137,50 @@ mod tests {
             "grip added speed with zero throttle: {} -> {}",
             v0.length(),
             v1.length()
+        );
+    }
+
+    /// rl#382: aerodynamic control authority scales with dynamic pressure. Hold full
+    /// yaw for a few ticks (zero throttle, zero gravity, so airspeed is the only
+    /// variable) — a standstill plane must not turn at all, half-cruise gets partial
+    /// authority, and at the full-authority speed the rate matches flying feel. The
+    /// SHIP's controls are thrusters, not surfaces: full authority at standstill.
+    #[test]
+    fn control_authority_scales_with_airspeed() {
+        let yaw_rate = |kind: VehicleKind, speed: f32| {
+            let (mut app, e) = app_with_vehicle(kind, FAR, Vec3::new(0.0, 0.0, speed));
+            let mut ent = app.world_mut().entity_mut(e);
+            ent.get_mut::<Vehicle>().unwrap().throttle = 0.0;
+            ent.insert(GravityScale(0.0));
+            set_cmd(&mut app, |c| c.yaw = 1.0);
+            for _ in 0..10 {
+                app.update();
+            }
+            body(&app, e).1.angular.y
+        };
+
+        let standstill = yaw_rate(VehicleKind::Plane, 0.0);
+        let half = yaw_rate(VehicleKind::Plane, 1.25);
+        let cruise = yaw_rate(VehicleKind::Plane, 2.5);
+        println!("yaw rate rad/s — standstill {standstill}, half {half}, cruise {cruise}");
+        assert_eq!(
+            standstill, 0.0,
+            "a stationary plane has no airflow over its rudder — it must not yaw in place"
+        );
+        assert!(
+            half > 0.05 * cruise && half < 0.6 * cruise,
+            "half-speed authority should be partial (~(v/v_full)² = 25%), got \
+             half={half} cruise={cruise}"
+        );
+        assert!(
+            cruise > 1.0,
+            "full-authority yaw rate must stay at the tuned flying feel, got {cruise}"
+        );
+
+        let ship_standstill = yaw_rate(VehicleKind::Ship, 0.0);
+        assert!(
+            ship_standstill > 0.0,
+            "the ship aims with thrusters, not surfaces — standstill authority stays"
         );
     }
 
