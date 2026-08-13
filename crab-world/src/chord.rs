@@ -71,7 +71,11 @@ impl<A: Copy + PartialEq + Debug> ChordRegistry<A> {
 
     /// Panics on a duplicate code or a blank/duplicate label (the combo map would
     /// render indistinguishable rooms). Call from the surface's scheme test. Code
-    /// length is deliberately unbounded — deep codes are gameplay (rl#380).
+    /// length is deliberately unbounded — deep codes are gameplay (rl#380). Prefix
+    /// pairs (`L` ⊂ `LR`) are legal — release does an exact lookup — but a prefix
+    /// code executes on an early release mid-entry, so registries must keep prefix
+    /// codes benign; the destructive cases carry their own targeted guards (no code
+    /// behind ExitVehicle's `vv`, Quit's ≥2-tap margin).
     pub fn assert_well_formed(&self) {
         for (i, e) in self.0.iter().enumerate() {
             assert!(!e.label.is_empty(), "{:?} has an empty label", e.action);

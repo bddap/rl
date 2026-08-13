@@ -96,9 +96,11 @@ impl Plugin for DemoPlugin {
         graph::register(app, self.graph, self.graph_shot.clone());
         self.overrides.apply_rng_and_ball(app);
         crate::controls::install_overlay(app, &self.controls);
-        // Chord-code command input (rl#330): the capture, the held-modifier menu, and
-        // every discrete verb's dispatch edge. No reset gate — the demo has no phase
-        // transitions to smuggle taps across.
+        // Chord-code command input (rl#330): the capture and every discrete verb's
+        // dispatch edge. No reset gate — the demo has no phase transitions to smuggle
+        // taps across. NOTE the demo has NO chord display since the rl#358 pick: the
+        // combo map lives in `net` (GCR-only) and the textual menu/legend rows are
+        // deleted everywhere, so demo code entry is audio feedback only.
         crate::chord::install_chords::<DemoControls>(app);
         // The demo is a single always-armed owner-facing crab: a rescue there is a
         // visible teleport, so it logs at the same fault/warn tier GCR arms.

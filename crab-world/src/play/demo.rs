@@ -94,8 +94,8 @@ pub(super) fn demo_controls(
     mut policy: NonSendMut<crate::policy::Policy>,
     mut manual: ResMut<ManualControl>,
 ) {
-    // Every discrete verb dispatches from DEMO_CHORDS (rl#330 stage 4), so it triggers
-    // on exactly the code the held-modifier menu and the legend show. The Manual toggle
+    // Every discrete verb dispatches from DEMO_CHORDS (rl#330 stage 4) — the one
+    // registered code per verb (no display surface since rl#358). The Manual toggle
     // lives here rather than in `manual_control_step`: chord execution is a one-frame
     // Update-rate edge, and a FixedUpdate reader would miss it on a fast frame or
     // double-toggle on a slow one.

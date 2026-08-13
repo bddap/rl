@@ -10,8 +10,8 @@ pub struct GcrControls;
 /// switching is a code per vehicle, not a tap verb (the ↑-family = the sky craft,
 /// ↓↓ = back to the ground). Every render/art variant is its own entry (stage 5,
 /// replacing the two Cycle* verbs): render modes under `^^`, ground looks under `v` —
-/// `v^` is ALL the night blooms (4 taps), `v<`/`v>` the other looks (3 taps) — so the
-/// held-X menu filters to one family per tap. No ground code starts `vv` — an early
+/// `v^` is ALL the night blooms (4 taps), `v<`/`v>` the other looks (3 taps) — so each
+/// tap descends one family wing on the combo map. No ground code starts `vv` — an early
 /// release mid-look-code must never execute ExitVehicle. Quit's code is ≥2 taps
 /// longer than every other — one stray tap after any registered code can never end
 /// the round (the chord replacement for the old timed hold-to-quit guard; a couch kid
