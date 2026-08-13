@@ -1,8 +1,9 @@
 //! The d-pad combo map (rl#358): a spatial, DISCOVERED-ONLY presentation of the chord
 //! code space, shown full-screen while a code is being entered (the held-modifier
-//! capture) and for a short linger after a code resolves so the growth moment is
-//! visible. Since the owner's post-playtest pick (2026-08-12) this IS the only code
-//! surface — the textual chord menu is gone, and look-and-feel iterates here.
+//! capture) and gone the frame the hold ends — no linger, no fade-out (rl#381: the
+//! player is the bottleneck, not animations). Since the owner's post-playtest pick
+//! (2026-08-12) this IS the only code surface — the textual chord menu is gone, and
+//! look-and-feel iterates here.
 //!
 //! The layout is the circular zoom-quadrant space from the winning design submission
 //! (`proposal/dpad-map-zoomquad`): every node is a circle, its four children nested
@@ -366,6 +367,9 @@ fn layout_circles(tree: &MapTree) -> Vec<Circle> {
 
 const CANVAS_PX: usize = 800;
 
+/// Width of the backdrop's edge-to-transparent fade band (rl#381), in canvas px.
+const BACKDROP_FADE_PX: f64 = 110.0;
+
 /// An inclusive canvas-clamped pixel span; empty ranges come out inverted and the
 /// `for` loops simply don't run.
 fn clamp_span(lo: f64, hi: f64) -> (i32, i32) {
@@ -389,9 +393,22 @@ impl Canvas {
         Self { px: buf }
     }
 
-    fn fill(&mut self, c: [u8; 4]) {
-        for p in self.px.chunks_exact_mut(4) {
-            p.copy_from_slice(&c);
+    /// The backdrop fill, alpha fading to fully transparent over the outer
+    /// [`BACKDROP_FADE_PX`] band (rl#381): the square's hard edge against the world
+    /// read as an abrupt UI seam. Smoothstep per axis, multiplied — corners round off
+    /// instead of double-darkening.
+    fn fill_backdrop(&mut self, c: [u8; 3], a: u8) {
+        let fade: Vec<f32> = (0..CANVAS_PX)
+            .map(|i| {
+                let t = (i.min(CANVAS_PX - 1 - i) as f64 / BACKDROP_FADE_PX).min(1.0);
+                (t * t * (3.0 - 2.0 * t)) as f32
+            })
+            .collect();
+        for (y, row) in self.px.chunks_exact_mut(CANVAS_PX * 4).enumerate() {
+            for (x, p) in row.chunks_exact_mut(4).enumerate() {
+                p[..3].copy_from_slice(&c);
+                p[3] = (a as f32 * fade[x] * fade[y]) as u8;
+            }
         }
     }
 
@@ -481,10 +498,6 @@ fn family_color(code: &[ChordDir]) -> [u8; 3] {
 // Live state + systems.
 // ---------------------------------------------------------------------------
 
-/// Seconds the map lingers after an ACCEPTED code — long enough to watch the new
-/// node bloom in.
-const LINGER_ACCEPTED_S: f32 = 2.4;
-const LINGER_UNKNOWN_S: f32 = 0.8;
 /// Room labels on screen at once; only circles big enough to read as places get
 /// one, so the visible set stays small. Overflow drops labels silently.
 const LABEL_POOL: usize = 12;
@@ -498,26 +511,25 @@ const FOCUS_FILL: f64 = 0.58;
 #[derive(Resource)]
 pub(crate) struct ChordMapState {
     visible: f32,
-    linger: f32,
     focus: Vec<ChordDir>,
     /// Animated camera: world center + view width (world units per canvas side).
     view_center: DVec2,
     view_size: f64,
-    /// The just-discovered code and its age — drives the bloom highlight.
+    /// The just-discovered code and its VISIBLE age — drives the bloom highlight.
+    /// Discovery lands on the release frame (the map is already gone — rl#381 instant
+    /// close), so the bloom ages only while the map renders and the growth moment
+    /// greets the player on the next open instead of playing to a closed panel.
     bloom: Option<(Vec<ChordDir>, f32)>,
-    was_open: bool,
 }
 
 impl Default for ChordMapState {
     fn default() -> Self {
         Self {
             visible: 0.0,
-            linger: 0.0,
             focus: Vec::new(),
             view_center: DVec2::ZERO,
             view_size: ROOT_VIEW_SIZE,
             bloom: None,
-            was_open: false,
         }
     }
 }
@@ -645,37 +657,37 @@ fn drive_chord_map(
     let dt = time.delta_secs();
 
     // Discovery: an accepted resolution is a PLAYED code — onto the map, persisted.
-    if let Some((code, accepted)) = chords.resolution() {
-        state.focus = code.to_vec();
-        if accepted {
-            if discovered.insert(code) {
-                state.bloom = Some((code.to_vec(), 0.0));
-            }
-            state.linger = LINGER_ACCEPTED_S;
-        } else {
-            state.linger = LINGER_UNKNOWN_S;
-        }
+    // Resolution IS the release frame, so the map is closing this same frame; the
+    // bloom waits (visible-age only) for the next open.
+    if let Some((code, accepted)) = chords.resolution()
+        && accepted
+        && discovered.insert(code)
+    {
+        state.bloom = Some((code.to_vec(), 0.0));
     }
-    // A live capture holds the map open DIRECTLY — not via the linger timer, which
-    // a single ≥100ms frame would outrun, closing the map mid-entry and resetting
-    // the zoom exactly when a slow frame made it most confusing.
-    let capturing = chords.capturing();
     if let Some(entered) = chords.entered() {
         state.focus = entered.to_vec();
     }
-    state.linger = (state.linger - dt).max(0.0);
-    let open = capturing || state.linger > 0.0;
-    if open && !state.was_open && state.visible < 0.02 {
-        // Fresh open: start the zoom from the root pose, not wherever the last
-        // linger left off. Keyed on the OPEN edge — not on `entered()`, which a
-        // press+release inside one frame (level-OR-edge modifier) never sets — and
-        // gated on the panel being actually faded out: a re-open while the map is
-        // still fading keeps the live pose instead of teleporting mid-view.
+
+    let Ok(mut panel_node) = panel.single_mut() else {
+        return;
+    };
+    if !chords.capturing() {
+        // rl#381 owner directive: the map is GONE the frame the X hold ends — no
+        // linger, no fade-out, no close animation. The player is the bottleneck.
+        state.visible = 0.0;
+        if panel_node.display != Display::None {
+            panel_node.display = Display::None;
+        }
+        return;
+    }
+    if state.visible == 0.0 {
+        // Open edge (instant close pins visible to exactly 0.0 while shut): start
+        // the zoom from the root pose, not wherever the last capture left off.
         state.view_center = DVec2::ZERO;
         state.view_size = ROOT_VIEW_SIZE;
     }
-    state.was_open = open;
-    state.visible += ((open as u8 as f32) - state.visible) * (dt * 10.0).min(1.0);
+    state.visible += (1.0 - state.visible) * (dt * 10.0).min(1.0);
     // Age the bloom out ENTIRELY: a spent bloom left in place would keep walking
     // its ring's rows every frame at coverage 0.
     if let Some((_, age)) = &mut state.bloom {
@@ -683,16 +695,6 @@ fn drive_chord_map(
         if *age >= 1.2 {
             state.bloom = None;
         }
-    }
-
-    let Ok(mut panel_node) = panel.single_mut() else {
-        return;
-    };
-    if state.visible < 0.02 {
-        if panel_node.display != Display::None {
-            panel_node.display = Display::None;
-        }
-        return;
     }
     panel_node.display = Display::Flex;
 
@@ -723,7 +725,7 @@ fn drive_chord_map(
         return;
     };
     let mut canvas = Canvas::new(image.data.take().unwrap_or_default());
-    canvas.fill([6, 8, 13, 242]);
+    canvas.fill_backdrop([6, 8, 13], 242);
     let alpha = state.visible;
     let mut label_reqs: Vec<LabelReq> = Vec::new();
 
