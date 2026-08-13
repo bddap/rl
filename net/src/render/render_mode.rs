@@ -4,6 +4,7 @@ use crate::controls::{self, Action};
 use bevy_rapier3d::prelude::Collider;
 pub use crab_world::crab_view::RenderMode;
 use crab_world::crab_view::{COLLIDER_WIREFRAME_COLOR, draw_collider_wireframe};
+use crab_world::moon::MoonSong;
 use crab_world::vehicle::Vehicle;
 
 pub fn register(app: &mut App, initial: RenderMode) {
@@ -21,6 +22,9 @@ pub fn register(app: &mut App, initial: RenderMode) {
         (
             select_view::<RenderMode>.run_if(in_state(AppPhase::Playing)),
             select_view::<crab_world::ground::GroundLook>.run_if(in_state(AppPhase::Playing)),
+            play_moon_songs
+                .run_if(in_state(AppPhase::Playing))
+                .before(crab_world::moon::MoonMotionSet),
             manage_silhouette_visibility,
         ),
     );
@@ -75,6 +79,44 @@ impl ViewKnob for crab_world::ground::GroundLook {
             NightBloomFrost => Action::GroundNightBloomFrost,
             NightBloomRose => Action::GroundNightBloomRose,
             NightBloomFiligree => Action::GroundNightBloomFiligree,
+        }
+    }
+}
+
+/// The song's chord action. Exhaustive like [`ViewKnob::action`]: a new
+/// [`MoonSong`] without an action — and hence no code in `GCR_CHORDS` — is a
+/// compile error here, and the coverage test below catches an action left out
+/// of the table.
+fn song_action(song: MoonSong) -> Action {
+    match song {
+        MoonSong::PhaseFull => Action::MoonFull,
+        MoonSong::PhaseWaxing => Action::MoonWaxing,
+        MoonSong::PhaseWaning => Action::MoonWaning,
+        MoonSong::PhaseNew => Action::MoonNew,
+        MoonSong::HueSilver => Action::MoonSilver,
+        MoonSong::HueBlood => Action::MoonBlood,
+        MoonSong::HueHarvest => Action::MoonHarvest,
+        MoonSong::HueVerdant => Action::MoonVerdant,
+        MoonSong::TempoDrift => Action::MoonDrift,
+        MoonSong::TempoFreeze => Action::MoonFreeze,
+        MoonSong::TempoGallop => Action::MoonGallop,
+        MoonSong::PoseZenith => Action::MoonZenith,
+        MoonSong::PoseRise => Action::MoonRise,
+    }
+}
+
+/// Chord-song dispatch onto the [`Moon`] knobs (rl#374). Ordered before the
+/// motion step so a pose-freeze song lands before motion could overwrite the
+/// posed frame. Deref only on a hit — the light/sky syncs filter on the moon's
+/// change detection.
+fn play_moon_songs(
+    chords: Res<crab_world::chord::Chords<controls::GcrControls>>,
+    mut moon: ResMut<crab_world::moon::Moon>,
+) {
+    for song in MoonSong::ALL {
+        if chords.executed(song_action(song)) {
+            song.apply(&mut moon);
+            info!("moon song: {song:?} -> {:?}", *moon);
         }
     }
 }
@@ -179,6 +221,33 @@ mod tests {
         assert_covered::<crab_world::ground::GroundLook>();
     }
 
+    /// The moon-song half of the same contract (rl#374): every song's action
+    /// sits in the registry, i.e. every song is playable — and the registry's
+    /// `Moon: ` family is exactly the songs, no orphan entry (the count check
+    /// lives here, not in the controls tests, because `crab_world::moon` is
+    /// render-gated and that test mod compiles without render).
+    #[test]
+    fn every_moon_song_has_a_chord_code() {
+        for song in MoonSong::ALL {
+            assert!(
+                controls::GCR_CHORDS
+                    .entries()
+                    .iter()
+                    .any(|e| e.action == song_action(song)),
+                "moon song {song:?} has no chord entry"
+            );
+        }
+        assert_eq!(
+            controls::GCR_CHORDS
+                .entries()
+                .iter()
+                .filter(|e| e.label.starts_with("Moon: "))
+                .count(),
+            MoonSong::ALL.len(),
+            "registry has a Moon: entry no song claims"
+        );
+    }
+
     /// The variant→action maps must stay injective — two variants sharing an action
     /// would make one code set whichever variant iterates last, silently.
     #[test]
@@ -191,6 +260,7 @@ mod tests {
         }
         let mut all = actions::<RenderMode>();
         all.extend(actions::<crab_world::ground::GroundLook>());
+        all.extend(MoonSong::ALL.map(song_action));
         for (i, a) in all.iter().enumerate() {
             assert!(!all[i + 1..].contains(a), "action {a:?} mapped twice");
         }

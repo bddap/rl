@@ -112,6 +112,92 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         action: Action::GroundWatershedNocturne,
         label: "Ground: nocturne",
     },
+    // The moon song suite (rl#374): `^v` — reach up, pull down — is the moon family
+    // root (the last free wing under `^`), each 3-tap wing a knob family (`^v^` phase,
+    // `^vv` hue, `^v<` tempo, `^v>` pose), the 4th tap the value. All depth 4: deep
+    // enough that every root and wing stays a benign unassigned prefix, and 2 under
+    // Quit's 6 so the quit margin holds. What each song DOES lives in
+    // `crab_world::moon::MoonSong` — this table only assigns its codes.
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down, ChordDir::Up, ChordDir::Up],
+        action: Action::MoonFull,
+        label: "Moon: full",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down, ChordDir::Up, ChordDir::Right],
+        action: Action::MoonWaxing,
+        label: "Moon: waxing",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down, ChordDir::Up, ChordDir::Left],
+        action: Action::MoonWaning,
+        label: "Moon: waning",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down, ChordDir::Up, ChordDir::Down],
+        action: Action::MoonNew,
+        label: "Moon: new",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down, ChordDir::Down, ChordDir::Up],
+        action: Action::MoonSilver,
+        label: "Moon: silver",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down, ChordDir::Down, ChordDir::Left],
+        action: Action::MoonBlood,
+        label: "Moon: blood",
+    },
+    ChordEntry {
+        code: &[
+            ChordDir::Up,
+            ChordDir::Down,
+            ChordDir::Down,
+            ChordDir::Right,
+        ],
+        action: Action::MoonHarvest,
+        label: "Moon: harvest",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down, ChordDir::Down, ChordDir::Down],
+        action: Action::MoonVerdant,
+        label: "Moon: verdant",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down, ChordDir::Left, ChordDir::Up],
+        action: Action::MoonDrift,
+        label: "Moon: drift",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down, ChordDir::Left, ChordDir::Left],
+        action: Action::MoonFreeze,
+        label: "Moon: freeze",
+    },
+    ChordEntry {
+        code: &[
+            ChordDir::Up,
+            ChordDir::Down,
+            ChordDir::Left,
+            ChordDir::Right,
+        ],
+        action: Action::MoonGallop,
+        label: "Moon: gallop",
+    },
+    ChordEntry {
+        code: &[ChordDir::Up, ChordDir::Down, ChordDir::Right, ChordDir::Up],
+        action: Action::MoonZenith,
+        label: "Moon: zenith",
+    },
+    ChordEntry {
+        code: &[
+            ChordDir::Up,
+            ChordDir::Down,
+            ChordDir::Right,
+            ChordDir::Down,
+        ],
+        action: Action::MoonRise,
+        label: "Moon: rise",
+    },
     ChordEntry {
         code: &[ChordDir::Left],
         action: Action::SwapBrain,
@@ -182,6 +268,22 @@ pub enum Action {
     GroundNightBloomFrost,
     GroundNightBloomRose,
     GroundNightBloomFiligree,
+    // One action per moon song (rl#374) — the `^v` family. The render-gated
+    // `moon_songs` map in net/src/render matches `MoonSong::ALL` exhaustively, so a
+    // new song without an action is a compile error there.
+    MoonFull,
+    MoonWaxing,
+    MoonWaning,
+    MoonNew,
+    MoonSilver,
+    MoonBlood,
+    MoonHarvest,
+    MoonVerdant,
+    MoonDrift,
+    MoonFreeze,
+    MoonGallop,
+    MoonZenith,
+    MoonRise,
     SwapBrain,
     /// The rl#326 debug overlay (fps / sim ms / frame graph), reachable without a
     /// keyboard — the TV/couch slideshow-diagnosis affordance (rl#331).
@@ -711,7 +813,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 46] = [
+    const ALL_ACTIONS: [Action; 59] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -742,6 +844,19 @@ mod tests {
         Action::GroundNightBloomFrost,
         Action::GroundNightBloomRose,
         Action::GroundNightBloomFiligree,
+        Action::MoonFull,
+        Action::MoonWaxing,
+        Action::MoonWaning,
+        Action::MoonNew,
+        Action::MoonSilver,
+        Action::MoonBlood,
+        Action::MoonHarvest,
+        Action::MoonVerdant,
+        Action::MoonDrift,
+        Action::MoonFreeze,
+        Action::MoonGallop,
+        Action::MoonZenith,
+        Action::MoonRise,
         Action::SwapBrain,
         Action::ToggleDebugOverlay,
         Action::RevealControls,
@@ -854,6 +969,23 @@ mod tests {
         );
     }
 
+    /// The `^v` family is EXACTLY the moon songs (rl#374), every code depth 4: the
+    /// family roots and wings (`^v`, `^v^`, `^vv`, `^v<`, `^v>`) stay benign
+    /// unassigned prefixes, and depth 4 keeps Quit's ≥2-tap margin.
+    #[test]
+    fn moon_family_is_exactly_the_moon_songs() {
+        for e in GCR_CHORDS.entries() {
+            let in_family = e.code.starts_with(&[ChordDir::Up, ChordDir::Down]);
+            let is_song = e.label.starts_with("Moon: ");
+            assert_eq!(in_family, is_song, "{:?} misfiled", e.action);
+            if is_song {
+                assert_eq!(e.code.len(), 4, "{:?} is not depth 4", e.action);
+            }
+        }
+        // Entry-count ⟺ MoonSong::ALL lives in net's render_mode tests — `moon` is
+        // render-gated in crab-world, and this test mod compiles without render.
+    }
+
     /// No ground-look code may start with ExitVehicle's `vv`: releasing one tap early
     /// mid-look-code would otherwise dismount the player over an art tweak.
     #[test]
@@ -929,6 +1061,19 @@ mod tests {
                 | Action::GroundNightBloomFrost
                 | Action::GroundNightBloomRose
                 | Action::GroundNightBloomFiligree
+                | Action::MoonFull
+                | Action::MoonWaxing
+                | Action::MoonWaning
+                | Action::MoonNew
+                | Action::MoonSilver
+                | Action::MoonBlood
+                | Action::MoonHarvest
+                | Action::MoonVerdant
+                | Action::MoonDrift
+                | Action::MoonFreeze
+                | Action::MoonGallop
+                | Action::MoonZenith
+                | Action::MoonRise
                 | Action::SwapBrain
                 | Action::ToggleDebugOverlay
                 | Action::RevealControls

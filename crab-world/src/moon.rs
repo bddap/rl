@@ -109,6 +109,92 @@ impl Moon {
     }
 }
 
+/// Gallop tempo ([`MoonSong::TempoGallop`]): a day-length traversal per real
+/// minute, the synodic phase cycle in ~29.5 real minutes — fast enough to watch
+/// the sky move while standing still.
+const GALLOP_TIMESCALE: f32 = 1440.0;
+
+/// What one d-pad song does to the moon (rl#374): each song poses one knob
+/// family. The codes live in the surface's chord registry (the songs ARE chord
+/// entries, so the instrument and the discovered-codes map carry them for
+/// free); this enum is the one source for each song's effect, so a surface
+/// maps action → song and never re-states moon semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoonSong {
+    /// Phase 0.5 — full light.
+    PhaseFull,
+    /// Phase 0.25 — waxing quarter.
+    PhaseWaxing,
+    /// Phase 0.75 — waning quarter.
+    PhaseWaning,
+    /// Phase 0.0 — near-dark.
+    PhaseNew,
+    /// The default 220° pastel — the shipped look.
+    HueSilver,
+    /// 10° — blood moon.
+    HueBlood,
+    /// 45° — harvest gold.
+    HueHarvest,
+    /// 140° — green.
+    HueVerdant,
+    /// Timescale back to [`DEFAULT_TIMESCALE`].
+    TempoDrift,
+    /// Timescale 0 — the sky holds still (the manual-pose escape hatch).
+    TempoFreeze,
+    /// Timescale [`GALLOP_TIMESCALE`] — watch the sky move.
+    TempoGallop,
+    /// Park the moon at the traversal's high point. Freezes the sky: while
+    /// moving, motion owns the angles and the pose would be overwritten next
+    /// frame.
+    PoseZenith,
+    /// Park the moon at its rise pose (the default). Freezes likewise.
+    PoseRise,
+}
+
+impl MoonSong {
+    pub const ALL: [Self; 13] = [
+        Self::PhaseFull,
+        Self::PhaseWaxing,
+        Self::PhaseWaning,
+        Self::PhaseNew,
+        Self::HueSilver,
+        Self::HueBlood,
+        Self::HueHarvest,
+        Self::HueVerdant,
+        Self::TempoDrift,
+        Self::TempoFreeze,
+        Self::TempoGallop,
+        Self::PoseZenith,
+        Self::PoseRise,
+    ];
+
+    pub fn apply(self, moon: &mut Moon) {
+        match self {
+            Self::PhaseFull => moon.phase = 0.5,
+            Self::PhaseWaxing => moon.phase = 0.25,
+            Self::PhaseWaning => moon.phase = 0.75,
+            Self::PhaseNew => moon.phase = 0.0,
+            Self::HueSilver => moon.hue_deg = 220.0,
+            Self::HueBlood => moon.hue_deg = 10.0,
+            Self::HueHarvest => moon.hue_deg = 45.0,
+            Self::HueVerdant => moon.hue_deg = 140.0,
+            Self::TempoDrift => moon.timescale = DEFAULT_TIMESCALE,
+            Self::TempoFreeze => moon.timescale = 0.0,
+            Self::TempoGallop => moon.timescale = GALLOP_TIMESCALE,
+            Self::PoseZenith => {
+                moon.azimuth_deg = RISE_AZIMUTH_DEG + TRAVERSAL_SWEEP_DEG / 2.0;
+                moon.elevation_deg = PEAK_ELEVATION_DEG;
+                moon.timescale = 0.0;
+            }
+            Self::PoseRise => {
+                moon.azimuth_deg = RISE_AZIMUTH_DEG;
+                moon.elevation_deg = ELEVATION_FLOOR_DEG;
+                moon.timescale = 0.0;
+            }
+        }
+    }
+}
+
 /// The motion accumulators, separate from [`Moon`] so they run in f64:
 /// frame-sized increments on a f32 stall outright (at 60 fps a ≲5× timescale's
 /// phase increment rounds to zero ulps) or accumulate double-digit rate bias.
@@ -397,6 +483,97 @@ mod tests {
             }
         );
         assert_eq!(clock.t, 0.0);
+    }
+
+    /// Every song lands the moon in a valid, distinct state: phases in [0,1),
+    /// hues on the wheel, poses inside the traversal's own band (the elevation
+    /// floor contract extends to posed moons), and pose/freeze songs actually
+    /// hold — the next motion step must not move a posed moon.
+    #[test]
+    fn songs_pose_valid_holdable_states() {
+        for song in MoonSong::ALL {
+            let mut moon = Moon::default();
+            song.apply(&mut moon);
+            assert!((0.0..1.0).contains(&moon.phase), "{song:?} phase");
+            assert!((0.0..360.0).contains(&moon.hue_deg), "{song:?} hue");
+            assert!(
+                (ELEVATION_FLOOR_DEG..=PEAK_ELEVATION_DEG).contains(&moon.elevation_deg),
+                "{song:?} breaks the elevation band: {}",
+                moon.elevation_deg
+            );
+            if moon.timescale == 0.0 {
+                let posed = moon;
+                step(&mut moon, &mut MoonClock::default(), 3600.0);
+                assert_eq!(moon, posed, "{song:?} must hold its pose");
+            }
+        }
+    }
+
+    /// Songs are distinguishable: no two songs map the same moon to the same
+    /// state (two identical songs would be two codes for one command). The base
+    /// is deliberately off-default everywhere — from a default base the
+    /// default-RESTORING songs (silver, drift) are legitimately no-ops.
+    #[test]
+    fn songs_are_distinct() {
+        let base = Moon {
+            azimuth_deg: 100.0,
+            elevation_deg: 40.0,
+            hue_deg: 300.0,
+            phase: 0.9,
+            timescale: 7.0,
+        };
+        let states: Vec<Moon> = MoonSong::ALL
+            .iter()
+            .map(|s| {
+                let mut m = base;
+                s.apply(&mut m);
+                m
+            })
+            .collect();
+        for (i, a) in states.iter().enumerate() {
+            for (j, b) in states.iter().enumerate().skip(i + 1) {
+                assert_ne!(
+                    a,
+                    b,
+                    "{:?} and {:?} pose the same moon",
+                    MoonSong::ALL[i],
+                    MoonSong::ALL[j]
+                );
+            }
+        }
+    }
+
+    /// The default-restoring songs really restore the default: silver is the
+    /// boot hue, drift the boot tempo, rise the boot pose (plus freeze — the
+    /// pose has to hold).
+    #[test]
+    fn restoring_songs_land_on_the_default() {
+        let d = Moon::default();
+        let apply = |s: MoonSong| {
+            let mut m = Moon::default();
+            s.apply(&mut m);
+            m
+        };
+        assert_eq!(apply(MoonSong::HueSilver).hue_deg, d.hue_deg);
+        assert_eq!(apply(MoonSong::TempoDrift).timescale, d.timescale);
+        let rise = apply(MoonSong::PoseRise);
+        assert_eq!(
+            (rise.azimuth_deg, rise.elevation_deg),
+            (d.azimuth_deg, d.elevation_deg)
+        );
+        // Zenith is the traversal's own high point — mid-sweep at the peak.
+        let zen = apply(MoonSong::PoseZenith);
+        let (az, el) = traversal_angles(0.25 * DAY_SECONDS);
+        assert!(
+            (zen.azimuth_deg - az).abs() < 1e-3,
+            "{} != {az}",
+            zen.azimuth_deg
+        );
+        assert!(
+            (zen.elevation_deg - el).abs() < 1e-3,
+            "{} != {el}",
+            zen.elevation_deg
+        );
     }
 
     /// Hue wraps rather than panicking or saturating.
