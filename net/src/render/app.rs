@@ -67,9 +67,9 @@ pub fn build_windowed_app(
     // Voice notes (rl#378): record / review / confirm, wav to disk.
     super::voice::install(&mut app);
     // Outside Playing every chord dispatcher is gated off, so a capture there could
-    // only pop the context menu and promise commands whose release does nothing —
-    // keep the capture Idle instead (right after it would have opened, so no Update
-    // reader ever sees a menu-phase capture).
+    // only pop the full-screen combo map and promise commands whose release does
+    // nothing — keep the capture Idle instead (right after it would have opened, so
+    // no Update reader ever sees a menu-phase capture).
     app.add_systems(
         PreUpdate,
         crab_world::chord::reset_chords::<GcrControls>

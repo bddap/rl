@@ -70,7 +70,7 @@ pub(super) fn orbit_camera(
     // modifier (rl#330) — deliberately NOT suppressed while a capture is live: the
     // empty code is unassigned, so a plain drag-release executes nothing, and killing
     // the drag would kill mouse orbit outright (the capture spans the whole hold).
-    // Cost: the chord menu shows during a mouse orbit; owner-tunable.
+    // Cost: a capture is silently live during a mouse orbit; owner-tunable.
     if mouse.pressed(ORBIT_DRAG_BUTTON) {
         for ev in motion.read() {
             d_yaw -= ev.delta.x * 0.006;

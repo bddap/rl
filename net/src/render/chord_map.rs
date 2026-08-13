@@ -130,7 +130,9 @@ impl DiscoveredCodes {
         // The empty code (a bare modifier tap) is never a discovery: its room IS the
         // root, which is always on the map — and it can't round-trip the
         // one-code-per-line save format (its line is blank, which `load` skips), so
-        // persisting it would re-"discover" it every session.
+        // persisting it would re-"discover" it every session. Consequence: if a
+        // registry ever assigns the empty code, the root will not bloom/label for
+        // it — root discovery needs its own representation first.
         if code.is_empty() || !self.codes.insert(code.to_vec()) {
             return false;
         }
@@ -444,7 +446,15 @@ impl Canvas {
                 let (x0, x1) = clamp_span(lo, hi);
                 for x in x0..=x1 {
                     let d = (DVec2::new(x as f64, y as f64) - center).length();
-                    let cov = (r1 + 0.5 - d).clamp(0.0, 1.0) * (d - r0 + 0.5).clamp(0.0, 1.0);
+                    // A disc (r0 = 0) has no inner edge to anti-alias — the naive
+                    // symmetric formula would dim the exact center pixel (d ≈ 0
+                    // gives inner factor ~0.5), a pinhole on every landmark heart.
+                    let inner = if r0 <= 0.0 {
+                        1.0
+                    } else {
+                        (d - r0 + 0.5).clamp(0.0, 1.0)
+                    };
+                    let cov = (r1 + 0.5 - d).clamp(0.0, 1.0) * inner;
                     self.blend(x, y, c, cov as f32 * alpha);
                 }
             }
@@ -655,18 +665,24 @@ fn drive_chord_map(
     }
     state.linger = (state.linger - dt).max(0.0);
     let open = capturing || state.linger > 0.0;
-    if open && !state.was_open {
+    if open && !state.was_open && state.visible < 0.02 {
         // Fresh open: start the zoom from the root pose, not wherever the last
-        // linger left off. Keyed on the OPEN edge, not on `entered()` — a press+
-        // release inside one frame (level-OR-edge modifier, a hitch) opens straight
-        // into the linger with `entered()` never having been `Some`.
+        // linger left off. Keyed on the OPEN edge — not on `entered()`, which a
+        // press+release inside one frame (level-OR-edge modifier) never sets — and
+        // gated on the panel being actually faded out: a re-open while the map is
+        // still fading keeps the live pose instead of teleporting mid-view.
         state.view_center = DVec2::ZERO;
         state.view_size = ROOT_VIEW_SIZE;
     }
     state.was_open = open;
     state.visible += ((open as u8 as f32) - state.visible) * (dt * 10.0).min(1.0);
+    // Age the bloom out ENTIRELY: a spent bloom left in place would keep walking
+    // its ring's rows every frame at coverage 0.
     if let Some((_, age)) = &mut state.bloom {
         *age += dt;
+        if *age >= 1.2 {
+            state.bloom = None;
+        }
     }
 
     let Ok(mut panel_node) = panel.single_mut() else {
@@ -736,18 +752,27 @@ fn drive_chord_map(
         } else {
             canvas.ring(at, px_r, stroke, color, 0.75 * ghost * alpha);
         }
-        if node.command.is_some() && !node.provisional {
-            // A discovered room: a filled heart, the submission's landmark mark.
+        // A discovered room: a filled heart, the submission's landmark mark. Skipped
+        // once the heart outgrows the whole canvas (you're inside the room — it
+        // would read as a near-invisible wash, and a canvas-covering disc is the one
+        // rasterizer call whose row spans are all full-width).
+        if node.command.is_some() && !node.provisional && px_r < CANVAS_PX as f64 {
             let rr = (px_r * 0.28).min(px_r - 1.0);
             canvas.disc(at, rr, color, 0.55 * ghost * alpha);
             canvas.disc(at, rr * 0.45, [235, 232, 218], 0.9 * ghost * alpha);
+            let anchor = Vec2::new(at.x as f32, (at.y + rr + 10.0) as f32);
             if px_r > LABEL_MIN_RADIUS_PX
+                && anchor.x >= 0.0
+                && anchor.x <= CANVAS_PX as f32
+                && anchor.y <= CANVAS_PX as f32
                 && let Some(label) = node.command
             {
                 label_reqs.push(LabelReq {
-                    at: Vec2::new(at.x as f32, (at.y + rr + 10.0) as f32),
+                    at: anchor,
                     text: label,
-                    alpha: 0.9 * alpha,
+                    // Ghosted circle, ghosted label — full-strength text over a
+                    // nearly invisible ring would shout.
+                    alpha: 0.9 * ghost * alpha,
                 });
             }
         }
