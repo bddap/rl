@@ -52,7 +52,7 @@ pub(crate) struct Args {
     debug_overlay: bool,
 
     /// Scripted chord entry (rl#330 evidence): hold the kb chord modifier
-    /// (right mouse) from this frame — the held-X context menu opens.
+    /// (right mouse) from this frame — the combo map (rl#358) opens.
     #[arg(long)]
     chord_hold_at: Option<u64>,
     /// Release the scripted chord modifier at this frame, executing the typed code.

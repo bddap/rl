@@ -49,13 +49,10 @@ const DIRS: [ChordDir; 4] = [
     ChordDir::Right,
 ];
 
+/// Child-slot index of a direction — `DIRS[dir_index(d)] == d` by construction
+/// (`DIRS` lists `ChordDir` in declaration order; tied down by a test).
 fn dir_index(d: ChordDir) -> usize {
-    match d {
-        ChordDir::Up => 0,
-        ChordDir::Down => 1,
-        ChordDir::Left => 2,
-        ChordDir::Right => 3,
-    }
+    d as usize
 }
 
 fn code_to_str(code: &[ChordDir]) -> String {
@@ -130,7 +127,11 @@ impl DiscoveredCodes {
     /// Record a played code; returns whether it is NEW (the growth moment). Saves
     /// eagerly — discoveries are rare and the file is tiny.
     fn insert(&mut self, code: &[ChordDir]) -> bool {
-        if !self.codes.insert(code.to_vec()) {
+        // The empty code (a bare modifier tap) is never a discovery: its room IS the
+        // root, which is always on the map — and it can't round-trip the
+        // one-code-per-line save format (its line is blank, which `load` skips), so
+        // persisting it would re-"discover" it every session.
+        if code.is_empty() || !self.codes.insert(code.to_vec()) {
             return false;
         }
         if let Some(path) = &self.file {
@@ -157,7 +158,7 @@ impl DiscoveredCodes {
 
 /// The windowed client's save location: `$RL_CHORD_MAP_FILE`, else
 /// [`super::data_dir`] + `discovered-codes.txt`.
-pub fn default_save_path() -> Option<PathBuf> {
+pub(crate) fn default_save_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("RL_CHORD_MAP_FILE") {
         return Some(PathBuf::from(p));
     }
@@ -365,7 +366,7 @@ const CANVAS_PX: usize = 800;
 
 /// An inclusive canvas-clamped pixel span; empty ranges come out inverted and the
 /// `for` loops simply don't run.
-fn clamp_span(lo: f32, hi: f32) -> (i32, i32) {
+fn clamp_span(lo: f64, hi: f64) -> (i32, i32) {
     (
         (lo.floor() as i32).max(0),
         (hi.ceil() as i32).min(CANVAS_PX as i32 - 1),
@@ -406,11 +407,11 @@ impl Canvas {
         self.px[i + 3] = ((da + (1.0 - da) * a) * 255.0) as u8;
     }
 
-    fn disc(&mut self, center: Vec2, radius: f32, c: [u8; 3], alpha: f32) {
+    fn disc(&mut self, center: DVec2, radius: f64, c: [u8; 3], alpha: f32) {
         self.annulus(center, 0.0, radius, c, alpha);
     }
 
-    fn ring(&mut self, center: Vec2, radius: f32, width: f32, c: [u8; 3], alpha: f32) {
+    fn ring(&mut self, center: DVec2, radius: f64, width: f64, c: [u8; 3], alpha: f32) {
         self.annulus(center, radius - width / 2.0, radius + width / 2.0, c, alpha);
     }
 
@@ -418,11 +419,13 @@ impl Canvas {
     /// span(s) inside the outer edge and outside the inner hole. A zoomed-out
     /// ancestor ring can be 10^5 px across — iterating its full bounding box (the
     /// naive rasterizer) is a multi-ms stall per ring, while its on-canvas band is a
-    /// few thousand pixels.
-    fn annulus(&mut self, center: Vec2, r0: f32, r1: f32, c: [u8; 3], alpha: f32) {
+    /// few thousand pixels. All the math is f64 end-to-end: at deep zoom an ancestor's
+    /// center/radius reach 10^7+ px, where f32 span endpoints (cancellation of
+    /// near-equal huge values) wander by whole pixels and paint phantom rows.
+    fn annulus(&mut self, center: DVec2, r0: f64, r1: f64, c: [u8; 3], alpha: f32) {
         let (y0, y1) = clamp_span(center.y - r1 - 1.0, center.y + r1 + 1.0);
         for y in y0..=y1 {
-            let dy = y as f32 - center.y;
+            let dy = y as f64 - center.y;
             let out2 = (r1 + 1.0) * (r1 + 1.0) - dy * dy;
             if out2 <= 0.0 {
                 continue;
@@ -440,9 +443,9 @@ impl Canvas {
             for (lo, hi) in spans {
                 let (x0, x1) = clamp_span(lo, hi);
                 for x in x0..=x1 {
-                    let d = (Vec2::new(x as f32, y as f32) - center).length();
+                    let d = (DVec2::new(x as f64, y as f64) - center).length();
                     let cov = (r1 + 0.5 - d).clamp(0.0, 1.0) * (d - r0 + 0.5).clamp(0.0, 1.0);
-                    self.blend(x, y, c, cov * alpha);
+                    self.blend(x, y, c, cov as f32 * alpha);
                 }
             }
         }
@@ -483,7 +486,7 @@ const LABEL_MIN_RADIUS_PX: f64 = 90.0;
 const FOCUS_FILL: f64 = 0.58;
 
 #[derive(Resource)]
-pub struct ChordMapState {
+pub(crate) struct ChordMapState {
     visible: f32,
     linger: f32,
     focus: Vec<ChordDir>,
@@ -648,21 +651,19 @@ fn drive_chord_map(
     // the zoom exactly when a slow frame made it most confusing.
     let capturing = chords.capturing();
     if let Some(entered) = chords.entered() {
-        if !state.was_open {
-            // Fresh open: start the zoom from the root pose, not wherever the last
-            // linger left off.
-            state.view_center = DVec2::ZERO;
-            state.view_size = ROOT_VIEW_SIZE;
-            state.bloom = None;
-        }
         state.focus = entered.to_vec();
-        state.was_open = true;
     }
     state.linger = (state.linger - dt).max(0.0);
     let open = capturing || state.linger > 0.0;
-    if !open {
-        state.was_open = false;
+    if open && !state.was_open {
+        // Fresh open: start the zoom from the root pose, not wherever the last
+        // linger left off. Keyed on the OPEN edge, not on `entered()` — a press+
+        // release inside one frame (level-OR-edge modifier, a hitch) opens straight
+        // into the linger with `entered()` never having been `Some`.
+        state.view_center = DVec2::ZERO;
+        state.view_size = ROOT_VIEW_SIZE;
     }
+    state.was_open = open;
     state.visible += ((open as u8 as f32) - state.visible) * (dt * 10.0).min(1.0);
     if let Some((_, age)) = &mut state.bloom {
         *age += dt;
@@ -697,15 +698,10 @@ fn drive_chord_map(
         (state.view_size.ln() + (target_size.ln() - state.view_size.ln()) * ease).exp();
     let view_center = state.view_center;
     let scale = CANVAS_PX as f64 / state.view_size;
-    // World → canvas px in f64; only the view-relative offset drops to f32, so deep
-    // circles keep their sub-radius precision.
-    let to_px = |p: DVec2| -> Vec2 {
-        let rel = (p - view_center) * scale;
-        Vec2::new(
-            rel.x as f32 + CANVAS_PX as f32 / 2.0,
-            rel.y as f32 + CANVAS_PX as f32 / 2.0,
-        )
-    };
+    // World → canvas px, f64 throughout — the painter is f64 too, because a deep
+    // zoom puts ancestor centers/radii at 10^7+ px where f32 loses whole pixels.
+    let to_px =
+        |p: DVec2| -> DVec2 { (p - view_center) * scale + DVec2::splat(CANVAS_PX as f64 / 2.0) };
 
     let Some(image) = images.get_mut(&canvas_handle.0) else {
         return;
@@ -720,49 +716,43 @@ fn drive_chord_map(
         let c = circles[i];
         let px_r = c.radius * scale;
         let at = to_px(c.center);
-        let off_canvas = at.x + px_r as f32 + 1.0 < 0.0
-            || at.y + px_r as f32 + 1.0 < 0.0
-            || at.x - px_r as f32 - 1.0 > CANVAS_PX as f32
-            || at.y - px_r as f32 - 1.0 > CANVAS_PX as f32;
+        let off_canvas = at.x + px_r + 1.0 < 0.0
+            || at.y + px_r + 1.0 < 0.0
+            || at.x - px_r - 1.0 > CANVAS_PX as f64
+            || at.y - px_r - 1.0 > CANVAS_PX as f64;
         if px_r < 2.5 || off_canvas {
             continue;
         }
         let color = family_color(&node.code);
         // Huge ancestor rings ghost past the edges instead of shouting.
-        let ghost = if px_r > CANVAS_PX as f64 * 0.6 {
+        let ghost: f32 = if px_r > CANVAS_PX as f64 * 0.6 {
             0.3
         } else {
             1.0
         };
-        let stroke = (px_r / 40.0).clamp(1.5, 4.0) as f32;
+        let stroke = (px_r / 40.0).clamp(1.5, 4.0);
         if node.provisional {
-            canvas.ring(at, px_r as f32, stroke, [150, 155, 165], 0.45 * alpha);
+            canvas.ring(at, px_r, stroke, [150, 155, 165], 0.45 * alpha);
         } else {
-            canvas.ring(
-                at,
-                px_r as f32,
-                stroke,
-                color,
-                (0.75 * ghost * alpha) as f32,
-            );
+            canvas.ring(at, px_r, stroke, color, 0.75 * ghost * alpha);
         }
         if node.command.is_some() && !node.provisional {
             // A discovered room: a filled heart, the submission's landmark mark.
-            let rr = (px_r * 0.28).min(px_r - 1.0) as f32;
-            canvas.disc(at, rr, color, 0.55 * ghost as f32 * alpha);
-            canvas.disc(at, rr * 0.45, [235, 232, 218], 0.9 * ghost as f32 * alpha);
+            let rr = (px_r * 0.28).min(px_r - 1.0);
+            canvas.disc(at, rr, color, 0.55 * ghost * alpha);
+            canvas.disc(at, rr * 0.45, [235, 232, 218], 0.9 * ghost * alpha);
             if px_r > LABEL_MIN_RADIUS_PX
                 && let Some(label) = node.command
             {
                 label_reqs.push(LabelReq {
-                    at: at + Vec2::new(0.0, rr + 10.0),
+                    at: Vec2::new(at.x as f32, (at.y + rr + 10.0) as f32),
                     text: label,
                     alpha: 0.9 * alpha,
                 });
             }
         }
         if i == focus {
-            canvas.ring(at, px_r as f32 + 5.0, 2.5, [240, 235, 210], alpha);
+            canvas.ring(at, px_r + 5.0, 2.5, [240, 235, 210], alpha);
         }
         if let Some((code, age)) = &state.bloom
             && *code == node.code
@@ -770,7 +760,7 @@ fn drive_chord_map(
             let t = (age / 1.2).min(1.0);
             canvas.ring(
                 at,
-                px_r as f32 + 6.0 + t * 40.0,
+                px_r + 6.0 + t as f64 * 40.0,
                 3.0,
                 [255, 240, 180],
                 (1.0 - t) * alpha,
@@ -778,7 +768,9 @@ fn drive_chord_map(
         }
         // Undiscovered directions as quiet seed rings (rl#380: empty space stays
         // quiet) — only inside a discovered circle that's big on screen, so the
-        // sparse space whispers "it keeps going" without teasing content.
+        // sparse space whispers "it keeps going" without teasing content. Nominal
+        // size/offset, deliberately NOT density-scaled: an empty direction has no
+        // weight to speak of.
         if !node.provisional && px_r > SEED_MIN_PARENT_PX {
             for (slot, &child) in node.children.iter().enumerate() {
                 if child.is_some() {
@@ -786,21 +778,20 @@ fn drive_chord_map(
                 }
                 let sr = c.radius * CIRCLE_SHRINK * SEED_SHRINK;
                 let sc = c.center + dir_vec(DIRS[slot]) * (c.radius * CIRCLE_STEP);
-                canvas.ring(
-                    to_px(sc),
-                    (sr * scale) as f32,
-                    1.0,
-                    [120, 128, 140],
-                    0.12 * alpha,
-                );
+                canvas.ring(to_px(sc), sr * scale, 1.0, [120, 128, 140], 0.12 * alpha);
             }
         }
     }
 
     image.data = Some(canvas.px);
 
-    // Labels: percent-anchored wrappers (each centers its text), nearest-first so
-    // pool overflow drops the farthest.
+    // Labels: percent-anchored wrappers (each centers its text), sorted nearest the
+    // view center first so pool overflow drops the farthest (least relevant) rooms.
+    let canvas_mid = Vec2::splat(CANVAS_PX as f32 / 2.0);
+    label_reqs.sort_by(|a, b| {
+        a.at.distance_squared(canvas_mid)
+            .total_cmp(&b.at.distance_squared(canvas_mid))
+    });
     let mut pool = labels.iter_mut();
     for req in label_reqs.into_iter().take(LABEL_POOL) {
         let Some((mut node, children)) = pool.next() else {
@@ -842,6 +833,24 @@ mod tests {
         assert_eq!(code_to_str(&code), "UUDDLR");
         assert_eq!(code_from_str("UUDDLR"), Some(code));
         assert_eq!(code_from_str("UX"), None);
+    }
+
+    /// `dir_index` is `as usize`, valid only while `DIRS` lists `ChordDir` in
+    /// declaration order — the tie-down for every `DIRS[dir_index(d)]` site.
+    #[test]
+    fn dirs_table_matches_dir_index() {
+        for d in DIRS {
+            assert_eq!(DIRS[dir_index(d)], d);
+        }
+    }
+
+    /// A bare modifier tap (the empty code) is never a discovery: its room is the
+    /// root, and a blank save line couldn't round-trip anyway.
+    #[test]
+    fn empty_code_is_not_a_discovery() {
+        let mut codes = DiscoveredCodes::load(None);
+        assert!(!codes.insert(&[]));
+        assert!(codes.codes().is_empty());
     }
 
     #[test]
