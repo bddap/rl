@@ -12,7 +12,7 @@
 //! keeps the wav for the next sweep (confirm or round start), so delivery is
 //! at-least-once and a dead inbox never loses a take.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
