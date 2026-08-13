@@ -142,8 +142,11 @@ pub struct LegendLine {
     pub glyphs: Vec<Glyph>,
 }
 
+// No chord-command rows here: since the owner's rl#358 pick (2026-08-12) chord codes
+// have no textual lookup surface anywhere — codes are DISCOVERED by playing, and the
+// combo map is the one place they appear.
 pub fn legend<S: ControlScheme + ?Sized>(ctx: S::Context, device: Device) -> Vec<LegendLine> {
-    let lines: Vec<LegendLine> = S::context_rows(ctx)
+    S::context_rows(ctx)
         .iter()
         .filter_map(|row| {
             let b = binding::<S>(row.action).expect(
@@ -159,11 +162,7 @@ pub fn legend<S: ControlScheme + ?Sized>(ctx: S::Context, device: Device) -> Vec
                 glyphs,
             })
         })
-        .collect();
-    // No chord-command rows: since the owner's rl#358 pick (2026-08-12) chord codes
-    // have no textual lookup surface anywhere — codes are DISCOVERED by playing, and
-    // the combo map is the one place they appear.
-    lines
+        .collect()
 }
 
 pub fn reveal_glyph<S: ControlScheme + ?Sized>(device: Device) -> Option<Glyph> {

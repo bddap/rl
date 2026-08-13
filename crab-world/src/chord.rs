@@ -97,18 +97,12 @@ impl<A: Copy + PartialEq + Debug> ChordRegistry<A> {
 
 /// The capture state machine, pure and frame-stepped: feed it each frame's modifier state
 /// and the directions just pressed, get the completed code back on the release edge.
-/// A newtype over a private enum so the illegal combination (a buffer while idle) is
-/// unrepresentable, not merely unreached. Code length is unbounded by design (rl#380):
-/// deep codes are gameplay, and the buffer only grows by one press per player input.
+/// `Some(buffer)` is a live capture, `None` is idle; the newtype keeps the buffer
+/// private (readers go through [`Self::entered`]). Code length is unbounded by design
+/// (rl#380): deep codes are gameplay, and the buffer only grows by one press per
+/// player input.
 #[derive(Default)]
-pub struct ChordCapture(CaptureState);
-
-#[derive(Default)]
-enum CaptureState {
-    #[default]
-    Idle,
-    Capturing(Vec<ChordDir>),
-}
+pub struct ChordCapture(Option<Vec<ChordDir>>);
 
 impl ChordCapture {
     /// Advance one frame. `modifier_down` is whether the modifier is held THIS frame;
@@ -124,42 +118,35 @@ impl ChordCapture {
         modifier_down: bool,
         taps: impl IntoIterator<Item = ChordDir>,
     ) -> Option<Vec<ChordDir>> {
-        use CaptureState::*;
-        if modifier_down && matches!(self.0, Idle) {
-            self.0 = Capturing(Vec::new());
+        if modifier_down && self.0.is_none() {
+            self.0 = Some(Vec::new());
         }
-        if let Capturing(buf) = &mut self.0 {
+        if let Some(buf) = &mut self.0 {
             buf.extend(taps);
         }
         if modifier_down {
             return None;
         }
-        match std::mem::take(&mut self.0) {
-            Idle => None,
-            Capturing(buf) => Some(buf),
-        }
+        self.0.take()
     }
 
     /// Whether a capture is live — input readers suppress WASD/d-pad MOVEMENT while the
     /// player is typing a code on those same inputs (sticks stay live; analog is out of
     /// chord scope).
     pub fn capturing(&self) -> bool {
-        !matches!(self.0, CaptureState::Idle)
+        self.0.is_some()
     }
 
     /// Drop any half-typed code — for state transitions (menu → round) that a held
     /// modifier could otherwise smuggle buffered taps across.
     pub fn reset(&mut self) {
-        self.0 = CaptureState::Idle;
+        self.0 = None;
     }
 
     /// The code typed so far in the live capture — the combo map zooms to it.
     /// `None` while idle.
     pub fn entered(&self) -> Option<&[ChordDir]> {
-        match &self.0 {
-            CaptureState::Capturing(buf) => Some(buf),
-            CaptureState::Idle => None,
-        }
+        self.0.as_deref()
     }
 }
 

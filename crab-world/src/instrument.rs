@@ -116,8 +116,8 @@ fn walk_step(d: ChordDir) -> i32 {
 }
 
 fn walk_index(path: &[ChordDir]) -> i32 {
-    // Clamped to ±one-and-a-bit octaves so MAX_CHORD_LEN monotone codes stay in a
-    // singable register instead of walking off the piano.
+    // Clamped to ±one-and-a-bit octaves: codes are uncapped (rl#380), so a long
+    // monotone code pins at the clamp instead of walking off the piano.
     path.iter().map(|&d| walk_step(d)).sum::<i32>().clamp(-6, 8)
 }
 
