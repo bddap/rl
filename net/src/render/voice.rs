@@ -1,8 +1,10 @@
 //! In-game voice notes (rl#378 stage 1): tap [`Action::VoiceRecord`] to start
 //! recording (red ● indicator), tap again to stop into a review modal that plays
 //! the take back; MenuConfirm keeps it (wav on disk), MenuBack discards, another
-//! VoiceRecord tap replays. Stage 2 picks saved files up for delivery, so the wav
-//! directory is the seam between the stages.
+//! VoiceRecord tap replays. The wav directory is the seam to stage 2: confirm
+//! (and each round start, for retries) fires a background
+//! [`crate::voice_delivery`] sweep that ships pending takes to the assistant's
+//! inbox and deletes them on ack.
 //!
 //! Capture must never block play, and cpal's `Stream` is `!Send`, so the whole
 //! device dance (open, run, close) lives on one dedicated thread per take: the
@@ -23,6 +25,7 @@ use bevy::prelude::*;
 
 use super::app::AppPhase;
 use crate::controls::{self, Action, GcrControls};
+use crate::voice_delivery;
 use crab_world::wav;
 
 /// Memory/attention bound for one take; the thread stops itself at the cap even if
@@ -48,6 +51,7 @@ pub(super) fn install(app: &mut App) {
             .after(super::input::gather_input)
             .run_if(in_state(AppPhase::Playing)),
     );
+    app.add_systems(OnEnter(AppPhase::Playing), kick_pending_delivery);
     app.add_systems(OnExit(AppPhase::Playing), cancel_voice);
 }
 
@@ -77,6 +81,9 @@ pub(super) struct VoiceUx {
     phase: Phase,
     /// Transient status line + time left to show it.
     flash: Option<(String, f32)>,
+    /// A running stage-2 delivery sweep's report channel; polled each frame so
+    /// the sent/queued outcome can flash without ever blocking play.
+    delivery: Option<std::sync::Mutex<mpsc::Receiver<voice_delivery::Report>>>,
     /// The modal just closed but a confirm/discard input is still physically held:
     /// jump/slide/brake are level-triggered `pressed()` reads, so without this the
     /// A that saved the note would hop the character on the very next frame.
@@ -88,6 +95,7 @@ impl Default for VoiceUx {
         Self {
             phase: Phase::Idle,
             flash: None,
+            delivery: None,
             linger: false,
         }
     }
@@ -222,6 +230,7 @@ fn drive_voice(
     playback: Query<Entity, With<VoicePlayback>>,
 ) {
     use crab_world::controls::{just_pressed, pressed};
+    poll_delivery(&mut voice);
     let record = just_pressed::<GcrControls>(Action::VoiceRecord, &keys, &gamepads);
     let confirm = just_pressed::<GcrControls>(Action::MenuConfirm, &keys, &gamepads);
     let discard = just_pressed::<GcrControls>(Action::MenuBack, &keys, &gamepads);
@@ -304,15 +313,21 @@ fn drive_voice(
         }
         Phase::Review { samples } => {
             if confirm {
-                let msg = match save_take(samples) {
-                    Ok(path) => format!("voice note saved · {}", path.display()),
+                let (msg, delivery) = match save_take(samples) {
+                    Ok(path) => (
+                        format!("voice note saved · {}", path.display()),
+                        spawn_delivery_sweep(),
+                    ),
                     Err(e) => {
                         warn!("voice note save failed: {e}");
-                        format!("save failed: {e}")
+                        (format!("save failed: {e}"), None)
                     }
                 };
                 stop_playback(&mut commands, &playback);
                 voice.flash = Some((msg, FLASH_SECS));
+                if delivery.is_some() {
+                    voice.delivery = delivery;
+                }
                 voice.phase = Phase::Idle;
                 voice.linger = true;
             } else if discard {
@@ -330,6 +345,59 @@ fn drive_voice(
                 ));
             }
         }
+    }
+}
+
+/// Surface a finished delivery sweep's outcome. Empty sweeps (the round-start
+/// kick found nothing pending) stay silent — no news is the common case.
+fn poll_delivery(voice: &mut VoiceUx) {
+    let Some(rx) = voice.delivery.take() else {
+        return;
+    };
+    let polled = rx.lock().unwrap().try_recv();
+    match polled {
+        Ok(report) => {
+            let flash = match (&report.error, report.sent) {
+                (Some(_), _) => Some("voice note queued — inbox unreachable".into()),
+                (None, 0) => None,
+                (None, 1) => Some("voice note sent".into()),
+                (None, n) => Some(format!("{n} voice notes sent")),
+            };
+            if let Some(f) = flash {
+                voice.flash = Some((f, FLASH_SECS));
+            }
+        }
+        Err(mpsc::TryRecvError::Empty) => voice.delivery = Some(rx),
+        Err(mpsc::TryRecvError::Disconnected) => warn!("voice delivery thread died"),
+    }
+}
+
+/// Fire one background delivery sweep over the voice dir; `None` when a sweep
+/// is already running (its pass covers any file this one would have sent).
+fn spawn_delivery_sweep() -> Option<std::sync::Mutex<mpsc::Receiver<voice_delivery::Report>>> {
+    let slot = voice_delivery::try_begin_sweep()?;
+    let dir = voice_dir()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("voice-deliver".into())
+        .spawn(move || {
+            let _slot = slot;
+            let report = voice_delivery::deliver_pending(
+                &dir,
+                &voice_delivery::endpoint(),
+                &voice_delivery::host_tag(),
+            );
+            let _ = tx.send(report);
+        })
+        .ok()?;
+    Some(std::sync::Mutex::new(rx))
+}
+
+/// Round start: retry anything a dead inbox left behind — the sender deletes
+/// only on ack, so this is the at-least-once loop's other half.
+fn kick_pending_delivery(mut voice: ResMut<VoiceUx>) {
+    if voice.delivery.is_none() {
+        voice.delivery = spawn_delivery_sweep();
     }
 }
 
