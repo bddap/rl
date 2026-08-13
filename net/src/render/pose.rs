@@ -31,7 +31,7 @@ pub(super) struct PoseWindow {
 }
 
 /// A per-tick pose jump no craft or crab part can cover by MOVING (plane terminal
-/// ~4.5 m/s ⇒ ~0.15 m/tick) is a TELEPORT — a round-RESTART respawn, a non-finite
+/// ~9.1 m/s ⇒ ~0.30 m/tick) is a TELEPORT — a round-RESTART respawn, a non-finite
 /// rescue (rl#137). Interpolating across one would smear the body over the window's
 /// span on every observer, so the window restarts and holds the arrival pose — the
 /// same motion-vs-teleport discrimination as `boarding_of`'s walk-speed guard.

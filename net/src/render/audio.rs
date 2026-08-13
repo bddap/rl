@@ -122,11 +122,11 @@ impl Default for AtomicF32 {
     }
 }
 
-/// Full-wind airspeed, m/s — the plane's full-throttle terminal (~4.5 m/s, the
-/// fastest thing in the game; see `PLANE` in crab-world's vehicle.rs). At or above
-/// it the wind is at full roar in every context. The plane engine layer
+/// Full-wind airspeed, m/s — the plane's full-throttle terminal (the fastest thing
+/// in the game; the vehicle.rs ruler test pins the constant to the realized speed).
+/// At or above it the wind is at full roar in every context. The plane engine layer
 /// (ambience.rs) tops its band here too.
-pub(super) const FULL_WIND_MPS: f32 = 4.5;
+pub(super) const FULL_WIND_MPS: f32 = crab_world::vehicle::PLANE_TOP_SPEED_MPS;
 
 /// The plane airstream's level under [`WIND_MASTER`] — the ONE plane-wind knob.
 /// In the cockpit the wind sits UNDER the engine and the speed roar, not on top
@@ -439,7 +439,7 @@ mod tests {
         for kind in [None, Some(VehicleKind::Plane), Some(VehicleKind::Ship)] {
             let quiet = settled_rms(kind, 0.1);
             let mid = settled_rms(kind, 2.0);
-            let fast = settled_rms(kind, 4.5);
+            let fast = settled_rms(kind, FULL_WIND_MPS);
             assert!(
                 quiet < mid && mid < fast,
                 "{kind:?}: rms not monotone: {quiet} {mid} {fast}"

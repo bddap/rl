@@ -13,8 +13,8 @@ const VEHICLE_DENSITY: f32 = 50.0;
 const VEHICLE_MASS: f32 = VEHICLE_DENSITY * 8.0 * VEHICLE_HALF.x * VEHICLE_HALF.y * VEHICLE_HALF.z;
 
 /// The craft's [`crate::physics::brake_coeff_max`] (one-step momentum cancel) on the
-/// drag + match-velocity damp coefficient. The cap only engages past ~110 m/s (plane)
-/// / ~277 m/s (ship) — 25×+ any flyable speed — so tuned feel is untouched.
+/// drag + match-velocity damp coefficient. The cap only engages past ~220 m/s (plane)
+/// / ~277 m/s (ship) — 20×+ any flyable speed — so tuned feel is untouched.
 const BRAKE_COEFF_MAX: f32 = crate::physics::brake_coeff_max(VEHICLE_MASS);
 
 /// How far below the local surface a craft must sink before rescue: past the
@@ -45,28 +45,42 @@ const THROTTLE_TRIM_RATE: f32 = 0.03;
 
 const MATCH_VEL_DAMP: f32 = 0.9;
 
+/// The plane's settled full-throttle top speed — the fastest thing in the game, THE
+/// number every downstream band (wind/engine audio, ship comparisons) normalizes
+/// against. Not free-floating: `full_throttle_top_speed_settles_in_band` measures the
+/// realized settle and pins it within ±5% of this constant, so a params change that
+/// moves the real top speed without updating this fails the ruler.
+pub const PLANE_TOP_SPEED_MPS: f32 = 9.13;
+
+// rl#379 (owner: "2x current"): every equilibrium speed doubled by scaling the
+// speed-shaped terms — thrust ×2 + quadratic drag ÷2 doubles the thrust-vs-drag
+// terminal (measured 4.64 → 9.13 m/s settled, `full_throttle_top_speed_settles_in_band`),
+// lift ÷2 doubles the lift-vs-weight level-flight speed, and the full-authority
+// speed doubles with cruise. Linear drag, grip, and every torque stay put: grip's
+// force is already ∝ speed (same alignment τ), angular rates keep the tuned feel
+// (turn RADIUS doubles with speed — that's the point of a faster plane).
 const PLANE: VehicleParams = VehicleParams {
-    lever_thrust: 4.0,
+    lever_thrust: 8.0,
     direct_thrust: Vec3::ZERO,
-    // 0.9 puts level flight at ~2.9 m/s — above the ~2 m/s slow-flight band (a
-    // freshly-boarded craft can't free-balloon) and ~64% of the full-throttle terminal
-    // ~4.5 m/s, so climb costs throttle. At
+    // 0.45 puts level flight at ~5.7 m/s — above the slow-flight band (a
+    // freshly-boarded craft can't free-balloon) and ~62% of the full-throttle terminal
+    // ~9.1 m/s, so climb costs throttle. At
     // 1.8 the plane out-lifted its ~2.6 N weight from 1.4 m/s (owner: "Bernoulli overdone",
     // rl#230); the level-flight band is pinned by `slow_flight_sinks_high_speed_climbs`.
-    lift: 0.9,
+    lift: 0.45,
     // Alignment time-constant ≈ mass/grip ≈ 0.3 s — velocity follows the nose well inside
     // one turn's sweep, so a coordinated turn stays near-aligned and pays only the
     // second-order grip loss (rl#255).
     grip: 0.8,
     drag_lin: 0.2,
-    drag_quad: 0.15,
+    drag_quad: 0.075,
     angular_drag: 0.06,
     pitch_torque: 0.2,
     roll_torque: 0.3,
     yaw_torque: 0.1,
-    // Full control authority just below the ~2.9 m/s level-flight speed, so cruise
+    // Full control authority just below the ~5.7 m/s level-flight speed, so cruise
     // and everything above it keeps the tuned feel (rl#382).
-    control_speed_full: 2.5,
+    control_speed_full: 5.0,
 };
 
 const SHIP_AIM_TORQUE: f32 = 0.015;
@@ -1002,8 +1016,8 @@ mod tests {
     }
 
     /// Pins the rl#230 feel-call: level flight lives strictly between slow flight and the
-    /// full-throttle terminal — at slow flight (2 m/s) lift < weight so the plane settles
-    /// instead of ballooning off the runway, while near terminal (4 m/s) lift > weight so
+    /// full-throttle terminal — at slow flight (4 m/s) lift < weight so the plane settles
+    /// instead of ballooning off the runway, while near terminal (8 m/s) lift > weight so
     /// altitude is still winnable with throttle. Both sides sample vertical velocity over a
     /// few zero-throttle ticks, level attitude, so lift vs gravity is the only vertical term.
     #[test]
@@ -1018,24 +1032,24 @@ mod tests {
             }
             body(&app, e).1.linear.y - y0
         };
-        let slow = dvy(2.0);
+        let slow = dvy(4.0);
         assert!(
             slow < 0.0,
             "plane must sink in slow flight (lift < weight), got Δvy={slow}"
         );
-        let near_terminal = dvy(4.0);
+        let near_terminal = dvy(8.0);
         assert!(
             near_terminal > 0.0,
             "plane must climb near full-throttle terminal speed, got Δvy={near_terminal}"
         );
     }
 
-    // The pitch/yaw sign tests fly at 3 m/s (≥ full-authority speed): control
+    // The pitch/yaw sign tests fly at 6 m/s (≥ full-authority speed): control
     // surfaces are aerodynamic, so a standstill craft has no authority (rl#382) —
     // the zero-speed behavior is pinned by `control_authority_scales_with_airspeed`.
     #[test]
     fn positive_pitch_raises_the_nose() {
-        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 6.0));
         set_cmd(&mut app, |c| c.pitch = 1.0);
         for _ in 0..10 {
             app.update();
@@ -1049,7 +1063,7 @@ mod tests {
 
     #[test]
     fn positive_yaw_turns_nose_right() {
-        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 6.0));
         set_cmd(&mut app, |c| c.yaw = 1.0);
         for _ in 0..10 {
             app.update();
@@ -1064,7 +1078,7 @@ mod tests {
     #[test]
     fn pitch_input_loops_the_craft_without_autoright() {
         // Flying start — a standstill craft has no surface authority (rl#382).
-        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 6.0));
         set_cmd(&mut app, |c| c.pitch = 1.0);
         let mut went_inverted = false;
         for _ in 0..240 {
@@ -1087,7 +1101,7 @@ mod tests {
     /// the speed survived (the symptom).
     #[test]
     fn sharp_turn_carries_speed_and_velocity_follows_nose() {
-        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 6.0));
         set_cmd(&mut app, |c| c.yaw = 1.0);
         let s0 = body(&app, e).1.linear.length();
         for _ in 0..120 {
@@ -1160,8 +1174,8 @@ mod tests {
         };
 
         let standstill = yaw_rate(VehicleKind::Plane, 0.0);
-        let half = yaw_rate(VehicleKind::Plane, 1.25);
-        let cruise = yaw_rate(VehicleKind::Plane, 2.5);
+        let half = yaw_rate(VehicleKind::Plane, 2.5);
+        let cruise = yaw_rate(VehicleKind::Plane, 5.0);
         println!("yaw rate rad/s — standstill {standstill}, half {half}, cruise {cruise}");
         assert_eq!(
             standstill, 0.0,
@@ -1181,6 +1195,35 @@ mod tests {
         assert!(
             ship_standstill > 0.0,
             "the ship aims with thrusters, not surfaces — standstill authority stays"
+        );
+    }
+
+    /// rl#379 ruler: the settled full-throttle top speed, measured in free flight
+    /// (level start at boarding speed, throttle pinned to 1, 20 s of sim). The
+    /// median of the last 100 ticks is the "top speed" every retune quotes.
+    #[test]
+    fn full_throttle_top_speed_settles_in_band() {
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 2.0));
+        set_cmd(&mut app, |c| c.throttle_trim = 1.0);
+        let mut speeds = Vec::new();
+        for _ in 0..600 {
+            app.update();
+            speeds.push(body(&app, e).1.linear.length());
+        }
+        for (t, s) in speeds.iter().enumerate().step_by(30) {
+            println!("trace t={t} |v|={s:.3}");
+        }
+        let mut tail: Vec<f32> = speeds[500..].to_vec();
+        tail.sort_by(f32::total_cmp);
+        let settled = tail[tail.len() / 2];
+        println!("settled top speed = {settled:.3} m/s");
+        // rl#379: the owner-set target is 2× the pre-retune measurement (4.635 m/s,
+        // same ruler); ±5% keeps the pin tight without chasing solver noise.
+        let (lo, hi) = (PLANE_TOP_SPEED_MPS * 0.95, PLANE_TOP_SPEED_MPS * 1.05);
+        assert!(
+            (lo..hi).contains(&settled),
+            "full-throttle top speed off PLANE_TOP_SPEED_MPS ({PLANE_TOP_SPEED_MPS}): \
+             {settled} m/s"
         );
     }
 
