@@ -35,6 +35,13 @@ pub const fn brake_coeff_max(mass: f32) -> f32 {
 /// re-fail `claws_quiet_at_rest`.
 pub const PHYSICS_SUBSTEPS: usize = 4;
 
+/// (outer, internal-PGS, internal-stabilization) solver iterations — the other
+/// half of the [`PHYSICS_SUBSTEPS`] tuned set (rationale there). Rapier's 4/1/1
+/// defaults under-converge the railed claw joints at rest into rad/s-scale
+/// velocity chatter; both internal counts are load-bearing, not just the outer
+/// one — either alone at 1 re-fails `claws_quiet_at_rest`.
+pub const SOLVER_ITERATIONS: (usize, usize, usize) = (8, 4, 4);
+
 fn fixed_timestep() -> TimestepMode {
     TimestepMode::Fixed {
         dt: PHYSICS_DT,
@@ -63,13 +70,9 @@ fn rapier_context_init() -> RapierContextInitialization {
     RapierContextInitialization::InitializeDefaultRapierContext {
         integration_parameters: IntegrationParameters {
             contact_softness: CONTACT_SOFTNESS,
-            // One tuned set with PHYSICS_SUBSTEPS (rationale on its doc): defaults
-            // (4/1/1) under-converge the railed claw joints at rest into rad/s-scale
-            // velocity chatter. Both internal counts are load-bearing, not just the
-            // outer one: either alone at 1 re-fails `claws_quiet_at_rest`.
-            num_solver_iterations: 8,
-            num_internal_pgs_iterations: 4,
-            num_internal_stabilization_iterations: 4,
+            num_solver_iterations: SOLVER_ITERATIONS.0,
+            num_internal_pgs_iterations: SOLVER_ITERATIONS.1,
+            num_internal_stabilization_iterations: SOLVER_ITERATIONS.2,
             ..IntegrationParameters::default()
         },
         rapier_configuration: RapierConfiguration {
@@ -95,18 +98,20 @@ impl bevy::app::Plugin for CrabPhysicsPlugin {
     }
 }
 
-/// Runtime backstop that the spawned context carries [`CONTACT_SOFTNESS`].
+/// Runtime backstop that the spawned context carries [`CONTACT_SOFTNESS`] and
+/// [`SOLVER_ITERATIONS`] — both live in the same `IntegrationParameters` and are
+/// lost together by the same last-write-wins hazard.
 fn assert_contact_spring_applied(
     ctx: bevy::ecs::system::Query<
         &bevy_rapier3d::plugin::context::RapierContextSimulation,
         bevy::ecs::query::With<bevy_rapier3d::plugin::context::DefaultRapierContext>,
     >,
 ) {
-    let spring = ctx
+    let params = &ctx
         .single()
         .expect("CrabPhysicsPlugin: exactly one default Rapier context")
-        .integration_parameters
-        .contact_softness;
+        .integration_parameters;
+    let spring = params.contact_softness;
     assert_eq!(
         (spring.natural_frequency, spring.damping_ratio),
         (
@@ -116,6 +121,18 @@ fn assert_contact_spring_applied(
         "CrabPhysicsPlugin: the spawned Rapier context lost CONTACT_SOFTNESS — its \
          RapierContextInitialization was overridden after the plugin (last-write-wins). \
          The contact spring is silently wrong; fix the init ordering at the call site."
+    );
+    assert_eq!(
+        (
+            params.num_solver_iterations,
+            params.num_internal_pgs_iterations,
+            params.num_internal_stabilization_iterations,
+        ),
+        SOLVER_ITERATIONS,
+        "CrabPhysicsPlugin: the spawned Rapier context lost SOLVER_ITERATIONS — its \
+         RapierContextInitialization was overridden after the plugin (last-write-wins). \
+         Rest contact silently reverts to chatter (rl#340 stage 2); fix the init \
+         ordering at the call site."
     );
 }
 
@@ -163,6 +180,16 @@ mod tests {
         assert_eq!(
             spring.damping_ratio, CONTACT_SOFTNESS.damping_ratio,
             "contact spring damping_ratio lost — init ordering broke"
+        );
+        assert_eq!(
+            (
+                ctx.integration_parameters.num_solver_iterations,
+                ctx.integration_parameters.num_internal_pgs_iterations,
+                ctx.integration_parameters
+                    .num_internal_stabilization_iterations,
+            ),
+            SOLVER_ITERATIONS,
+            "solver iteration counts lost — init ordering broke"
         );
     }
 
