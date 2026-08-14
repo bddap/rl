@@ -35,10 +35,38 @@ pub struct Reply {
     pub wav: Vec<u8>,
 }
 
+/// A received reply plus the live connection its ack rides on. The caller acks
+/// only AFTER it has taken responsibility for the reply (handed it to the
+/// display queue) — acking on receipt would let a teardown between receive and
+/// hand-off delete the bundle bot-side with nothing shown (the reviewer-loop's
+/// ack-then-drop window). Dropping this without [`Polled::split`]+ack simply
+/// leaves the bundle spooled for the next poll.
+pub struct Polled {
+    reply: Reply,
+    stream: TcpStream,
+}
+
+/// The deferred ack half of a [`Polled`].
+pub struct ReplyAck(TcpStream);
+
+impl Polled {
+    pub fn split(self) -> (Reply, ReplyAck) {
+        (self.reply, ReplyAck(self.stream))
+    }
+}
+
+impl ReplyAck {
+    /// Tell the inbox the reply is safely handed off; it deletes the bundle.
+    pub fn ack(self) {
+        // A failed ack write is the same as no ack: re-served next poll.
+        let _ = (&self.0).write_all(b"ack\n");
+    }
+}
+
 /// Ask the inbox for one queued reply. `Ok(None)` is the common quiet case; an
 /// `Err` is a transport/protocol failure the caller should treat as "try again
 /// next tick", never fatal — the reply (if any) is still spooled bot-side.
-pub fn poll_one(endpoint: &str, host: &str) -> Result<Option<Reply>, String> {
+pub fn poll_one(endpoint: &str, host: &str) -> Result<Option<Polled>, String> {
     let addr = endpoint
         .to_socket_addrs()
         .map_err(|e| e.to_string())?
@@ -85,12 +113,22 @@ pub fn poll_one(endpoint: &str, host: &str) -> Result<Option<Reply>, String> {
 
     let mut text = vec![0u8; text_len as usize];
     reader.read_exact(&mut text).map_err(|e| e.to_string())?;
-    let text = String::from_utf8(text).map_err(|_| "reply text is not UTF-8".to_string())?;
     let mut wav = vec![0u8; wav_len as usize];
     reader.read_exact(&mut wav).map_err(|e| e.to_string())?;
-
-    writer.write_all(b"ack\n").map_err(|e| e.to_string())?;
-    Ok(Some(Reply { text, wav }))
+    let text = match String::from_utf8(text) {
+        Ok(t) => t,
+        Err(_) => {
+            // Fully received but unusable: bot-authored garbage, not a torn
+            // transport. Ack it away — leaving it would re-serve the same
+            // poison bundle every poll and wedge everything behind it.
+            let _ = writer.write_all(b"ack\n");
+            return Err("reply text is not UTF-8 — acked away".into());
+        }
+    };
+    Ok(Some(Polled {
+        reply: Reply { text, wav },
+        stream,
+    }))
 }
 
 #[cfg(test)]
@@ -124,22 +162,46 @@ mod tests {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let ep = local(&l);
         let server = serve_one(l, b"none\n");
-        assert_eq!(poll_one(&ep, "tv").unwrap(), None);
+        assert!(poll_one(&ep, "tv").unwrap().is_none());
         let (req, _) = server.join().unwrap();
         assert_eq!(req, "voice-poll/1 tv\n");
     }
 
     #[test]
-    fn reply_is_framed_and_acked() {
+    fn reply_is_framed_and_acked_only_on_demand() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let ep = local(&l);
         let server = serve_one(l, b"reply 5 8\nhelloRIFFfake");
-        let got = poll_one(&ep, "deck-2").unwrap().unwrap();
-        assert_eq!(got.text, "hello");
-        assert_eq!(got.wav, b"RIFFfake");
+        let (reply, ack) = poll_one(&ep, "deck-2").unwrap().unwrap().split();
+        assert_eq!(reply.text, "hello");
+        assert_eq!(reply.wav, b"RIFFfake");
+        ack.ack();
         let (req, acked) = server.join().unwrap();
         assert_eq!(req, "voice-poll/1 deck-2\n");
-        assert!(acked, "client must ack a fully-received reply");
+        assert!(acked, "explicit ack must reach the server");
+    }
+
+    #[test]
+    fn dropped_polled_reply_never_acks() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ep = local(&l);
+        let server = serve_one(l, b"reply 5 8\nhelloRIFFfake");
+        drop(poll_one(&ep, "tv").unwrap().unwrap());
+        let (_, acked) = server.join().unwrap();
+        assert!(!acked, "an unhanded reply must stay spooled bot-side");
+    }
+
+    #[test]
+    fn non_utf8_text_is_acked_away_not_wedged() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ep = local(&l);
+        let server = serve_one(l, b"reply 2 4\n\xff\xfeRIFF");
+        assert!(poll_one(&ep, "tv").is_err());
+        let (_, acked) = server.join().unwrap();
+        assert!(
+            acked,
+            "fully-received poison must be acked so it can't wedge the queue"
+        );
     }
 
     #[test]
