@@ -17,7 +17,9 @@ pub fn read_mono_44k(path: &Path) -> Result<Vec<f32>, String> {
     parse_mono_44k(&std::fs::read(path).map_err(|e| e.to_string())?)
 }
 
-fn parse_mono_44k(b: &[u8]) -> Result<Vec<f32>, String> {
+/// Same strict contract over in-memory bytes — for wavs that arrive on the
+/// wire rather than from disk (the rl#378 assistant-reply TTS).
+pub fn parse_mono_44k(b: &[u8]) -> Result<Vec<f32>, String> {
     if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
         return Err("not a RIFF/WAVE file".into());
     }

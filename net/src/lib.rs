@@ -18,6 +18,7 @@ pub mod snapshot;
 pub mod telemetry;
 pub mod transport;
 pub mod voice_delivery;
+pub mod voice_reply;
 pub mod wire;
 
 // Render-free since rl#298 stage 4: only the label publisher inside stays
