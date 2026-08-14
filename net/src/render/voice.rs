@@ -705,11 +705,16 @@ fn start_reply_poll(mut reply: ResMut<ReplyUx>) {
             let mut warned = false;
             'live: loop {
                 match crate::voice_reply::poll_one(&endpoint, &host) {
-                    Ok(Some(r)) => {
+                    Ok(Some(polled)) => {
                         warned = false;
-                        if tx.send(r).is_err() {
+                        // Hand off BEFORE acking: if the round ended and the
+                        // receiver is gone, the un-acked bundle stays spooled
+                        // for the next session instead of vanishing.
+                        let (reply, ack) = polled.split();
+                        if tx.send(reply).is_err() {
                             return;
                         }
+                        ack.ack();
                         // A backlog (session was away) drains without waiting
                         // out the cadence between items.
                         continue;
@@ -752,7 +757,8 @@ fn stop_reply_poll(
     mut hud: Query<&mut Visibility, With<ReplyHud>>,
 ) {
     reply.poll = None; // Drop raises the stop flag.
-    reply.queue.clear();
+    // The queue deliberately SURVIVES the round: anything here was already
+    // acked away bot-side, so this is its only copy — next round shows it.
     reply.showing = None;
     for e in playback.iter() {
         commands.entity(e).despawn();
