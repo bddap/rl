@@ -1003,19 +1003,27 @@ fn phantom_force_instrument() {
         ((p1 - p0 - m * g * dt_total - j_drag) / (m * dt_total)).length()
     };
 
+    // "old-solver" rows pin the 2026-07-28 findings' conditions (sub=2 it=4 was
+    // the shipped config then; rl#340 stage 2 moved shipping to sub=4 it=8/4/4 —
+    // the internal 4/4 now leaks into every row via `rapier_context_init`, so
+    // rows are comparable to each other, not to the dated findings).
+    let (ship_sub, ship_it) = (
+        crate::physics::PHYSICS_SUBSTEPS,
+        crate::physics::SOLVER_ITERATIONS.0,
+    );
     for (label, amp, substeps, iters, root_tq) in [
         (
-            "baseline            amp=1.0 sub=2 it=4",
+            "baseline amp=1.0 shipped sub/it",
             1.0,
-            2usize,
-            4usize,
+            ship_sub,
+            ship_it,
             0.0,
         ),
-        ("amp=0.5             ", 0.5, 2, 4, 0.0),
-        ("amp=0.2             ", 0.2, 2, 4, 0.0),
-        ("root-torque-only 1Nm", 0.0, 2, 4, 1.0),
-        ("root-torque-only 5Nm", 0.0, 2, 4, 5.0),
-        ("root-tq 5Nm sub=8   ", 0.0, 8, 4, 5.0),
+        ("amp=0.5    old-solver", 0.5, 2, 4, 0.0),
+        ("amp=0.2    old-solver", 0.2, 2, 4, 0.0),
+        ("root-torque-only 1Nm old-solver", 0.0, 2, 4, 1.0),
+        ("root-torque-only 5Nm old-solver", 0.0, 2, 4, 5.0),
+        ("root-tq 5Nm sub=8    old-solver", 0.0, 8, 4, 5.0),
     ] {
         let r = run(amp, substeps, iters, root_tq);
         println!("INSTRUMENT {label}: resid={r:.5} m/s²");
