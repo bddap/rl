@@ -325,7 +325,11 @@ fn drive_voice(
                 };
                 stop_playback(&mut commands, &playback);
                 voice.flash = Some((msg, FLASH_SECS));
-                if delivery.is_some() {
+                // Never clobber a still-unread report channel: if a sweep
+                // finished between this frame's poll and now, its receiver may
+                // hold an unflashed outcome — keep it; the slot guarantees the
+                // new sweep only spawned if that one had fully finished anyway.
+                if delivery.is_some() && voice.delivery.is_none() {
                     voice.delivery = delivery;
                 }
                 voice.phase = Phase::Idle;

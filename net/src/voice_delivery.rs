@@ -86,8 +86,16 @@ fn sanitize_host(raw: &str) -> String {
     }
 }
 
-/// Deliver every pending take in `dir`, oldest first, stopping at the first
-/// failure (one dead inbox would fail them all identically).
+/// A transport failure (inbox unreachable, IO error) would fail every
+/// remaining note identically, so the sweep stops. A per-note rejection must
+/// NOT stop it: `continue` keeps one poison file from wedging the queue —
+/// everything behind it still ships.
+enum DeliverError {
+    Transport(String),
+    Rejected(String),
+}
+
+/// Deliver every pending take in `dir`, oldest first.
 pub fn deliver_pending(dir: &Path, endpoint: &str, host: &str) -> Report {
     let mut pending = pending_takes(dir);
     pending.sort();
@@ -102,7 +110,11 @@ pub fn deliver_pending(dir: &Path, endpoint: &str, host: &str) -> Report {
                 }
                 report.sent += 1;
             }
-            Err(e) => {
+            Err(DeliverError::Rejected(e)) => {
+                tracing::warn!("voice note rejected ({}): {e}", path.display());
+                report.error = Some(e);
+            }
+            Err(DeliverError::Transport(e)) => {
                 tracing::warn!("voice note delivery failed ({}): {e}", path.display());
                 report.error = Some(e);
                 break;
@@ -128,38 +140,44 @@ fn pending_takes(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn deliver_one(path: &Path, endpoint: &str, host: &str) -> Result<(), String> {
-    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+fn deliver_one(path: &Path, endpoint: &str, host: &str) -> Result<(), DeliverError> {
+    use DeliverError::{Rejected, Transport};
+    let len = std::fs::metadata(path)
+        .map_err(|e| Rejected(e.to_string()))?
+        .len();
     if len > MAX_WAV_BYTES {
-        return Err(format!("{len} bytes exceeds the {MAX_WAV_BYTES} note cap"));
+        return Err(Rejected(format!(
+            "{len} bytes exceeds the {MAX_WAV_BYTES} note cap"
+        )));
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(path).map_err(|e| Rejected(e.to_string()))?;
     let addr = endpoint
         .to_socket_addrs()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| Transport(e.to_string()))?
         .next()
-        .ok_or_else(|| format!("{endpoint} resolves to no address"))?;
-    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|e| e.to_string())?;
+        .ok_or_else(|| Transport(format!("{endpoint} resolves to no address")))?;
+    let stream =
+        TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|e| Transport(e.to_string()))?;
     stream
         .set_write_timeout(Some(IO_TIMEOUT))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Transport(e.to_string()))?;
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Transport(e.to_string()))?;
     let mut writer = &stream;
     writer
         .write_all(format!("voice/1 {host} {}\n", bytes.len()).as_bytes())
         .and_then(|()| writer.write_all(&bytes))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Transport(e.to_string()))?;
     let mut reply = String::new();
     BufReader::new(&stream)
         .take(16)
         .read_line(&mut reply)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Transport(e.to_string()))?;
     if reply.trim_end() == "ok" {
         Ok(())
     } else {
-        Err(format!("inbox refused the note: {reply:?}"))
+        Err(Rejected(format!("inbox refused the note: {reply:?}")))
     }
 }
 
@@ -219,6 +237,45 @@ mod tests {
         let (header, body) = server.join().unwrap();
         assert_eq!(header, "voice/1 testhost 8\n");
         assert_eq!(body, b"RIFFfake");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rejected_note_does_not_wedge_the_queue() {
+        let dir = std::env::temp_dir().join(format!("voice-deliver-rej-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("voice-1.wav");
+        let good = dir.join("voice-2.wav");
+        std::fs::write(&bad, b"poison").unwrap();
+        std::fs::write(&good, b"RIFFfake").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            // Refuse the first note, accept the second.
+            for reply in [&b"no\n"[..], &b"ok\n"[..]] {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                let len: usize = header
+                    .trim_end()
+                    .rsplit(' ')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                std::io::copy(&mut reader.by_ref().take(len as u64), &mut std::io::sink()).unwrap();
+                (&stream).write_all(reply).unwrap();
+            }
+        });
+
+        let report = deliver_pending(&dir, &endpoint, "testhost");
+        server.join().unwrap();
+        assert_eq!(report.sent, 1, "the note behind the poison one must ship");
+        assert!(report.error.is_some());
+        assert!(bad.exists(), "rejected note stays for inspection");
+        assert!(!good.exists(), "acked note deleted");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
