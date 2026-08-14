@@ -41,7 +41,8 @@ const FLASH_SECS: f32 = 3.0;
 pub(super) fn install(app: &mut App) {
     app.add_audio_source::<VoiceClip>();
     app.init_resource::<VoiceUx>();
-    app.add_systems(Startup, spawn_voice_hud);
+    app.init_resource::<ReplyUx>();
+    app.add_systems(Startup, (spawn_voice_hud, spawn_reply_hud));
     app.add_systems(
         Update,
         // After gather_input: on the confirm/discard frame the gatherer must still
@@ -51,8 +52,12 @@ pub(super) fn install(app: &mut App) {
             .after(super::input::gather_input)
             .run_if(in_state(AppPhase::Playing)),
     );
-    app.add_systems(OnEnter(AppPhase::Playing), kick_pending_delivery);
-    app.add_systems(OnExit(AppPhase::Playing), cancel_voice);
+    app.add_systems(Update, drive_reply.run_if(in_state(AppPhase::Playing)));
+    app.add_systems(
+        OnEnter(AppPhase::Playing),
+        (kick_pending_delivery, start_reply_poll),
+    );
+    app.add_systems(OnExit(AppPhase::Playing), (cancel_voice, stop_reply_poll));
 }
 
 /// One finished take, already 44.1 kHz mono i16.
@@ -608,6 +613,210 @@ fn resample_to_i16(src: &[f32], src_rate: u32) -> Vec<i16> {
             to_i16(a + (b - a) * frac)
         })
         .collect()
+}
+
+// ---- assistant replies (rl#378 stage 3) ------------------------------------
+//
+// The other half of the loop: while a round is live, a background thread polls
+// the inbox ([`crate::voice_reply`]) for a queued assistant reply; when one
+// arrives it goes on screen (subtitle strip) and out loud (the bot-side TTS
+// wav through the same [`VoiceClip`] path as review playback). Replies queued
+// while no session runs simply wait in the bot-side spool — next launch's
+// first poll picks them up.
+
+/// Poll cadence. One TCP connect per tick; the quiet `none` case is a handful
+/// of bytes, so this can stay snappy without ever mattering for play.
+const REPLY_POLL: Duration = Duration::from_secs(3);
+
+/// On-screen floor per reply, and how long the text outlives its audio — the
+/// player is mid-play, not staring at the strip.
+const REPLY_MIN_SECS: f32 = 6.0;
+const REPLY_LINGER_SECS: f32 = 4.0;
+
+#[derive(Resource, Default)]
+struct ReplyUx {
+    /// Live while a round is up; dropped (stop flag raised) on round end.
+    poll: Option<ReplyPoll>,
+    /// Replies parsed but not yet shown; displayed one at a time, in order.
+    /// `None` samples = the wav failed the strict parse — show text-only.
+    queue: std::collections::VecDeque<(String, Option<Arc<Vec<i16>>>)>,
+    /// Seconds left on the reply currently on screen.
+    showing: Option<f32>,
+}
+
+struct ReplyPoll {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Mutex only for Sync, same story as [`Phase::Recording::done`].
+    rx: std::sync::Mutex<mpsc::Receiver<crate::voice_reply::Reply>>,
+}
+
+impl Drop for ReplyPoll {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Marks the reply read-aloud entity so round teardown can silence it.
+#[derive(Component)]
+struct ReplyPlayback;
+
+#[derive(Component)]
+struct ReplyHud;
+
+fn spawn_reply_hud(mut commands: Commands) {
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(96.0),
+            left: Val::Percent(15.0),
+            width: Val::Percent(70.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        })
+        .with_children(|p| {
+            p.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 20.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.8, 0.95, 1.0)),
+                TextLayout::new_with_justify(Justify::Center),
+                Visibility::Hidden,
+                ReplyHud,
+            ));
+        });
+}
+
+fn start_reply_poll(mut reply: ResMut<ReplyUx>) {
+    if reply.poll.is_some() {
+        return;
+    }
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel();
+    let thread_stop = stop.clone();
+    let spawned = std::thread::Builder::new()
+        .name("voice-reply-poll".into())
+        .spawn(move || {
+            let endpoint = voice_delivery::endpoint();
+            let host = voice_delivery::host_tag();
+            // Warn once per outage, not once per 3 s tick — a deck away from
+            // its tunnel would otherwise fill the log.
+            let mut warned = false;
+            'live: loop {
+                match crate::voice_reply::poll_one(&endpoint, &host) {
+                    Ok(Some(r)) => {
+                        warned = false;
+                        if tx.send(r).is_err() {
+                            return;
+                        }
+                        // A backlog (session was away) drains without waiting
+                        // out the cadence between items.
+                        continue;
+                    }
+                    Ok(None) => warned = false,
+                    Err(e) => {
+                        if !warned {
+                            tracing::warn!("voice reply poll failed (will keep trying): {e}");
+                            warned = true;
+                        }
+                    }
+                }
+                // Sleep in short slices so round end stops the thread promptly.
+                let mut left = REPLY_POLL;
+                while !left.is_zero() {
+                    if thread_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        break 'live;
+                    }
+                    let slice = left.min(Duration::from_millis(200));
+                    std::thread::sleep(slice);
+                    left -= slice;
+                }
+            }
+        });
+    match spawned {
+        Ok(_) => {
+            reply.poll = Some(ReplyPoll {
+                stop,
+                rx: std::sync::Mutex::new(rx),
+            })
+        }
+        Err(e) => warn!("voice reply poll thread failed to spawn: {e}"),
+    }
+}
+
+fn stop_reply_poll(
+    mut reply: ResMut<ReplyUx>,
+    mut commands: Commands,
+    playback: Query<Entity, With<ReplyPlayback>>,
+    mut hud: Query<&mut Visibility, With<ReplyHud>>,
+) {
+    reply.poll = None; // Drop raises the stop flag.
+    reply.queue.clear();
+    reply.showing = None;
+    for e in playback.iter() {
+        commands.entity(e).despawn();
+    }
+    for mut vis in &mut hud {
+        *vis = Visibility::Hidden;
+    }
+}
+
+fn drive_reply(
+    mut reply: ResMut<ReplyUx>,
+    time: Res<Time>,
+    mut commands: Commands,
+    mut clips: ResMut<Assets<VoiceClip>>,
+    mut hud: Query<(&mut Text, &mut Visibility), With<ReplyHud>>,
+) {
+    if let Some(poll) = &reply.poll {
+        // Collect first: pushing to the queue needs &mut while rx holds &.
+        let fresh: Vec<_> = poll.rx.lock().unwrap().try_iter().collect();
+        for r in fresh {
+            let samples = match wav::parse_mono_44k(&r.wav) {
+                Ok(f32s) => Some(Arc::new(
+                    f32s.iter()
+                        .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                        .collect::<Vec<i16>>(),
+                )),
+                Err(e) => {
+                    // The text half still lands — a silent reply beats none.
+                    warn!("assistant reply wav unplayable: {e}");
+                    None
+                }
+            };
+            reply.queue.push_back((r.text, samples));
+        }
+    }
+
+    if let Some(left) = &mut reply.showing {
+        *left -= time.delta_secs();
+        if *left > 0.0 {
+            return;
+        }
+        reply.showing = None;
+        if let Ok((_, mut vis)) = hud.single_mut() {
+            *vis = Visibility::Hidden;
+        }
+    }
+
+    let Some((text, samples)) = reply.queue.pop_front() else {
+        return;
+    };
+    let mut secs = REPLY_MIN_SECS;
+    if let Some(samples) = samples {
+        secs = secs.max(samples.len() as f32 / wav::SAMPLE_RATE as f32 + REPLY_LINGER_SECS);
+        commands.spawn((
+            ReplyPlayback,
+            AudioPlayer(clips.add(VoiceClip(samples))),
+            PlaybackSettings::DESPAWN,
+        ));
+    }
+    if let Ok((mut hud_text, mut vis)) = hud.single_mut() {
+        **hud_text = format!("assistant: {text}");
+        *vis = Visibility::Visible;
+    }
+    reply.showing = Some(secs);
 }
 
 #[cfg(test)]
