@@ -24,7 +24,16 @@ pub const fn brake_coeff_max(mass: f32) -> f32 {
     mass * PHYSICS_HZ as f32
 }
 
-pub const PHYSICS_SUBSTEPS: usize = 2;
+/// 4 substeps + the 8/4/4 solver iterations below are one tuned set (rl#340
+/// stage 2): at rl#299's 30 Hz contact stiffness the zero-drive mesh multibody
+/// chattered at rest (claw links 12.9 m/s, momentum leak 32× the rl#321
+/// baseline) — under-converged contact/limit solves on the near-massless distal
+/// links, invisible under an actively-driven gait. Substeps are load-bearing: at
+/// 2, rest bounce triples past its bound and FOUGHT self-pairs reappear
+/// (`sim_truth_test`, `collider_check`). ~3× solver cost vs the old 2/4/1/1;
+/// trim attempts (6/3/3, or dropping either internal iteration count alone)
+/// re-fail `claws_quiet_at_rest`.
+pub const PHYSICS_SUBSTEPS: usize = 4;
 
 fn fixed_timestep() -> TimestepMode {
     TimestepMode::Fixed {
@@ -33,13 +42,17 @@ fn fixed_timestep() -> TimestepMode {
     }
 }
 
-/// Rapier's contact defaults (30 Hz / 5.0). Held explicit (with the PostStartup
-/// assert) so a bevy_rapier plumbing change can't silently swap the plant's contact
-/// stiffness. Was 5 Hz — a 36× softer spring that rested weight-bearing limbs
+/// Held explicit (with the PostStartup assert) so a bevy_rapier plumbing change
+/// can't silently swap the plant's contact stiffness. Frequency is rapier's 30 Hz
+/// default — was 5 Hz, a 36× softer spring that rested weight-bearing limbs
 /// 6–10 cm INSIDE the terrain (bddap/rl#299); at 30 Hz the same gait rests ≲1 cm.
+/// Damping ratio 10 (2× rapier's 5.0): at ζ5 the resting claw links keep ~0.4 rad/s
+/// of contact-solve velocity noise even at the raised iteration counts on
+/// [`PHYSICS_SUBSTEPS`] — ζ10 halves it under the `claws_quiet_at_rest` bound
+/// (rl#340 stage 2) without touching rest depth (frequency owns that).
 pub const CONTACT_SOFTNESS: SpringCoefficients<f32> = SpringCoefficients {
     natural_frequency: 30.0,
-    damping_ratio: 5.0,
+    damping_ratio: 10.0,
 };
 
 const LENGTH_UNIT: f32 = 1.0;
@@ -50,6 +63,13 @@ fn rapier_context_init() -> RapierContextInitialization {
     RapierContextInitialization::InitializeDefaultRapierContext {
         integration_parameters: IntegrationParameters {
             contact_softness: CONTACT_SOFTNESS,
+            // One tuned set with PHYSICS_SUBSTEPS (rationale on its doc): defaults
+            // (4/1/1) under-converge the railed claw joints at rest into rad/s-scale
+            // velocity chatter. Both internal counts are load-bearing, not just the
+            // outer one: either alone at 1 re-fails `claws_quiet_at_rest`.
+            num_solver_iterations: 8,
+            num_internal_pgs_iterations: 4,
+            num_internal_stabilization_iterations: 4,
             ..IntegrationParameters::default()
         },
         rapier_configuration: RapierConfiguration {
