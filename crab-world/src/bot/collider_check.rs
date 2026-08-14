@@ -6,6 +6,8 @@ use bevy_rapier3d::rapier::geometry::ColliderHandle;
 use bevy_rapier3d::rapier::parry::query::contact;
 
 use super::body::{CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
+#[cfg(test)]
+use super::headless::flat_headless_app;
 use super::headless::{headless_app, tick};
 use super::rig::PartId;
 #[cfg(test)]
@@ -758,7 +760,7 @@ mod load_tests {
     /// CLEAN on the current body and gates every build.
     #[test]
     fn body_primitives_do_not_interpenetrate_at_rest() {
-        let mut app = headless_app();
+        let mut app = flat_headless_app();
         tick(&mut app, SETTLE_TICKS);
         let parts = collect_parts(&mut app);
         assert!(
