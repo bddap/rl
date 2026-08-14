@@ -18,7 +18,8 @@
 //! owner picked by ear, so that is what ships). The depth gradient follows the owner's
 //! deep-code spec (rl#380 comment, 2026-08-13): note 0 is PURE; twin-voice detune
 //! ramps as `min(1, sqrt(s/8))` of max; bitcrush is silent until note 4, pops in at
-//! 25% intensity, and reaches full at note 12.
+//! 25% of its ceiling, and reaches the ceiling at note 12 (the ceiling is
+//! [`MAX_CRUSH`], dialed down from full per the owner).
 //!
 //! Notes are procedurally synthesized plucks (additive partials, exponential decay) —
 //! no asset dependency, every parameter tunable from the [`NoteSpec`]. The instrument
@@ -168,9 +169,14 @@ fn tension_crush(s: usize) -> f32 {
     if s < 4 {
         0.0
     } else {
-        (0.25 + 0.75 * (s - 4) as f32 / 8.0).min(1.0)
+        MAX_CRUSH * (0.25 + 0.75 * (s - 4) as f32 / 8.0).min(1.0)
     }
 }
+
+/// Bitcrush ceiling. The rl#380 envelope shape is the contract, but full crush was
+/// too intense in play (owner, 2026-08-14: "Reduce max to 1/3 of current") — the
+/// whole envelope scales down to this ceiling.
+const MAX_CRUSH: f32 = 1.0 / 3.0;
 
 /// Full twin-voice spread at max tension. ±24¢ beats at ~6 Hz in the walk's
 /// register — unmistakable, still pitched.
@@ -556,8 +562,9 @@ mod tests {
     }
 
     /// The owner's deep-code tension spec (rl#380): note 0 PURE; detune at 50% of
-    /// max on note 2, full by note 8; crush zero through note 3, 25% on note 4,
-    /// full by note 12 — and both hold, never recede.
+    /// max on note 2, full by note 8; crush zero through note 3, 25% of
+    /// [`MAX_CRUSH`] on note 4, the full ceiling by note 12 — and both hold,
+    /// never recede.
     #[test]
     fn tension_follows_the_owner_curve() {
         let s = scheme();
@@ -571,9 +578,12 @@ mod tests {
         assert_eq!(at(8).detune_cents, MAX_DETUNE_CENTS);
         assert_eq!(at(20).detune_cents, MAX_DETUNE_CENTS, "detune holds");
         assert_eq!(at(3).crush, 0.0, "crush silent before note 4");
-        assert!((at(4).crush - 0.25).abs() < 1e-3, "crush pops in at 25%");
-        assert_eq!(at(12).crush, 1.0);
-        assert_eq!(at(20).crush, 1.0, "crush holds");
+        assert!(
+            (at(4).crush - 0.25 * MAX_CRUSH).abs() < 1e-3,
+            "crush pops in at 25% of ceiling"
+        );
+        assert_eq!(at(12).crush, MAX_CRUSH);
+        assert_eq!(at(20).crush, MAX_CRUSH, "crush holds");
     }
 
     /// The accepted chord is DERIVED from the code's own melody (owner amendment
