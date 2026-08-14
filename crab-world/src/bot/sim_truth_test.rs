@@ -96,7 +96,7 @@ fn crab_spawns_in_rest_pose_inside_limits() {
     use bevy_rapier3d::prelude::MultibodyJoint;
     use std::collections::HashMap;
 
-    let mut app = headless_app();
+    let mut app = flat_headless_app();
     tick(&mut app, 3);
 
     let mut tf_q = app.world_mut().query::<(Entity, &Transform)>();
@@ -309,7 +309,7 @@ fn crab_settles_quietly_at_rest() {
         return;
     }
 
-    let mut app = headless_app();
+    let mut app = flat_headless_app();
     tick(&mut app, 1);
 
     tick(&mut app, 320);
@@ -367,7 +367,7 @@ fn claws_quiet_at_rest() {
         return;
     }
 
-    let mut app = headless_app();
+    let mut app = flat_headless_app();
     tick(&mut app, 1);
     tick(&mut app, 320);
 
