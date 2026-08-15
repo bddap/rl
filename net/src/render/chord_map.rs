@@ -624,7 +624,7 @@ fn spawn_chord_map(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                                 wrap.spawn((
                                     Text::new(""),
                                     TextFont {
-                                        font_size: 16.0,
+                                        font_size: FontSize::Px(16.0),
                                         ..default()
                                     },
                                     TextColor(Color::srgba(0.92, 0.92, 0.86, 1.0)),
@@ -721,7 +721,7 @@ fn drive_chord_map(
     let to_px =
         |p: DVec2| -> DVec2 { (p - view_center) * scale + DVec2::splat(CANVAS_PX as f64 / 2.0) };
 
-    let Some(image) = images.get_mut(&canvas_handle.0) else {
+    let Some(mut image) = images.get_mut(&canvas_handle.0) else {
         return;
     };
     let mut canvas = Canvas::new(image.data.take().unwrap_or_default());

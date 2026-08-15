@@ -122,7 +122,6 @@ impl VoiceUx {
 struct VoiceClip(Arc<Vec<i16>>);
 
 impl Decodable for VoiceClip {
-    type DecoderItem = i16;
     type Decoder = VoiceStream;
     fn decoder(&self) -> VoiceStream {
         VoiceStream {
@@ -138,23 +137,25 @@ struct VoiceStream {
 }
 
 impl Iterator for VoiceStream {
-    type Item = i16;
-    fn next(&mut self) -> Option<i16> {
+    type Item = f32;
+    fn next(&mut self) -> Option<f32> {
+        // rodio 0.22 (bevy 0.19) samples are f32-only; the clip stays i16 on disk
+        // and in memory, converted at the audio-thread boundary.
         let s = self.samples.get(self.pos).copied();
         self.pos += 1;
-        s
+        s.map(|s| f32::from(s) / -(i16::MIN as f32))
     }
 }
 
 impl bevy::audio::Source for VoiceStream {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        1
+    fn channels(&self) -> std::num::NonZeroU16 {
+        std::num::NonZeroU16::new(1).expect("1 is nonzero")
     }
-    fn sample_rate(&self) -> u32 {
-        wav::SAMPLE_RATE
+    fn sample_rate(&self) -> std::num::NonZeroU32 {
+        std::num::NonZeroU32::new(wav::SAMPLE_RATE).expect("SAMPLE_RATE is nonzero")
     }
     fn total_duration(&self) -> Option<Duration> {
         Some(Duration::from_secs_f64(
@@ -186,7 +187,7 @@ fn spawn_voice_hud(mut commands: Commands) {
             p.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: 18.0,
+                    font_size: FontSize::Px(18.0),
                     ..default()
                 },
                 TextColor(Color::srgb(1.0, 0.35, 0.3)),
@@ -677,11 +678,11 @@ fn spawn_reply_hud(mut commands: Commands) {
             p.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: 20.0,
+                    font_size: FontSize::Px(20.0),
                     ..default()
                 },
                 TextColor(Color::srgb(0.8, 0.95, 1.0)),
-                TextLayout::new_with_justify(Justify::Center),
+                TextLayout::justify(Justify::Center),
                 Visibility::Hidden,
                 ReplyHud,
             ));
