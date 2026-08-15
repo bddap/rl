@@ -154,11 +154,8 @@ fn actuator_injects_no_net_wrench() {
     // modeled EXTERNAL force. Predict it from the same pre-tick `Velocity` the
     // drag system reads, so the assert isolates the actuator's contribution.
     let expected_drag = {
-        let mut q = app
-            .world_mut()
-            .query_filtered::<&bevy_rapier3d::prelude::Velocity, With<super::body::CrabCarapace>>();
-        let v = q.single(app.world()).expect("one carapace").linear;
-        -(super::aero::CARAPACE_DRAG * v.length()) * v
+        let (v, c) = carapace_vel_and_drag(&mut app);
+        -(c * v.length()) * v
     };
     tick(&mut app, 1);
 
@@ -632,6 +629,19 @@ fn airborne_crab_conserves_angular_momentum() {
     );
 }
 
+/// The spawned carapace's pre-tick velocity and drag coefficient, read together —
+/// the same components `aero::apply_air_drag` reads this tick — so a test's drag
+/// bookkeeping reproduces the applied force bit-for-bit.
+#[cfg(test)]
+fn carapace_vel_and_drag(app: &mut App) -> (Vec3, f32) {
+    let mut q = app.world_mut().query_filtered::<(
+        &bevy_rapier3d::prelude::Velocity,
+        &super::aero::CarapaceDrag,
+    ), bevy::prelude::With<super::body::CrabCarapace>>();
+    let (v, d) = q.single(app.world()).expect("one carapace");
+    (v.linear, d.0)
+}
+
 /// Σ m·v over every crab body plus the total mass, from the rapier set (ground
 /// truth, not the bevy mirror).
 #[cfg(test)]
@@ -761,11 +771,8 @@ fn airborne_thrash_residual(kind: Thrash, seed: u64, isolate: bool) -> (Vec3, us
         // system reads this tick (nothing writes it between here and the system),
         // so the subtraction reproduces the applied force bit-for-bit.
         {
-            let mut q = app
-                .world_mut()
-                .query_filtered::<&bevy_rapier3d::prelude::Velocity, With<super::body::CrabCarapace>>();
-            let v = q.single(app.world()).expect("one carapace").linear;
-            j_drag += -(super::aero::CARAPACE_DRAG * v.length()) * v * crate::physics::PHYSICS_DT;
+            let (v, c) = carapace_vel_and_drag(&mut app);
+            j_drag += -(c * v.length()) * v * crate::physics::PHYSICS_DT;
         }
         tick(&mut app, 1);
         total_contacts += contact_points(&mut app);
@@ -988,12 +995,8 @@ fn phantom_force_instrument() {
             );
             // Same drag-impulse bookkeeping as `airborne_thrash_residual`.
             {
-                let mut q = app
-                    .world_mut()
-                    .query_filtered::<&bevy_rapier3d::prelude::Velocity, With<super::body::CrabCarapace>>();
-                let v = q.single(app.world()).expect("one carapace").linear;
-                j_drag +=
-                    -(super::aero::CARAPACE_DRAG * v.length()) * v * crate::physics::PHYSICS_DT;
+                let (v, c) = carapace_vel_and_drag(&mut app);
+                j_drag += -(c * v.length()) * v * crate::physics::PHYSICS_DT;
             }
             tick(&mut app, 1);
         }
@@ -1213,12 +1216,14 @@ fn passive_storm_energy_on_terrain_instrument() {
 
 /// bddap/rl#332 — the plant has air: an unactuated falling crab approaches the
 /// carapace-drag terminal velocity instead of integrating gravity unboundedly.
-/// Pre-drag this fall measured ~39 m/s at the window's end; with
-/// [`super::aero::CARAPACE_DRAG`] sized for v_t = √(m·g/DRAG) ≈ 15 m/s the same
-/// window must land in a band around that. The band is the drift alarm on BOTH
-/// sides: above 18 m/s the drag went missing (or mass grew — a re-bake changed
-/// the MDP, rl#277); below 11 m/s something over-damps her and the trained gait
-/// is next.
+/// Pre-drag this fall measured ~39 m/s at the window's end; with the coefficient
+/// derived from the spawned body's own mass ([`super::aero::CarapaceDrag`],
+/// v_t = [`super::aero::TERMINAL_SPEED`]) the same window must land in a band
+/// around 15 m/s for mesh and fallback bodies alike (rl#340 stage 3: the old
+/// fallback-sized CONSTANT let the 1.97 kg mesh body fall at 22 m/s). The band is
+/// the drift alarm on BOTH sides: above 18 m/s the drag went missing or the
+/// spawn-time mass sum diverged from what rapier integrates; below 11 m/s
+/// something over-damps her and the trained gait is next.
 #[test]
 fn airborne_crab_reaches_terminal_velocity() {
     const TICKS: u32 = 256; // 4 s — ~2.6 drag time-constants past v_t
@@ -1284,6 +1289,16 @@ fn hypersonic_carapace_brake_decays() {
     // One settle tick: rapier ingests the body and writes back its mass mirror (the
     // drag cap reads it; it is zero until the first writeback).
     tick(&mut app, 1);
+    // Arm the drag the way `spawn_crab` arms a crab: coefficient sized off this
+    // body's own mass, so its terminal velocity is the design TERMINAL_SPEED.
+    let m = app
+        .world()
+        .get::<ReadMassProperties>(body)
+        .expect("test body")
+        .mass;
+    app.world_mut()
+        .entity_mut(body)
+        .insert(super::aero::CarapaceDrag(super::aero::drag_coeff(m)));
 
     let speed = |app: &mut App| -> f32 {
         app.world()

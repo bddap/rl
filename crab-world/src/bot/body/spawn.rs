@@ -125,6 +125,25 @@ pub fn spawn_crab(
             .with_rotation(init_rotation)
     };
 
+    let carapace_collider = Collider::compound(vec![(
+        recipe.carapace_offset,
+        Quat::IDENTITY,
+        Collider::cuboid(
+            recipe.carapace_half.x,
+            recipe.carapace_half.y,
+            recipe.carapace_half.z,
+        ),
+    )]);
+    // Whole-body mass for the drag coefficient (aero::CarapaceDrag): summed off the
+    // very colliders spawned below, via rapier's own mass_properties — the same
+    // density×shape products the solver integrates, so no second mass formula to
+    // drift (rl#340 stage 3: a fallback-sized constant let the heavier mesh body
+    // fall at 22 m/s).
+    let mut total_mass = carapace_collider
+        .raw
+        .mass_properties(recipe.carapace_density)
+        .mass();
+
     let carapace = commands
         .spawn((
             CrabCarapace,
@@ -132,15 +151,7 @@ pub fn spawn_crab(
             CrabEnvId(env),
             RigidBody::Dynamic,
             SOFT_CCD,
-            Collider::compound(vec![(
-                recipe.carapace_offset,
-                Quat::IDENTITY,
-                Collider::cuboid(
-                    recipe.carapace_half.x,
-                    recipe.carapace_half.y,
-                    recipe.carapace_half.z,
-                ),
-            )]),
+            carapace_collider,
             crab_collision(env),
             ColliderMassProperties::Density(recipe.carapace_density),
             // Live mass mirror for the drag brake's momentum-cancel cap
@@ -185,6 +196,7 @@ pub fn spawn_crab(
         } else {
             crab_collision(env)
         };
+        total_mass += collider.raw.mass_properties(link.density).mass();
         let id = link
             .actuated
             .expect("locked links are skipped before spawn");
@@ -215,6 +227,12 @@ pub fn spawn_crab(
         }
         ents.push(ec.id());
     }
+
+    commands
+        .entity(carapace)
+        .insert(crate::bot::aero::CarapaceDrag(
+            crate::bot::aero::drag_coeff(total_mass),
+        ));
 
     carapace
 }

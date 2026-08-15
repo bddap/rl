@@ -865,6 +865,29 @@ mod tests {
                 .query_filtered::<&Transform, With<CrabCarapace>>();
             q.single(app.world()).expect("carapace").translation
         };
+        let carapace_speed = |app: &mut App| -> f32 {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&Velocity, With<CrabCarapace>>();
+            q.single(app.world()).expect("carapace").linear.length()
+        };
+
+        // The zero-action mesh ragdoll never sits STILL — solver rest noise
+        // twitch-walks her decimeters over the settle (rl#340 stage 3 measured
+        // spawn-to-ram drift spanning x ±0.3 m across bit-level physics
+        // perturbations), so where and at what yaw the ram lands is draw-dependent
+        // and a signed along-axis displacement assert measures her wander, not the
+        // push. The push instrument is her carapace SPEED spike over the ram
+        // window instead; this same-length pre-ram window is its printed noise
+        // floor. Five stage-3 draws measured push peaks 0.44–0.58 m/s against
+        // wander peaks 0.11–0.14, so the 0.3 bound sits ~1.5x under the weakest
+        // observed push and ~2x over the loudest observed wander.
+        const RAM_WINDOW: u32 = 60;
+        let mut wander_peak = 0.0f32;
+        for _ in 0..RAM_WINDOW {
+            tick(&mut app, 1);
+            wander_peak = wander_peak.max(carapace_speed(&mut app));
+        }
         let p0 = carapace(&mut app);
 
         const RAM_SPEED: f32 = 8.0;
@@ -877,7 +900,11 @@ mod tests {
                 angular: Vec3::ZERO,
             },
         );
-        tick(&mut app, 60);
+        let mut pushed_peak = 0.0f32;
+        for _ in 0..RAM_WINDOW {
+            tick(&mut app, 1);
+            pushed_peak = pushed_peak.max(carapace_speed(&mut app));
+        }
 
         let p1 = carapace(&mut app);
         let v1 = app
@@ -885,12 +912,14 @@ mod tests {
             .get::<Velocity>(rammer)
             .expect("the rammer body persists — nothing despawns it in this app")
             .linear;
+        println!(
+            "ram: carapace {p0:?} -> {p1:?}, peak speed {pushed_peak:.2} m/s \
+             (pre-ram wander peak {wander_peak:.2}), rammer v1 {v1:?}"
+        );
         assert!(
-            p0.x - p1.x > 0.02,
-            "the world must push her: an {RAM_SPEED} m/s ram left the carapace at \
-             x {:+.3} -> {:+.3}",
-            p0.x,
-            p1.x
+            pushed_peak > 0.3,
+            "the world must push her: an {RAM_SPEED} m/s ram peaked her carapace at \
+             {pushed_peak:.2} m/s (pre-ram rest wander peaked {wander_peak:.2})"
         );
         assert!(
             v1.x > -0.7 * RAM_SPEED,
