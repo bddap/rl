@@ -127,7 +127,8 @@ fn tilted_gravity_hold() {
             .world_mut()
             .query::<&mut bevy_rapier3d::plugin::RapierConfiguration>();
         let mut cfg = q.single_mut(app.world_mut()).expect("rapier config");
-        cfg.gravity = 9.81 * Vec3::new(angle.sin(), -angle.cos(), 0.0);
+        cfg.gravity =
+            -crate::physics::PHYSICS_GRAVITY.y * Vec3::new(angle.sin(), -angle.cos(), 0.0);
     }
     let start = carapace(&mut app).translation;
     for s in 0..10 {
@@ -146,9 +147,11 @@ fn tilted_gravity_hold() {
 /// coefficients on each side — the ground-truth for "who carries the crab".
 fn dump_ground_contacts(app: &mut App) {
     use bevy_rapier3d::plugin::context::{RapierContextColliders, RapierContextSimulation};
-    let mut parts_q = app
-        .world_mut()
-        .query::<(Entity, Option<&super::body::CrabJoint>, Has<CrabCarapace>)>();
+    let mut parts_q = app.world_mut().query_filtered::<(
+        Entity,
+        Option<&super::body::CrabJoint>,
+        Has<CrabCarapace>,
+    ), With<CrabBodyPart>>();
     let names: std::collections::HashMap<Entity, String> = parts_q
         .iter(app.world())
         .map(|(e, j, cara)| {
@@ -194,8 +197,13 @@ fn dump_ground_contacts(app: &mut App) {
         let fo = cols.colliders.get(other).map(|c| c.friction());
         let fg = cols.colliders.get(gh).map(|c| c.friction());
         let name = names.get(&oe).cloned().unwrap_or_else(|| "non-part".into());
+        let depth = if depth == f32::MIN {
+            "none".to_string()
+        } else {
+            format!("{depth:.4}")
+        };
         rows.push(format!(
-            "    contact {name}: depth {depth:.4} pts {npts} μ_part {fo:?} μ_ground {fg:?}"
+            "    contact {name}: depth {depth} pts {npts} μ_part {fo:?} μ_ground {fg:?}"
         ));
     }
     rows.sort();
@@ -206,8 +214,9 @@ fn dump_ground_contacts(app: &mut App) {
 
 /// Diagnostic: bind-pose mass distribution vs foot support polygon → static topple
 /// thresholds per direction, from the baked recipe alone (no sim). Baseline for the
-/// mesh body: com height 0.279 m, feet x ±1.04 m (75° threshold) but z only
-/// [-0.58, +0.15] — 36.5° forward. `--ignored --nocapture`.
+/// mesh body: com height 0.399 m, foot tips x ±1.09 m (70° threshold across) but z
+/// only [-0.63, +0.13] — 24.3° forward, well under the rl#318 band's floor.
+/// `--ignored --nocapture`.
 #[test]
 #[ignore]
 fn stance_stats() {
@@ -216,7 +225,6 @@ fn stance_stats() {
     let world_pos = rig::link_world_origins(&recipe.links, recipe.hub_bind_world);
     let mut com = Vec3::ZERO;
     let mut total = 0.0f32;
-    let mut feet = Vec::new();
     {
         let c = bevy_rapier3d::prelude::Collider::cuboid(
             recipe.carapace_half.x,
@@ -229,8 +237,13 @@ fn stance_stats() {
         total += m;
         println!("carapace m {m:.3} at {p:?}");
     }
+    // A foot is the LOW capsule endpoint — the point that actually meets the
+    // ground — not the link center, which sits half a capsule higher and inboard
+    // on splayed legs.
+    let mut tips = Vec::new();
     for (link, &wp) in recipe.links.iter().zip(&world_pos) {
-        let c = match rig::link_rest_shape(link, Vec3::ZERO) {
+        let shape = rig::link_rest_shape(link, Vec3::ZERO);
+        let c = match shape {
             rig::RestShape::Capsule { a, b, radius } => {
                 bevy_rapier3d::prelude::Collider::capsule(a, b, radius)
             }
@@ -239,16 +252,20 @@ fn stance_stats() {
             }
         };
         let m = c.raw.mass_properties(link.density).mass();
-        let p = wp + link.center;
-        com += p * m;
+        com += (wp + link.center) * m;
         total += m;
         if matches!(link.actuated, Some(super::body::CrabJointId::LegCarpus(..))) {
-            feet.push(p);
+            let rig::RestShape::Capsule { a, b, radius } = shape else {
+                panic!("carpus links are capsules in every bake so far");
+            };
+            let tip = wp + if a.y < b.y { a } else { b };
+            tips.push((tip, radius));
         }
     }
     com /= total;
     println!("total m {total:.3}  com {com:?}");
-    let ground = feet.iter().map(|f| f.y).fold(f32::MAX, f32::min) - 0.05;
+    let feet: Vec<Vec3> = tips.iter().map(|&(t, _)| t).collect();
+    let ground = tips.iter().map(|&(t, r)| t.y - r).fold(f32::MAX, f32::min);
     let h = com.y - ground;
     let max_x = feet.iter().map(|f| f.x).fold(f32::MIN, f32::max);
     let min_x = feet.iter().map(|f| f.x).fold(f32::MAX, f32::min);
