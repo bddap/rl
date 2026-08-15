@@ -5,6 +5,8 @@ pub mod body;
 #[cfg(test)]
 mod claw_whip_test;
 pub mod collider_check;
+#[cfg(test)]
+mod fling_test;
 pub mod headless;
 pub mod physics_digest;
 pub mod pose_sentinel;
