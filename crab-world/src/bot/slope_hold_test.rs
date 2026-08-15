@@ -105,6 +105,30 @@ fn crab_holds_steep_slopes_with_zero_input() {
 /// geometry/delivery on the mesh body (capsule foot tips on 1–4 mm-deep flickering
 /// 30 Hz-soft contacts; at rest only 4 of 8 feet + one claw wrist even touch —
 /// see `stance_stats`).
+///
+/// rl#340 stage 4b (job 2476) falsified direction (a) — foot-contact redesign —
+/// too, one draw each (this run added the imp_n/imp_t columns to the contact
+/// dump: the solver's summed normal/tangent impulses per pair):
+/// - flat foot pads (round-cuboid under each carpus tip, ground-parallel in bind
+///   pose, sitting proud of the capsule sphere): first-second tilt slide
+///   1.09→0.83 m but still flips — and the RAMP test DEGRADES (30°: 0.99→1.28 m
+///   ending half-tumbled, 40°: 18.75→21.4 m): pads mush the touchdown;
+/// - `ContactSkin` 5 mm on the feet (keeps manifold points alive across the mm
+///   flicker): pure-hold creep decelerates (near-hold to t=4 at cap 0.3) yet
+///   every combination still trips by t≤9, and the ramp degrades as above;
+/// - solver iterations 16/8/8: no change; contact spring 30→120 Hz: ballistic
+///   chatter explosion (24 m in the first tilted second);
+/// - the friction cone is NEVER railed while creeping (Σ|imp_t|/Σimp_n measured
+///   0.3–1.3 vs the 2.0 pair coefficient): the slide is point-flicker windows
+///   plus joint yield, not cone-limited slip — coefficients stay innocent;
+/// - UPPER BOUND: rigid joints (cap 5.0) + pads + skin — the most any foot
+///   geometry can deliver — still creeps to 2.25 m by t=8 and trips at t=9 at
+///   40°. Every foot-contact redesign is bounded by the rigid-joint hold, so
+///   direction (a) alone cannot pass the 1.5 m/10 s bar; what remains is
+///   stance/bake work (direction b: all 8 feet grounded, wider support polygon
+///   — which moves the rigid bound itself) or the rl#318 band re-scope
+///   (direction c). The pad/skin plant changes were reverted (they regress the
+///   ramp acceptance); only this instrumentation landed.
 #[test]
 #[ignore]
 fn tilted_gravity_hold() {
@@ -194,6 +218,17 @@ fn dump_ground_contacts(app: &mut App) {
             .fold((f32::MIN, 0usize), |(d, n), pt| {
                 (d.max(-pt.dist), n + usize::from(-pt.dist > 0.0))
             });
+        // Solver ground truth: what the friction cone actually delivered last
+        // step. Slip with |tangent| ≈ μ·normal means the cone is railed (bound
+        // too low); |tangent| ≪ μ·normal during slip means the solver never
+        // applies the friction it is allowed.
+        let (n_imp, t_imp) = pair
+            .manifolds
+            .iter()
+            .flat_map(|m| m.points.iter())
+            .fold((0.0f32, 0.0f32), |(n, t), pt| {
+                (n + pt.data.impulse, t + pt.data.tangent_impulse.norm())
+            });
         let fo = cols.colliders.get(other).map(|c| c.friction());
         let fg = cols.colliders.get(gh).map(|c| c.friction());
         let name = names.get(&oe).cloned().unwrap_or_else(|| "non-part".into());
@@ -203,7 +238,8 @@ fn dump_ground_contacts(app: &mut App) {
             format!("{depth:.4}")
         };
         rows.push(format!(
-            "    contact {name}: depth {depth} pts {npts} μ_part {fo:?} μ_ground {fg:?}"
+            "    contact {name}: depth {depth} pts {npts} μ_part {fo:?} μ_ground {fg:?} \
+             imp_n {n_imp:.4} imp_t {t_imp:.4}"
         ));
     }
     rows.sort();
