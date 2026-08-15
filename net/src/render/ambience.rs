@@ -309,7 +309,6 @@ pub(super) struct AmbienceChannel {
 pub(super) struct AmbienceMix(AmbienceChannel);
 
 impl Decodable for AmbienceMix {
-    type DecoderItem = f32;
     type Decoder = AmbienceStream;
     fn decoder(&self) -> AmbienceStream {
         AmbienceStream::new(self.0.targets.clone(), self.0.beds.clone())
@@ -559,14 +558,14 @@ impl Iterator for AmbienceStream {
 }
 
 impl bevy::audio::Source for AmbienceStream {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        1
+    fn channels(&self) -> std::num::NonZeroU16 {
+        std::num::NonZeroU16::new(1).expect("1 is nonzero")
     }
-    fn sample_rate(&self) -> u32 {
-        SAMPLE_RATE
+    fn sample_rate(&self) -> std::num::NonZeroU32 {
+        std::num::NonZeroU32::new(SAMPLE_RATE).expect("SAMPLE_RATE is nonzero")
     }
     fn total_duration(&self) -> Option<std::time::Duration> {
         None

@@ -297,7 +297,7 @@ fn spawn_moon_light(mut commands: Commands) {
     commands.spawn((
         MoonLight,
         DirectionalLight {
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         bevy::light::CascadeShadowConfigBuilder {

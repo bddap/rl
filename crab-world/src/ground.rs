@@ -503,7 +503,7 @@ pub fn apply_ground_anchor(
         .map(|(id, _)| id)
         .collect();
     for id in stale {
-        let m = materials.get_mut(id).expect("id from the iteration above");
+        let mut m = materials.get_mut(id).expect("id from the iteration above");
         m.extension.moisture_extent.z = anchor.0.x;
         m.extension.moisture_extent.w = anchor.0.y;
     }

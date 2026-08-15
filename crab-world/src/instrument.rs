@@ -299,7 +299,6 @@ fn heldbreath_resolve(scale: &Scale, code: &[ChordDir], accepted: bool) -> Vec<N
 pub struct Phrase(pub Vec<NoteSpec>);
 
 impl Decodable for Phrase {
-    type DecoderItem = f32;
     type Decoder = PhraseStream;
     fn decoder(&self) -> PhraseStream {
         PhraseStream::new(&self.0)
@@ -439,14 +438,14 @@ impl Iterator for PhraseStream {
 }
 
 impl bevy::audio::Source for PhraseStream {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        1
+    fn channels(&self) -> std::num::NonZeroU16 {
+        std::num::NonZeroU16::new(1).expect("1 is nonzero")
     }
-    fn sample_rate(&self) -> u32 {
-        SAMPLE_RATE
+    fn sample_rate(&self) -> std::num::NonZeroU32 {
+        std::num::NonZeroU32::new(SAMPLE_RATE).expect("SAMPLE_RATE is nonzero")
     }
     fn total_duration(&self) -> Option<std::time::Duration> {
         Some(std::time::Duration::from_secs_f64(

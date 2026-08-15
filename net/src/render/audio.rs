@@ -169,7 +169,6 @@ pub(super) struct WindChannel(Arc<WindTargets>);
 pub(super) struct WindNoise(Arc<WindTargets>);
 
 impl Decodable for WindNoise {
-    type DecoderItem = f32;
     type Decoder = WindStream;
     fn decoder(&self) -> WindStream {
         WindStream::new(self.0.clone())
@@ -402,14 +401,14 @@ impl Iterator for WindStream {
 }
 
 impl bevy::audio::Source for WindStream {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        1
+    fn channels(&self) -> std::num::NonZeroU16 {
+        std::num::NonZeroU16::new(1).expect("1 is nonzero")
     }
-    fn sample_rate(&self) -> u32 {
-        SAMPLE_RATE
+    fn sample_rate(&self) -> std::num::NonZeroU32 {
+        std::num::NonZeroU32::new(SAMPLE_RATE).expect("SAMPLE_RATE is nonzero")
     }
     fn total_duration(&self) -> Option<std::time::Duration> {
         None
