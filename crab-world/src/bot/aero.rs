@@ -33,27 +33,42 @@ use super::body::CrabCarapace;
 /// c ≈ 0.086) — an unremarkable shell either way.
 pub const TERMINAL_SPEED: f32 = 15.0;
 
-/// The drag coefficient (N·s²/m²) that gives [`TERMINAL_SPEED`] for a body of
-/// `total_mass` kg: at terminal, `c·v_t² = m·g`.
-pub fn drag_coeff(total_mass: f32) -> f32 {
-    total_mass * -crate::physics::PHYSICS_GRAVITY.y / (TERMINAL_SPEED * TERMINAL_SPEED)
-}
-
 /// The carapace's drag coefficient, computed by `spawn_crab` from the summed
 /// collider masses of the whole body it just spawned (the same density×shape
 /// products rapier integrates). Component state, not a constant, because the
 /// total mass depends on which body loaded — mesh vs fallback (rl#340 stage 3).
-/// Tests that book drag impulses bit-for-bit read this same value.
+/// The field is private and the only constructor takes a mass, so "drag not
+/// derived from the body's mass" is unrepresentable.
 #[derive(Component)]
-pub struct CarapaceDrag(pub f32);
+pub struct CarapaceDrag {
+    coeff: f32,
+}
+
+impl CarapaceDrag {
+    /// The coefficient (N·s²/m²) that gives [`TERMINAL_SPEED`] for a body of
+    /// `total_mass` kg: at terminal, `c·v_t² = m·g`.
+    pub fn for_total_mass(total_mass: f32) -> Self {
+        Self {
+            coeff: total_mass * -crate::physics::PHYSICS_GRAVITY.y
+                / (TERMINAL_SPEED * TERMINAL_SPEED),
+        }
+    }
+
+    /// Tests that book drag impulses bit-for-bit read this same value.
+    pub fn coeff(&self) -> f32 {
+        self.coeff
+    }
+}
 
 /// Cap on the drag FORCE, in multiples of body weight (`m·g`). Two jobs (rl#339):
 ///
 /// - **Integrator correctness**: explicit `F = −c·|v|·v` is a brake only while its
-///   one-tick impulse stays under the momentum it cancels; past `|v| = m·Hz/c` —
-///   with `c = m·g/v_t²` that is `Hz·v_t²/g ≈ 1470 m/s`, for EVERY body — it
-///   amplifies geometrically: measured 6000 → 788,000 m/s in ONE tick. With the force capped, the per-tick Δv is a constant
-///   `20·g/Hz ≈ 3 m/s` — it can never overshoot a hypersonic velocity, at any speed.
+///   one-tick impulse stays under the momentum of the body it acts on — the
+///   CARAPACE link, so past `|v| = m_carapace·Hz/c =
+///   (m_carapace/m_total)·Hz·v_t²/g` (~720 m/s mesh, ~1470 fallback) it
+///   amplifies geometrically: measured 6000 → 788,000 m/s in ONE tick. With the
+///   force capped, the per-tick Δv is a constant `20·g/Hz ≈ 3 m/s` — it can
+///   never overshoot a hypersonic velocity, at any speed.
 /// - **Solver sanity**: the craft's fix for the same instability
 ///   ([`crate::physics::brake_coeff_max`], the one-step momentum-cancel coefficient
 ///   cap) is exact for a lone rigid body but produces ~2×10⁵ N on the carapace, and
@@ -77,6 +92,7 @@ const CARAPACE_BRAKE_WEIGHT_MAX: f32 = 20.0;
 /// The live rapier mass mirror reads zero until the first writeback, so the first
 /// tick's drag cap is zero and the drag is dropped — at gait speeds drag is a few
 /// percent of body weight, so one tick is nothing.
+#[allow(clippy::type_complexity)]
 pub(crate) fn apply_air_drag(
     mut carapaces: Query<
         (
@@ -87,16 +103,33 @@ pub(crate) fn apply_air_drag(
         ),
         With<CrabCarapace>,
     >,
+    undragged: Query<
+        Entity,
+        (
+            With<CrabCarapace>,
+            With<ExternalForce>,
+            Without<CarapaceDrag>,
+        ),
+    >,
 ) {
+    // A dynamic carapace with a force accumulator but no drag coefficient is the
+    // illegal state this system's query would otherwise skip SILENTLY — no air
+    // drag, no error, Sally flies again. Only `spawn_crab` (and the lone-body
+    // rl#339 test) may spawn one, and both attach the coefficient at spawn.
+    debug_assert!(
+        undragged.is_empty(),
+        "a physics carapace has no CarapaceDrag — spawned outside spawn_crab?"
+    );
     for (vel, mass, drag, mut force) in carapaces.iter_mut() {
         let speed = vel.linear.length();
         let f_max = CARAPACE_BRAKE_WEIGHT_MAX * mass.mass * -crate::physics::PHYSICS_GRAVITY.y;
         // Coefficient form so the in-band expression is BIT-identical to the uncapped
         // original — the 300-tick flail pin in net is sensitive to bit-level physics
         // drift. speed = 0 ⇒ f_max/speed = +inf ⇒ the cap arm never wins; mass = 0
-        // (pre-writeback tick) ⇒ 0/0 = NaN and `f32::min` returns the OTHER arm —
-        // uncapped for that one tick, exactly the pre-cap behavior.
-        let coeff = (drag.0 * speed).min(f_max / speed);
+        // (pre-writeback tick) with speed > 0 ⇒ f_max/speed = 0 wins ⇒ the drag is
+        // dropped for that one tick (at speed = 0 the zero drag arm wins — `min`
+        // returns the non-NaN arm even against the cap's 0/0).
+        let coeff = (drag.coeff() * speed).min(f_max / speed);
         force.force += -coeff * vel.linear;
     }
 }

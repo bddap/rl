@@ -35,12 +35,13 @@ const TOUCH_EPS: f32 = 1e-4;
 /// near-massless links, and bit-level physics perturbations re-roll it —
 /// seven draws during rl#340 stage 3 (varying only low bits of the drag
 /// coefficient) measured 0.24–0.38 rad/s, so the old 0.3 ceiling passed only
-/// lucky draws and any legitimate plant change could flip it. 0.5 clears the
-/// measured band ~30% while still firing on the guarded diseases: removed
-/// rest support is 3-4x (rl#109) and the pre-rl#340-stage-2 convergence
-/// regression measured 2.43 rad/s.
+/// lucky draws and any legitimate plant change could flip it. 0.6 clears the
+/// 7-draw max ~60% (a max over seven realizations under-estimates the tail)
+/// while still firing on the guarded diseases: removed rest support is 3-4x
+/// (rl#109) and the pre-rl#340-stage-2 convergence regression measured
+/// 2.43 rad/s.
 pub(crate) const QUIET_LIN_MPS: f32 = 0.2;
-pub(crate) const QUIET_ANG_RADPS: f32 = 0.5;
+pub(crate) const QUIET_ANG_RADPS: f32 = 0.6;
 
 /// Ticks over which per-part mean speeds are sampled after the settle.
 const QUIET_WINDOW_TICKS: u32 = 192;

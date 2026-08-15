@@ -639,7 +639,7 @@ fn carapace_vel_and_drag(app: &mut App) -> (Vec3, f32) {
         &super::aero::CarapaceDrag,
     ), bevy::prelude::With<super::body::CrabCarapace>>();
     let (v, d) = q.single(app.world()).expect("one carapace");
-    (v.linear, d.0)
+    (v.linear, d.coeff())
 }
 
 /// Σ m·v over every crab body plus the total mass, from the rapier set (ground
@@ -1269,12 +1269,18 @@ fn hypersonic_carapace_brake_decays() {
 
     let mut app = flat_headless_app();
     tick(&mut app, 1);
+    // Arm the drag at spawn the way `spawn_crab` arms a crab: coefficient sized
+    // off this body's own collider mass (same rapier mass_properties source), so
+    // its terminal velocity is the design TERMINAL_SPEED — and the undragged-
+    // carapace sentinel in `apply_air_drag` never sees it bare.
+    let collider = Collider::cuboid(0.15, 0.06, 0.11);
+    let drag = super::aero::CarapaceDrag::for_total_mass(collider.raw.mass_properties(50.0).mass());
     let body = app
         .world_mut()
         .spawn((
             CrabCarapace,
             RigidBody::Dynamic,
-            Collider::cuboid(0.15, 0.06, 0.11),
+            collider,
             ColliderMassProperties::Density(50.0),
             CollisionGroups::new(Group::NONE, Group::NONE),
             ReadMassProperties::default(),
@@ -1284,21 +1290,12 @@ fn hypersonic_carapace_brake_decays() {
             },
             ExternalForce::default(),
             Transform::from_xyz(0.0, 400.0, 0.0),
+            drag,
         ))
         .id();
     // One settle tick: rapier ingests the body and writes back its mass mirror (the
     // drag cap reads it; it is zero until the first writeback).
     tick(&mut app, 1);
-    // Arm the drag the way `spawn_crab` arms a crab: coefficient sized off this
-    // body's own mass, so its terminal velocity is the design TERMINAL_SPEED.
-    let m = app
-        .world()
-        .get::<ReadMassProperties>(body)
-        .expect("test body")
-        .mass;
-    app.world_mut()
-        .entity_mut(body)
-        .insert(super::aero::CarapaceDrag(super::aero::drag_coeff(m)));
 
     let speed = |app: &mut App| -> f32 {
         app.world()
