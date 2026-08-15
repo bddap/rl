@@ -28,18 +28,34 @@ fn ramp(angle_deg: f32) -> TerrainGrid {
 /// Returns (drift_m, up_y, rescues): a rescue teleports the body and voids the
 /// measure, and a small/negative final carapace-up y means the crab tumbled — a
 /// "held position" that ends wedged on its back must not pass as holding.
-fn zero_input_drift(grid: TerrainGrid, secs: f32) -> (f32, f32, u64) {
-    let hz = crate::physics::PHYSICS_HZ as f32;
+///
+/// Prints a per-second trace plus the t=2 joint-rail dump: on a failure the
+/// captured output separates a touchdown skid (drift front-loaded into the first
+/// seconds while joints collapse to their stops) from steady creep — the two need
+/// different fixes, and one final number cannot tell them apart.
+fn zero_input_drift(grid: TerrainGrid, secs: u32) -> (f32, f32, u64) {
+    let hz = crate::physics::PHYSICS_HZ as u32;
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
         grid: std::sync::Arc::new(grid),
         visuals: crate::Visuals(false),
     });
-    tick(&mut app, hz as u32); // 1 s: spawn + touch down
+    tick(&mut app, hz); // 1 s: spawn + touch down
 
     let start = carapace(&mut app).translation;
-    tick(&mut app, (secs * hz) as u32);
+    for s in 1..=secs {
+        tick(&mut app, hz);
+        let c = carapace(&mut app);
+        let d = (c.translation - start).xz().length();
+        println!(
+            "    ramp t={s}s drift {d:.2} m up_y {:.2}",
+            (c.rotation * Vec3::Y).y
+        );
+        if s == 2 {
+            dump_joint_angles(&mut app);
+        }
+    }
     let end = carapace(&mut app);
     let drift = (end.translation - start).xz().length();
     let up_y = (end.rotation * Vec3::Y).y;
@@ -62,7 +78,7 @@ fn carapace(app: &mut App) -> Transform {
 #[test]
 fn crab_holds_steep_slopes_with_zero_input() {
     for angle in [30.0f32, 40.0, 45.0, 50.0, 55.0] {
-        let (drift, up_y, rescues) = zero_input_drift(ramp(angle), 10.0);
+        let (drift, up_y, rescues) = zero_input_drift(ramp(angle), 10);
         println!(
             "slope {angle:>4.1}°: drift {drift:.2} m over 10 s (up_y {up_y:.2}, {rescues} rescues)"
         );
@@ -129,6 +145,38 @@ fn crab_holds_steep_slopes_with_zero_input() {
 ///   — which moves the rigid bound itself) or the rl#318 band re-scope
 ///   (direction c). The pad/skin plant changes were reverted (they regress the
 ///   ramp acceptance); only this instrumentation landed.
+///
+/// rl#340 stage 4c (job 2485) ran direction (b) to its bound. The key mechanism
+/// (`dump_joint_angles`, the landed increment): with 0.04 N·m stiction no
+/// load-bearing joint holds mid-range, so the zero-input standing skeleton is
+/// the gravity-railed LIMIT-STOP pose — at rest 6/8 basis joints sit railed on
+/// their −0.6 lo stop, the body hangs nose-down on the 4 front feet + one claw
+/// wrist (μ 0.5, half the normal load), and the back feet never reach ground.
+/// Stance is therefore a LIMITS property; spawn-time joint coordinates cannot
+/// hold against load. Experiments at 40°, one draw each:
+/// - claw shoulders preset to −0.3 (wrist prop removed): still 4-footed,
+///   still flips — the prop was not the binding failure;
+/// - basis lo stop −0.6 → −0.2 (+ spawn preset at the stop, claws lifted):
+///   7–8 feet grounded, and the FLIP IS GONE — first upright 40° hold in the
+///   epic (tilt instrument: up_y 0.97–1.00 through t=10). Ramp: 30° drift
+///   0.99 → 0.61–0.75 m, 40° 18.75 → 1.97 m upright — but the bar is 1.5 m.
+///   The trace: ~1.45 m is t≤2 touchdown skid while the downhill merus/carpus
+///   collapse to their +1.0/+1.1 stops, then ~60 mm/s creep;
+/// - the neighborhood is sharp: basis lo −0.15 → 2.91 m, −0.25 → 7.55 m
+///   tumbling, and −0.3 → 6.93 m ends tumbled; −0.2 is the optimum;
+/// - tightening merus/carpus stops to ±0.8 (to cut the collapse): 16.07 m —
+///   that compliance is what conforms the legs to the slope; falsified;
+/// - stiction cap 0.04 → 0.1 on the best stance: 6.49 m with a mid-run
+///   tumble; stiffer joints conform worse; falsified;
+/// - 45° with the best stance: 29.09 m, flipped — the band above 40° stays
+///   unreachable by any stance found.
+///
+/// Verdict: stance work moves the rigid bound exactly as 4b predicted (a 9×
+/// slide cut and flip-free 40°) yet cannot pass 1.5 m at 40°, and ≥45° is
+/// structurally out of reach. The basis-stop plant change was reverted per the
+/// revert rule (the gated test stays red either way, and halving the basis
+/// range is an MDP call bundled with direction (c) — the owner's rl#318 band
+/// re-scope, which now has this frontier to price against the 30–55° demand).
 #[test]
 #[ignore]
 fn tilted_gravity_hold() {
@@ -146,6 +194,7 @@ fn tilted_gravity_hold() {
         .to_radians();
     println!("  pre-tilt rest contacts:");
     dump_ground_contacts(&mut app);
+    dump_joint_angles(&mut app);
     {
         let mut q = app
             .world_mut()
@@ -164,6 +213,45 @@ fn tilted_gravity_hold() {
         if s == 0 {
             dump_ground_contacts(&mut app);
         }
+    }
+}
+
+/// Per-joint coordinate vs its limits at rest: the zero-input skeleton is gravity
+/// railed against limit stops (stiction is 0.04 N·m — no load-bearing joint holds
+/// mid-range), so THIS pose, not the bind pose, is the standing geometry.
+fn dump_joint_angles(app: &mut App) {
+    use bevy_rapier3d::plugin::context::RapierContextJoints;
+    let mut jq = app.world_mut().query::<(
+        &bevy_rapier3d::prelude::RapierMultibodyJointHandle,
+        &super::body::CrabJoint,
+    )>();
+    let pairs: Vec<_> = jq.iter(app.world()).map(|(h, j)| (h.0, j.id)).collect();
+    let mut ctx = app.world_mut().query::<&RapierContextJoints>();
+    let joints = ctx.single(app.world()).expect("rapier joints");
+    let mut rows = Vec::new();
+    for (handle, id) in pairs {
+        let Some((mb, link_id)) = joints.multibody_joints.get(handle) else {
+            continue;
+        };
+        let Some(link) = mb.link(link_id) else {
+            continue;
+        };
+        let angle = link.joint().coords()[3];
+        let [lo, hi] = id.limits();
+        let railed = if angle <= lo + 0.02 {
+            " RAILED-LO"
+        } else if angle >= hi - 0.02 {
+            " RAILED-HI"
+        } else {
+            ""
+        };
+        rows.push(format!(
+            "    joint {id:?}: {angle:+.3} in [{lo:+.2},{hi:+.2}]{railed}"
+        ));
+    }
+    rows.sort();
+    for r in rows {
+        println!("{r}");
     }
 }
 
