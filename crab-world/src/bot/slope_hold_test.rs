@@ -230,12 +230,20 @@ fn dump_joint_angles(app: &mut App) {
     let joints = ctx.single(app.world()).expect("rapier joints");
     let mut rows = Vec::new();
     for (handle, id) in pairs {
-        let Some((mb, link_id)) = joints.multibody_joints.get(handle) else {
+        // A missing row would silently shrink the "N/8 railed" denominator this
+        // dump exists to count, so a stale handle announces itself instead.
+        let Some(link) = joints
+            .multibody_joints
+            .get(handle)
+            .and_then(|(mb, link_id)| mb.link(link_id))
+        else {
+            rows.push(format!(
+                "    joint {id:?}: NO MULTIBODY LINK (stale handle)"
+            ));
             continue;
         };
-        let Some(link) = mb.link(link_id) else {
-            continue;
-        };
+        // Spatial-vector slots 0-2 are linear; a revolute's one angular dof
+        // lands in slot 3.
         let angle = link.joint().coords()[3];
         let [lo, hi] = id.limits();
         let railed = if angle <= lo + 0.02 {
