@@ -878,10 +878,11 @@ mod tests {
         // perturbations), so where and at what yaw the ram lands is draw-dependent
         // and a signed along-axis displacement assert measures her wander, not the
         // push. The push instrument is her carapace SPEED spike over the ram
-        // window instead; this same-length pre-ram window is its printed noise
-        // floor. Five stage-3 draws measured push peaks 0.44–0.58 m/s against
-        // wander peaks 0.11–0.14, so the 0.3 bound sits ~1.5x under the weakest
-        // observed push and ~2x over the loudest observed wander.
+        // window instead, asserted RELATIVE to this same-length pre-ram window —
+        // the live noise floor, so wander creeping up to the signal fails loudly
+        // instead of hollowing the instrument out. Five stage-3 draws measured
+        // push peaks 0.44–0.58 m/s against wander peaks 0.11–0.14; the 0.15
+        // clamp keeps the bar ≥0.3 even if a future plant goes quieter.
         const RAM_WINDOW: u32 = 60;
         let mut wander_peak = 0.0f32;
         for _ in 0..RAM_WINDOW {
@@ -917,9 +918,10 @@ mod tests {
              (pre-ram wander peak {wander_peak:.2}), rammer v1 {v1:?}"
         );
         assert!(
-            pushed_peak > 0.3,
+            pushed_peak > 2.0 * wander_peak.max(0.15),
             "the world must push her: an {RAM_SPEED} m/s ram peaked her carapace at \
-             {pushed_peak:.2} m/s (pre-ram rest wander peaked {wander_peak:.2})"
+             {pushed_peak:.2} m/s, not clearly above the pre-ram rest wander peak \
+             of {wander_peak:.2}"
         );
         assert!(
             v1.x > -0.7 * RAM_SPEED,

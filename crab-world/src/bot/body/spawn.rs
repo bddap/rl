@@ -230,9 +230,7 @@ pub fn spawn_crab(
 
     commands
         .entity(carapace)
-        .insert(crate::bot::aero::CarapaceDrag(
-            crate::bot::aero::drag_coeff(total_mass),
-        ));
+        .insert(crate::bot::aero::CarapaceDrag::for_total_mass(total_mass));
 
     carapace
 }
