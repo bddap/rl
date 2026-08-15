@@ -340,7 +340,9 @@ fn crab_settles_quietly_at_rest() {
     assert!(
         bounce < 0.024,
         "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.024 at the 0.04 \
-         floppy cap; the 30 Hz contact regression ~0.036, substeps=1 ~0.030)"
+         floppy cap; the 30 Hz contact regression ~0.036, substeps=1 ~0.030; the quiet \
+         stage-2 plant measures 0.0014-0.0025 across 7 solver-noise draws, so a red \
+         here is a real regression, not realization spread)"
     );
     assert!(
         crumple > 0.4,
