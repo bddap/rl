@@ -104,8 +104,8 @@ pub fn usable_model() -> &'static Result<UsableModel, String> {
 /// whole gated suite quietly stops testing Sally while reporting green. With
 /// `RL_REQUIRE_MESH` set (any non-empty value — an unrecognized value must fail
 /// loud, not silently disarm the guard), an unusable-model verdict panics right
-/// here instead, turning every would-skip red. Only the guard sets it
-/// (bothouse rl-mesh-suite.sh); production surfaces keep the refusal/fallback
+/// here instead, turning every would-skip red. Set only by mesh-suite guard
+/// harnesses, never by production surfaces — those keep the refusal/fallback
 /// semantics above.
 fn require_mesh_or_panic(verdict: Result<(), &str>, required: bool) {
     if !required {
