@@ -82,6 +82,14 @@ fn rapier_context_init() -> RapierContextInitialization {
             // the spring pinned). Pin both to the pre-0.35 semantics.
             static_contact_softness: CONTACT_SOFTNESS,
             friction_in_bias_pass: true,
+            // Third silent 0.35 default swap: a per-substep solver speed cap
+            // (400 m/s · length_unit) that pre-0.35 rapier did not have. It
+            // invisibly rewrites any fast body's velocity, which masks the very
+            // energy-injection flings the rl#349 instruments hunt and voids the
+            // rl#339 hypersonic drag-brake guarantees (both regression tests
+            // launch above it and were clamped to exactly 400). The rl#339 drag
+            // force caps own the speed bound; the solver must not have one.
+            normalized_max_linear_velocity: f32::MAX,
             ..IntegrationParameters::default()
         },
         rapier_configuration: RapierConfiguration {
@@ -129,6 +137,7 @@ fn assert_contact_spring_applied(
             static_spring.natural_frequency,
             static_spring.damping_ratio,
             params.friction_in_bias_pass,
+            params.normalized_max_linear_velocity,
         ),
         (
             CONTACT_SOFTNESS.natural_frequency,
@@ -136,6 +145,7 @@ fn assert_contact_spring_applied(
             CONTACT_SOFTNESS.natural_frequency,
             CONTACT_SOFTNESS.damping_ratio,
             true,
+            f32::MAX,
         ),
         "CrabPhysicsPlugin: the spawned Rapier context lost CONTACT_SOFTNESS — its \
          RapierContextInitialization was overridden after the plugin (last-write-wins). \
