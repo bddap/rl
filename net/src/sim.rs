@@ -137,11 +137,21 @@ const JUMP_FLOAT_GRAVITY_DIV: i64 = 2;
 /// momentum) can. Below it the skid ends and the axes take over again.
 const SLIDE_MIN_SPEED: i64 = PLAYER_SPEED * 3 / 2;
 
-/// Slide friction per tick, as a 63/64 decay: sprint pace (1.8×) reaches the
-/// [`SLIDE_MIN_SPEED`] cutoff (1.5×) in ~12 ticks ≈ 0.4 s of skid — and a plane-speed
-/// landing rides it out far longer. Feel knob.
+/// Slide friction per tick, as a 63/64 decay: a boosted entry (2.25×, see
+/// [`SLIDE_BOOST_NUM`]) reaches the [`SLIDE_MIN_SPEED`] cutoff (1.5×) in ~26 ticks
+/// ≈ 0.85 s of skid — and a plane-speed landing rides it out far longer. Feel knob.
 const SLIDE_KEEP_NUM: i64 = 63;
 const SLIDE_KEEP_DEN: i64 = 64;
+
+/// Slide entry boost, ×5/4: committing to a skid pays out a burst — sprint pace
+/// (1.8×) jumps to 2.25× walk, then friction bleeds it back down. Without it a
+/// slide was a pure slowdown next to just holding sprint (1.8→1.5 in 0.4 s):
+/// strictly dominated and unobservable in play (rl#368). Edge-triggered on
+/// [`Player::sliding`] and gated to entry from at-most-sprint pace, so a
+/// plane-speed carried landing skids as before and a held slide through a jump
+/// can't re-boost every touchdown into unbounded speed.
+const SLIDE_BOOST_NUM: i64 = 5;
+const SLIDE_BOOST_DEN: i64 = 4;
 
 /// The tallest surface drop a grounded step absorbs, half a player height: a walk or
 /// slide whose tick crosses a steeper drop-off goes AIRBORNE from the old height
@@ -491,22 +501,35 @@ pub struct Player {
     /// surface, the pre-rl#355 invariant); > 0 = airborne, integrating under gravity.
     alt: i64,
     vel: Vel,
+    /// Mid-skid (rl#368). State, not a derivation: the entry boost is
+    /// edge-triggered on it (a held slide across a jump's touchdown must not
+    /// re-boost — compounding boosts are an unbounded-speed exploit), and the
+    /// render layer reads it for the first-person eye dip and avatar lean.
+    sliding: bool,
 }
 
 impl Player {
-    pub(crate) fn from_parts(pos: Pos, yaw: i32, status: PlayerStatus, alt: i64, vel: Vel) -> Self {
+    pub(crate) fn from_parts(
+        pos: Pos,
+        yaw: i32,
+        status: PlayerStatus,
+        alt: i64,
+        vel: Vel,
+        sliding: bool,
+    ) -> Self {
         Self {
             pos,
             yaw,
             status,
             alt,
             vel,
+            sliding,
         }
     }
 
     /// A grounded, motionless walker — every spawn starts here.
     pub(crate) fn standing(pos: Pos, yaw: i32, status: PlayerStatus) -> Self {
-        Self::from_parts(pos, yaw, status, 0, Vel::default())
+        Self::from_parts(pos, yaw, status, 0, Vel::default(), false)
     }
 
     pub fn pos(self) -> Pos {
@@ -520,6 +543,9 @@ impl Player {
     }
     pub fn alt(self) -> i64 {
         self.alt
+    }
+    pub fn sliding(self) -> bool {
+        self.sliding
     }
     pub fn vel(self) -> Vel {
         self.vel
@@ -1036,6 +1062,9 @@ impl Sim {
         p.yaw = trig::wrap_turns(p.yaw + dyaw);
 
         if p.alt > 0 {
+            // Releasing SLIDE mid-air re-arms the entry boost; holding it through a
+            // jump keeps the skid armed so touchdown re-entry is boost-free.
+            p.sliding &= inp.pressed(buttons::SLIDE);
             // Airborne (rl#355): ballistic — the carried velocity IS the motion, no
             // air control (the spec: sail with the craft's velocity and fall). The
             // altitude is terrain-relative, so integrate in absolute height and
@@ -1070,12 +1099,20 @@ impl Sim {
             // Sliding (rl#355): a committed skid — the move axes are surrendered and
             // the carried momentum decays under friction until it drops to near
             // walking pace. Look stays live (handled above), steering does not.
+            let sprint = SPRINT_SPEED as i128;
+            if !p.sliding && speed2 <= sprint * sprint {
+                // Entry burst (rl#368) — see [`SLIDE_BOOST_NUM`].
+                p.vel.x = p.vel.x * SLIDE_BOOST_NUM / SLIDE_BOOST_DEN;
+                p.vel.z = p.vel.z * SLIDE_BOOST_NUM / SLIDE_BOOST_DEN;
+            }
+            p.sliding = true;
             p.vel.x = p.vel.x * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN;
             p.vel.z = p.vel.z * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN;
             p.vel.y = 0;
             p.pos.x += p.vel.x;
             p.pos.z += p.vel.z;
         } else {
+            p.sliding = false;
             // Walking: direct-drive axes, sprint scales the pace. The step is recorded
             // as the carried velocity so a jump (or slide entry) inherits walk/sprint
             // speed.
@@ -1199,6 +1236,7 @@ impl Sim {
                 status,
                 alt,
                 vel,
+                sliding,
             } = player;
             h.write(&[id.0]);
             h.write(&pos_bytes(*pos));
@@ -1209,6 +1247,7 @@ impl Sim {
             h.write(&x.to_le_bytes());
             h.write(&y.to_le_bytes());
             h.write(&z.to_le_bytes());
+            h.write(&[*sliding as u8]);
         }
         h.write(&(crabs.len() as u32).to_le_bytes());
         for crab in crabs {
@@ -1473,6 +1512,101 @@ mod tests {
                 skid.z * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN
             ),
             "the jump inherits the skid's decayed momentum"
+        );
+    }
+
+    /// The rl#368 fix: entering a slide from sprint pace bursts PAST sprint (×5/4,
+    /// then friction) — without it the skid was a pure slowdown next to holding
+    /// sprint, unobservable in play. The burst is entry-edge only.
+    #[test]
+    fn slide_entry_bursts_past_sprint_then_decays_without_reboost() {
+        let mut sim = Sim::new(11, &players(1));
+        for _ in 0..10 {
+            let mut inputs = neutral_for(&sim);
+            inputs.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, buttons::SPRINT));
+            step_scenery(&mut sim, &inputs);
+        }
+        let carried = sim.player(PlayerId(0)).unwrap().vel();
+
+        let mut slide = neutral_for(&sim);
+        slide.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::SLIDE));
+        step_scenery(&mut sim, &slide);
+        let entry = sim.player(PlayerId(0)).unwrap();
+        assert!(entry.sliding(), "the skid state is set on entry");
+        let boosted =
+            |v: i64| v * SLIDE_BOOST_NUM / SLIDE_BOOST_DEN * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN;
+        assert_eq!(
+            (entry.vel().x, entry.vel().z),
+            (boosted(carried.x), boosted(carried.z)),
+            "entry tick boosts ×5/4 before the friction step"
+        );
+        assert!(
+            dist2_i128(entry.vel().x, entry.vel().z) > dist2_i128(carried.x, carried.z),
+            "the entry burst outruns sprint pace"
+        );
+
+        // Second held tick: friction only — the boost must not re-fire mid-skid.
+        let skid = entry.vel();
+        let mut slide = neutral_for(&sim);
+        slide.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::SLIDE));
+        step_scenery(&mut sim, &slide);
+        let p = sim.player(PlayerId(0)).unwrap();
+        assert_eq!(
+            (p.vel().x, p.vel().z),
+            (
+                skid.x * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN,
+                skid.z * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN
+            ),
+            "mid-skid ticks decay only"
+        );
+    }
+
+    /// A held slide across a jump keeps the skid armed: touchdown re-entry is
+    /// boost-free, or auto-hop + slide would compound ×5/4 per hop into unbounded
+    /// speed.
+    #[test]
+    fn held_slide_through_a_jump_does_not_reboost_on_touchdown() {
+        let mut sim = Sim::new(23, &players(1));
+        for _ in 0..5 {
+            let mut inputs = neutral_for(&sim);
+            inputs.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, buttons::SPRINT));
+            step_scenery(&mut sim, &inputs);
+        }
+        let slide_held = |sim: &Sim, jump: bool| {
+            let mut inputs = neutral_for(sim);
+            let btns = buttons::SLIDE | if jump { buttons::JUMP } else { 0 };
+            inputs.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, btns));
+            inputs
+        };
+        let inputs = slide_held(&sim, false);
+        step_scenery(&mut sim, &inputs);
+        let inputs = slide_held(&sim, true);
+        step_scenery(&mut sim, &inputs);
+        assert!(sim.player(PlayerId(0)).unwrap().alt() > 0, "lifted off");
+        for _ in 0..300 {
+            if sim.player(PlayerId(0)).unwrap().alt() == 0 {
+                break;
+            }
+            let inputs = slide_held(&sim, false);
+            step_scenery(&mut sim, &inputs);
+        }
+        let landed = sim.player(PlayerId(0)).unwrap();
+        assert_eq!(landed.alt(), 0, "came back down");
+        assert!(
+            landed.sliding(),
+            "the held slide stayed armed through the air"
+        );
+        let carried = landed.vel();
+        let inputs = slide_held(&sim, false);
+        step_scenery(&mut sim, &inputs);
+        let p = sim.player(PlayerId(0)).unwrap();
+        assert_eq!(
+            (p.vel().x, p.vel().z),
+            (
+                carried.x * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN,
+                carried.z * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN
+            ),
+            "touchdown re-entry under a held slide decays only — no second boost"
         );
     }
 

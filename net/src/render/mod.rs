@@ -26,6 +26,15 @@ const MAX_TICKS_PER_FRAME: u32 = 8;
 /// Eye level: the pre-rl#256 1.6 m eyes on the 1.8 m player, as a stature fraction.
 const EYE_HEIGHT: f32 = 1.6 / 1.8 * crate::sim::PLAYER_HEIGHT;
 
+/// Eye level mid-slide (rl#368): a crouch-skid at half stature. The dip is the
+/// first-person cue that the slide took — the sim's speed change alone was
+/// unreadable in play. Render-only; the sim's collision/claw geometry is untouched.
+const SLIDE_EYE_HEIGHT: f32 = 0.9 / 1.8 * crate::sim::PLAYER_HEIGHT;
+
+/// The eye eases between stand and slide height with this per-second rate
+/// (time-constant ≈ 1/12 s ≈ 80 ms — quick enough to read as a drop, not a cut).
+const SLIDE_EYE_RATE: f32 = 12.0;
+
 /// Avatar capsule radius: the pre-rl#256 0.4 m on the 1.8 m player, as a stature fraction.
 const PLAYER_RADIUS: f32 = 0.4 / 1.8 * crate::sim::PLAYER_HEIGHT;
 
