@@ -55,22 +55,29 @@ const FIGHT_MIN_DEPTH: f32 = 0.005;
 
 /// Rest contacts the crab is allowed to carry standing load through — the
 /// structural patterns observed on the settled real model: shell skirt on
-/// the thigh (basis) colliders, same-side adjacent thighs/knees stacking in
-/// the crumple, the folded claws resting on themselves and each other, and
-/// the front thigh nesting against its claw shoulder (a contact the mesh
-/// really makes; it only registered once rl#20 Phase 1 fit the flesh fully).
-/// Quietness exempts a contact from the illegal verdict ONLY on these pairs;
-/// a quiet deep wedge anywhere else (the historical coxa-coxa class) stays
-/// illegal.
+/// the thigh (basis) colliders, same-side adjacent legs stacking segment-on-
+/// segment in the crumple (basis/merus/carpus in any combination — which
+/// neighbor-leg segments land on which is a solver-realization draw, rl#340
+/// stage 7: bit-level perturbations re-roll e.g. merus-on-basis into
+/// carpus-on-carpus, at the ~1 cm depth the 30 Hz contact spring rests
+/// load-bearing pairs at), the folded claws resting on themselves and each
+/// other, and the front thigh nesting against its claw shoulder (a contact
+/// the mesh really makes; it only registered once rl#20 Phase 1 fit the
+/// flesh fully). Quietness exempts a contact from the illegal verdict ONLY
+/// on these pairs; a quiet deep wedge anywhere else (the historical
+/// coxa-coxa class) stays illegal.
 fn allowed_rest_contact(a: Option<PartId>, b: Option<PartId>) -> bool {
     use CrabJointId::*;
     let (Some(a), Some(b)) = (a, b) else {
         return false;
     };
-    let adjacent_stack = |x: CrabJointId, y: CrabJointId| match (x, y) {
-        (LegBasis(s, i), LegBasis(t, j)) | (LegMerus(s, i), LegMerus(t, j)) => {
-            s == t && i.abs_diff(j) == 1
-        }
+    let stackable_seg = |x: CrabJointId| match x {
+        LegBasis(s, i) | LegMerus(s, i) | LegCarpus(s, i) => Some((s, i)),
+        _ => None,
+    };
+    let adjacent_stack = |x: CrabJointId, y: CrabJointId| match (stackable_seg(x), stackable_seg(y))
+    {
+        (Some((s, i)), Some((t, j))) => s == t && i.abs_diff(j) == 1,
         _ => false,
     };
     match (a, b) {
@@ -578,6 +585,18 @@ mod tests {
             j(LegMerus(Side::Left, 1)),
             j(LegMerus(Side::Left, 2))
         ));
+        assert!(
+            allowed_rest_contact(j(LegMerus(Side::Left, 0)), j(LegBasis(Side::Left, 1))),
+            "the crumple stacks neighbor-leg segments across kinds (rl#340 stage 7)"
+        );
+        assert!(allowed_rest_contact(
+            j(LegCarpus(Side::Left, 0)),
+            j(LegCarpus(Side::Left, 1))
+        ));
+        assert!(allowed_rest_contact(
+            j(LegMerus(Side::Left, 1)),
+            j(LegCarpus(Side::Left, 0))
+        ));
         assert!(!allowed_rest_contact(
             j(LegMerus(Side::Left, 1)),
             j(LegMerus(Side::Right, 1))
@@ -586,6 +605,10 @@ mod tests {
             j(LegBasis(Side::Left, 0)),
             j(LegBasis(Side::Left, 2))
         ));
+        assert!(
+            !allowed_rest_contact(j(LegMerus(Side::Left, 0)), j(LegCarpus(Side::Left, 2))),
+            "cross-kind stacking is still adjacent-legs-only"
+        );
         assert!(
             !allowed_rest_contact(j(LegCoxa(Side::Left, 1)), j(LegCoxa(Side::Left, 2))),
             "the historical coxa-coxa wedge class is NOT an allowed rest contact"
