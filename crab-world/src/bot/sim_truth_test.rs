@@ -341,8 +341,9 @@ fn crab_settles_quietly_at_rest() {
         bounce < 0.024,
         "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.024 at the 0.04 \
          floppy cap; the 30 Hz contact regression ~0.036, substeps=1 ~0.030; the rapier-0.35 \
-         plant measures 0.012-0.015 across solver-noise draws — was 0.0014-0.0025 on 0.32 — \
-         so a red here is a real regression, not realization spread)"
+         plant measures 0.012-0.015 across 3 solver-noise draws — was 0.0014-0.0025 on 0.32 \
+         — so headroom is ~1.6x, not the old 10x: before blaming a marginal red on \
+         realization spread, re-measure the draw spread, stage-3 style)"
     );
     assert!(
         crumple > 0.4,

@@ -98,13 +98,10 @@ fn rapier_context_init() -> RapierContextInitialization {
             // collapses from ~1.0 rad to 0.28 (`crab_settles_quietly_at_rest`
             // floppiness arm) — the rl#340-stage-7 "rest pose stiffened"
             // regression. The plant's rest behavior was tuned without it; off.
-            // Known trade: the phantom rigidity was also propping the zero-input
-            // 30° ramp touchdown (rl#318 slope test, red-and-excluded either
-            // way) — with the designed floppiness back she tumbles there again;
-            // that economics shift is recorded on rl#340 stage 7 for the band
-            // call. The other 0.35 swaps (5 mm slop, 3 m/s corrective cap, 2 cm
-            // speculative margin, manifold clustering) measured no effect on
-            // any gated behavior and stay at their new defaults.
+            // The zero-input slope-hold trade this uncovers is recorded on
+            // rl#340 stage 7. The other 0.35 swaps (5 mm slop, 3 m/s corrective
+            // cap, 2 cm speculative margin, manifold clustering) measured no
+            // effect on any gated behavior and stay at their new defaults.
             contact_recycling: false,
             ..IntegrationParameters::default()
         },
@@ -144,30 +141,35 @@ fn assert_contact_spring_applied(
         .single()
         .expect("CrabPhysicsPlugin: exactly one default Rapier context")
         .integration_parameters;
-    let spring = params.contact_softness;
-    let static_spring = params.static_contact_softness;
+    // ONE source for the expected values: project them out of the same
+    // initialization the plugin inserts, so a pin edited there can never
+    // drift from this backstop (dt is excluded — the fixed-schedule plugin
+    // rewrites it, so whole-struct equality would be wrong).
+    let RapierContextInitialization::InitializeDefaultRapierContext {
+        integration_parameters: expected,
+        ..
+    } = rapier_context_init()
+    else {
+        unreachable!("rapier_context_init always initializes a default context");
+    };
+    let project = |p: &IntegrationParameters| {
+        (
+            p.contact_softness.natural_frequency,
+            p.contact_softness.damping_ratio,
+            p.static_contact_softness.natural_frequency,
+            p.static_contact_softness.damping_ratio,
+            p.friction_in_bias_pass,
+            p.normalized_max_linear_velocity,
+            p.contact_recycling,
+        )
+    };
     assert_eq!(
-        (
-            spring.natural_frequency,
-            spring.damping_ratio,
-            static_spring.natural_frequency,
-            static_spring.damping_ratio,
-            params.friction_in_bias_pass,
-            params.normalized_max_linear_velocity,
-            params.contact_recycling,
-        ),
-        (
-            CONTACT_SOFTNESS.natural_frequency,
-            CONTACT_SOFTNESS.damping_ratio,
-            CONTACT_SOFTNESS.natural_frequency,
-            CONTACT_SOFTNESS.damping_ratio,
-            true,
-            f32::MAX,
-            false,
-        ),
-        "CrabPhysicsPlugin: the spawned Rapier context lost CONTACT_SOFTNESS — its \
-         RapierContextInitialization was overridden after the plugin (last-write-wins). \
-         The contact spring is silently wrong; fix the init ordering at the call site."
+        project(params),
+        project(&expected),
+        "CrabPhysicsPlugin: the spawned Rapier context lost the contact-semantics \
+         pins — its RapierContextInitialization was overridden after the plugin \
+         (last-write-wins). The contact physics is silently wrong; fix the init \
+         ordering at the call site."
     );
     assert_eq!(
         (
