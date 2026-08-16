@@ -71,15 +71,6 @@ fn allowed_rest_contact(a: Option<PartId>, b: Option<PartId>) -> bool {
     let (Some(a), Some(b)) = (a, b) else {
         return false;
     };
-    let stackable_seg = |x: CrabJointId| match x {
-        LegBasis(s, i) | LegMerus(s, i) | LegCarpus(s, i) => Some((s, i)),
-        _ => None,
-    };
-    let adjacent_stack = |x: CrabJointId, y: CrabJointId| match (stackable_seg(x), stackable_seg(y))
-    {
-        (Some((s, i)), Some((t, j))) => s == t && i.abs_diff(j) == 1,
-        _ => false,
-    };
     match (a, b) {
         (PartId::Carapace, PartId::Joint(j)) | (PartId::Joint(j), PartId::Carapace) => {
             matches!(j, LegBasis(..))
@@ -88,8 +79,23 @@ fn allowed_rest_contact(a: Option<PartId>, b: Option<PartId>) -> bool {
             (ClawShoulder(s), ClawPincer(t)) | (ClawPincer(s), ClawShoulder(t)) => s == t,
             (ClawShoulder(_), ClawShoulder(_)) => true,
             (ClawShoulder(s), LegBasis(t, 0)) | (LegBasis(s, 0), ClawShoulder(t)) => s == t,
-            _ => adjacent_stack(x, y),
+            _ => adjacent_leg_stack(x, y),
         },
+        _ => false,
+    }
+}
+
+/// The crumple-stack arm of [`allowed_rest_contact`]: basis/merus/carpus
+/// segments of same-side ADJACENT legs, in any kind combination — which
+/// segments land on which is a solver-realization draw (rl#340 stage 7).
+fn adjacent_leg_stack(x: CrabJointId, y: CrabJointId) -> bool {
+    use CrabJointId::*;
+    let stackable_seg = |x: CrabJointId| match x {
+        LegBasis(s, i) | LegMerus(s, i) | LegCarpus(s, i) => Some((s, i)),
+        _ => None,
+    };
+    match (stackable_seg(x), stackable_seg(y)) {
+        (Some((s, i)), Some((t, j))) => s == t && i.abs_diff(j) == 1,
         _ => false,
     }
 }
@@ -597,6 +603,14 @@ mod tests {
             j(LegMerus(Side::Left, 1)),
             j(LegCarpus(Side::Left, 0))
         ));
+        assert!(allowed_rest_contact(
+            j(LegBasis(Side::Left, 2)),
+            j(LegCarpus(Side::Left, 1))
+        ));
+        assert!(
+            !allowed_rest_contact(j(LegBasis(Side::Left, 1)), j(LegCarpus(Side::Left, 1))),
+            "same-leg cross-kind pairs are the joint chain, not the crumple stack"
+        );
         assert!(!allowed_rest_contact(
             j(LegMerus(Side::Left, 1)),
             j(LegMerus(Side::Right, 1))
@@ -637,6 +651,14 @@ mod tests {
 /// whose multibody joints carry `contacts_enabled(false)`), and the
 /// structural rest contacts [`allowed_rest_contact`] already encodes (the
 /// designed shell-on-thigh / folded-claw load paths, rl#109/rl#234).
+///
+/// The allowlisted patterns are exempt at ANY depth: depth-capping the
+/// [`adjacent_leg_stack`] arm was tried and rejected (rl#340 stage 7) — the
+/// designed rest population spans 7 mm (distal draws) to 35 mm (loaded
+/// basis-basis), overlapping the historical 46 mm wedge scale, so depth
+/// cannot discriminate a resting stack from a wedge here. Quietness can, and
+/// the rest-pose audit ([`run`]) applies exactly that gate to these pairs;
+/// this test's job is the pairs NO exemption covers.
 #[cfg(test)]
 fn designed_contact(o: &Overlap) -> bool {
     let joint_adjacent = match (o.a_part, o.b_part) {
