@@ -118,10 +118,18 @@ pub(crate) const SPRINT_SPEED: i64 = PLAYER_SPEED * 9 / 5;
 const GRAVITY_PER_TICK2: i64 = (-crab_world::physics::PHYSICS_GRAVITY.y as f64 * UNIT as f64
     / (TICK_HZ * TICK_HZ) as f64) as i64;
 
-/// Jump liftoff speed, grid units per tick: √(2·g·h) for an apex of h ≈ 1.5 player
-/// heights (0.077 m) under the shared gravity → 1.23 m/s. Feel knob; the airtime is
-/// ~0.25 s, snappy at this world's 0.051 m stature.
-const JUMP_SPEED: i64 = (1.23 * UNIT as f64 / TICK_HZ as f64) as i64;
+/// Jump liftoff speed, grid units per tick: √(2·g·h) for a TAPPED apex of h ≈ 2.1
+/// player heights (0.107 m) under the shared gravity → 1.45 m/s. Feel knob (rl#367:
+/// up from 1.23 — the 1.5-height, 0.25 s hop read as weak).
+const JUMP_SPEED: i64 = (1.45 * UNIT as f64 / TICK_HZ as f64) as i64;
+
+/// Hold-to-float (rl#367): while RISING with JUMP still held, gravity is divided by
+/// this — variable jump height (release early → the shared g reclaims the arc) plus
+/// a slow-rise/snap-fall asymmetry that reads as apex hang. At 2 a full hold doubles
+/// the tapped apex (~4.2 player heights, ~0.5 s airtime). The descent — and every
+/// airborne state without JUMP held, so the whole plane-exit handoff (rl#355) — stays
+/// under the ONE shared gravity: craft ballistics are untouched.
+const JUMP_FLOAT_GRAVITY_DIV: i64 = 2;
 
 /// A slide sustains only above this pace — 1.5× walk, between the √2×-walk a diagonal
 /// step reaches (the axes are direct-drive, not normalized) and sprint, so neither
@@ -1035,7 +1043,14 @@ impl Sim {
             let ground_before = ground_at(p.pos);
             p.pos.x += p.vel.x;
             p.pos.z += p.vel.z;
-            p.vel.y -= GRAVITY_PER_TICK2;
+            // One carve-out from "no air control" (rl#367): holding JUMP through the
+            // rise floats the arc ([`JUMP_FLOAT_GRAVITY_DIV`]) — height modulation,
+            // never steering. The descent is always full-g.
+            p.vel.y -= if p.vel.y > 0 && inp.pressed(buttons::JUMP) {
+                GRAVITY_PER_TICK2 / JUMP_FLOAT_GRAVITY_DIV
+            } else {
+                GRAVITY_PER_TICK2
+            };
             let abs_y = ground_before + p.alt + p.vel.y;
             p.alt = abs_y - ground_at(p.pos);
             if p.alt <= 0 {
@@ -1492,9 +1507,9 @@ mod tests {
             assert!(ticks < 300, "a jump must come back down");
         }
         let after = sim.player(PlayerId(0)).unwrap().pos();
-        // Flat-ground apex is ~1.5 player heights; the half-height floor leaves slack
-        // for the terrain slope the sprint carries the arc across (alt is
-        // surface-relative).
+        // Flat-ground tapped apex is ~2.1 player heights; the half-height floor
+        // leaves slack for the terrain slope the sprint carries the arc across (alt
+        // is surface-relative).
         assert!(
             peak > PLAYER_HEIGHT_FP / 2,
             "the apex clears half a player height (got {peak})"
@@ -1505,6 +1520,54 @@ mod tests {
             "airborne motion is the carried sprint step, immune to the axes"
         );
         assert_eq!(sim.player(PlayerId(0)).unwrap().vel().y, 0, "landed clean");
+    }
+
+    #[test]
+    fn held_jump_floats_higher_than_a_tap_and_falls_at_full_gravity() {
+        // rl#367 hold-to-float: same liftoff, but holding JUMP through the rise
+        // divides gravity — the held arc must peak clearly above the tapped one,
+        // while every descent tick pulls at the ONE shared gravity (the plane-exit
+        // handoff regime, rl#355 — no second fall rate).
+        let arc = |hold: bool| {
+            let mut sim = Sim::new(13, &players(1));
+            let mut jump = neutral_for(&sim);
+            jump.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::JUMP));
+            step_scenery(&mut sim, &jump);
+            let mut peak = 0;
+            let mut ticks = 0;
+            while sim.player(PlayerId(0)).unwrap().alt() > 0 {
+                let held = if hold && sim.player(PlayerId(0)).unwrap().vel().y > 0 {
+                    buttons::JUMP
+                } else {
+                    0
+                };
+                let vy_before = sim.player(PlayerId(0)).unwrap().vel().y;
+                let mut inputs = neutral_for(&sim);
+                inputs.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, held));
+                step_scenery(&mut sim, &inputs);
+                let p = sim.player(PlayerId(0)).unwrap();
+                if vy_before <= 0 && p.alt() > 0 {
+                    assert_eq!(
+                        p.vel().y,
+                        vy_before - GRAVITY_PER_TICK2,
+                        "descent is always full shared gravity"
+                    );
+                }
+                peak = peak.max(p.alt());
+                ticks += 1;
+                assert!(ticks < 300, "a floated jump must come back down");
+            }
+            peak
+        };
+        let (tapped, held) = (arc(false), arc(true));
+        assert!(
+            held > tapped * 3 / 2,
+            "the held arc peaks well above the tap (tap {tapped}, held {held})"
+        );
+        assert!(
+            tapped > PLAYER_HEIGHT_FP,
+            "even a tap clears a full player height (got {tapped})"
+        );
     }
 
     #[test]
