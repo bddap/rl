@@ -90,6 +90,22 @@ fn rapier_context_init() -> RapierContextInitialization {
             // launch above it and were clamped to exactly 400). The rl#339 drag
             // force caps own the speed bound; the solver must not have one.
             normalized_max_linear_velocity: f32::MAX,
+            // Fourth silent 0.35 default swap: contact recycling keeps a
+            // quasi-static pair's contact points stale (up to 5 cm of relative
+            // pose drift) AND skips per-step joint-based contact filtering
+            // until the pair moves. On the mesh multibody that props the
+            // settling legs on phantom joint-adjacent contacts: the crumple
+            // collapses from ~1.0 rad to 0.28 (`crab_settles_quietly_at_rest`
+            // floppiness arm) — the rl#340-stage-7 "rest pose stiffened"
+            // regression. The plant's rest behavior was tuned without it; off.
+            // Known trade: the phantom rigidity was also propping the zero-input
+            // 30° ramp touchdown (rl#318 slope test, red-and-excluded either
+            // way) — with the designed floppiness back she tumbles there again;
+            // that economics shift is recorded on rl#340 stage 7 for the band
+            // call. The other 0.35 swaps (5 mm slop, 3 m/s corrective cap, 2 cm
+            // speculative margin, manifold clustering) measured no effect on
+            // any gated behavior and stay at their new defaults.
+            contact_recycling: false,
             ..IntegrationParameters::default()
         },
         rapier_configuration: RapierConfiguration {
@@ -138,6 +154,7 @@ fn assert_contact_spring_applied(
             static_spring.damping_ratio,
             params.friction_in_bias_pass,
             params.normalized_max_linear_velocity,
+            params.contact_recycling,
         ),
         (
             CONTACT_SOFTNESS.natural_frequency,
@@ -146,6 +163,7 @@ fn assert_contact_spring_applied(
             CONTACT_SOFTNESS.damping_ratio,
             true,
             f32::MAX,
+            false,
         ),
         "CrabPhysicsPlugin: the spawned Rapier context lost CONTACT_SOFTNESS — its \
          RapierContextInitialization was overridden after the plugin (last-write-wins). \
