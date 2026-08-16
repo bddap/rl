@@ -89,7 +89,35 @@ fn checked_recipe(p: &std::path::Path) -> Result<bot::rig::RigRecipe, String> {
 
 pub fn usable_model() -> &'static Result<UsableModel, String> {
     static VERDICT: OnceLock<Result<UsableModel, String>> = OnceLock::new();
-    VERDICT.get_or_init(checked_model)
+    let verdict = VERDICT.get_or_init(checked_model);
+    require_mesh_or_panic(
+        verdict.as_ref().map(|_| ()).map_err(String::as_str),
+        std::env::var_os("RL_REQUIRE_MESH").is_some_and(|v| !v.is_empty()),
+    );
+    verdict
+}
+
+/// bddap/rl#340 stage 8: the hard-require channel for the mesh-suite guard. Every
+/// sally-gated test consults [`usable_model`] — either to skip on `Err`, or inside
+/// `spawn_crab` where an `Err` silently builds the fallback body — so if the asset
+/// resolution ever drifts (a `CRAB_MODEL_PATH` rename, a gate-logic change), the
+/// whole gated suite quietly stops testing Sally while reporting green. With
+/// `RL_REQUIRE_MESH` set (any non-empty value — an unrecognized value must fail
+/// loud, not silently disarm the guard), an unusable-model verdict panics right
+/// here instead, turning every would-skip red. Only the guard sets it
+/// (bothouse rl-mesh-suite.sh); production surfaces keep the refusal/fallback
+/// semantics above.
+fn require_mesh_or_panic(verdict: Result<(), &str>, required: bool) {
+    if !required {
+        return;
+    }
+    if let Err(reason) = verdict {
+        panic!(
+            "RL_REQUIRE_MESH is set but the canonical Sally mesh is not usable: {reason}. \
+             This process was told the mesh-gated paths MUST run — a skip or fallback here \
+             would be the silent rot bddap/rl#340 stage 8 closes."
+        );
+    }
 }
 
 pub fn usable_model_path() -> Option<PathBuf> {
@@ -334,6 +362,28 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod require_mesh_tests {
+    use super::require_mesh_or_panic;
+
+    /// Pure-function coverage; the env wiring (`RL_REQUIRE_MESH` → panic on a real
+    /// `Err` verdict) is deliberately NOT exercised in-process — flipping a
+    /// process-global env var would arm the panic under every concurrently running
+    /// test. The rl-mesh-suite harness covers the wired path end-to-end.
+    #[test]
+    fn not_required_never_panics() {
+        require_mesh_or_panic(Ok(()), false);
+        require_mesh_or_panic(Err("no mesh"), false);
+        require_mesh_or_panic(Ok(()), true);
+    }
+
+    #[test]
+    #[should_panic(expected = "RL_REQUIRE_MESH")]
+    fn required_and_unusable_panics() {
+        require_mesh_or_panic(Err("no mesh"), true);
     }
 }
 
