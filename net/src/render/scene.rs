@@ -346,6 +346,10 @@ pub(super) fn apply_transforms(
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
     mut cam_q: CamXf,
+    time: Res<Time>,
+    // Smoothed eye height (0 = uninitialized): the stand↔slide crouch eases at
+    // [`SLIDE_EYE_RATE`] instead of cutting, so the dip reads as a body motion.
+    mut eye_h: Local<f32>,
 ) {
     let sim = state.client.sim();
     let alpha = clock.frac;
@@ -381,6 +385,13 @@ pub(super) fn apply_transforms(
             *tf = Transform::from_translation(place(pos, PLAYER_RADIUS)).with_rotation(
                 Quat::from_rotation_y(yaw) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
             );
+        } else if now.sliding() {
+            // A skidding walker leans back feet-first (rl#368) — the third-person
+            // read of the slide, matching the local player's eye dip below.
+            *tf = Transform::from_translation(place(pos, PLAYER_HEIGHT * 0.35 + alt))
+                .with_rotation(
+                    Quat::from_rotation_y(yaw) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_3),
+                );
         }
     }
 
@@ -411,7 +422,18 @@ pub(super) fn apply_transforms(
             // The airborne walker's eye rides its altitude (rl#355) — the plane-exit
             // handoff sails, so the camera sails with it and settles on touchdown.
             let alt = lerp_alt(prev.alt(), now.alt(), alpha);
-            let eye = place(pos, EYE_HEIGHT + alt);
+            // Mid-slide the eye crouches to [`SLIDE_EYE_HEIGHT`] (rl#368), eased so
+            // the drop reads as a body motion, not a camera cut.
+            let target = if now.sliding() {
+                SLIDE_EYE_HEIGHT
+            } else {
+                EYE_HEIGHT
+            };
+            if *eye_h == 0.0 {
+                *eye_h = target;
+            }
+            *eye_h += (target - *eye_h) * (1.0 - (-time.delta_secs() * SLIDE_EYE_RATE).exp());
+            let eye = place(pos, *eye_h + alt);
             let look_dir = look_direction(cam_yaw, pitch.0);
             *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
         }

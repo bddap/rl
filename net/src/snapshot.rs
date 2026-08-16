@@ -72,6 +72,7 @@ impl CoreSnapshot {
             out.extend_from_slice(&vel.x.to_le_bytes());
             out.extend_from_slice(&vel.y.to_le_bytes());
             out.extend_from_slice(&vel.z.to_le_bytes());
+            out.push(player.sliding() as u8);
         }
 
         out.extend_from_slice(&(self.crabs.len() as u32).to_le_bytes());
@@ -115,7 +116,12 @@ impl CoreSnapshot {
                 y: i64::from_le_bytes(r.take()?),
                 z: i64::from_le_bytes(r.take()?),
             };
-            players.insert(id, Player::from_parts(pos, yaw, status, alt, vel));
+            let sliding = match r.byte()? {
+                0 => false,
+                1 => true,
+                _ => return Err(SnapshotDecodeError::BadTag),
+            };
+            players.insert(id, Player::from_parts(pos, yaw, status, alt, vel, sliding));
         }
 
         let n_crabs = u32::from_le_bytes(r.take::<4>()?) as usize;
@@ -223,6 +229,7 @@ mod tests {
                 p.status(),
                 4321,
                 crate::sim::Vel { x: 9, y: -8, z: 7 },
+                true,
             ),
         );
         // Server-stamped watermarks (`Sim::core_snapshot` leaves them empty) — nonempty here so

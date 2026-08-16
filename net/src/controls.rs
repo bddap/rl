@@ -635,7 +635,7 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
     },
     ContextRow {
         action: Action::Slide,
-        label: "Slide (hold)",
+        label: "Slide (hold, sprinting)",
     },
     ContextRow {
         action: Action::Extract,
