@@ -135,6 +135,10 @@ fn finish_offscreen_app(
 pub struct PilotScript {
     toggle_at: Vec<u64>,
     walk_at: Option<u64>,
+    /// On-foot JUMP hold windows `(from, to)`, `to = None` holding into the shot —
+    /// jump-feel evidence (rl#367): a 1-frame window taps, a long window rides the
+    /// hold-to-float rise (and auto-hops on touchdown).
+    jump_holds: Vec<(u64, Option<u64>)>,
     frame: u64,
 }
 
@@ -143,8 +147,14 @@ impl PilotScript {
         Self {
             toggle_at,
             walk_at,
+            jump_holds: Vec::new(),
             frame: 0,
         }
+    }
+
+    pub fn with_jump_holds(mut self, holds: Vec<(u64, Option<u64>)>) -> Self {
+        self.jump_holds = holds;
+        self
     }
 }
 
@@ -252,6 +262,13 @@ fn drive_pilot_script(
         // against evasion, not just a standing kill (rl#236).
         pending.forward = 1.0;
         pending.yaw_delta = 0.02;
+    }
+    if vehicle.kind().is_none() {
+        let frame = script.frame;
+        pending.jump |= script
+            .jump_holds
+            .iter()
+            .any(|&(from, to)| frame >= from && to.is_none_or(|r| frame < r));
     }
 }
 

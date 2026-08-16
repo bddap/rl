@@ -96,6 +96,11 @@ pub(crate) struct Args {
     /// (rl#334: texture stability is only visible while the eye translates).
     #[arg(long, value_name = "FRAME", value_parser = clap::value_parser!(u64).range(1..))]
     walk_at: Option<u64>,
+    /// Hold JUMP over these on-foot frame windows, `from:to` pairs comma-separated
+    /// (`to` empty = into the shot) — jump-feel evidence (rl#367): a short window
+    /// taps, a long window rides the hold-to-float rise.
+    #[arg(long, value_delimiter = ',')]
+    jump_holds: Vec<String>,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -118,8 +123,16 @@ pub(crate) fn run(args: Args) -> Result<()> {
     if args.debug_overlay {
         app.insert_resource(crab_world::debug_overlay::DebugOverlay { visible: true });
     }
-    if !args.pilot_toggle_at.is_empty() || args.walk_at.is_some() {
-        app.insert_resource(render::PilotScript::new(args.pilot_toggle_at, args.walk_at));
+    if !args.pilot_toggle_at.is_empty() || args.walk_at.is_some() || !args.jump_holds.is_empty() {
+        let jump_holds = args
+            .jump_holds
+            .iter()
+            .map(|spec| parse_hold(spec))
+            .collect::<Result<Vec<_>>>()?;
+        app.insert_resource(
+            render::PilotScript::new(args.pilot_toggle_at, args.walk_at)
+                .with_jump_holds(jump_holds),
+        );
     }
     if let Some(hold_at) = args.chord_hold_at {
         let taps = args
