@@ -139,6 +139,11 @@ pub struct PilotScript {
     /// jump-feel evidence (rl#367): a 1-frame window taps, a long window rides the
     /// hold-to-float rise (and auto-hops on touchdown).
     jump_holds: Vec<(u64, Option<u64>)>,
+    /// On-foot SPRINT hold windows, same shape — slide evidence (rl#368) needs
+    /// sprint pace on the entry tick.
+    sprint_holds: Vec<(u64, Option<u64>)>,
+    /// On-foot SLIDE hold windows, same shape (rl#368).
+    slide_holds: Vec<(u64, Option<u64>)>,
     frame: u64,
 }
 
@@ -148,12 +153,24 @@ impl PilotScript {
             toggle_at,
             walk_at,
             jump_holds: Vec::new(),
+            sprint_holds: Vec::new(),
+            slide_holds: Vec::new(),
             frame: 0,
         }
     }
 
     pub fn with_jump_holds(mut self, holds: Vec<(u64, Option<u64>)>) -> Self {
         self.jump_holds = holds;
+        self
+    }
+
+    pub fn with_sprint_holds(mut self, holds: Vec<(u64, Option<u64>)>) -> Self {
+        self.sprint_holds = holds;
+        self
+    }
+
+    pub fn with_slide_holds(mut self, holds: Vec<(u64, Option<u64>)>) -> Self {
+        self.slide_holds = holds;
         self
     }
 }
@@ -265,10 +282,14 @@ fn drive_pilot_script(
     }
     if vehicle.kind().is_none() {
         let frame = script.frame;
-        pending.jump |= script
-            .jump_holds
-            .iter()
-            .any(|&(from, to)| frame >= from && to.is_none_or(|r| frame < r));
+        let held = |holds: &[(u64, Option<u64>)]| {
+            holds
+                .iter()
+                .any(|&(from, to)| frame >= from && to.is_none_or(|r| frame < r))
+        };
+        pending.jump |= held(&script.jump_holds);
+        pending.sprint |= held(&script.sprint_holds);
+        pending.slide |= held(&script.slide_holds);
     }
 }
 

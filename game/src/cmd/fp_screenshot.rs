@@ -101,6 +101,13 @@ pub(crate) struct Args {
     /// taps, a long window rides the hold-to-float rise.
     #[arg(long, value_delimiter = ',')]
     jump_holds: Vec<String>,
+    /// Hold SPRINT over these on-foot frame windows, same `from:to` shape — slide
+    /// evidence (rl#368): the skid only enters above sprint pace.
+    #[arg(long, value_delimiter = ',')]
+    sprint_holds: Vec<String>,
+    /// Hold SLIDE over these on-foot frame windows, same `from:to` shape (rl#368).
+    #[arg(long, value_delimiter = ',')]
+    slide_holds: Vec<String>,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -123,15 +130,23 @@ pub(crate) fn run(args: Args) -> Result<()> {
     if args.debug_overlay {
         app.insert_resource(crab_world::debug_overlay::DebugOverlay { visible: true });
     }
-    if !args.pilot_toggle_at.is_empty() || args.walk_at.is_some() || !args.jump_holds.is_empty() {
-        let jump_holds = args
-            .jump_holds
-            .iter()
-            .map(|spec| parse_hold(spec))
-            .collect::<Result<Vec<_>>>()?;
+    if !args.pilot_toggle_at.is_empty()
+        || args.walk_at.is_some()
+        || !args.jump_holds.is_empty()
+        || !args.sprint_holds.is_empty()
+        || !args.slide_holds.is_empty()
+    {
+        let parse_holds = |specs: &[String]| {
+            specs
+                .iter()
+                .map(|spec| parse_hold(spec))
+                .collect::<Result<Vec<_>>>()
+        };
         app.insert_resource(
             render::PilotScript::new(args.pilot_toggle_at, args.walk_at)
-                .with_jump_holds(jump_holds),
+                .with_jump_holds(parse_holds(&args.jump_holds)?)
+                .with_sprint_holds(parse_holds(&args.sprint_holds)?)
+                .with_slide_holds(parse_holds(&args.slide_holds)?),
         );
     }
     if let Some(hold_at) = args.chord_hold_at {
