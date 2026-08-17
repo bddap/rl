@@ -1,5 +1,10 @@
 # rl#372 — shadow-side hillside renders a screen-corner "sunlit" wash
 
+> **SUPERSEDED — wrong diagnosis.** The owner ruled the captured "artifact"
+> below is an expected specular highlight, not the reported glitch (which was
+> some sort of clipping). The reflectance-ramp fix was reverted. Kept for
+> reference only; the issue remains open pending a position-anchored live repro.
+
 Repro (deterministic): `game fp-screenshot --walk-at 1 --anim-frames 17
 --anim-every 12 --cam-pitch=-12 --cam-yaw=45` (default seed), frame 16 — the
 walking player is on a hillside with the camera a little inward and down, the
