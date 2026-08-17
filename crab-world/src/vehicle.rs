@@ -690,8 +690,6 @@ fn apply_vehicle_forces(
         // off, and a sink converts into airspeed instead of a sideways fall (rl#255).
         let grip = (forward * speed - v) * p.grip;
 
-        ef.force = thrust + lift + drag + grip;
-
         // Surface torque comes from airflow over the control surfaces — dynamic
         // pressure ~ ½ρv² — so scale by (|v|/full-authority speed)², capped at 1.
         // Total |v|, not the forward component: a diving or tail-sliding craft still
@@ -707,9 +705,45 @@ fn apply_vehicle_forces(
                 control.yaw * p.yaw_torque,
                 -control.roll * p.roll_torque,
             );
-        ef.torque = rot * body_torque - velocity.angular * p.angular_drag;
+        // A parked craft must be allowed to SLEEP (rl#377): every write here marks
+        // the component changed, and bevy_rapier force-wakes the body on any Changed
+        // ExternalForce — resetting rapier's sleep timer each tick. At rest the
+        // passive terms (drag, grip, lift, angular drag) feed on the contact solver's
+        // own rest-noise velocities, re-deriving a not-quite-equal force every tick,
+        // so the loop held a grounded craft awake forever — and at far-coordinate
+        // locales (f32 position ULP ~1 mm at ~13 km) the awake contact solve rings at
+        // up to ~1 rad/s of orientation chatter: the visible parked wiggle. Magnitude
+        // can't separate noise from signal (settle-transient drag torques overlap
+        // real control torques), so split by SOURCE: with the command neutral and
+        // both velocities inside rapier's sleep thresholds, the passive terms are
+        // rest noise by definition — hold the force at exactly zero and skip the
+        // write, so sleep engages and rest is rest. Dissipative terms can never
+        // sustain motion, so dropping them only inside the sleep band changes no
+        // trajectory; any commanded input writes (and thus wakes) as before.
+        let command_neutral = thrust == Vec3::ZERO && body_torque == Vec3::ZERO;
+        let below_sleep_band = speed < SLEEP_LINEAR_THRESHOLD
+            && velocity.angular.length_squared()
+                < SLEEP_ANGULAR_THRESHOLD * SLEEP_ANGULAR_THRESHOLD;
+        let next = if command_neutral && below_sleep_band {
+            ExternalForce::default()
+        } else {
+            ExternalForce {
+                force: thrust + lift + drag + grip,
+                torque: rot * body_torque - velocity.angular * p.angular_drag,
+            }
+        };
+        if *ef != next {
+            *ef = next;
+        }
     }
 }
+
+/// Rapier's default sleep thresholds (`RigidBodyActivation`; linear is normalized by
+/// the 1 m length unit) — the band inside which the engine itself deems the body
+/// rest-eligible, restated so [`apply_vehicle_forces`]'s no-write rest rule tracks
+/// the engine's own sleep criterion.
+const SLEEP_LINEAR_THRESHOLD: f32 = 0.4;
+const SLEEP_ANGULAR_THRESHOLD: f32 = 0.5;
 
 #[cfg(test)]
 mod tests {
@@ -1977,6 +2011,52 @@ mod tests {
             "non-finite craft must park at rest at the origin: {:?} {:?}",
             t.translation,
             v.linear
+        );
+    }
+
+    /// rl#377: a parked craft with a neutral command must fall ASLEEP — bit-exact
+    /// stillness, not merely small motion. The bug: every apply_vehicle_forces write
+    /// marks ExternalForce changed, bevy_rapier force-wakes the body on Changed, and
+    /// the passive drag/grip/angular-drag terms re-derive a not-quite-equal force
+    /// from the solver's own rest noise every tick — so the craft never slept, and
+    /// the awake contact solve visibly chattered its orientation on the ground.
+    #[test]
+    fn parked_craft_falls_asleep() {
+        use crate::bot::headless::tick;
+        use bevy_rapier3d::plugin::context::RapierRigidBodySet;
+        use bevy_rapier3d::prelude::RapierRigidBodyHandle;
+
+        let mut app = flat_headless_app();
+        app.add_plugins(VehiclePlugin);
+        board_at(&mut app, P0, VehicleKind::Plane, Vec3::ZERO);
+        // Spawn edge + ground settle + rapier's time_until_sleep (0.4 s ≈ 26 steps).
+        tick(&mut app, 120);
+
+        let (e, frozen) = {
+            let mut q = app.world_mut().query::<(Entity, &Transform, &Vehicle)>();
+            let (e, tf, _) = q.single(app.world()).expect("one craft");
+            (e, *tf)
+        };
+        let handle = app
+            .world()
+            .entity(e)
+            .get::<RapierRigidBodyHandle>()
+            .expect("craft has a rapier body")
+            .0;
+        let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();
+        let set = set_q.single(app.world()).expect("one body set");
+        assert!(
+            set.bodies.get(handle).expect("live body").is_sleeping(),
+            "a parked craft with a neutral command must be asleep by 120 ticks"
+        );
+
+        tick(&mut app, 60);
+        let (t, _) = body(&app, e);
+        assert!(
+            t.translation == frozen.translation && t.rotation == frozen.rotation,
+            "a sleeping parked craft must be bit-exact still: {:?} -> {:?}",
+            frozen,
+            t
         );
     }
 }
