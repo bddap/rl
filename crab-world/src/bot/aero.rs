@@ -13,9 +13,9 @@
 //! the trained gait is built from (an in-distribution plant change the frozen
 //! policy would feel). `F = −c·|v|·v` with `c = m·g/v_t²` sized from the WHOLE
 //! body's mass at spawn ([`CarapaceDrag`]), so terminal velocity is
-//! [`TERMINAL_SPEED`] for whichever body loaded — the rl#340 stage-3 lesson: a
-//! constant sized for the 0.78 kg fallback let the 1.97 kg mesh body fall at
-//! 22 m/s. 15 m/s is real-animal scale for a 0.6 m body, ~5× her full-charge gait
+//! [`TERMINAL_SPEED`] whatever the body masses — the rl#340 stage-3 lesson: a
+//! constant sized for the then-extant 0.78 kg fallback body let the 1.97 kg
+//! mesh body fall at 22 m/s. 15 m/s is real-animal scale for a 0.6 m body, ~5× her full-charge gait
 //! speed (so in-distribution locomotion sees only a few percent of body weight),
 //! and low enough that a lip at speed is a hop, not a flight.
 //! `airborne_crab_reaches_terminal_velocity` pins the realized v_t against
@@ -29,15 +29,15 @@ use super::body::CrabCarapace;
 /// Design free-fall terminal speed, m/s — the one aero tuning knob.
 ///
 /// As a bluff-body check, `c = m·g/v_t²` vs `½·ρ·C_d·A` with air ρ = 1.2 kg/m³,
-/// frontal area ≈ 0.14 m² gives C_d ≈ 0.4 (fallback, c ≈ 0.034) to ≈ 1.0 (mesh,
-/// c ≈ 0.086) — an unremarkable shell either way.
+/// frontal area ≈ 0.14 m² gives C_d ≈ 1.0 (m = 1.97 kg, c ≈ 0.086) — an
+/// unremarkable shell.
 pub const TERMINAL_SPEED: f32 = 15.0;
 
 /// The carapace's drag coefficient, computed by `spawn_crab` from the summed
 /// collider masses of the whole body it just spawned (the same density×shape
-/// products rapier integrates). Component state, not a constant, because the
-/// total mass depends on which body loaded — mesh vs fallback (rl#340 stage 3).
-/// The field is private and the only constructor takes a mass, so "drag not
+/// products rapier integrates). Component state, not a constant, so the
+/// coefficient can never drift from the mass of the body actually spawned
+/// (rl#340 stage 3). The field is private and the only constructor takes a mass, so "drag not
 /// derived from the body's mass" is unrepresentable.
 #[derive(Component)]
 pub struct CarapaceDrag {
@@ -65,7 +65,7 @@ impl CarapaceDrag {
 /// - **Integrator correctness**: explicit `F = −c·|v|·v` is a brake only while its
 ///   one-tick impulse stays under the momentum of the body it acts on — the
 ///   CARAPACE link, so past `|v| = m_carapace·Hz/c =
-///   (m_carapace/m_total)·Hz·v_t²/g` (~720 m/s mesh, ~1470 fallback) it
+///   (m_carapace/m_total)·Hz·v_t²/g` (~720 m/s) it
 ///   amplifies geometrically: measured 6000 → 788,000 m/s in ONE tick. With the
 ///   force capped, the per-tick Δv is a constant `20·g/Hz ≈ 3 m/s` — it can
 ///   never overshoot a hypersonic velocity, at any speed.
@@ -79,9 +79,9 @@ impl CarapaceDrag {
 ///   must live on the force, not the coefficient.
 ///
 /// 20× carapace weight engages at `√(20·m_carapace·g/c)` =
-/// `v_t·√(20·m_carapace/m_total)` — 47–67 m/s across the mesh/fallback bodies,
-/// over 3× the terminal velocity and beyond anything a legit gait, lip, or fall
-/// reaches, so tuned locomotion never feels it. Past it, deceleration is a constant ~20 g; the
+/// `v_t·√(20·m_carapace/m_total)` ≈ 47 m/s — over 3× the terminal velocity and
+/// beyond anything a legit gait, lip, or fall reaches, so tuned locomotion
+/// never feels it. Past it, deceleration is a constant ~20 g; the
 /// escaped-crab rescue is the flight-time bound, this is the no-new-energy bound.
 const CARAPACE_BRAKE_WEIGHT_MAX: f32 = 20.0;
 
