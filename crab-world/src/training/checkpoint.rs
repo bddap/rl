@@ -762,11 +762,11 @@ mod tests {
         );
     }
 
-    /// `save_brain` stamps the CONSTRUCTED body digest and `load_brain_file` hands it
-    /// back — the stamp round-trips and, being read from the process-global verdict on
-    /// both sides, always passes [`check_body_identity`] for a same-process round trip.
+    /// `save_brain` stamps the baked body digest and `load_brain_file` hands it
+    /// back — the stamp round-trips and, being the same compiled constant on both
+    /// sides, always passes [`check_body_identity`] for a same-binary round trip.
     #[test]
-    fn save_brain_stamps_constructed_body_digest() {
+    fn save_brain_stamps_the_baked_body_digest() {
         let dir = std::env::temp_dir().join("rl_test_body_stamp");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
