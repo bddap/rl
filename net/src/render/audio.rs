@@ -249,6 +249,24 @@ pub(super) fn drive_wind(
         .store([gain, cutoff, whistle_hz, whistle_gain, gust]);
 }
 
+/// rl#376 trace observer: the airspeed [`drive_wind`] drives the synth with, through
+/// the same [`local_speed_mps`] read — registered in the windowed AND offscreen apps
+/// (the latter has no audio systems), so captures record the signal the wind hears.
+pub(super) fn trace_wind_speed(
+    state: NonSend<GameState>,
+    vehicle: Res<LocalVehicle>,
+    trace: Option<ResMut<super::pos_trace::PosTrace>>,
+) {
+    let Some(mut trace) = trace else {
+        return;
+    };
+    if let LocalVehicle::Flying { poses, .. } = &*vehicle
+        && let Some(t) = poses.newest_tick()
+    {
+        trace.wind(t, local_speed_mps(&state, &vehicle));
+    }
+}
+
 /// Timbre map: context + airspeed → `[gain, cutoff_hz, whistle_hz, whistle_gain,
 /// gust_depth]`. Each context normalizes speed over its own audible band — quiet
 /// floor to [`FULL_WIND_MPS`] — then shapes loudness and brightness from that.

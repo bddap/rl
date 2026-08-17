@@ -795,13 +795,18 @@ fn adopt_wire_articulation(
     crate::render::articulation::adopt(world, art);
     super::articulation::publish_remote_vehicles(world, art.tick, &art.vehicles, me);
     if let Some(p) = own_wire_pose(art, me) {
-        let mut vehicle = world.resource_mut::<LocalVehicle>();
-        if matches!(&*vehicle, LocalVehicle::Flying { poses, .. } if poses.is_empty()) {
-            // The request→grant edge (rl#191): the host accepted our intent and our
-            // craft's first pose just crossed the wire — the cockpit camera engages.
-            info!("cockpit engaged: own craft pose arrived on the wire");
+        {
+            let mut vehicle = world.resource_mut::<LocalVehicle>();
+            if matches!(&*vehicle, LocalVehicle::Flying { poses, .. } if poses.is_empty()) {
+                // The request→grant edge (rl#191): the host accepted our intent and our
+                // craft's first pose just crossed the wire — the cockpit camera engages.
+                info!("cockpit engaged: own craft pose arrived on the wire");
+            }
+            vehicle.update_pose(art.tick, p);
         }
-        vehicle.update_pose(art.tick, p);
+        world
+            .resource_mut::<super::pos_trace::PosTrace>()
+            .craft(art.tick, p.pos);
     }
 }
 
@@ -863,6 +868,9 @@ fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
                 world
                     .resource_mut::<LocalVehicle>()
                     .update_pose(inputs.stepping_into, p);
+                world
+                    .resource_mut::<super::pos_trace::PosTrace>()
+                    .craft(inputs.stepping_into, p.pos);
             }
             (poses, pilot_shadows(world))
         } else {
@@ -1156,11 +1164,15 @@ pub(super) fn drive_client_sim(world: &mut World) {
     // Feed the rl#331 perf readout/black box: this frame's whole-sim cost and how many
     // fixed ticks ran (pinned at MAX_TICKS_PER_FRAME = the sim can't keep up with wall
     // time — the death-spiral signature, distinct from a render/present stall).
+    let sim_ms = sim_started.elapsed().as_secs_f32() * 1000.0;
     *world.resource_mut::<crab_world::debug_overlay::SimFrameStats>() =
         crab_world::debug_overlay::SimFrameStats {
-            ms: sim_started.elapsed().as_secs_f32() * 1000.0,
+            ms: sim_ms,
             ticks: applied,
         };
+    world
+        .resource_mut::<super::pos_trace::PosTrace>()
+        .sim_cost(clock.tick, sim_ms, applied);
 }
 
 #[cfg(test)]
