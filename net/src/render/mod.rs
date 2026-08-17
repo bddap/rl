@@ -92,6 +92,7 @@ mod controls_sync;
 mod driver;
 mod input;
 mod menu;
+mod pos_trace;
 mod pose;
 mod render_mode;
 mod scene;
@@ -115,5 +116,6 @@ pub use app::{AppPhase, Boot, build_windowed_app};
 pub use audio::ExternalBus;
 pub use render_mode::RenderMode;
 pub use screenshot::{
-    ChordScript, PilotScript, ScreenshotConfig, build_net_screenshot_app, build_screenshot_app,
+    ChordScript, FrameDtModel, PilotScript, ScreenshotConfig, build_net_screenshot_app,
+    build_screenshot_app,
 };

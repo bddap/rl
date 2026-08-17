@@ -46,6 +46,11 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
          previous scope's teardowns would be silently dropped"
     );
     let mut scope: Vec<fn(&mut World)> = Vec::new();
+    // Process-lifetime, NOT round-scoped: one trace file spans rounds (each marked
+    // by its own `O` origin line), so it must not re-open — armed on first install.
+    if world.get_resource::<super::pos_trace::PosTrace>().is_none() {
+        world.insert_resource(super::pos_trace::PosTrace::from_env());
+    }
     let prev = SimSnapshot::capture(&client);
     world.insert_non_send(GameState {
         client,
@@ -1047,6 +1052,26 @@ fn log_round_edges(world: &mut World, tel: Option<&crate::telemetry::TelemetrySe
     }
 }
 
+/// rl#371 trace: the local player's sim position after this tick's advance. On the
+/// remote-adopt arm the sim cursor can hold across iterations (jitter-buffer stall);
+/// the tick number on each line lets the reader collapse the repeats.
+fn record_tick_trace(world: &mut World) {
+    if world.resource::<super::pos_trace::PosTrace>().0.is_none() {
+        return;
+    }
+    let Some((tick, pos, alt)) = ({
+        let state = world.non_send::<GameState>();
+        let sim = state.client.sim();
+        sim.player(state.client.me())
+            .map(|p| (sim.tick(), p.pos(), p.alt()))
+    }) else {
+        return;
+    };
+    world
+        .resource_mut::<super::pos_trace::PosTrace>()
+        .tick(tick, pos, alt);
+}
+
 /// The per-frame fixed-tick driver: accumulate render time, then per crossed tick
 /// assemble local control, exchange it through the [`Coordinator`], and run the
 /// role's arm — the host pumps + steps + broadcasts ([`pump_host_ticks`]); a remote
@@ -1096,6 +1121,8 @@ pub(super) fn drive_client_sim(world: &mut World) {
             publish_pilot_commands(world);
             pump_host_ticks(world, me, armed);
         }
+
+        record_tick_trace(world);
 
         if let Some(t) = &tel {
             sample_telemetry(world, t, roster_len, tick.issue_tick, sim_input);

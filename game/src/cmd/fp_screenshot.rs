@@ -108,6 +108,20 @@ pub(crate) struct Args {
     /// Hold SLIDE over these on-foot frame windows, same `from:to` shape (rl#368).
     #[arg(long, value_delimiter = ',')]
     slide_holds: Vec<String>,
+
+    /// Walk dead straight instead of the default gentle arc — position-trace
+    /// captures (rl#371) need a constant-velocity ground truth.
+    #[arg(long)]
+    walk_straight: bool,
+
+    /// Model the frame clock as `1/HZ ± --frame-jitter-ms` per frame instead of the
+    /// default one-sim-tick frames — reproduces a real display cadence (e.g. 60)
+    /// beating against the 30 Hz sim (rl#371). Deterministic per --seed.
+    #[arg(long, value_name = "HZ")]
+    frame_hz: Option<f64>,
+    /// Uniform ± bound, in ms, on each modeled frame delta (needs --frame-hz).
+    #[arg(long, default_value_t = 0.0)]
+    frame_jitter_ms: f64,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -146,8 +160,16 @@ pub(crate) fn run(args: Args) -> Result<()> {
             render::PilotScript::new(args.pilot_toggle_at, args.walk_at)
                 .with_jump_holds(parse_holds(&args.jump_holds)?)
                 .with_sprint_holds(parse_holds(&args.sprint_holds)?)
-                .with_slide_holds(parse_holds(&args.slide_holds)?),
+                .with_slide_holds(parse_holds(&args.slide_holds)?)
+                .with_straight_walk(args.walk_straight),
         );
+    }
+    if let Some(hz) = args.frame_hz {
+        app.insert_resource(render::FrameDtModel::new(
+            hz,
+            args.frame_jitter_ms,
+            args.seed,
+        ));
     }
     if let Some(hold_at) = args.chord_hold_at {
         let taps = args
