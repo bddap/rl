@@ -50,6 +50,9 @@ pub mod moon;
 #[cfg(feature = "render")]
 pub mod play;
 #[cfg(feature = "render")]
+pub mod sally_track;
+
+#[cfg(feature = "render")]
 pub mod scatter;
 #[cfg(feature = "render")]
 pub mod screenshot;
