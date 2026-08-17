@@ -547,7 +547,7 @@ mod overlay {
         mut commands: Commands,
         asset_server: Res<AssetServer>,
     ) {
-        crate::assets::warn_missing_glyphs(super::icon_asset_paths::<S>());
+        crate::assets::require_glyphs(super::icon_asset_paths::<S>());
 
         let default_device = Device::default();
         let default_ctx = S::Context::default();

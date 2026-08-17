@@ -10,20 +10,77 @@ pub fn bevy_asset_path() -> PathBuf {
     asset_root().join("assets")
 }
 
-pub fn warn_missing_glyphs<I: IntoIterator<Item = &'static str>>(paths: I) {
+/// What a load path does when an asset it wants is not there (rl#375, owner
+/// directive): every release repeatedly shipped code without its assets and the
+/// resulting degradation was silent-by-design, found by ear. So missing-asset is now
+/// a PANIC at load — a broken bundle refuses to run instead of quietly shipping less
+/// game — and an environment that legitimately has no assets (plain dev checkout, CI)
+/// must say so with `RL_ALLOW_MISSING_ASSETS=1`, never by just lacking the file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MissingAssetPolicy {
+    Panic,
+    /// Explicitly declared asset-less environment: keep the pre-rl#375 behavior
+    /// (silent layer / blank glyph slot / collider view), logged at WARN.
+    Degrade,
+}
+
+/// The one env flag, parsed strictly: unset or `0` = panic, `1` = degrade, anything
+/// else is a config typo and dies at first use — a silently-ignored `true` here would
+/// re-create the exact silent-fallback class this policy exists to kill.
+pub fn missing_asset_policy() -> MissingAssetPolicy {
+    static POLICY: std::sync::OnceLock<MissingAssetPolicy> = std::sync::OnceLock::new();
+    *POLICY.get_or_init(|| policy_from(std::env::var("RL_ALLOW_MISSING_ASSETS").ok().as_deref()))
+}
+
+fn policy_from(env: Option<&str>) -> MissingAssetPolicy {
+    match env {
+        None | Some("0") => MissingAssetPolicy::Panic,
+        Some("1") => MissingAssetPolicy::Degrade,
+        Some(other) => panic!(
+            "RL_ALLOW_MISSING_ASSETS={other:?} is malformed — set 1 (explicitly asset-less \
+             environment) or 0/unset (missing asset panics)"
+        ),
+    }
+}
+
+/// The single missing-asset chokepoint: every loader that finds an asset absent (or
+/// unreadable) reports it here. Panics under [`MissingAssetPolicy::Panic`] naming the
+/// path and the packaging step that should have shipped it; under `Degrade` it logs
+/// and returns so the caller can fall back exactly as before.
+///
+/// `ship_step` names how a correct deployment gets this asset (the packaging step
+/// and/or the dev fetch script) — the panic message must leave the reader with the
+/// fix, not just the fact.
+pub fn missing_asset(path: &Path, detail: &str, ship_step: &str) {
+    match missing_asset_policy() {
+        MissingAssetPolicy::Panic => panic!(
+            "missing asset: {} ({detail}). {ship_step} A shipped build hitting this is a \
+             packaging bug (rl#375); a legitimately asset-less environment must declare \
+             itself with RL_ALLOW_MISSING_ASSETS=1.",
+            path.display()
+        ),
+        MissingAssetPolicy::Degrade => tracing::warn!(
+            "missing asset: {} ({detail}) — degrading (RL_ALLOW_MISSING_ASSETS=1). {ship_step}",
+            path.display()
+        ),
+    }
+}
+
+/// Control-overlay glyphs: committed at crab-world/assets/controls/ and staged into
+/// every release, so an absent one is a broken checkout or bundle.
+pub fn require_glyphs<I: IntoIterator<Item = &'static str>>(paths: I) {
     let base = bevy_asset_path();
-    let missing: Vec<&str> = paths
-        .into_iter()
-        .filter(|p| !base.join(p).exists())
-        .collect();
-    if !missing.is_empty() {
-        tracing::warn!(
-            "control overlay glyphs missing under {} — those bindings will show a blank \
-             slot (non-fatal): {missing:?}. These are CC0 Kenney Input Prompts committed at \
-             crab-world/assets/controls/ and should be present in any checkout; if your \
-             assets live elsewhere, set BEVY_ASSET_ROOT.",
-            base.display(),
-        );
+    for p in paths {
+        let full = base.join(p);
+        if !full.exists() {
+            missing_asset(
+                &full,
+                "control glyph not found",
+                "These CC0 Kenney glyphs are committed at crab-world/assets/controls/ and \
+                 packaged by rl-release-build; if your assets live elsewhere, set \
+                 BEVY_ASSET_ROOT.",
+            );
+        }
     }
 }
 
@@ -32,12 +89,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_glyph_warns_does_not_panic() {
-        warn_missing_glyphs(["controls/__surely_absent_glyph__.png"]);
+    fn policy_parses_strictly() {
+        assert_eq!(policy_from(None), MissingAssetPolicy::Panic);
+        assert_eq!(policy_from(Some("0")), MissingAssetPolicy::Panic);
+        assert_eq!(policy_from(Some("1")), MissingAssetPolicy::Degrade);
+    }
+
+    #[test]
+    #[should_panic(expected = "malformed")]
+    fn malformed_policy_value_dies_loudly() {
+        policy_from(Some("true"));
+    }
+
+    #[test]
+    #[should_panic(expected = "missing asset")]
+    fn missing_glyph_panics_by_default() {
+        // The suite runs without RL_ALLOW_MISSING_ASSETS, so the strict policy applies.
+        require_glyphs(["controls/__surely_absent_glyph__.png"]);
     }
 
     #[test]
     fn no_glyphs_is_fine() {
-        warn_missing_glyphs(std::iter::empty());
+        require_glyphs(std::iter::empty());
     }
 }

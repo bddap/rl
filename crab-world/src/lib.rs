@@ -157,6 +157,20 @@ impl RenderArgs {
     pub fn resolve(self, surface: mesh_fallback::Surface) -> BootView {
         let mesh_err = mesh_fallback::usable_model().as_ref().err();
         if let Some(reason) = mesh_err {
+            // An ABSENT model is the missing-asset class (rl#375): panic unless the
+            // environment is explicitly asset-less. A resolvable model whose bytes
+            // mismatch the baked digest keeps the loud collider-view fallback below —
+            // that path is the honest render for a deliberate mesh/re-bake divergence
+            // and is already surfaced at ERROR + on-screen banner, not silent.
+            if reason == mesh_fallback::MESH_ABSENT_REASON {
+                assets::missing_asset(
+                    &assets::bevy_asset_path().join("sally.glb"),
+                    reason,
+                    "rl-release-build packages assets/sally.glb at release time; a dev \
+                     checkout fetches it with scripts/fetch-sally.sh (or points \
+                     CRAB_MODEL_PATH at a model).",
+                );
+            }
             mesh_fallback::log_fallback(surface, reason);
         }
         BootView {
