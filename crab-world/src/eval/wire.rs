@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn charge_keys_are_conditional_headline_keys() {
-        let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");
+        let h = crate::bot::rig::natural_body_height().expect("rig height measures");
         let mut paced_r = report(true, CRAB_CHARGE_SPEED_HEIGHTS_PER_S * h);
         for b in &mut paced_r.pace.per_bearing {
             b.active_ticks = super::super::PACE_PROBE_TICKS;

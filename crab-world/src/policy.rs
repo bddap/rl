@@ -222,7 +222,7 @@ fn load_set_once(dir: &Path, device: &NdArrayDevice) -> SetRead {
     // save migrates it).
     if let Err(why) = crate::training::checkpoint::check_body_identity(
         loaded.body_digest,
-        crate::mesh_fallback::constructed_body_digest(),
+        crate::bot::rig::baked_body_digest(),
     ) {
         return SetRead::Done(Loaded::Refused(format!(
             "{}: {why}",
@@ -859,7 +859,7 @@ mod tests {
         let paths = CheckpointDir::new(&dir);
         // Differs from the constructed digest whatever the test env's body is; the
         // layout stamp is CORRECT so this test isolates the body axis.
-        let wrong = crate::mesh_fallback::constructed_body_digest() ^ 0xdead_beef;
+        let wrong = crate::bot::rig::baked_body_digest() ^ 0xdead_beef;
         write_envelope(
             &paths.brain_file(),
             ArtifactKind::Brain,
@@ -910,7 +910,7 @@ mod tests {
             ArchId::DEFAULT,
             bytes,
             Some(BrainStamps {
-                body_digest: crate::mesh_fallback::constructed_body_digest(),
+                body_digest: crate::bot::rig::baked_body_digest(),
                 layout_digest: crate::bot::channel_layout_digest() ^ 0xdead_beef,
             }),
             21,
@@ -1140,7 +1140,7 @@ mod tests {
             ArchId::DEFAULT,
             bytes,
             Some(BrainStamps {
-                body_digest: crate::mesh_fallback::constructed_body_digest(),
+                body_digest: crate::bot::rig::baked_body_digest(),
                 layout_digest: crate::bot::channel_layout_digest(),
             }),
             21,

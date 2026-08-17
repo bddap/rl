@@ -67,12 +67,14 @@ impl std::fmt::Display for ArtifactKind {
 pub(crate) struct CheckpointEnvelope {
     pub(crate) arch: ArchId,
     pub(crate) payload: Vec<u8>,
-    /// Body identity the artifact was trained against ([`crate::mesh_fallback::
-    /// constructed_body_digest`]): `Some(0)` = the procedural fallback body, `Some(_)` =
-    /// a mesh-fitted body. `None` = a v1 brain from before the stamp existed
-    /// (bddap/rl#214) — resumed trust-on-first-use — or a paired kind, which never
-    /// carries one (the BRAIN is the body authority, as its arch tag is the arch
-    /// authority the paired artifacts are checked against).
+    /// Body identity the artifact was trained against
+    /// ([`crate::bot::rig::baked_body_digest`]). `Some(0)` = the DELETED procedural
+    /// fallback body (pre-rl#340-stage-10 `--allow-fallback-body` runs) — refuses
+    /// against the baked digest like any mismatch, which is correct: that policy is
+    /// not Sally. `None` = a v1 brain from before the stamp existed (bddap/rl#214)
+    /// — resumed trust-on-first-use — or a paired kind, which never carries one
+    /// (the BRAIN is the body authority, as its arch tag is the arch authority the
+    /// paired artifacts are checked against).
     pub(crate) body_digest: Option<u64>,
     /// The obs/action channel-layout identity the brain was trained against
     /// ([`crate::bot::channel_layout_digest`], bddap/rl#271). `None` = a pre-v4 brain
@@ -260,7 +262,7 @@ impl std::fmt::Display for EnvelopeError {
 /// brain is the identity authority they are checked against).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BrainStamps {
-    /// [`crate::mesh_fallback::constructed_body_digest`] (bddap/rl#214).
+    /// [`crate::bot::rig::baked_body_digest`] (bddap/rl#214).
     pub(crate) body_digest: u64,
     /// [`crate::bot::channel_layout_digest`] (bddap/rl#271).
     pub(crate) layout_digest: u64,

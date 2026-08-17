@@ -25,7 +25,7 @@ pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 /// Atomic (temp + fsync-rename), so a crash mid-write can't leave a torn `brain.bin`.
 ///
 /// The envelope is stamped with THIS process's constructed body digest
-/// ([`crate::mesh_fallback::constructed_body_digest`], bddap/rl#214) and channel-layout
+/// ([`crate::bot::rig::baked_body_digest`], bddap/rl#214) and channel-layout
 /// digest ([`crate::bot::channel_layout_digest`], bddap/rl#271) — read here, not taken
 /// as parameters, so no caller can stamp an identity the process didn't actually build;
 /// the resume checks ([`check_body_identity`], [`check_channel_layout`]) abort a
@@ -46,7 +46,7 @@ pub(crate) fn save_brain<B: Backend>(
         brain.arch(),
         bytes,
         Some(BrainStamps {
-            body_digest: crate::mesh_fallback::constructed_body_digest(),
+            body_digest: crate::bot::rig::baked_body_digest(),
             layout_digest: crate::bot::channel_layout_digest(),
         }),
         save_stamp,
@@ -179,7 +179,7 @@ fn check_stamp(checkpoint: Option<u64>, constructed: u64) -> Result<StampIdentit
 /// digest must never drive or train the body this process actually constructs if the two
 /// differ — that policy is not this crab. Pure over (checkpoint stamp, constructed
 /// digest) so the matrix is unit-testable; callers pass
-/// [`crate::mesh_fallback::constructed_body_digest`] and apply their refusal policy to
+/// [`crate::bot::rig::baked_body_digest`] and apply their refusal policy to
 /// the `Err` (the trainer aborts, inference refuses to arm).
 ///
 /// (The rl#20 stage-1 legacy shim that accepted bare-asset-digest stamps is GONE, per
@@ -777,7 +777,7 @@ mod tests {
         save_brain(&brain, &path, 11).unwrap();
 
         let loaded = load_brain_file::<TrainBackend>(&path, &device).unwrap();
-        let constructed = crate::mesh_fallback::constructed_body_digest();
+        let constructed = crate::bot::rig::baked_body_digest();
         assert_eq!(loaded.body_digest, Some(constructed));
         assert_eq!(loaded.save_stamp, Some(11), "the set stamp round-trips");
         assert_eq!(

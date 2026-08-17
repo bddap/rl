@@ -12,7 +12,7 @@ pub use collision::{
 
 pub use components::{
     CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint, CrabModelPath,
-    CrabRestPose, render_recipe,
+    CrabRestPose,
 };
 
 pub use joint_id::{

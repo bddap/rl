@@ -333,7 +333,7 @@ mod tests {
         let grid = steep_ramp();
         let mut world = World::new();
         let assets = CrabAssets {
-            recipe: crate::bot::rig::fallback_recipe(),
+            recipe: crate::bot::rig::baked_recipe(),
         };
         let position = grid.place(Vec2::ZERO, 0.0);
         let mut queue = CommandQueue::default();

@@ -149,11 +149,11 @@ pub fn parse_finite_f32(s: &str) -> Result<f32, String> {
 
 #[cfg(feature = "render")]
 impl RenderArgs {
-    /// The view `surface` boots in. With no usable canonical body, the flagless render
+    /// The view `surface` boots in. With no usable skin asset, the flagless render
     /// default is the collider wireframe, and the fallback is LOGGED (latched for
-    /// `surface`) — the render stays honest about what it is drawing, never a procedural
-    /// stand-in posing as Sally. That logging is why this is `resolve` and not a getter:
-    /// call it once, at the entrypoint.
+    /// `surface`) — the render stays honest about what it is drawing. Visual-only:
+    /// physics builds the baked body either way (rl#340 stage 10). That logging is
+    /// why this is `resolve` and not a getter: call it once, at the entrypoint.
     pub fn resolve(self, surface: mesh_fallback::Surface) -> BootView {
         let mesh_err = mesh_fallback::usable_model().as_ref().err();
         if let Some(reason) = mesh_err {

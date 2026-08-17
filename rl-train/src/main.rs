@@ -57,13 +57,6 @@ struct LearnArgs {
 
     #[arg(long, default_value_t = 10)]
     nice: i32,
-
-    /// DEV: train the procedural fallback body when no usable `sally.glb` resolves,
-    /// instead of refusing to start (bddap/rl#214). The checkpoints it writes carry
-    /// body digest 0 and will be REFUSED by every canonical-body surface — a policy
-    /// trained on the fallback is not Sally.
-    #[arg(long)]
-    allow_fallback_body: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -109,13 +102,6 @@ struct EvalArgs {
     /// training monitor plots.
     #[arg(long)]
     min_progress: Option<f32>,
-
-    /// DEV: judge on the procedural fallback body when no usable `sally.glb` resolves,
-    /// instead of refusing to start (bddap/rl#214). Only meaningful against a
-    /// checkpoint trained on the fallback (body digest 0) or an unstamped pre-#214
-    /// one; a Sally-stamped checkpoint still refuses (wrong body).
-    #[arg(long)]
-    allow_fallback_body: bool,
 }
 
 /// clap value-parser for `--arch`: delegates to the registry's `TryFrom<String>`, whose
@@ -144,24 +130,6 @@ fn parse_amplitude(s: &str) -> Result<f32, String> {
     }
 }
 
-/// The bddap/rl#214 body preflight, MANDATORY for every mode that builds a crab world
-/// (`learn`/`eval`/`--check-rest-colliders`): without it, they reached the body's SILENT
-/// fallback and trained, judged, or audited the procedural body as if it were Sally.
-/// The lib half logs the verdict (loud refusal / latched fallback error / positive body
-/// line). Placed on the subcommands, not in the lib entry points, so the glb-less lib
-/// tests (which call `headless_stack`/`run_eval` directly on the fallback body on
-/// purpose) stay hermetic.
-fn canonical_body(
-    context: &str,
-    allow_fallback: bool,
-) -> Result<crab_world::mesh_fallback::BodyGate, String> {
-    crab_world::mesh_fallback::require_canonical_body(context, allow_fallback).map_err(|_| {
-        format!(
-            "{context}: refusing to run on a non-canonical body (see the preflight verdict above)"
-        )
-    })
-}
-
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let _otel = otel::init("rl-train", cli.otel);
@@ -180,9 +148,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.command {
         Some(Command::Learn(l)) => {
-            let body_gate = canonical_body("learn", l.allow_fallback_body)?;
             training::inproc::run_learner(
-                body_gate,
                 &l.train,
                 l.arch,
                 training::inproc::default_workers(l.workers),
@@ -198,7 +164,6 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 }
 
 fn eval(e: EvalArgs) -> Result<ExitCode, String> {
-    let body_gate = canonical_body("eval", e.allow_fallback_body)?;
     // Gate mode judges the PINNED instrument only (rl#341 S1-3): a shorter episode,
     // a nearer ball, or a flattened arena would silently rescale the bar — e.g.
     // `--distance 1 --min-progress 0.3` passed a 24 m-chase gate on a 0.3 m twitch.
@@ -222,7 +187,6 @@ fn eval(e: EvalArgs) -> Result<ExitCode, String> {
     // progress would be the eval-side rl#214). Absent stays the legitimate
     // zero-action baseline below.
     let r = crab_world::eval::run_eval(
-        body_gate,
         &e.checkpoint.checkpoint_dir,
         e.ticks,
         distance,
@@ -295,10 +259,6 @@ fn eval(e: EvalArgs) -> Result<ExitCode, String> {
 /// / `verify-pivots`, bddap/rl#20.)
 fn dev_audit(dev: DevArgs) -> Result<ExitCode, String> {
     if dev.check_rest_colliders {
-        // The audit answers questions about SALLY's rest pose; on the fallback body it
-        // prints an identical-format report with unrelated numbers (rl#234 was first
-        // "measured" that way in a glb-less checkout). No fallback opt-in on purpose.
-        canonical_body("check-rest-colliders", false)?;
         return audit(bot::collider_check::run());
     }
 
