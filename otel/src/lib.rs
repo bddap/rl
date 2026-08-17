@@ -10,6 +10,11 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:4318";
 
+/// Target of the Sally flight-recorder batches (`crab_world::sally_track`, rl#332):
+/// OTLP-export-only data records — ~1 Hz of ~1 KB JSON that would be pure noise on
+/// stderr/journal, so the fmt layer drops them while the OTLP log layer ships them.
+pub const SALLY_TRACK_TARGET: &str = "sally_track";
+
 #[must_use = "telemetry stops and unflushed data is lost when the guard is dropped"]
 pub struct OtelGuard {
     logger_provider: Option<opentelemetry_sdk::logs::SdkLoggerProvider>,
@@ -48,8 +53,21 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
     // the LogTracer bridge itself. Do NOT also call `tracing_log::LogTracer::init()` here —
     // a pre-set logger makes those `.init()` calls PANIC (SetLoggerError), which took down
     // every binary at startup and broke the rl-release checkpoint gate (2026-07-02).
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    // The flight-recorder target rides on top of whatever RUST_LOG asks for: surfaces
+    // default to `warn`-ish filters (rl-demo pre-sets RUST_LOG), and a recorder that a
+    // quieter default silently disables is the gap rl#332 exists to close.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive(
+            format!("{SALLY_TRACK_TARGET}=info")
+                .parse()
+                .expect("static directive"),
+        );
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+            meta.target() != SALLY_TRACK_TARGET
+        }));
 
     let endpoint = resolve_endpoint(args.enabled);
     let Some(endpoint) = endpoint else {
