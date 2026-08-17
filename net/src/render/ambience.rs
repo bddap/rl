@@ -18,8 +18,10 @@
 //!
 //! Beds are CC0 recordings fetched from bddap-bot/rl-assets
 //! (scripts/fetch-ambience.sh; provenance in NOTICE) into the gitignored asset
-//! dir. An absent bed is a silent layer plus one warning, never an error — the
-//! sally.glb precedent — so plain checkouts and CI need no binaries.
+//! dir and packaged into every release by rl-release-build. A bed that fails to
+//! load goes through the game-wide missing-asset policy (rl#375): panic, unless
+//! the environment declares itself asset-less with RL_ALLOW_MISSING_ASSETS=1 —
+//! then the layer stays silent as before.
 
 use std::sync::Arc;
 
@@ -338,10 +340,13 @@ fn load_bed(def: &LayerDef) -> Arc<[f32]> {
             pcm.into()
         }
         Err(e) => {
-            tracing::warn!(
-                "ambient bed {} unavailable ({e}) — that layer stays silent (non-fatal). \
-                 Fetch the CC0 beds with scripts/fetch-ambience.sh.",
-                path.display()
+            // Absent OR unreadable/corrupt: either way the bytes a release must carry
+            // are not usable — same packaging-bug class, same chokepoint (rl#375).
+            crab_world::assets::missing_asset(
+                &path,
+                &format!("ambient bed unusable: {e}"),
+                "rl-release-build packages assets/ambience/ at release time; a dev \
+                 checkout fetches the CC0 beds with scripts/fetch-ambience.sh.",
             );
             Arc::from([])
         }
@@ -366,7 +371,8 @@ pub(super) fn spawn_ambience(
     mut assets: ResMut<Assets<AmbienceMix>>,
     channel: Res<AmbienceChannel>,
 ) {
-    // No beds fetched → nothing to play; the load-time warning already said why.
+    // Only reachable under RL_ALLOW_MISSING_ASSETS=1 (load_bed panics otherwise):
+    // no beds → nothing to play; the load-time log already said why.
     if channel.beds.iter().all(|b| b.is_empty()) {
         return;
     }
