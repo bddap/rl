@@ -659,7 +659,7 @@ mod tests {
         assert!(tail < 0.01, "tail still hot at cutoff: {tail}");
     }
 
-    /// Not a test — the rl#359 evidence generator: renders a real chord entry
+    /// Not a test — the rl#359/#369 evidence generator: renders a real chord entry
     /// (every press through the live scheme, then the resolution) to WAV, at frame
     /// timings matching the fp-screenshot chord script, for muxing with the frame
     /// capture. From the REPO root (cargo test's cwd is the crate dir):
@@ -675,7 +675,7 @@ mod tests {
         // (name, taps at 60 fps frame numbers, release frame, registered?).
         // `v^^^` = GroundNightBloom (a real GCR code); `>>>` is unregistered.
         type Clip = (&'static str, &'static [(u64, ChordDir)], u64, bool);
-        let clips: [Clip; 2] = [
+        let clips: [Clip; 3] = [
             (
                 "code-accepted-bloom",
                 &[(60, Down), (105, Up), (150, Up), (195, Up)],
@@ -686,6 +686,36 @@ mod tests {
                 "code-unknown",
                 &[(60, Right), (105, Right), (150, Right)],
                 210,
+                false,
+            ),
+            // rl#369: free musical play — a 20-tap mash, well past the deleted
+            // MAX_CHORD_LEN=8 poison guard; every tap sounds and the release is
+            // just an unknown cadence, never silence.
+            (
+                "free-play-mash",
+                &[
+                    (30, Up),
+                    (39, Right),
+                    (48, Up),
+                    (57, Down),
+                    (66, Left),
+                    (75, Down),
+                    (84, Up),
+                    (93, Up),
+                    (102, Right),
+                    (111, Down),
+                    (120, Left),
+                    (129, Left),
+                    (138, Up),
+                    (147, Right),
+                    (156, Down),
+                    (165, Up),
+                    (174, Down),
+                    (183, Left),
+                    (192, Up),
+                    (201, Right),
+                ],
+                240,
                 false,
             ),
         ];
