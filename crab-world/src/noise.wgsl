@@ -33,13 +33,19 @@ fn rand01(h: u32) -> f32 {
     return f32(h & 0xffffffu) / f32(0x1000000u);
 }
 
-// Value noise in [-1, 1]. Quintic (C2) interpolant: smoothstep's discontinuous
-// second derivative creases along every lattice edge, and the rl#324 close-up
-// octaves are large enough on screen to read those creases as a woven grid.
+// The quintic (C2) lattice interpolant, shared by vnoise and gnoise:
+// smoothstep's discontinuous second derivative creases along every lattice
+// edge, and the rl#324 close-up octaves are large enough on screen to read
+// those creases as a woven grid.
+fn quintic(f: vec2<f32>) -> vec2<f32> {
+    return f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+}
+
+// Value noise in [-1, 1].
 fn vnoise(p: vec2<f32>, seed: u32) -> f32 {
     let i = vec2<i32>(floor(p));
     let f = fract(p);
-    let w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let w = quintic(f);
     let a = rand01(hash2(i, seed));
     let b = rand01(hash2(i + vec2(1, 0), seed));
     let c = rand01(hash2(i + vec2(0, 1), seed));
@@ -47,21 +53,49 @@ fn vnoise(p: vec2<f32>, seed: u32) -> f32 {
     return 2.0 * mix(mix(a, b, w.x), mix(c, d, w.x), w.y) - 1.0;
 }
 
+// Hash → unit gradient, uniform over the circle (16 hash bits of angle).
+fn grad2(h: u32) -> vec2<f32> {
+    let a = f32(h & 0xffffu) * 9.5873799e-5; // 2π / 65536
+    return vec2(cos(a), sin(a));
+}
+
+// Gradient (Perlin-class) noise: same lattice, hash family, and quintic fade as
+// vnoise, RMS-matched to it (×2.1; rare tails pass ±1). Value noise puts one
+// HEIGHT per cell and interpolates, so its derivative concentrates energy at
+// cell scale — a normal built from it shows the lattice as cells with ramps
+// between them (rl#373). Gradient noise puts one SLOPE per cell (value 0 at
+// every corner), so derivative energy is spread across the cell: the
+// rl::ground::detail descents sample HERE. vnoise stays alive alongside for
+// the field/threshold/vein uses — gradient noise is zero at every lattice
+// point, so a threshold or zero-set (vein) of it would inherit exactly the
+// lattice structure this function exists to remove.
+fn gnoise(p: vec2<f32>, seed: u32) -> f32 {
+    let i = vec2<i32>(floor(p));
+    let f = fract(p);
+    let w = quintic(f);
+    let a = dot(grad2(hash2(i, seed)), f);
+    let b = dot(grad2(hash2(i + vec2(1, 0), seed)), f - vec2(1.0, 0.0));
+    let c = dot(grad2(hash2(i + vec2(0, 1), seed)), f - vec2(0.0, 1.0));
+    let d = dot(grad2(hash2(i + vec2(1, 1), seed)), f - vec2(1.0, 1.0));
+    return 2.1 * mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
+}
+
 // 1 while the octave's wavelength spans many pixels, 0 once it is subpixel.
 fn footprint_fade(wavelength: f32, fw: f32) -> f32 {
     return 1.0 - smoothstep(wavelength * 0.15, wavelength * 0.5, fw);
 }
 
-// The adaptive-descent fade (rl#324): wider margins than footprint_fade, so the
-// finest octave the descent keeps still spans ~5+ pixels per wavelength. Letting
-// octaves ride down toward Nyquist (footprint_fade's window) turns the fine tail
-// into per-pixel salt noise — grain must stay coarse enough to read as surface.
-// Window tuning (rl#353 stage 7): an 8 px floor caps the finest visible grain
-// on foot at ~4 cm, which reads as low-frequency up close — this window (2.5×
-// edge ratio) trades down to ~5.3 px, a third-finer near field, still above
-// the salt line.
+// The adaptive-descent fade (rl#324). Edge-ratio ≥3 is load-bearing (rl#373):
+// the descents step wavelengths by thirds, so a window narrower than 3× leaves
+// a plateau between one octave's death and the next-coarser's fade start —
+// each dropout then reads as its own concentric amplitude ring in the normals.
+// At 4× (0.07 → 0.28) adjacent windows overlap and the rolloff is continuous.
+// The upper edge rides nearer Nyquist than the old 5.3 px (dead at ~3.6 px per
+// wavelength): some distant shimmer, deliberately preferred over visible LOD
+// rings (rl#373). The 0.07 lower edge holds the near field within ~7% of
+// rl#353 stage 7's (full strength ≥14.3 px per wavelength vs its 13.3).
 fn grain_fade(wavelength: f32, fw: f32) -> f32 {
-    return 1.0 - smoothstep(wavelength * 0.075, wavelength * 0.1875, fw);
+    return 1.0 - smoothstep(wavelength * 0.07, wavelength * 0.28, fw);
 }
 
 // Per-octave lattice rotation, 55.62° (90°/φ): value noise's lattice is
