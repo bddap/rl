@@ -129,11 +129,11 @@ fn carapace_cuboid(recipe: &RigRecipe, hub: Vec3) -> RestShape {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bot::rig::fallback_recipe;
+    use crate::bot::rig::baked_recipe;
 
     #[test]
     fn recipe_silhouette_covers_all_links_plus_carapace() {
-        let recipe = fallback_recipe();
+        let recipe = baked_recipe();
         let sil = recipe_silhouette(&recipe);
         assert_eq!(
             sil.limbs.len(),

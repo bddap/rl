@@ -2522,44 +2522,29 @@ mod tests {
 
     /// Pins [`MIN_CRAB_SPAWN_DISTANCE`] to the crab's actual body (rl#236). The world
     /// runs at rig scale (rl#256), so rig meters ARE world meters; [`CRAB_STATURE`] is
-    /// pinned to every rig here. Against EVERY rig she can wear (the procedural fallback
-    /// always; the mesh-fitted recipe when sally.glb resolves): spawns clear the carapace
-    /// footprint's corner reach, so no spawn materializes under her body with her claws
-    /// ([`ClawPose`] — the ONE down mechanism) already overhead.
+    /// pinned to the one baked rig every process builds (rl#340 stage 10): spawns clear
+    /// the carapace footprint's corner reach, so no spawn materializes under her body
+    /// with her claws ([`ClawPose`] — the ONE down mechanism) already overhead.
     #[test]
     fn spawn_clearance_matches_crab_body() {
-        use crab_world::bot::rig::{RestShape, fallback_recipe, recipe_silhouette};
+        use crab_world::bot::rig::{RestShape, baked_recipe, recipe_silhouette};
 
-        let mut recipes = vec![("fallback", fallback_recipe())];
-        match crab_world::mesh_fallback::usable_model() {
-            Ok(u) => recipes.push(("fitted", u.recipe.clone())),
-            // No asset on this host is a legitimate degrade (sally.glb is not in git);
-            // an asset that RESOLVES but can't be used is a breakage this test must not
-            // paper over.
-            Err(e) => assert!(
-                crab_world::mesh_fallback::model_path().is_none(),
-                "sally.glb resolves but is unusable: {e}"
-            ),
-        }
-
-        for (name, recipe) in &recipes {
-            let sil = recipe_silhouette(recipe);
-            let RestShape::Cuboid { half, .. } = sil.carapace else {
-                panic!("the carapace silhouette is a cuboid");
-            };
-            // One frame (rl#256): the rig IS world-scale. Pin the nominal stature to
-            // every wearable rig so the derived human constants stay honest.
-            assert!(
-                (sil.natural_height() - CRAB_STATURE).abs() / CRAB_STATURE < 0.01,
-                "{name}: natural height {} strays >1% from CRAB_STATURE {CRAB_STATURE}",
-                sil.natural_height()
-            );
-            let corner_m = half.x.hypot(half.z);
-            assert!(
-                MIN_CRAB_SPAWN_DISTANCE_M > corner_m,
-                "{name}: spawn clearance must exceed the carapace's corner reach {corner_m:.2} m"
-            );
-        }
+        let sil = recipe_silhouette(&baked_recipe());
+        let RestShape::Cuboid { half, .. } = sil.carapace else {
+            panic!("the carapace silhouette is a cuboid");
+        };
+        // One frame (rl#256): the rig IS world-scale. Pin the nominal stature to
+        // the rig so the derived human constants stay honest.
+        assert!(
+            (sil.natural_height() - CRAB_STATURE).abs() / CRAB_STATURE < 0.01,
+            "natural height {} strays >1% from CRAB_STATURE {CRAB_STATURE}",
+            sil.natural_height()
+        );
+        let corner_m = half.x.hypot(half.z);
+        assert!(
+            MIN_CRAB_SPAWN_DISTANCE_M > corner_m,
+            "spawn clearance must exceed the carapace's corner reach {corner_m:.2} m"
+        );
     }
 
     #[test]

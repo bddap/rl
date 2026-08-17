@@ -76,7 +76,7 @@ pub fn may_arm_crabs(sync: Option<SyncVerdict>) -> bool {
 /// constructor BY CONSTRUCTION — a launcher cannot hand-roll a dishonest stamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncStamp {
-    /// [`crab_world::mesh_fallback::constructed_body_digest`] — 0 = no usable model.
+    /// [`crab_world::bot::rig::baked_body_digest`] (rl#340 stage 10: every peer constructs the baked body).
     pub(crate) body_digest: u64,
     /// [`crab_world::bot::body::constructed_plant_digest`] — never legitimately 0.
     pub(crate) plant_digest: u64,
@@ -101,7 +101,7 @@ impl SyncStamp {
     /// plants genuinely agree — that refusal is the rl#286 guard, not a bug.
     pub fn local(crab_count: u8) -> Self {
         Self {
-            body_digest: crab_world::mesh_fallback::constructed_body_digest(),
+            body_digest: crab_world::bot::rig::baked_body_digest(),
             plant_digest: crab_world::bot::body::constructed_plant_digest(),
             crab_count,
         }

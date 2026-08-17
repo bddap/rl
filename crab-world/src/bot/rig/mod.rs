@@ -4,7 +4,6 @@ use crate::bot::body::CrabJointId;
 
 mod baked;
 mod colliders;
-mod fallback;
 mod recipe;
 
 pub use baked::{BAKED_ASSET_DIGEST, baked_recipe};
@@ -12,16 +11,25 @@ pub use colliders::{
     CrabSilhouette, RestCollider, RestShape, cuboid_corners, link_rest_shape, recipe_silhouette,
     rest_colliders,
 };
-pub use fallback::fallback_recipe;
 pub(crate) use recipe::link_world_origins;
 pub use recipe::{TRUNK_BONES, arc_to, build_recipe, part_for_bone, parts_adjacent};
 
-/// The full digest of THE baked Sally body this binary carries: the asset-byte digest
-/// chained with the committed [`baked_recipe`] table's [`RigRecipe::digest`]. Both
-/// inputs are compiled constants — no asset on disk needed — which is what lets the
-/// rl#20 legacy-stamp pin and the golden test check it model-free. Whether a process
-/// ADVERTISES it is [`crate::mesh_fallback::constructed_body_digest`]'s verdict-gated
-/// call.
+/// The full digest of THE baked Sally body every process constructs (rl#340 stage
+/// 10: there is no other body): the asset-byte digest chained with the committed
+/// [`baked_recipe`] table's [`RigRecipe::digest`]. Both inputs are compiled
+/// constants — no asset on disk needed — which is what lets the rl#20 legacy-stamp
+/// pin and the golden test check it model-free. This is the checkpoint
+/// body-identity stamp (bddap/rl#214) AND the per-peer collider digest the MP
+/// membership handshake advertises (rl#100/rl#114).
+///
+/// WHY both halves (bddap/rl#20 stage 1): the asset digest alone certified the
+/// render mesh but NOT the body — a `baked.rs` regen (a re-fit of the same
+/// sally.glb) changes every collider under an unchanged asset digest, which is a
+/// new MDP no live checkpoint can drive (rl#277). Folding the table's own
+/// bit-exact digest in makes a table move refuse loudly at trainer resume, eval,
+/// demo arm, and the MP handshake. Remaining caveat: the binary axis beyond the
+/// table stays unguarded — spawn/joint CODE changes still alter the body under an
+/// unchanged digest.
 pub fn baked_body_digest() -> u64 {
     static D: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *D.get_or_init(|| {
@@ -29,6 +37,20 @@ pub fn baked_body_digest() -> u64 {
         h.write(&BAKED_ASSET_DIGEST.to_le_bytes());
         h.write(&baked_recipe().digest().to_le_bytes());
         h.finish()
+    })
+}
+
+/// Natural rest-pose height of the crab body (arena m) — THE scale bridge between
+/// her rig and any sized frame: net's arena→sim render seam and the eval's rl#266
+/// charge-speed guard both divide by this one measurement, so the two can never
+/// disagree on what "one crab height" is. `None` when the silhouette is degenerate
+/// — callers must treat that as unmeasurable, never as scale 1.0 (an identity
+/// conversion silently re-opens the rl#254 creep).
+pub fn natural_body_height() -> Option<f32> {
+    static H: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *H.get_or_init(|| {
+        let h = recipe_silhouette(&baked_recipe()).natural_height();
+        (h > 1e-4).then_some(h)
     })
 }
 
@@ -46,14 +68,12 @@ impl PartId {
 }
 
 /// A skeleton the rig recipe can be derived from: bone origins for topology and
-/// anchors, a trunk vertex cloud for the carapace box. Implemented by the procedural
-/// [`fallback::FallbackModel`] here and by the offline `meshfit` tool's glTF loader —
-/// the runtime itself never reads mesh data for physics; it consumes
-/// [`baked_recipe`] (bddap/rl#20).
+/// anchors, a trunk vertex cloud for the carapace box. Implemented by the offline
+/// `meshfit` tool's glTF loader — the runtime itself never reads mesh data for
+/// physics; it consumes [`baked_recipe`] (bddap/rl#20).
 pub trait BindSource {
     fn bone_origin(&self, name: &str) -> Option<Vec3>;
-    /// The vertex cloud the carapace box is sized from ([`TRUNK_BONES`] flesh on a
-    /// real model, synthetic box corners on the fallback).
+    /// The vertex cloud the carapace box is sized from ([`TRUNK_BONES`] flesh).
     fn trunk_vertices(&self) -> Vec<Vec3>;
     fn radius_hint(&self, _part: PartId) -> Option<f32> {
         None
@@ -136,7 +156,7 @@ impl RigRecipe {
     /// FNV-1a/64 over EVERY field of the recipe, bit-exact (f32s hashed as their raw
     /// bits, so any committed-table change — however small — is a different digest).
     /// This is the collider-geometry half of
-    /// [`crate::mesh_fallback::constructed_body_digest`] (bddap/rl#20 stage 1): a
+    /// [`crate::bot::rig::baked_body_digest`] (bddap/rl#20 stage 1): a
     /// `baked.rs` regen changes the body under an UNCHANGED asset digest, and this is
     /// what makes that change refuse loudly at every checkpoint load and MP handshake.
     /// Densities and joint anchors/axes are included deliberately — mass distribution

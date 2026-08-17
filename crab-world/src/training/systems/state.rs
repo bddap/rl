@@ -382,23 +382,9 @@ fn warm_start(
             // policy — abort, same class as the arch refusals above. A pre-stamp
             // checkpoint is trusted on first use; `save_checkpoint`'s next write
             // stamps it (the one-time migration, never an invalidation).
-            let constructed = crate::mesh_fallback::constructed_body_digest();
+            let constructed = crate::bot::rig::baked_body_digest();
             match check_body_identity(body_digest, constructed) {
                 Ok(StampIdentity::Match) => {}
-                // TOFU exists to grandfather the fleet's live pre-stamp checkpoints
-                // ONTO SALLY — a pre-stamp checkpoint is almost certainly
-                // Sally-trained, so trusting it onto the FALLBACK body
-                // (--allow-fallback-body on a mesh-less box) would retrain it wrong
-                // AND stamp it `0` on the next save, irreversibly relabelling a
-                // Sally lineage as fallback-trained. Fallback runs get a fresh dir.
-                Ok(StampIdentity::TrustOnFirstUse) if constructed == 0 => panic!(
-                    "REFUSING to train over checkpoint dir {}: this run constructs \
-                     the procedural fallback body, but the checkpoint predates \
-                     body-identity stamps (bddap/rl#214) and is presumably \
-                     Sally-trained. Point --checkpoint-dir at a fresh dir for a \
-                     fallback run.",
-                    config.checkpoint.checkpoint_dir.display()
-                ),
                 Ok(StampIdentity::TrustOnFirstUse) => warn!(
                     "checkpoint at {} predates body-identity stamping (bddap/rl#214) — \
                      trusting on first use; the next save stamps body digest \

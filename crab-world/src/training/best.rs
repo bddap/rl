@@ -8,7 +8,6 @@ use super::checkpoint::{
     TICK_WATERMARK_FILENAME,
 };
 use crate::eval::{DEFAULT_EVAL_TICKS, DEFAULT_TARGET_DISTANCE_M, EvalReport};
-use crate::mesh_fallback::BodyGate;
 
 const BEST_SUBDIR: &str = "best";
 
@@ -148,7 +147,7 @@ pub(crate) struct BestKeeper {
 }
 
 impl BestKeeper {
-    pub(crate) fn new(checkpoint_dir: &Path, body_gate: BodyGate) -> Self {
+    pub(crate) fn new(checkpoint_dir: &Path) -> Self {
         Self::with_evaluator(
             checkpoint_dir,
             EVAL_PERIOD,
@@ -158,13 +157,7 @@ impl BestKeeper {
                 // in-process only because the trainer already ran the identical
                 // thread-pool pin at boot (`init_process_pools`), making run_eval's
                 // own pin a pure read.
-                crate::eval::run_eval(
-                    body_gate,
-                    dir,
-                    DEFAULT_EVAL_TICKS,
-                    DEFAULT_TARGET_DISTANCE_M,
-                    1.0,
-                )
+                crate::eval::run_eval(dir, DEFAULT_EVAL_TICKS, DEFAULT_TARGET_DISTANCE_M, 1.0)
             }),
         )
     }

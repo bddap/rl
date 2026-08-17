@@ -299,13 +299,6 @@ fn crab_settles_quietly_at_rest() {
         (v.angular.length(), t.translation.y)
     }
 
-    // Keyed on the VERDICT, not path presence: a present-but-digest-mismatched glb
-    // constructs the FALLBACK body (rl#20 Phase 2), and these are Sally assertions.
-    if crate::mesh_fallback::usable_model().is_err() {
-        eprintln!("crab_settles_quietly_at_rest: no usable model — skipping (fallback body)");
-        return;
-    }
-
     let mut app = flat_headless_app();
     tick(&mut app, 1);
 
@@ -362,11 +355,6 @@ fn crab_settles_quietly_at_rest() {
 fn claws_quiet_at_rest() {
     use bevy_rapier3d::prelude::Velocity;
 
-    if crate::mesh_fallback::usable_model().is_err() {
-        eprintln!("claws_quiet_at_rest: no usable model — skipping (fallback body)");
-        return;
-    }
-
     let mut app = flat_headless_app();
     tick(&mut app, 1);
     tick(&mut app, 320);
@@ -409,60 +397,6 @@ fn claws_quiet_at_rest() {
          shoulder, shell on leg bases; collision-group changes that remove that \
          support make this 3-4x worse, rl#109)",
         super::collider_check::QUIET_ANG_RADPS
-    );
-}
-
-#[test]
-fn fallback_body_settles_without_blowing_up() {
-    use super::body::{CrabBodyPart, CrabCarapace};
-    use bevy_rapier3d::prelude::Velocity;
-
-    if crate::mesh_fallback::usable_model().is_ok() {
-        eprintln!(
-            "fallback_body_settles_without_blowing_up: usable model present — skipping (not the fallback body)"
-        );
-        return;
-    }
-
-    let mut app = flat_headless_app();
-    tick(&mut app, 1);
-    tick(&mut app, 320);
-
-    let mut parts_q = app
-        .world_mut()
-        .query_filtered::<(&Transform, &Velocity), With<CrabBodyPart>>();
-    let mut n = 0;
-    for (t, v) in parts_q.iter(app.world()) {
-        assert!(
-            t.translation.is_finite() && t.rotation.is_finite(),
-            "fallback part pose went non-finite at rest: {t:?}"
-        );
-        assert!(
-            v.linear.is_finite() && v.angular.is_finite(),
-            "fallback part velocity went non-finite at rest: {v:?}"
-        );
-        assert!(
-            v.linear.length() < 5.0 && v.angular.length() < 50.0,
-            "fallback part still moving fast at rest: lin {:.2} m/s ang {:.2} rad/s",
-            v.linear.length(),
-            v.angular.length()
-        );
-        n += 1;
-    }
-    assert!(n >= 30, "fallback crab failed to spawn its parts (got {n})");
-
-    let mut car_q = app
-        .world_mut()
-        .query_filtered::<&Transform, With<CrabCarapace>>();
-    let car_y = car_q
-        .iter(app.world())
-        .next()
-        .expect("carapace")
-        .translation
-        .y;
-    assert!(
-        (0.0..2.0).contains(&car_y),
-        "fallback carapace at y={car_y:.2} — sank through the floor or launched"
     );
 }
 
@@ -918,7 +852,7 @@ fn scripted_flail_gait_pace() {
     }
     let dist = (carapace_xz(&mut app) - start).length();
     let secs = ticks as f32 / 64.0;
-    let height = crate::mesh_fallback::natural_body_height().unwrap_or(f32::NAN);
+    let height = crate::bot::rig::natural_body_height().unwrap_or(f32::NAN);
     println!(
         "SCRIPTED_FLAIL dist={dist:.3} m over {secs:.1} s -> {:.4} m/s = {:.4} heights/s (h={height:.4})",
         dist / secs,

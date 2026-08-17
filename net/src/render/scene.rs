@@ -148,13 +148,7 @@ pub(super) fn spawn_world(
                 CrabAvatar(idx),
             ))
             .id();
-        spawn_crab_silhouette(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            crab_root,
-            have_model,
-        );
+        spawn_crab_silhouette(&mut commands, &mut meshes, &mut materials, crab_root);
     }
 }
 
@@ -209,12 +203,10 @@ fn spawn_crab_silhouette(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     crab_root: Entity,
-    have_model: bool,
 ) {
     use crab_world::bot::rig::RestShape;
 
-    let sil =
-        crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe(have_model));
+    let sil = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::rig::baked_recipe());
     let shapes = || sil.shapes();
 
     let shape_mid = |s: &RestShape| match *s {
@@ -261,10 +253,10 @@ fn spawn_crab_silhouette(
             }
         }
     }
-    let Some(_h) = crab_world::mesh_fallback::natural_body_height() else {
+    let Some(_h) = crab_world::bot::rig::natural_body_height() else {
         unreachable!(
-            "crab silhouette: render_recipe yielded a degenerate (zero natural-height) crab \
-             — the collider recipe is broken"
+            "crab silhouette: the baked recipe yielded a degenerate (zero natural-height) crab \
+             — the collider table is broken"
         );
     };
     let origin = Vec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5);

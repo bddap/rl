@@ -572,7 +572,7 @@ impl EvalReport {
             return None;
         }
         let pace = self.pace.best_sustained_pace_m_per_s();
-        let height = crate::mesh_fallback::natural_body_height()?;
+        let height = crate::bot::rig::natural_body_height()?;
         (pace > 0.0).then(|| pace / height)
     }
 
@@ -724,7 +724,6 @@ impl EvalState {
 }
 
 pub fn run_eval(
-    _body_gate: crate::mesh_fallback::BodyGate,
     checkpoint_dir: &Path,
     active_ticks: u64,
     target_distance: f32,
@@ -1414,7 +1413,7 @@ mod tests {
     /// spurious drift.
     #[test]
     fn charge_speed_guard_measures_and_refuses() {
-        let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");
+        let h = crate::bot::rig::natural_body_height().expect("rig height measures");
         let fast = CRAB_CHARGE_SPEED_HEIGHTS_PER_S * h * 1.5;
 
         let r = paced_report(true, PACE_PROBE_DISTANCE_M, fast);
@@ -1470,7 +1469,7 @@ mod tests {
     /// the probe ball moves farther BEFORE this fails, never after.
     #[test]
     fn charge_speed_guard_keeps_saturation_headroom() {
-        let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");
+        let h = crate::bot::rig::natural_body_height().expect("rig height measures");
         let ceiling_heights_per_s = PACE_PROBE_DISTANCE_M / PACE_WINDOW_MIN_S / h;
         assert!(
             ceiling_heights_per_s
@@ -1635,7 +1634,7 @@ mod tests {
         }
         // Within-horizon arrival at the pinned pace (flat-ground bound): the far
         // ball must be reachable inside one episode with real margin.
-        let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");
+        let h = crate::bot::rig::natural_body_height().expect("rig height measures");
         let flat_traverse = CRAB_CHARGE_SPEED_HEIGHTS_PER_S * h * (DEFAULT_EVAL_TICKS as f32)
             / crate::physics::PHYSICS_HZ as f32;
         assert!(
@@ -1867,16 +1866,8 @@ mod tests {
         // checkpoint dir looks like before the first save.
         crate::bot::body::record_plant(&dir).unwrap();
 
-        // Explicit, greppable test-only opt-in: this eval deliberately runs whatever
-        // body the test env constructs (usually the fallback — no sally.glb in CI).
-        let r = run_eval(
-            crate::mesh_fallback::BodyGate::FallbackAllowed,
-            &dir,
-            200,
-            DEFAULT_TARGET_DISTANCE_M,
-            1.0,
-        )
-        .expect("an absent checkpoint is the legitimate baseline, never a refusal");
+        let r = run_eval(&dir, 200, DEFAULT_TARGET_DISTANCE_M, 1.0)
+            .expect("an absent checkpoint is the legitimate baseline, never a refusal");
 
         assert!(!r.policy_loaded, "an empty dir loads no policy (rest pose)");
         assert_eq!(r.far.pairs.len(), EVAL_PAIRS);

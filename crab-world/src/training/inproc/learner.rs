@@ -246,12 +246,7 @@ fn log_bearing_reach(window: &[(u64, u64); crate::eval::EVAL_BEARINGS]) {
 /// than a learner with no update path. (crab-world builds without `wgpu` for the render
 /// bins, which only do CPU inference and never call this.)
 ///
-/// `body_gate` is the PROOF the bddap/rl#214 body preflight ran
-/// ([`crate::mesh_fallback::require_canonical_body`]), required here so a new entry
-/// point can't build training worlds while silently on the fallback body; the
-/// best-keeper carries it into its periodic chase-evals.
 pub fn run_learner(
-    body_gate: crate::mesh_fallback::BodyGate,
     config: &TrainConfig,
     requested_arch: Option<ArchId>,
     k: usize,
@@ -367,7 +362,7 @@ pub fn run_learner(
     // progress, so a collapse stays confined to `<ckpt>/` (the trainer resumes from it)
     // while the demo/release — which mirror `best/` — hold the best-by-THE-metric gait.
     // Resumes the running bar from the sidecar.
-    let mut best_keeper = crate::training::best::BestKeeper::new(&checkpoint_dir, body_gate);
+    let mut best_keeper = crate::training::best::BestKeeper::new(&checkpoint_dir);
 
     let compute_threads = bevy::tasks::ComputeTaskPool::get().thread_num();
     eprintln!(

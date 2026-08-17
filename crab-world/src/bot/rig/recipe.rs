@@ -407,7 +407,7 @@ fn carapace_box(model: &impl BindSource, center: Vec3) -> (Vec3, Vec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bot::rig::{baked_recipe, fallback_recipe};
+    use crate::bot::rig::baked_recipe;
 
     // (The shoulder-upswing clearance check lives in the offline `meshfit` tool's
     // tests: the honest bound swings the skinned FLESH clouds, which need the model —
@@ -444,40 +444,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    /// The baked table and the procedural fallback must enumerate the SAME links
-    /// (count, bone, actuated joint, parent): the RL obs/action layout and the skin
-    /// mapping key off that sequence, so a fork would silently re-layout the policy
-    /// or mis-route skin. Model-free — both recipes are in the binary.
-    #[test]
-    fn baked_and_fallback_share_link_topology() {
-        let baked = baked_recipe();
-        let fallback = fallback_recipe();
-        assert_eq!(
-            baked.links.len(),
-            fallback.links.len(),
-            "baked ({}) and fallback ({}) disagree on link count — the rig forked",
-            baked.links.len(),
-            fallback.links.len()
-        );
-        for (i, (b, h)) in baked.links.iter().zip(&fallback.links).enumerate() {
-            assert_eq!(
-                b.bone, h.bone,
-                "link {i}: bone baked={} fallback={}",
-                b.bone, h.bone
-            );
-            assert_eq!(
-                b.actuated, h.actuated,
-                "link {i} ({}): actuated joint baked={:?} fallback={:?}",
-                b.bone, b.actuated, h.actuated
-            );
-            assert_eq!(
-                b.parent, h.parent,
-                "link {i} ({}): parent baked={:?} fallback={:?}",
-                b.bone, b.parent, h.parent
-            );
         }
     }
 

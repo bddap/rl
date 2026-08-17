@@ -299,7 +299,7 @@ fn parse_plant(text: &str) -> Result<Plant, String> {
 }
 
 /// The effective-plant digest the MP membership handshake advertises (rl#286),
-/// the world-identity sibling of [`crate::mesh_fallback::constructed_body_digest`]:
+/// the world-identity sibling of [`crate::bot::rig::baked_body_digest`]:
 /// arena tag, the terrain bake's byte digest when that arena stands on one, and the
 /// per-joint friction caps and damper coefficients the solver will actually run.
 /// Peers whose digests differ

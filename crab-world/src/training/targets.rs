@@ -276,46 +276,42 @@ mod tests {
     /// tips can already touch under-footprint points, the close-disc curriculum
     /// (rl#250) degenerates back to re-seed-everything and under-body touch is
     /// untrainable. Planar clearance bounds the 3D distance from below, so no
-    /// settled-pose y is needed. Checks every recipe buildable on this host.
+    /// settled-pose y is needed. Checks the one body every process builds (rl#340
+    /// stage 10).
     /// Pins the bind pose only; tilted spawns and post-settle drift are
     /// backstopped at runtime by `pre_touched_target`'s re-seed.
     #[test]
     fn reach_radius_is_finer_than_the_crab() {
         use crate::bot::body::CrabJointId;
-        use crate::bot::rig::{fallback_recipe, link_world_origins};
+        use crate::bot::rig::{baked_recipe, link_world_origins};
 
-        let mut recipes = vec![("fallback", fallback_recipe())];
-        if let Ok(u) = crate::mesh_fallback::usable_model() {
-            recipes.push(("fitted", u.recipe.clone()));
-        }
-        for (name, recipe) in &recipes {
-            let inscribed = recipe.carapace_half.x.min(recipe.carapace_half.z);
-            assert!(
-                REACH_RADIUS < inscribed,
-                "{name}: REACH_RADIUS {REACH_RADIUS} m out-reaches the carapace's inscribed \
-                 footprint radius {inscribed} m — touch is not finer than the crab"
-            );
+        let recipe = baked_recipe();
+        let inscribed = recipe.carapace_half.x.min(recipe.carapace_half.z);
+        assert!(
+            REACH_RADIUS < inscribed,
+            "REACH_RADIUS {REACH_RADIUS} m out-reaches the carapace's inscribed \
+             footprint radius {inscribed} m — touch is not finer than the crab"
+        );
 
-            let origins = link_world_origins(&recipe.links, recipe.hub_bind_world);
-            let footprint_center = recipe.hub_bind_world + recipe.carapace_offset;
-            let mut tips = 0usize;
-            for (link, &tip) in recipe.links.iter().zip(&origins) {
-                if !matches!(link.actuated, Some(CrabJointId::ClawPincer(_))) {
-                    continue;
-                }
-                tips += 1;
-                let dx = ((tip.x - footprint_center.x).abs() - recipe.carapace_half.x).max(0.0);
-                let dz = ((tip.z - footprint_center.z).abs() - recipe.carapace_half.z).max(0.0);
-                let clearance = dx.hypot(dz);
-                assert!(
-                    clearance > REACH_RADIUS,
-                    "{name}: rest claw tip {tip:?} clears the carapace footprint by only \
-                     {clearance} m ≤ REACH_RADIUS {REACH_RADIUS} m — the rest pose would \
-                     auto-touch under-carapace targets"
-                );
+        let origins = link_world_origins(&recipe.links, recipe.hub_bind_world);
+        let footprint_center = recipe.hub_bind_world + recipe.carapace_offset;
+        let mut tips = 0usize;
+        for (link, &tip) in recipe.links.iter().zip(&origins) {
+            if !matches!(link.actuated, Some(CrabJointId::ClawPincer(_))) {
+                continue;
             }
-            assert_eq!(tips, 2, "{name}: two claw-tip links measure the grab");
+            tips += 1;
+            let dx = ((tip.x - footprint_center.x).abs() - recipe.carapace_half.x).max(0.0);
+            let dz = ((tip.z - footprint_center.z).abs() - recipe.carapace_half.z).max(0.0);
+            let clearance = dx.hypot(dz);
+            assert!(
+                clearance > REACH_RADIUS,
+                "rest claw tip {tip:?} clears the carapace footprint by only \
+                 {clearance} m ≤ REACH_RADIUS {REACH_RADIUS} m — the rest pose would \
+                 auto-touch under-carapace targets"
+            );
         }
+        assert_eq!(tips, 2, "two claw-tip links measure the grab");
     }
 
     #[test]

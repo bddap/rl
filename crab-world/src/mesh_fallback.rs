@@ -1,4 +1,11 @@
-use crate::bot;
+//! sally.glb is VISUAL-ONLY (bddap/rl#340 stage 10): physics always builds the
+//! committed [`bot::rig::baked_recipe`] table — no surface gates a body on the
+//! asset. What this module gates is the SKIN: a resolvable glb whose bytes match
+//! [`bot::rig::BAKED_ASSET_DIGEST`] may be drawn over the physics body; anything
+//! else (absent, corrupt, or changed without a re-bake) falls back to the honest
+//! collider view, loudly — a stale skin over current colliders would silently
+//! desync render from physics, the one thing the digest check protects.
+
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -9,10 +16,6 @@ pub const MESH_ABSENT_REASON: &str = "no crab model resolved (CRAB_MODEL_PATH / 
 pub enum Surface {
     RlDemo,
     Game,
-    /// The headless trainer/eval, when `--allow-fallback-body` deliberately runs the
-    /// procedural body (bddap/rl#214). Without the flag it refuses instead
-    /// ([`require_canonical_body`]).
-    Trainer,
 }
 
 impl Surface {
@@ -20,7 +23,6 @@ impl Surface {
         match self {
             Surface::RlDemo => "rl-demo",
             Surface::Game => "game",
-            Surface::Trainer => "rl-train",
         }
     }
 }
@@ -48,196 +50,48 @@ fn resolve(
     exists(&asset).then_some(asset)
 }
 
-/// A verified-usable crab model: the path whose bytes matched
-/// [`bot::rig::BAKED_ASSET_DIGEST`] (any other byte state is refused, so there is no
-/// digest field to carry — the const IS the digest) and the baked collider recipe.
-pub struct UsableModel {
-    pub path: PathBuf,
-    pub recipe: bot::rig::RigRecipe,
-}
-
-fn checked_model() -> Result<UsableModel, String> {
+fn checked_model() -> Result<PathBuf, String> {
     let Some(path) = model_path() else {
         return Err(MESH_ABSENT_REASON.to_string());
     };
-    let recipe = checked_recipe(&path)?;
-    Ok(UsableModel { path, recipe })
+    checked_skin(&path)?;
+    Ok(path)
 }
 
-/// The bddap/rl#20 Phase 2 gate: the runtime does not fit colliders from the mesh —
-/// it verifies the asset's bytes are EXACTLY the ones the committed
-/// [`bot::rig::baked_recipe`] table was baked from, then serves that table. Any other
-/// byte state (a changed model, a corrupt download) is refused loudly: serving a
-/// stale table under a new mesh would silently fork physics from render, and a
-/// re-fit is a deliberate offline event (`cargo run -p meshfit -- bake`), never a
-/// side effect of swapping a file.
-fn checked_recipe(p: &std::path::Path) -> Result<bot::rig::RigRecipe, String> {
+/// The skin digest gate: the asset's bytes must be EXACTLY the ones the committed
+/// [`bot::rig::baked_recipe`](crate::bot::rig::baked_recipe) table was baked from.
+/// Any other byte state (a changed model, a corrupt download) refuses the SKIN
+/// loudly: physics runs the baked table regardless (rl#340 stage 10), so drawing a
+/// mismatched mesh over it would silently fork render from physics. A re-fit is a
+/// deliberate offline event (`cargo run -p meshfit -- bake`), never a side effect
+/// of swapping a file.
+fn checked_skin(p: &std::path::Path) -> Result<(), String> {
     let bytes = std::fs::read(p).map_err(|e| format!("crab model {p:?}: read: {e}"))?;
     let digest = crate::fnv::fnv1a(&bytes);
-    if digest != bot::rig::BAKED_ASSET_DIGEST {
+    if digest != crate::bot::rig::BAKED_ASSET_DIGEST {
         return Err(format!(
             "crab model {p:?}: digest {digest:#018x} does not match the baked collider \
              table ({:#018x}) — the asset changed (or is corrupt) without a re-bake. \
              Fetch the canonical sally.glb (scripts/fetch-sally.sh), or re-bake \
              deliberately (`cargo run -p meshfit -- bake`): a geometry change is a new \
              MDP — review the baked.rs diff and plan a retrain (rl#277)",
-            bot::rig::BAKED_ASSET_DIGEST
+            crate::bot::rig::BAKED_ASSET_DIGEST
         ));
     }
-    Ok(bot::rig::baked_recipe())
+    Ok(())
 }
 
-pub fn usable_model() -> &'static Result<UsableModel, String> {
-    static VERDICT: OnceLock<Result<UsableModel, String>> = OnceLock::new();
-    let verdict = VERDICT.get_or_init(checked_model);
-    require_mesh_or_panic(
-        verdict.as_ref().map(|_| ()).map_err(String::as_str),
-        std::env::var_os("RL_REQUIRE_MESH").is_some_and(|v| !v.is_empty()),
-    );
-    verdict
-}
-
-/// bddap/rl#340 stage 8: the hard-require channel for the mesh-suite guard. Every
-/// sally-gated test consults [`usable_model`] — either to skip on `Err`, or inside
-/// `spawn_crab` where an `Err` silently builds the fallback body — so if the asset
-/// resolution ever drifts (a `CRAB_MODEL_PATH` rename, a gate-logic change), the
-/// whole gated suite quietly stops testing Sally while reporting green. With
-/// `RL_REQUIRE_MESH` set (any non-empty value — an unrecognized value must fail
-/// loud, not silently disarm the guard), an unusable-model verdict panics right
-/// here instead, turning every would-skip red. Set only by mesh-suite guard
-/// harnesses, never by production surfaces — those keep the refusal/fallback
-/// semantics above.
-fn require_mesh_or_panic(verdict: Result<(), &str>, required: bool) {
-    if !required {
-        return;
-    }
-    if let Err(reason) = verdict {
-        panic!(
-            "RL_REQUIRE_MESH is set but the canonical Sally mesh is not usable: {reason}. \
-             This process was told the mesh-gated paths MUST run — a skip or fallback here \
-             would be the silent rot bddap/rl#340 stage 8 closes."
-        );
-    }
+/// The memoized skin verdict: `Ok(path)` iff a model resolves AND its bytes match
+/// the baked digest — the only state in which the skin may be drawn. `Err` carries
+/// the human-facing reason for the banner/collider-view surfaces. Physics never
+/// consults this (rl#340 stage 10).
+pub fn usable_model() -> &'static Result<PathBuf, String> {
+    static VERDICT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    VERDICT.get_or_init(checked_model)
 }
 
 pub fn usable_model_path() -> Option<PathBuf> {
-    usable_model().as_ref().ok().map(|u| u.path.clone())
-}
-
-/// Natural rest-pose height of the crab body THIS process constructs (arena m) — THE
-/// scale bridge between her rig and any sized frame: net's arena→sim render seam and
-/// the eval's rl#266 charge-speed guard both divide by this one measurement, so the
-/// two can never disagree on what "one crab height" is. `None` when the silhouette is
-/// degenerate — callers must treat that as unmeasurable, never as scale 1.0 (an
-/// identity conversion silently re-opens the rl#254 creep).
-pub fn natural_body_height() -> Option<f32> {
-    static H: OnceLock<Option<f32>> = OnceLock::new();
-    *H.get_or_init(|| {
-        let h =
-            bot::rig::recipe_silhouette(&bot::body::render_recipe(usable_model_path().is_some()))
-                .natural_height();
-        (h > 1e-4).then_some(h)
-    })
-}
-
-/// Digest of the crab body THIS process constructs — THE one "which body is this?"
-/// value: the checkpoint body-identity stamp (bddap/rl#214) AND the per-peer collider
-/// digest the MP membership handshake advertises (rl#100/rl#114). When the
-/// [`usable_model`] verdict is `Ok`, [`bot::rig::baked_body_digest`] — asset bytes
-/// chained with the baked collider table's [`bot::rig::RigRecipe::digest`] — else `0`: the
-/// fallback/no-asset value, which never counts as synced in the handshake and never
-/// passes for Sally at a checkpoint load. Keyed off the VERDICT, not bare
-/// `model_path()`: a present-but-unloadable glb constructs the fallback body, so it must
-/// advertise/stamp `0`, not the broken file's hash (two identically-corrupt peers must
-/// not "agree on the collider asset" while both run not-Sally bodies).
-///
-/// WHY both halves (bddap/rl#20 stage 1): the asset digest alone certified the render
-/// mesh but NOT the body — a `baked.rs` regen (a re-fit of the same sally.glb) changes
-/// every collider under an unchanged asset digest, which is a new MDP no live
-/// checkpoint can drive (rl#277). Folding the table's own bit-exact digest in makes a
-/// table move refuse loudly at trainer resume, eval, demo arm, and the MP handshake —
-/// no float-reproducibility risk, since both halves hash compiled constants.
-/// Remaining caveat: the binary axis beyond the table stays unguarded — spawn/joint
-/// CODE changes still alter the body under an unchanged digest.
-pub fn constructed_body_digest() -> u64 {
-    if usable_model().is_ok() {
-        bot::rig::baked_body_digest()
-    } else {
-        0
-    }
-}
-
-/// The trainer/eval body-preflight verdict: proceed (on which body), or refuse. A value
-/// of this type is the PROOF the preflight ran — [`crate::training::inproc::run_learner`]
-/// and [`crate::eval::run_eval`] take one as a required argument, so a new entry point
-/// can't recreate rl#214 by forgetting the gate; production obtains it only from
-/// [`require_canonical_body`], and a test writing a `BodyGate::…` literal is a visible,
-/// greppable opt-in rather than a silent hole.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BodyGate {
-    /// The canonical Sally mesh is usable — the body every checkpoint should train on.
-    RealSally,
-    /// No usable mesh, but the caller explicitly opted into the procedural fallback.
-    FallbackAllowed,
-}
-
-/// Pure gate decision, split from [`require_canonical_body`] so the refusal matrix is
-/// unit-testable without touching the memoized global verdict or process env.
-fn body_gate(
-    verdict: Result<(), &str>,
-    allow_fallback: bool,
-    context: &str,
-) -> Result<BodyGate, String> {
-    match verdict {
-        Ok(()) => Ok(BodyGate::RealSally),
-        Err(_) if allow_fallback => Ok(BodyGate::FallbackAllowed),
-        Err(reason) => Err(format!(
-            "REFUSING to {context}: {reason}. A policy trained or judged on the procedural \
-             fallback body is NOT Sally (bddap/rl#214). Fetch the mesh \
-             (scripts/fetch-sally.sh, or point CRAB_MODEL_PATH / BEVY_ASSET_ROOT at it), or \
-             pass --allow-fallback-body for a deliberate procedural-body dev run."
-        )),
-    }
-}
-
-/// MANDATORY body preflight for training and eval (bddap/rl#214): the trainer used to hit
-/// [`crate::bot::body::render_recipe`]'s silent fallback and train the procedural body as
-/// if it were Sally. Now `rl-train learn`/`eval` call this before building any world and
-/// pass the returned [`BodyGate`] proof down to `run_learner`/`run_eval` — `Err` is the
-/// refusal, ALREADY logged loudly here (`tracing::error!`, so it also
-/// exports over OTEL; the binary lacks a tracing dep of its own), for the caller to exit
-/// nonzero on; `--allow-fallback-body` downgrades it to the SAME latched [`log_fallback`]
-/// error the player-facing surfaces raise, plus a warning that checkpoints will carry
-/// body digest 0. On the happy path it logs one positive line naming the mesh and
-/// digest, so "which body is this run on?" is always answerable from the log.
-pub fn require_canonical_body(context: &str, allow_fallback: bool) -> Result<BodyGate, String> {
-    let verdict = usable_model();
-    let gate = body_gate(
-        verdict.as_ref().map(|_| ()).map_err(String::as_str),
-        allow_fallback,
-        context,
-    );
-    match (&gate, verdict) {
-        (Err(refusal), _) => {
-            tracing::error!(target: "crab_world::canonical_mesh", "{refusal}");
-        }
-        (Ok(BodyGate::RealSally), Ok(u)) => tracing::info!(
-            "canonical Sally mesh preflight OK for {context}: {} (body digest {:#018x})",
-            u.path.display(),
-            constructed_body_digest(),
-        ),
-        (Ok(BodyGate::FallbackAllowed), Err(reason)) => {
-            log_fallback(Surface::Trainer, reason);
-            tracing::warn!(
-                "--allow-fallback-body: {context} proceeds on the procedural fallback \
-                 body (NOT Sally); checkpoints will carry body digest 0"
-            );
-        }
-        (Ok(BodyGate::RealSally), Err(_)) | (Ok(BodyGate::FallbackAllowed), Ok(_)) => {
-            unreachable!("gate outcome co-derives with the verdict")
-        }
-    }
-    gate
+    usable_model().as_ref().ok().cloned()
 }
 
 pub fn log_fallback(surface: Surface, reason: &str) {
@@ -345,64 +199,21 @@ mod model_path_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::checked_recipe;
+    use super::checked_skin;
 
     #[test]
-    fn present_but_unloadable_glb_is_err_not_panic() {
+    fn present_but_mismatched_glb_refuses_the_skin() {
         let dir = std::env::temp_dir().join(format!("rl154-badglb-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bad = dir.join("sally.glb");
         std::fs::write(&bad, b"this is not a glb, it is garbage bytes").unwrap();
 
-        let status = checked_recipe(&bad);
+        let status = checked_skin(&bad);
         assert!(
             status.is_err(),
-            "a garbage present-but-unloadable glb must report Err (rl#154), got a recipe: {:?}",
-            status.is_ok()
+            "a present-but-mismatched glb must refuse the skin (rl#154/rl#340 stage 10)"
         );
 
         std::fs::remove_dir_all(&dir).ok();
-    }
-}
-
-#[cfg(test)]
-mod require_mesh_tests {
-    use super::require_mesh_or_panic;
-
-    /// Pure-function coverage; the env wiring (`RL_REQUIRE_MESH` → panic on a real
-    /// `Err` verdict) is deliberately NOT exercised in-process — flipping a
-    /// process-global env var would arm the panic under every concurrently running
-    /// test. The rl-mesh-suite harness covers the wired path end-to-end.
-    #[test]
-    fn not_required_never_panics() {
-        require_mesh_or_panic(Ok(()), false);
-        require_mesh_or_panic(Err("no mesh"), false);
-        require_mesh_or_panic(Ok(()), true);
-    }
-
-    #[test]
-    #[should_panic(expected = "RL_REQUIRE_MESH")]
-    fn required_and_unusable_panics() {
-        require_mesh_or_panic(Err("no mesh"), true);
-    }
-}
-
-#[cfg(test)]
-mod body_gate_tests {
-    use super::{BodyGate, body_gate};
-
-    /// The bddap/rl#214 refusal matrix: a usable mesh always proceeds on Sally; without
-    /// one, training/eval refuse unless the fallback was explicitly opted into.
-    #[test]
-    fn refuses_fallback_body_unless_opted_in() {
-        assert_eq!(body_gate(Ok(()), false, "learn"), Ok(BodyGate::RealSally));
-        assert_eq!(body_gate(Ok(()), true, "learn"), Ok(BodyGate::RealSally));
-        assert_eq!(
-            body_gate(Err("no mesh"), true, "learn"),
-            Ok(BodyGate::FallbackAllowed)
-        );
-        let refusal = body_gate(Err("no mesh"), false, "learn").unwrap_err();
-        assert!(refusal.contains("REFUSING to learn"), "{refusal}");
-        assert!(refusal.contains("--allow-fallback-body"), "{refusal}");
     }
 }

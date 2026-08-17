@@ -14,6 +14,10 @@ impl CrabAssets {
     }
 }
 
+/// The SKIN asset, `None` unless a digest-matched sally.glb resolved
+/// ([`crate::mesh_fallback::usable_model_path`]). Visual-only: physics builds
+/// [`rig::baked_recipe`] regardless (rl#340 stage 10) — this only decides whether
+/// the skin loads over it.
 #[derive(Resource, Clone)]
 pub struct CrabModelPath(pub Option<std::path::PathBuf>);
 
@@ -23,22 +27,10 @@ impl FromWorld for CrabModelPath {
     }
 }
 
-pub fn render_recipe(has_model: bool) -> RigRecipe {
-    if has_model {
-        match crate::mesh_fallback::usable_model() {
-            Ok(u) => u.recipe.clone(),
-            Err(_) => rig::fallback_recipe(),
-        }
-    } else {
-        rig::fallback_recipe()
-    }
-}
-
 impl FromWorld for CrabAssets {
-    fn from_world(world: &mut World) -> Self {
-        let has_model = world.resource::<CrabModelPath>().0.is_some();
+    fn from_world(_world: &mut World) -> Self {
         Self {
-            recipe: render_recipe(has_model),
+            recipe: rig::baked_recipe(),
         }
     }
 }
