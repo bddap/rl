@@ -22,6 +22,14 @@ the one he asked for; he appreciates the pushback. Dry sass too.
 - `cargo clippy --quiet --all-targets -- --deny warnings` (`--all-targets` lints test/bench/example code too, so test-only lints can't slip in)
 - `cargo test -q` (on bothouse add `-- --test-threads=2`: the live trainer saturates the cores and the heavy physics tests hang at default parallelism). The sim suites arm `test-watchdog` — a rare 0%-CPU wedge under trainer load (rl#282) aborts loudly after ~2 min instead of hanging; rerun on a quieter box.
 
+## Checkpoints for probes/screenshots
+Need NN-crab weights for `rl-demo` / `game fp-screenshot` on bothouse? Use the
+release store's live pointer: `~/.local/state/rl-releases/latest/checkpoints` —
+always the current tagged-envelope checkpoint with terrain provenance. Do NOT
+copy checkpoints into ad-hoc `~/.cache` dirs: stale copies outlive format
+migrations (pre-envelope rl#200, flat-plant rl#293) and every launch against
+one fails.
+
 ## Profiling
 "Why is the game slow?" → `scripts/profile-game.sh` instead of rediscovering the
 toolchain. `--pid N` attaches to a running process (read-only — safe against a live
