@@ -108,6 +108,7 @@ pub fn build_windowed_app(
                 // muffle (rl#359) lands on wind and beds as one mix move.
                 super::audio::drive_muffle,
                 super::audio::drive_wind,
+                super::audio::trace_wind_speed,
                 super::ambience::update_context,
                 super::ambience::drive_layers,
                 place_extraction_pillar,

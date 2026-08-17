@@ -104,6 +104,10 @@ fn finish_offscreen_app(
                 gather_input,
                 drive_pilot_script,
                 drive_client_sim,
+                // rl#376: record the wind's airspeed read in captures too — the
+                // offscreen app has no audio systems, but the trace must still see
+                // the signal the wind would hear.
+                super::audio::trace_wind_speed,
                 // Before any pose/transform consumer, as in the windowed app: the
                 // render origin must be current the frame it changes (rl#354).
                 sync_ground_anchor.before(crab_world::ground::apply_ground_anchor),

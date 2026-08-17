@@ -91,15 +91,27 @@ impl PoseWindow {
         self.buf[2].is_none()
     }
 
+    /// Newest pose's tick — the rl#376 trace's timestamp for the wind's speed reads.
+    pub(super) fn newest_tick(&self) -> Option<u64> {
+        self.buf[2].map(|(t, _)| t)
+    }
+
     /// Ground speed of the newest tick interval, m/s — the wind-audio driver's
-    /// airspeed signal (rl#356). Tick-average (not staircase-corrected): audio only
-    /// needs the magnitude's trend, and the window's teleport/NaN guards already
-    /// keep spikes out. `None` until two poses arrive (engage grace, post-teleport).
+    /// airspeed signal (rl#356), measured over the PHYSICS-STEP clock, the same
+    /// clock [`Self::sample`] walks. A craft covers distance per physics step, and
+    /// the 64:30 staircase bunches 2 vs 3 steps per tick — a tick-average here read
+    /// 0.94×–1.41× of the true speed, surging ~4×/s (rl#376: the irregular wind
+    /// wooshes; the 3-step ticks are also the costlier frames, hence the perf-graph
+    /// correlation). `None` until two poses arrive (engage grace, post-teleport).
     pub(super) fn speed_mps(&self) -> Option<f32> {
+        use crate::cadence::cumulative_steps;
         let (Some((t1, p1)), Some((t2, p2))) = (self.buf[1], self.buf[2]) else {
             return None;
         };
-        Some(p1.pos.distance(p2.pos) / ((t2 - t1) as f32 * crate::sim::TICK_DT as f32))
+        // t2 > t1 by the push guard, and PHYSICS_HZ > TICK_HZ makes every tick ≥2
+        // steps, so the divisor is never 0.
+        let steps = (cumulative_steps(t2) - cumulative_steps(t1)) as f32;
+        Some(p1.pos.distance(p2.pos) * crab_world::physics::PHYSICS_HZ as f32 / steps)
     }
 }
 
@@ -161,6 +173,43 @@ mod tests {
             }
         }
         assert!(checked > 700, "the sweep must actually cover the run");
+    }
+
+    #[test]
+    fn speed_mps_is_uniform_through_the_staircase() {
+        // rl#376: a body at CONSTANT velocity in physics time must read a CONSTANT
+        // speed_mps. The tick-average form read 0.94×–1.41× of true speed as the
+        // 64:30 cadence bunched 2 vs 3 steps per tick — the irregular wind wooshes.
+        // Tick gaps (lost datagrams) must read exact too, not just on average.
+        use crate::cadence::cumulative_steps;
+        const STEP_METERS: f64 = 0.1;
+        let true_mps = (STEP_METERS * crab_world::physics::PHYSICS_HZ as f64) as f32;
+        let pose_at = |tick: u64| Pose {
+            pos: Vec3::new(
+                (cumulative_steps(tick) as f64 * STEP_METERS) as f32,
+                0.0,
+                0.0,
+            ),
+            orient: Quat::IDENTITY,
+        };
+        let mut window = PoseWindow::default();
+        let mut checked = 0u32;
+        for tick in 1..200u64 {
+            if tick == 100 || tick == 101 {
+                continue; // a 3-tick gap must not dent the reading either
+            }
+            window.push(tick, pose_at(tick));
+            let Some(speed) = window.speed_mps() else {
+                continue;
+            };
+            assert!(
+                (speed - true_mps).abs() < 1e-3 * true_mps,
+                "tick {tick}: speed_mps read {speed} for a body moving {true_mps} \
+                 m/s — the staircase leaked into the speed signal"
+            );
+            checked += 1;
+        }
+        assert!(checked > 190, "the sweep must actually cover the run");
     }
 
     #[test]

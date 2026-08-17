@@ -15,6 +15,12 @@
 //! - `F,<tick>,<frac>,<dt_us>,<cx>,<cy>,<cz>` — the frame's [`RenderClock`] and
 //!   camera translation (render-frame meters) after `apply_transforms`, plus the
 //!   frame's `Time` delta in microseconds.
+//! - `V,<tick>,<x>,<y>,<z>` — the local craft pose entering the pose window
+//!   (rl#376), render-frame meters: the per-tick craft displacement ground truth.
+//! - `W,<tick>,<speed>` — the airspeed the wind synth was driven with this frame
+//!   (rl#376), m/s, stamped with the pose window's newest tick.
+//! - `S,<tick>,<sim_ms>,<ticks>` — the frame's measured whole-sim wall cost, ms,
+//!   and how many fixed ticks it pumped (rl#376): the perf-graph correlation axis.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -53,6 +59,28 @@ impl PosTrace {
     pub(crate) fn tick(&mut self, tick: u64, pos: Pos, alt: i64) {
         if let Some(t) = &mut self.0 {
             writeln!(t.w, "T,{tick},{},{},{alt}", pos.x, pos.z).expect("pos trace write");
+        }
+    }
+
+    /// The local craft pose the window just accepted for tick `tick` (rl#376).
+    pub(crate) fn craft(&mut self, tick: u64, pos: Vec3) {
+        if let Some(t) = &mut self.0 {
+            writeln!(t.w, "V,{tick},{:.9e},{:.9e},{:.9e}", pos.x, pos.y, pos.z)
+                .expect("pos trace write");
+        }
+    }
+
+    /// The airspeed handed to the wind synth this frame (rl#376).
+    pub(crate) fn wind(&mut self, tick: u64, speed_mps: f32) {
+        if let Some(t) = &mut self.0 {
+            writeln!(t.w, "W,{tick},{speed_mps:.9e}").expect("pos trace write");
+        }
+    }
+
+    /// The frame's measured sim cost and pumped tick count (rl#376).
+    pub(crate) fn sim_cost(&mut self, tick: u64, sim_ms: f32, ticks: u32) {
+        if let Some(t) = &mut self.0 {
+            writeln!(t.w, "S,{tick},{sim_ms:.4},{ticks}").expect("pos trace write");
         }
     }
 
