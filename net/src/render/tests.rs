@@ -539,6 +539,45 @@ fn camera_never_ends_a_frame_under_the_terrain() {
 /// at f64) keeps the step exact; the pre-fix absolute-f32 path is measured
 /// alongside to keep the pin honest about what it prevents.
 #[test]
+fn interpolated_eye_path_is_uniform_at_every_locale() {
+    // rl#371: the rl#354 pin below walks RAW tick positions — the camera renders
+    // lerp_pos(prev, now, frac), and an absolute-coordinate f32 lerp quantizes at
+    // 64 grid units (0.64 mm) at the far locales even though every raw tick
+    // position survives rel_meters exactly. Sample the real interpolation at a
+    // 60 Hz cadence (frac 0, 0.5) and hold the per-frame step to the same bound.
+    use super::scene::lerp_pos;
+    use crate::sim::{PLAYER_SPEED, Pos};
+    let ideal = PLAYER_SPEED as f64 / 100_000.0 / 2.0; // meters per 60 Hz frame
+    for (x0_m, z0_m) in [(3.0f64, -7.0f64), (-10318.9, -10006.1), (14800.0, 14800.0)] {
+        let origin = super::RenderOrigin(Pos::from_meters(x0_m as f32, z0_m as f32));
+        let mut prev = Pos {
+            x: (x0_m * 100_000.0) as i64,
+            z: (z0_m * 100_000.0) as i64,
+        };
+        let mut worst = 0.0f64;
+        let mut last_rx: Option<f32> = None;
+        for _ in 0..120 {
+            let now = Pos {
+                x: prev.x + PLAYER_SPEED,
+                z: prev.z,
+            };
+            for frac in [0.0f32, 0.5] {
+                let (rx, _) = lerp_pos(prev, now, frac).rel_meters(origin.0);
+                if let Some(last) = last_rx {
+                    worst = worst.max(((rx - last) as f64 - ideal).abs());
+                }
+                last_rx = Some(rx);
+            }
+            prev = now;
+        }
+        assert!(
+            worst < 2e-5,
+            "interpolated eye step off by {worst} m at ({x0_m}, {z0_m})"
+        );
+    }
+}
+
+#[test]
 fn walker_eye_path_is_uniform_at_every_locale() {
     use crate::sim::{PLAYER_SPEED, Pos};
     let g = crab_world::terrain::TerrainGrid::gcr();

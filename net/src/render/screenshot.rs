@@ -100,6 +100,7 @@ fn finish_offscreen_app(
         .add_systems(
             Update,
             (
+                drive_frame_dt,
                 gather_input,
                 drive_pilot_script,
                 drive_client_sim,
@@ -126,6 +127,52 @@ fn finish_offscreen_app(
     super::render_mode::register(app, render_mode);
 }
 
+/// Per-frame virtual clock for the offscreen apps (rl#371): replaces the scaffold's
+/// fixed one-tick frames with `1/hz ± jitter` — the shape a real display session's
+/// `Time` deltas have — so artifacts that only exist when frames and ticks beat
+/// against each other (the 30 Hz sim under a 60 Hz display) are reproducible
+/// offscreen. Deterministic: the jitter draws from the seeded RNG, so a capture is
+/// a byte-stable function of its arguments.
+#[derive(Resource)]
+pub struct FrameDtModel {
+    hz: f64,
+    jitter_ms: f64,
+    rng: rand_chacha::ChaCha8Rng,
+}
+
+impl FrameDtModel {
+    pub fn new(hz: f64, jitter_ms: f64, seed: u64) -> Self {
+        use rand::SeedableRng;
+        Self {
+            hz,
+            jitter_ms,
+            rng: rand_chacha::ChaCha8Rng::seed_from_u64(seed),
+        }
+    }
+}
+
+/// Feed next frame's virtual delta. Writing [`TimeUpdateStrategy`] takes effect at
+/// the NEXT `First`-schedule time update, so the very first frame still runs the
+/// scaffold's one-tick delta — immaterial after settle.
+fn drive_frame_dt(
+    model: Option<ResMut<FrameDtModel>>,
+    mut strategy: ResMut<bevy::time::TimeUpdateStrategy>,
+) {
+    let Some(mut m) = model else {
+        return;
+    };
+    use rand::Rng;
+    let jitter_s = if m.jitter_ms > 0.0 {
+        let bound = m.jitter_ms / 1000.0;
+        m.rng.gen_range(-bound..=bound)
+    } else {
+        0.0
+    };
+    *strategy = bevy::time::TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        (1.0 / m.hz + jitter_s).max(1e-4),
+    ));
+}
+
 /// A scripted local pilot for the offscreen apps: issue a vehicle request at the given
 /// frames and hold a constant forward drive while piloting. This drives the REAL input
 /// seams — the same `PendingInput`/`FlightInput` the keyboard writes, feeding the real
@@ -144,6 +191,10 @@ pub struct PilotScript {
     sprint_holds: Vec<(u64, Option<u64>)>,
     /// On-foot SLIDE hold windows, same shape (rl#368).
     slide_holds: Vec<(u64, Option<u64>)>,
+    /// Walk dead straight instead of the default gentle arc — position-trace
+    /// captures (rl#371) need a constant-velocity ground truth to difference
+    /// against; the arc stays the default for the hunt-evidence shots.
+    straight: bool,
     frame: u64,
 }
 
@@ -155,6 +206,7 @@ impl PilotScript {
             jump_holds: Vec::new(),
             sprint_holds: Vec::new(),
             slide_holds: Vec::new(),
+            straight: false,
             frame: 0,
         }
     }
@@ -171,6 +223,12 @@ impl PilotScript {
 
     pub fn with_slide_holds(mut self, holds: Vec<(u64, Option<u64>)>) -> Self {
         self.slide_holds = holds;
+        self
+    }
+
+    /// See [`Self::straight`].
+    pub fn with_straight_walk(mut self, straight: bool) -> Self {
+        self.straight = straight;
         self
     }
 }
@@ -276,9 +334,10 @@ fn drive_pilot_script(
         flight.rt = 0.5;
     } else if script.walk_at.is_some_and(|at| script.frame >= at) {
         // Walk a gentle arc on foot — a moving target, so the run exercises the hunt
-        // against evasion, not just a standing kill (rl#236).
+        // against evasion, not just a standing kill (rl#236). Straight for the
+        // rl#371 position traces, where the arc would alias into the step lengths.
         pending.forward = 1.0;
-        pending.yaw_delta = 0.02;
+        pending.yaw_delta = if script.straight { 0.0 } else { 0.02 };
     }
     if vehicle.kind().is_none() {
         let frame = script.frame;

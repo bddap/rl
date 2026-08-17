@@ -350,6 +350,8 @@ pub(super) fn apply_transforms(
     // Smoothed eye height (0 = uninitialized): the stand↔slide crouch eases at
     // [`SLIDE_EYE_RATE`] instead of cutting, so the dip reads as a body motion.
     mut eye_h: Local<f32>,
+    // `Option`: the hand-built test worlds run this system without a round install.
+    trace: Option<ResMut<super::pos_trace::PosTrace>>,
 ) {
     let sim = state.client.sim();
     let alpha = clock.frac;
@@ -438,6 +440,9 @@ pub(super) fn apply_transforms(
             *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
         }
         clamp_camera_above_terrain(&mut cam, &terrain, *origin);
+        if let Some(mut trace) = trace {
+            trace.frame(clock.tick, alpha, time.delta(), cam.translation, origin.0);
+        }
     }
 }
 
@@ -484,12 +489,15 @@ pub(super) fn lerp_alt(a: i64, b: i64, alpha: f32) -> f32 {
     (a as f32 + (b - a) as f32 * alpha) / crate::sim::UNIT as f32
 }
 
+/// Lerp the per-tick DELTA in f32 and add it back on the i64 grid. The absolute
+/// coordinate must never pass through f32: at the far locales it is ~1e9 grid
+/// units, where f32 quantizes at 64 units (0.64 mm) — a third of a 60 Hz walking
+/// step, seen as alternating long/short frame steps (the rl#371 residual jitter).
+/// The delta is a few hundred units, exact in f32.
 pub(super) fn lerp_pos(a: Pos, b: Pos, alpha: f32) -> Pos {
-    let lx = a.x as f32 + (b.x - a.x) as f32 * alpha;
-    let lz = a.z as f32 + (b.z - a.z) as f32 * alpha;
     Pos {
-        x: lx.round() as i64,
-        z: lz.round() as i64,
+        x: a.x + ((b.x - a.x) as f32 * alpha).round() as i64,
+        z: a.z + ((b.z - a.z) as f32 * alpha).round() as i64,
     }
 }
 
