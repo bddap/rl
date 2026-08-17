@@ -15,10 +15,10 @@ fn ramp(angle_deg: f32) -> TerrainGrid {
 }
 
 /// `ramp` with an explicit vertical scale: ppm-level jitter on the scale re-rolls
-/// the solver's rest-noise realization without changing the physics (the rl#340
-/// stage-3 chaos finding — one draw of this system is a lottery ticket). Angle
-/// jitter can NOT do this: heights are i16-quantized, so sub-0.5° perturbations
-/// leave the cells near the spawn point bit-identical.
+/// the solver's rest-noise realization at physically negligible world change (the
+/// rl#340 stage-3 chaos finding — one draw of this system is a lottery ticket).
+/// Small ANGLE jitter can not do this: heights are i16-quantized, so a
+/// milli-degree perturbation leaves the cells near the spawn point bit-identical.
 fn ramp_scaled(angle_deg: f32, scale: f32) -> TerrainGrid {
     const N: usize = 257; // 256 cells × 4 m = ±512 m
     const CELL: f32 = 4.0;
