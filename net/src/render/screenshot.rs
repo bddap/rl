@@ -199,6 +199,9 @@ pub struct PilotScript {
     /// captures (rl#371) need a constant-velocity ground truth to difference
     /// against; the arc stays the default for the hunt-evidence shots.
     straight: bool,
+    /// Hold every flight axis at zero while piloting instead of the default full
+    /// forward drive — parked-craft captures (rl#377) need a body at rest.
+    park: bool,
     frame: u64,
 }
 
@@ -211,6 +214,7 @@ impl PilotScript {
             sprint_holds: Vec::new(),
             slide_holds: Vec::new(),
             straight: false,
+            park: false,
             frame: 0,
         }
     }
@@ -233,6 +237,12 @@ impl PilotScript {
     /// See [`Self::straight`].
     pub fn with_straight_walk(mut self, straight: bool) -> Self {
         self.straight = straight;
+        self
+    }
+
+    /// See [`Self::park`].
+    pub fn with_park(mut self, park: bool) -> Self {
+        self.park = park;
         self
     }
 }
@@ -334,8 +344,10 @@ fn drive_pilot_script(
     // Runs after `gather_input` (which zeroes FlightInput off the absent devices), so the
     // script's hold wins the frame.
     if vehicle.kind().is_some() {
-        flight.wasd = bevy::math::Vec2::new(0.0, 1.0);
-        flight.rt = 0.5;
+        if !script.park {
+            flight.wasd = bevy::math::Vec2::new(0.0, 1.0);
+            flight.rt = 0.5;
+        }
     } else if script.walk_at.is_some_and(|at| script.frame >= at) {
         // Walk a gentle arc on foot — a moving target, so the run exercises the hunt
         // against evasion, not just a standing kill (rl#236). Straight for the

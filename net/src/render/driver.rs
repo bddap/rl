@@ -806,7 +806,7 @@ fn adopt_wire_articulation(
         }
         world
             .resource_mut::<super::pos_trace::PosTrace>()
-            .craft(art.tick, p.pos);
+            .craft(art.tick, p.pos, p.orient);
     }
 }
 
@@ -870,7 +870,7 @@ fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
                     .update_pose(inputs.stepping_into, p);
                 world
                     .resource_mut::<super::pos_trace::PosTrace>()
-                    .craft(inputs.stepping_into, p.pos);
+                    .craft(inputs.stepping_into, p.pos, p.orient);
             }
             (poses, pilot_shadows(world))
         } else {

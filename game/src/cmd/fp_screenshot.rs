@@ -114,6 +114,11 @@ pub(crate) struct Args {
     #[arg(long)]
     walk_straight: bool,
 
+    /// Hold every flight axis at zero while piloting instead of the default full
+    /// forward drive — parked-craft captures (rl#377).
+    #[arg(long)]
+    pilot_park: bool,
+
     /// Model the frame clock as `1/HZ ± --frame-jitter-ms` per frame instead of the
     /// default one-sim-tick frames — reproduces a real display cadence (e.g. 60)
     /// beating against the 30 Hz sim (rl#371). Deterministic per --seed.
@@ -161,7 +166,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
                 .with_jump_holds(parse_holds(&args.jump_holds)?)
                 .with_sprint_holds(parse_holds(&args.sprint_holds)?)
                 .with_slide_holds(parse_holds(&args.slide_holds)?)
-                .with_straight_walk(args.walk_straight),
+                .with_straight_walk(args.walk_straight)
+                .with_park(args.pilot_park),
         );
     }
     if let Some(hz) = args.frame_hz {
