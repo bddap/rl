@@ -17,6 +17,8 @@
 //!   frame's `Time` delta in microseconds.
 //! - `V,<tick>,<x>,<y>,<z>` — the local craft pose entering the pose window
 //!   (rl#376), render-frame meters: the per-tick craft displacement ground truth.
+//! - `Q,<tick>,<qx>,<qy>,<qz>,<qw>` — that pose's orientation quaternion (rl#377:
+//!   the parked wiggle is rotational; position alone pins at the f32 ULP).
 //! - `W,<tick>,<speed>` — the airspeed the wind synth was driven with this frame
 //!   (rl#376), m/s, stamped with the pose window's newest tick.
 //! - `S,<tick>,<sim_ms>,<ticks>` — the frame's measured whole-sim wall cost, ms,
@@ -62,11 +64,20 @@ impl PosTrace {
         }
     }
 
-    /// The local craft pose the window just accepted for tick `tick` (rl#376).
-    pub(crate) fn craft(&mut self, tick: u64, pos: Vec3) {
+    /// The local craft pose the window just accepted for tick `tick` (rl#376), plus
+    /// its orientation as a `Q` record (rl#377: the parked-craft wiggle is
+    /// rotational — position pins at the far-locale f32 ULP while orientation
+    /// chatters, so a position-only trace reads a wiggling craft as still).
+    pub(crate) fn craft(&mut self, tick: u64, pos: Vec3, orient: Quat) {
         if let Some(t) = &mut self.0 {
             writeln!(t.w, "V,{tick},{:.9e},{:.9e},{:.9e}", pos.x, pos.y, pos.z)
                 .expect("pos trace write");
+            writeln!(
+                t.w,
+                "Q,{tick},{:.9e},{:.9e},{:.9e},{:.9e}",
+                orient.x, orient.y, orient.z, orient.w
+            )
+            .expect("pos trace write");
         }
     }
 
