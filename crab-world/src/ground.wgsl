@@ -111,6 +111,14 @@ fn fragment(
     rgb *= max(1.0 + fine_color(p, fw, strengths.z * a.grain), 0.0);
     pbr_input.material.base_color = vec4(rgb, pbr_input.material.base_color.a);
     pbr_input.material.perceptual_roughness = a.roughness;
+    // Matte ground carries NO specular lobe (rl#372): single-scatter GGX still
+    // returns a broad white grazing sheet at roughness ~1, so a shadow-side
+    // hillside catches the low moon as a screen-corner "sunlit" wash. Fade the
+    // lobe out as roughness approaches matte. Watershed's intentional sheens
+    // keep full reflectance: fully-wet basins land at rough ≈0.719 (a partial
+    // mix toward 0.62), puddle cores 0.05 — below the ramp; partial-wetness
+    // fringes ride the ramp and fade dry↔wet smoothly.
+    pbr_input.material.reflectance *= 1.0 - smoothstep(0.75, 0.92, a.roughness);
     pbr_input.material.emissive = vec4(
         pbr_input.material.emissive.rgb + a.emissive,
         pbr_input.material.emissive.a,
