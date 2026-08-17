@@ -11,17 +11,28 @@ use crate::terrain::TerrainGrid;
 /// A uniform ramp of `angle_deg` along +x. ±512 m span so band sampling's clamp
 /// assert is satisfied (same sizing as `flat_headless_app`).
 fn ramp(angle_deg: f32) -> TerrainGrid {
+    ramp_scaled(angle_deg, 0.1)
+}
+
+/// `ramp` with an explicit vertical scale: ppm-level jitter on the scale re-rolls
+/// the solver's rest-noise realization without changing the physics (the rl#340
+/// stage-3 chaos finding — one draw of this system is a lottery ticket). Angle
+/// jitter can NOT do this: heights are i16-quantized, so sub-0.5° perturbations
+/// leave the cells near the spawn point bit-identical.
+fn ramp_scaled(angle_deg: f32, scale: f32) -> TerrainGrid {
     const N: usize = 257; // 256 cells × 4 m = ±512 m
     const CELL: f32 = 4.0;
     const SCALE: f32 = 0.1;
     let slope = angle_deg.to_radians().tan();
+    // The i16 counts always use the canonical 0.1 divisor, so a jittered `scale`
+    // shifts every world height by the same ppm factor instead of re-quantizing.
     let heights: Vec<i16> = (0..N * N)
         .map(|i| {
             let col = i % N;
             (slope * CELL * (col as f32 - (N as f32 - 1.0) / 2.0) / SCALE).round() as i16
         })
         .collect();
-    TerrainGrid::test_grid(N, N, CELL, SCALE, &heights)
+    TerrainGrid::test_grid(N, N, CELL, scale, &heights)
 }
 
 /// Carapace xz drift over `secs` of zero-input settling, after 1 s of touchdown.
@@ -93,6 +104,34 @@ fn crab_holds_steep_slopes_with_zero_input() {
             up_y > angle.to_radians().cos() - 0.3,
             "crab ended tumbled on the {angle}° ramp: carapace up_y {up_y:.2}"
         );
+    }
+}
+
+/// Diagnostic: the zero-input hold table over arbitrary ramp angles — the
+/// instrument that prices the rl#318 band call (drift and posture per angle,
+/// where the acceptance test above only reports its fixed band). `RAMP_DEGS`
+/// is a comma-separated angle list; `RAMP_DRAWS` (default 3) runs each angle
+/// that many times under ppm terrain-scale jitter (see [`ramp_scaled`]) so the
+/// realization spread is visible, not hidden inside one draw.
+/// `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn slope_hold_table() {
+    let degs = std::env::var("RAMP_DEGS").unwrap_or_else(|_| "25,30,35,40,45".into());
+    let draws: u32 = std::env::var("RAMP_DRAWS")
+        .map(|v| v.parse().expect("RAMP_DRAWS must be a count"))
+        .unwrap_or(3);
+    for angle in degs
+        .split(',')
+        .map(|s| s.trim().parse::<f32>().expect("RAMP_DEGS must be numbers"))
+    {
+        for k in 0..draws {
+            let scale = 0.1 * (1.0 + k as f32 * 1e-6);
+            let (drift, up_y, rescues) = zero_input_drift(ramp_scaled(angle, scale), 10);
+            println!(
+                "TABLE {angle:>4.1}° draw {k}: drift {drift:.2} m up_y {up_y:.2} rescues {rescues}"
+            );
+        }
     }
 }
 
@@ -177,6 +216,21 @@ fn crab_holds_steep_slopes_with_zero_input() {
 /// revert rule (the gated test stays red either way, and halving the basis
 /// range is an MDP call bundled with direction (c) — the owner's rl#318 band
 /// re-scope, which now has this frontier to price against the 30–55° demand).
+///
+/// rl#340 stage 9 (job 2506) re-priced both plants on the post-recycling plant
+/// (a4e4b89 pinned rapier-0.35 contact recycling off, which moved the slope
+/// economics stage 4c was priced on). `slope_hold_table`, 3 scale-jitter draws
+/// per angle, drift m over 10 s (bar 1.5):
+/// - stock plant: 25° 0.98–1.04 up_y 0.85; 30° 2.57–2.69 TUMBLED (up_y −0.87,
+///   every draw — pre-recycling this held at 0.99 m); 35° 3.59–3.75 half-tumbled
+///   (up_y 0.35–0.42); 40° 4.68–17.60 heavy-tailed (stage 7's one-draw 3.71 was
+///   the tail's lucky end); 45° 21.8–33.7 tumbled;
+/// - 4c candidate (basis lo −0.2 + spawn preset + claws lifted): 25° 0.34–0.65;
+///   30° 0.78–0.81; 35° 0.82–1.65 straddling the bar; 40° 2.07–2.59 UPRIGHT
+///   every draw (up_y 0.75–0.82); 45° 3.71–19.63 (up_y down to 0.15).
+///
+/// The candidate's ordering vs stock survives recycling unchanged; the stock
+/// plant's zero-input floor dropped from "holds 30°" to "holds 25°".
 #[test]
 #[ignore]
 fn tilted_gravity_hold() {
