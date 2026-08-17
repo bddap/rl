@@ -125,7 +125,11 @@ fn park_sweep() {
     park_run("far t0", Vec2::new(-12900.0, 9360.0), 0);
     // Residual throttle: landed without trimming back to zero.
     for trim in [30, 60, 100] {
-        park_run(&format!("far trim{trim}"), Vec2::new(-12900.0, 9360.0), trim);
+        park_run(
+            &format!("far trim{trim}"),
+            Vec2::new(-12900.0, 9360.0),
+            trim,
+        );
     }
     // Slope spots: sample the grid for progressively steeper parks near the far corner.
     for (dx, dz) in [(50.0, 0.0), (0.0, 80.0), (120.0, 120.0), (-200.0, 40.0)] {

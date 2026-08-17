@@ -868,9 +868,11 @@ fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
                 world
                     .resource_mut::<LocalVehicle>()
                     .update_pose(inputs.stepping_into, p);
-                world
-                    .resource_mut::<super::pos_trace::PosTrace>()
-                    .craft(inputs.stepping_into, p.pos, p.orient);
+                world.resource_mut::<super::pos_trace::PosTrace>().craft(
+                    inputs.stepping_into,
+                    p.pos,
+                    p.orient,
+                );
             }
             (poses, pilot_shadows(world))
         } else {
