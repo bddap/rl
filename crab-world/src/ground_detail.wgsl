@@ -5,7 +5,9 @@
 
 #define_import_path rl::ground::detail
 
-#import rl::noise::{vnoise, footprint_fade, grain_fade, ROT}
+// gnoise, not vnoise, in BOTH descents (rl#373): these are the two places the
+// value-noise lattice reached the eye — see rl::noise::gnoise for why.
+#import rl::noise::{gnoise, footprint_fade, grain_fade, ROT}
 
 // Fine color detail (meters and below): the on-foot / landing-height optic-flow cue.
 // ADAPTIVE descent (rl#324): a fixed finest octave IS a resolution — its lattice
@@ -41,7 +43,7 @@ fn fine_color(p: vec2<f32>, fw: f32, gain: f32) -> f32 {
         if fade <= 0.001 {
             break;
         }
-        fine_n += vnoise(q / wl, seed) * amp * fade;
+        fine_n += gnoise(q / wl, seed) * amp * fade;
         q = ROT * q;
         wl /= 3.0;
         // 0.82/octave (rl#353 stage 7): a steeper decay peaks the spectrum at
@@ -74,7 +76,11 @@ fn relief_normal(p: vec2<f32>, fw: f32, n: vec3<f32>, gain: f32) -> vec3<f32> {
     // carries the octave's gradient back to world space.
     var nrot = mat2x2<f32>(1.0, 0.0, 0.0, 1.0);
     var nwl = 0.45;
-    var nweight = 0.06;
+    // Tuned to hold the pre-rl#373 composed relief strength: 0.0405 = 0.06 ×
+    // 0.675, the measured vnoise/gnoise finite-difference gradient-RMS ratio
+    // (gnoise's gradients run ~1.48× hotter at this 0.27·wl step) — same
+    // overall punch, minus the lattice.
+    var nweight = 0.0405;
     var nseed = 51u;
     while nwl > 0.0035 {
         let fade = grain_fade(nwl, fw);
@@ -83,9 +89,9 @@ fn relief_normal(p: vec2<f32>, fw: f32, n: vec3<f32>, gain: f32) -> vec3<f32> {
         }
         let nq = nrot * p;
         let step = nwl * 0.27;
-        let h0 = vnoise(nq / nwl, nseed);
-        let hx = vnoise((nq + vec2(step, 0.0)) / nwl, nseed);
-        let hz = vnoise((nq + vec2(0.0, step)) / nwl, nseed);
+        let h0 = gnoise(nq / nwl, nseed);
+        let hx = gnoise((nq + vec2(step, 0.0)) / nwl, nseed);
+        let hz = gnoise((nq + vec2(0.0, step)) / nwl, nseed);
         grad += fade * (transpose(nrot) * vec2(hx - h0, hz - h0)) / step * nweight;
         nrot = ROT * nrot;
         nwl /= 3.0;
