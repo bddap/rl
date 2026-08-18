@@ -366,10 +366,12 @@ pub fn run_learner(
 
     let compute_threads = bevy::tasks::ComputeTaskPool::get().thread_num();
     eprintln!(
-        "[learner] in-process: K={k} threads × M={m} envs × H={horizon} ticks/iter → {} transitions/update | budget {} ticks (0=∞), {iters} iters (0=∞) | nice {nice} | compute pool {compute_threads} thread(s), RAYON_NUM_THREADS={}",
+        "[learner] in-process: K={k} threads × M={m} envs × H={horizon} ticks/iter → {} transitions/update | budget {} ticks (0=∞), {iters} iters (0=∞) | nice {nice} | compute pool {compute_threads} thread(s), rayon pool {} thread(s)",
         k as u64 * m as u64 * horizon,
         tick_budget,
-        std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "<unset>".into()),
+        // The ACTUAL pool width, not the env — the env is not what the pin reads
+        // back (bddap/rl#345).
+        rayon::current_num_threads(),
     );
 
     // Spawn the K rollout threads; each builds its App (seconds) before serving.

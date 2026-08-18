@@ -152,7 +152,9 @@ impl EvalReport {
 /// The run-time CPU-feature fingerprint (`host=`, bddap/rl#345). Only the flags
 /// matrixmultiply's sgemm kernel ladder dispatches on — the seam that makes layer-1
 /// f32 rounding host-dependent; a kitchen-sink CPUID dump would churn the value on
-/// flags nothing reads.
+/// flags nothing reads. The set mirrors matrixmultiply 0.3.10's `sgemm_kernel.rs`
+/// selector — audit it on any matrixmultiply bump (a new dispatch flag, e.g. avx512,
+/// would silently weaken the fingerprint).
 fn host_fingerprint() -> String {
     #[cfg(target_arch = "x86_64")]
     {
