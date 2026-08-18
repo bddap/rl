@@ -13,10 +13,16 @@
 // ADAPTIVE descent (rl#324): a fixed finest octave IS a resolution — its lattice
 // reads as an upscaled low-res texture the moment the camera gets closer than it
 // was tuned for. So descend by thirds from 2.6 m until the octave is subpixel
-// (footprint-faded to nothing), down to a 3.5 mm floor: finer than any standing
-// eye can resolve (~2 mm ground per pixel on foot at 720p). The anchor-relative
-// p (rl#334) is what makes a floor this fine tenable — raw world xz quantizes
-// at ~1-2 mm out at the corners, a large fraction of such a lattice cell.
+// (footprint-faded to nothing), down to a 0.1 mm floor. The old 3.5 mm floor
+// assumed ~2 mm ground per pixel — a standing HUMAN eye; the crab eye is
+// centimeters above the ground, near ground is 0.02-0.2 mm/px, and 3.5 mm was
+// a ~35 px blur ceiling on every down-look (rl#390 — the fade windows, checked
+// first, were innocent: fw sat so far below every octave's fade that widening
+// them moved nothing). The floor is a cost/precision backstop, not the resolution
+// law — fade exit is the law. The anchor-relative p (rl#334, anchor == the
+// player, so |p| is meters-scale wherever fw is small enough to reach the floor)
+// is what makes a floor this fine tenable — raw world xz quantizes at ~1-2 mm
+// out at the corners, thousands of such lattice cells.
 // Distant ground exits after one test — fw alone decides, so the loop is
 // quad-coherent and the near-fullscreen far ground pays nothing.
 // Each octave rotated by ROT from the last (why that angle: rl::noise).
@@ -38,7 +44,7 @@ fn fine_color(p: vec2<f32>, fw: f32, gain: f32) -> f32 {
     var wl = 2.6;
     var amp = 1.0;
     var seed = 31u;
-    while wl > 0.0035 {
+    while wl > 0.0001 {
         let fade = grain_fade(wl, fw);
         if fade <= 0.001 {
             break;
@@ -61,7 +67,7 @@ fn fine_color(p: vec2<f32>, fw: f32, gain: f32) -> f32 {
 // geometric normal. Same adaptive descent as the color detail (rl#324): a
 // relief lattice that stops at a fixed wavelength is the "low-res normal map"
 // the eye catches on foot, so descend by thirds from 45 cm until subpixel
-// (same 3.5 mm floor / f32-ulp rationale as fine_color). The finite-difference
+// (same 0.1 mm floor / f32-ulp rationale as fine_color). The finite-difference
 // step scales with the wavelength so each octave's gradient stays honest;
 // per-octave gradient weight falls slower than the color amplitude (relief keeps
 // more of its punch as it refines — pebbles under moonlight, not blur).
@@ -82,7 +88,7 @@ fn relief_normal(p: vec2<f32>, fw: f32, n: vec3<f32>, gain: f32) -> vec3<f32> {
     // overall punch, minus the lattice.
     var nweight = 0.0405;
     var nseed = 51u;
-    while nwl > 0.0035 {
+    while nwl > 0.0001 {
         let fade = grain_fade(nwl, fw);
         if fade <= 0.001 {
             break;
