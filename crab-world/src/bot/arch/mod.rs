@@ -1,9 +1,11 @@
+pub mod mlp256;
 pub mod mlp512x3;
 
 use burn::module::Module;
 use burn::prelude::*;
 use burn::record::{Recorder, RecorderError};
 
+pub use mlp256::Mlp256;
 pub use mlp512x3::Mlp512x3;
 
 // These consts and `GaussianHead` are used only from `training`, whose liveness root
@@ -17,6 +19,7 @@ pub(crate) const LOG_STD_MAX: f32 = 0.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchId {
+    Mlp256,
     Mlp512x3,
 }
 
@@ -24,15 +27,18 @@ impl ArchId {
     /// Every living architecture. `TryFrom<String>` inverts [`Self::name`] through this
     /// list, so the name table lives in exactly one place; a new variant that misses
     /// this list is caught by `roundtrips_every_arch` below.
-    pub const ALL: &'static [ArchId] = &[Self::Mlp512x3];
+    pub const ALL: &'static [ArchId] = &[Self::Mlp256, Self::Mlp512x3];
 
-    /// The arch a fresh start gets when `--arch` is omitted (the sole survivor of the
-    /// 5b cull; the trainer's CLI help states it in prose — keep that in sync).
+    /// The arch a fresh start gets when `--arch` is omitted. Still the 5b-cull winner:
+    /// mlp256 returned as an opt-in after rl#351's cold-start conviction of mlp512x3,
+    /// but the default flips only on Probe G's fix-or-revert verdict. (The trainer's
+    /// CLI help states the default in prose — keep that in sync.)
     pub const DEFAULT: ArchId = Self::Mlp512x3;
 
     /// The stable on-disk / CLI name. Kebab-case, never reused after a cull.
     pub fn name(self) -> &'static str {
         match self {
+            Self::Mlp256 => "mlp256",
             Self::Mlp512x3 => "mlp512x3",
         }
     }
@@ -67,38 +73,48 @@ impl From<ArchId> for String {
     }
 }
 
+// Variant sizes legitimately diverge (mlp512x3 vs mlp256), and a brain is a held-once
+// singleton, never hot-array data — boxing the big leaf would buy nothing and cost an
+// indirection on every forward pass.
+#[allow(clippy::large_enum_variant)]
 #[derive(Module, Debug)]
 pub enum AnyBrain<B: Backend> {
+    Mlp256(Mlp256<B>),
     Mlp512x3(Mlp512x3<B>),
 }
 
 impl<B: Backend> AnyBrain<B> {
     pub fn init(arch: ArchId, device: &B::Device) -> Self {
         match arch {
+            ArchId::Mlp256 => Self::Mlp256(Mlp256::new(device)),
             ArchId::Mlp512x3 => Self::Mlp512x3(Mlp512x3::new(device)),
         }
     }
 
     pub fn arch(&self) -> ArchId {
         match self {
+            Self::Mlp256(_) => ArchId::Mlp256,
             Self::Mlp512x3(_) => ArchId::Mlp512x3,
         }
     }
 
     pub fn policy(&self, obs: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
         match self {
+            Self::Mlp256(m) => m.policy(obs),
             Self::Mlp512x3(m) => m.policy(obs),
         }
     }
 
     pub fn value(&self, obs: Tensor<B, 2>) -> Tensor<B, 2> {
         match self {
+            Self::Mlp256(m) => m.value(obs),
             Self::Mlp512x3(m) => m.value(obs),
         }
     }
 
     pub fn io_dims(&self) -> (usize, usize) {
         match self {
+            Self::Mlp256(m) => m.io_dims(),
             Self::Mlp512x3(m) => m.io_dims(),
         }
     }
@@ -109,6 +125,7 @@ impl<B: Backend> AnyBrain<B> {
         args: R::RecordArgs,
     ) -> Result<R::RecordOutput, RecorderError> {
         match self {
+            Self::Mlp256(m) => recorder.record(m.clone().into_record(), args),
             Self::Mlp512x3(m) => recorder.record(m.clone().into_record(), args),
         }
     }
@@ -120,6 +137,7 @@ impl<B: Backend> AnyBrain<B> {
         device: &B::Device,
     ) -> Result<Self, RecorderError> {
         match self {
+            Self::Mlp256(m) => Ok(Self::Mlp256(m.load_record(recorder.load(args, device)?))),
             Self::Mlp512x3(m) => Ok(Self::Mlp512x3(m.load_record(recorder.load(args, device)?))),
         }
     }
