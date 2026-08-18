@@ -21,10 +21,10 @@ use crate::training::targets::{
 
 /// The far sweep's ball distance — pinned from measured pace, NOT the band edge
 /// (rl#292/rl#293): at the 128 m band edge an unreachable ball would make the pair's
-/// progress measure the ray's worst obstruction instead of her chase. 24 m ≈ 65% of
+/// progress measure the ray's worst obstruction instead of her chase. 24 m ≈ 40% of
 /// the pinned charge's flat-ground horizon traverse
-/// ([`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] ≈ 1.6 m/s × [`DEFAULT_EVAL_TICKS`] ≈ 23 s ≈
-/// 37 m), so arrival stays measurable for a competent brain even on relief, and
+/// ([`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] ≈ 2.7 m/s × [`DEFAULT_EVAL_TICKS`] ≈ 23 s ≈
+/// 62 m), so arrival stays measurable for a competent brain even on relief, and
 /// mid-band for the obs. NOTE: the far sweep runs NO mid-episode recenter — matching
 /// the training regime; only the pace probe wires the `pace_recenter` seam
 /// (fixed-locale measurement, see its doc). Re-pin from pace evidence when the gait
@@ -233,21 +233,29 @@ const TARGET_Y: f32 = (TARGET_Y_MIN + TARGET_Y_MAX) / 2.0;
 /// of the then-live brain; [`run_eval`] flags when a retrain drifts the real gait
 /// outside [`CHARGE_SPEED_DRIFT_TOL`] — re-measure and re-pin then.
 ///
-/// Measured 2026-07-16 on the live mlp512x3-s2 brain — the third re-pin in five days
-/// (1.74 → 2.31 → 2.61; the last is the rl#280 pace probe replacing the far-sweep
-/// instrument, which had read 2.31 on the same brain that morning: the probe's lure
-/// never lets her decelerate into an arrival, so it reads her pure charge a shade
-/// higher — the instrument systematic had to move into the pin, not sit in every
-/// future drift readout). Locomotion training is still accelerating her, which is how
-/// the original hand-pinned 8.5 sim m/s rotted unnoticed while `progress_m` sat
-/// saturated at the 9 m target (rl#266). Strictly her best 5-seconds-from-rest pace,
-/// not a cruise speed: for a decaying speed profile the max prefix lands at the
+/// Measured 2026-08-18 on the active-set canary-probe-g-mlp256 brain — the rl#344
+/// re-pin: the pace statistic went PLANAR (a 3D closing rate at the tile-centre
+/// locale credited the ~49° fall line's vertical drop as approach; on the same brain
+/// the 3D instrument read 7.44 where planar reads 4.42), and an instrument change
+/// re-pins from the then-live brain in the same change. Prod training was OFF at the
+/// re-pin (rl#351 bisect era), so the live brain is a diagnostic canary with a
+/// storming gait — fast (the close probe logs ~140 m sprints per episode) but barely
+/// target-directed (far mean 0.16 m); the pin honestly records ITS pace, and the
+/// next healthy prod brain re-pins via the drift guard as always. Pin history:
+/// 1.74 → 2.31 → 2.61 (2026-07-16, live mlp512x3-s2; that last was the rl#280 pace
+/// probe replacing the far-sweep instrument — the probe's lure never lets her
+/// decelerate into an arrival, so it reads her pure charge a shade higher; an
+/// instrument systematic moves into the pin, not into every future drift readout)
+/// → 4.42. Locomotion training keeps moving her, which is how the original
+/// hand-pinned 8.5 sim m/s rotted unnoticed while `progress_m` sat saturated at the
+/// 9 m target (rl#266). Strictly her best 5-seconds-from-rest pace, not a cruise
+/// speed: for a decaying speed profile the max prefix lands at the
 /// [`PACE_WINDOW_MIN_S`] floor, so the opening lunge inflates it a little — the safe
 /// direction for the spawn clearance derived from it. The instrument's saturation
 /// ceiling is [`PACE_PROBE_DISTANCE_M`] / [`PACE_WINDOW_MIN_S`] ≈ 5.9 heights/s
-/// (`charge_speed_guard_keeps_saturation_headroom`); when a re-pin approaches it, the
-/// probe needs an even farther ball (rl#280).
-pub const CRAB_CHARGE_SPEED_HEIGHTS_PER_S: f32 = 2.61;
+/// (`charge_speed_guard_keeps_saturation_headroom`); this re-pin's band edge (5.52)
+/// sits close under it — the next re-pin upward needs a farther ball (rl#280).
+pub const CRAB_CHARGE_SPEED_HEIGHTS_PER_S: f32 = 4.42;
 
 /// Fractional drift band around [`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] before the eval
 /// flags. Wide enough for brain-to-brain wobble in the measured pace and the residual
@@ -340,7 +348,10 @@ pub struct BearingReport {
     /// condemns the eval via [`EvalReport::plant_unbounded`].
     pub unbounded: bool,
     /// Best prefix pace toward the target (arena m/s): max over active ticks past
-    /// [`PACE_WINDOW_MIN_S`] of progress-so-far / time-so-far. The max is taken right
+    /// [`PACE_WINDOW_MIN_S`] of PLANAR (XZ) progress-so-far / time-so-far — planar
+    /// since rl#344, so a downhill fall line can't donate vertical drop to the
+    /// charge reading (the 3D distances stay the progress/reach measures). The max
+    /// is taken right
     /// when she arrives at the ball, so parking there for the rest of the episode
     /// (which dilutes `progress_m / active_ticks`) can't understate her charge. The
     /// rl#266 speed guard reads the PACE sweep's values only (rl#280 — the far/close
@@ -688,6 +699,10 @@ struct PairState {
     /// slot equals it except in pace-probe mode, where the slot holds the lure.
     real_target: Option<Vec3>,
     initial_dist: f32,
+    /// Planar (XZ) start distance — the pace statistic's own baseline (rl#344):
+    /// pace measures locomotion, so vertical drop toward a downhill ball must not
+    /// count as approach. The 3D `initial_dist` stays the progress/reach baseline.
+    initial_dist_xz: f32,
     closest_dist: f32,
     last_dist: f32,
     closest_tip_dist: Option<f32>,
@@ -1194,14 +1209,26 @@ fn eval_step(
             *slot = Some(probe_lure(cpos, target, &terrain));
         }
         let d = dist_3d(cpos, target);
+        // The pace statistic closes PLANAR distance only (rl#344): the probe runs on
+        // tile-centre relief whose fall line donates ~49° of drop over the 18 m rays,
+        // and a 3D closing rate under the max-over-bearings × max-over-prefix fold
+        // selects that bearing and credits pure vertical descent as charge. A
+        // residual stays by choice: gravity still assists the PLANAR component of a
+        // downhill run — a constant systematic of the fixed locale, safe-direction
+        // for the spawn clearance the pin feeds (which is itself planar, so planar
+        // measured now matches planar consumed).
+        let d_xz = Vec2::new(cpos.x - target.x, cpos.z - target.z).length();
         let p = &mut state.pairs[i];
         if settling {
             p.initial_dist = d;
+            p.initial_dist_xz = d_xz;
             p.closest_dist = d;
         } else {
             p.closest_dist = p.closest_dist.min(d);
             if elapsed_s >= PACE_WINDOW_MIN_S {
-                p.best_pace_m_per_s = p.best_pace_m_per_s.max((p.initial_dist - d) / elapsed_s);
+                p.best_pace_m_per_s = p
+                    .best_pace_m_per_s
+                    .max((p.initial_dist_xz - d_xz) / elapsed_s);
             }
         }
         p.last_dist = d;
