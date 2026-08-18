@@ -7,8 +7,8 @@ use bevy_rapier3d::rapier::parry::query::contact;
 
 use super::body::{CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
 #[cfg(test)]
-use super::headless::flat_headless_app;
-use super::headless::{headless_app, tick};
+use super::headless::{flat_headless_app, headless_app};
+use super::headless::{restable_headless_app, tick};
 use super::rig::PartId;
 #[cfg(test)]
 use super::rig::parts_adjacent;
@@ -159,7 +159,10 @@ impl Finding {
 }
 
 pub fn run() -> Result<super::AuditVerdict, String> {
-    let mut app = headless_app();
+    // Restable ground (rl#392): on the default spawn's mountainside a passive
+    // crab luges downhill for the whole settle window, so this audited the
+    // mid-tumble trajectory lottery instead of the rl#293 rest pose.
+    let mut app = restable_headless_app();
     tick(&mut app, SETTLE_TICKS);
 
     let parts = collect_parts(&mut app);

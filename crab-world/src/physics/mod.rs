@@ -24,23 +24,28 @@ pub const fn brake_coeff_max(mass: f32) -> f32 {
     mass * PHYSICS_HZ as f32
 }
 
-/// 4 substeps + the 8/4/4 solver iterations below are one tuned set (rl#340
-/// stage 2): at rl#299's 30 Hz contact stiffness the zero-drive mesh multibody
-/// chattered at rest (claw links 12.9 m/s, momentum leak 32× the rl#321
-/// baseline) — under-converged contact/limit solves on the near-massless distal
-/// links, invisible under an actively-driven gait. Substeps are load-bearing: at
-/// 2, rest bounce triples past its bound and FOUGHT self-pairs reappear
-/// (`sim_truth_test`, `collider_check`). ~3× solver cost vs the old 2/4/1/1;
-/// trim attempts (6/3/3, or dropping either internal iteration count alone)
-/// re-fail `claws_quiet_at_rest`.
-pub const PHYSICS_SUBSTEPS: usize = 4;
+/// Substeps + the solver iterations below are the DRIVEN-gait budget (rl#392):
+/// this is what every awake tick pays, and at rl#340 stage 2's 4×(8/4/4) it was
+/// ~3× too slow for the frame budget — the sim tick ran ~72 ms against 16.6 and
+/// the game presented at 2 fps. Stage 2 had raised these globally because the
+/// zero-drive mesh multibody chattered at rest (claw links 12.9 m/s of solver
+/// noise); that rest regime is now retired from the solver entirely by SLEEP
+/// instead (`bot::body`'s sleep gates + `CRAB_SETTLE_EXTRA_ITERATIONS`, the
+/// rl#377 source-split), so the global counts only need to carry the actively
+/// driven crab. Substeps dominate cost (~5 ms/substep fixed in the driven probe);
+/// 2 is the pre-stage-2 value the 60 fps game shipped with.
+pub const PHYSICS_SUBSTEPS: usize = 2;
 
 /// (outer, internal-PGS, internal-stabilization) solver iterations — the other
-/// half of the [`PHYSICS_SUBSTEPS`] tuned set (rationale there). Rapier's 4/1/1
-/// defaults under-converge the railed claw joints at rest into rad/s-scale
-/// velocity chatter; both internal counts are load-bearing, not just the outer
-/// one — either alone at 1 re-fails `claws_quiet_at_rest`.
-pub const SOLVER_ITERATIONS: (usize, usize, usize) = (8, 4, 4);
+/// half of the [`PHYSICS_SUBSTEPS`] driven budget (rationale there). Outer 4 is
+/// rapier's default; the internal counts at 2 are load-bearing for DRIVEN
+/// momentum honesty, not rest quiet: at 1/1 the airborne self-contact thrash
+/// leaks 0.31–0.58 m/s² of phantom COM force across realization draws —
+/// straddling the rl#321 0.5 ceiling and approaching the pre-fix 0.64 scale —
+/// while 2/2 measures 0.25–0.39 with real margin, for <1 ms/tick over 1/1
+/// (4/4 buys nothing further; 2/2 is the knee). A ZERO-DRIVE crab gets its
+/// rest convergence from `CRAB_SETTLE_EXTRA_ITERATIONS` on the outer count.
+pub const SOLVER_ITERATIONS: (usize, usize, usize) = (4, 2, 2);
 
 fn fixed_timestep() -> TimestepMode {
     TimestepMode::Fixed {
@@ -53,13 +58,18 @@ fn fixed_timestep() -> TimestepMode {
 /// can't silently swap the plant's contact stiffness. Frequency is rapier's 30 Hz
 /// default — was 5 Hz, a 36× softer spring that rested weight-bearing limbs
 /// 6–10 cm INSIDE the terrain (bddap/rl#299); at 30 Hz the same gait rests ≲1 cm.
-/// Damping ratio 10 (2× rapier's 5.0): at ζ5 the resting claw links keep ~0.4 rad/s
-/// of contact-solve velocity noise even at the raised iteration counts on
-/// [`PHYSICS_SUBSTEPS`] — ζ10 halves it under the `claws_quiet_at_rest` bound
-/// (rl#340 stage 2) without touching rest depth (frequency owns that).
+/// Do NOT stiffen it to buy contact resolution at the cheap solver counts: 60 Hz
+/// at 2×(4/1/1) injects energy under hard impacts — respawn drops launched the
+/// carapace 50 m and the craft-ram momentum test blew up (rl#392); resolution
+/// depth is the solver's job (`CRAB_SETTLE_EXTRA_ITERATIONS`), not the spring's.
+/// Damping ζ20 (4× rapier's 5.0), raised in two measured steps that each bought
+/// quiet without touching rest depth (frequency owns that): ζ5→ζ10 halved the
+/// resting claw links' solve-noise (rl#340 stage 2); ζ10→ζ20 brings the rest
+/// bounce and pre-sleep settle inside the `crab_settles_quietly_at_rest` bounds
+/// at the cheap counts (0.045 m bounce at ζ10 vs the 0.024 bound, rl#392).
 pub const CONTACT_SOFTNESS: SpringCoefficients<f32> = SpringCoefficients {
     natural_frequency: 30.0,
-    damping_ratio: 10.0,
+    damping_ratio: 20.0,
 };
 
 const LENGTH_UNIT: f32 = 1.0;

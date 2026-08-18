@@ -59,4 +59,4 @@ opt-level = 3
 strip = true
 
 [patch.crates-io]
-rapier3d = { git = "https://github.com/bddap-bot/rapier", rev = "35db4004403c3a11d066770d84da05b29c7fd555" }
+rapier3d = { git = "https://github.com/bddap-bot/rapier", rev = "8a5d9859edbcd3fca6eeb6bd53bd6acb32cf00c5" }

@@ -126,6 +126,7 @@ pub fn apply_actions(
     joints: Query<(Entity, &CrabJoint, &CrabEnvId, &MultibodyJoint)>,
     transforms: Query<&Transform>,
     mut forces: Query<(Entity, &mut ExternalForce), With<CrabBodyPart>>,
+    mut solver_iters: Query<(&CrabEnvId, &mut AdditionalSolverIterations), With<CrabBodyPart>>,
     mut warned_nonfinite: Local<bool>,
 ) {
     let mut torque: HashMap<Entity, Vec3> = HashMap::new();
@@ -152,8 +153,43 @@ pub fn apply_actions(
         *torque.entry(mj.parent).or_default() -= wrench;
     }
 
+    // A resting crab must be allowed to SLEEP (rl#392, the rl#377 pattern):
+    // bevy_rapier force-wakes a body on any Changed ExternalForce, so an
+    // unconditional write here resets every crab body's sleep timer each tick
+    // and the awake contact solve rings the railed claw links forever. Skip
+    // the write when the value is unchanged — a zero-drive policy then stops
+    // touching the bodies after the first tick and rapier's pose-drift sleep
+    // check retires the settled crab from the solver: rest is bit-exact rest.
     for (e, mut ef) in forces.iter_mut() {
-        ef.force = Vec3::ZERO;
-        ef.torque = torque.get(&e).copied().unwrap_or(Vec3::ZERO);
+        let next = ExternalForce {
+            force: Vec3::ZERO,
+            torque: torque.get(&e).copied().unwrap_or(Vec3::ZERO),
+        };
+        if *ef != next {
+            *ef = next;
+        }
+    }
+
+    // The two solver regimes, split by drive state through rapier's per-body
+    // lever (rl#392): a DRIVEN crab runs the cheap global iteration counts (the
+    // gait budget — this is most of the sim's per-tick cost), while a ZERO-DRIVE
+    // crab gets extra solver iterations so its rest contacts actually converge,
+    // settle below the sleep gates, and the whole multibody leaves the solver.
+    // The elevated regime therefore lasts only the settle transient (~1 s);
+    // asleep it costs nothing. Written only on drive-state edges — the value is
+    // island-wide data, not a per-frame config fork.
+    for (env, mut iters) in solver_iters.iter_mut() {
+        let zero_drive = actions
+            .envs
+            .get(env.0)
+            .is_none_or(|values| values.iter().all(|v| *v == 0.0));
+        let want = if zero_drive {
+            super::body::CRAB_SETTLE_EXTRA_ITERATIONS
+        } else {
+            0
+        };
+        if iters.0 != want {
+            iters.0 = want;
+        }
     }
 }

@@ -303,6 +303,7 @@ fn crab_settles_quietly_at_rest() {
     tick(&mut app, 1);
 
     tick(&mut app, 320);
+    settle_to_sleep(&mut app, 1024);
     let crumple = max_leg_joint_deflection(&mut app);
 
     let mut ang_sum = 0.0f32;
@@ -351,6 +352,32 @@ fn crab_settles_quietly_at_rest() {
     );
 }
 
+/// Tick until every dynamic body sleeps, or `cap` ticks — the rl#392 settle for
+/// rest measurements. Rest quiet is delivered by SLEEP, so a rest window starts
+/// at "the crab fell asleep", not at a fixed tick count: under a loaded box the
+/// async sally.glb load can spawn the crab hundreds of ticks late, and a fixed
+/// settle then measures the settle transient instead of rest (the
+/// contended-suite flake this replaces). A crab that never sleeps caps out and
+/// the caller's bounds fail honestly.
+fn settle_to_sleep(app: &mut App, cap: u32) {
+    use bevy_rapier3d::plugin::context::RapierRigidBodySet;
+
+    for _ in 0..cap {
+        tick(app, 1);
+        let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();
+        let set = set_q.single(app.world()).unwrap();
+        let states: Vec<bool> = set
+            .bodies
+            .iter()
+            .filter(|(_, rb)| rb.is_dynamic())
+            .map(|(_, rb)| rb.is_sleeping())
+            .collect();
+        if !states.is_empty() && states.iter().all(|s| *s) {
+            return;
+        }
+    }
+}
+
 #[test]
 fn claws_quiet_at_rest() {
     use bevy_rapier3d::prelude::Velocity;
@@ -358,6 +385,7 @@ fn claws_quiet_at_rest() {
     let mut app = flat_headless_app();
     tick(&mut app, 1);
     tick(&mut app, 320);
+    settle_to_sleep(&mut app, 1024);
 
     let (mut lin_sum, mut ang_sum) = (0.0f32, 0.0f32);
     let window = 192u32;
@@ -1277,4 +1305,83 @@ fn hypersonic_carapace_brake_decays() {
          is missing or mis-scaled (rl#339)",
         v1 - prev
     );
+}
+
+/// rl#392's structural pin. The solver runs two regimes split by drive state:
+/// awake ticks pay only the cheap global [`crate::physics::SOLVER_ITERATIONS`]
+/// (the frame budget), and a ZERO-DRIVE crab must actually leave the solver —
+/// wake-loop-free force writers (actuator + carapace drag write-skips), the
+/// noise-floor sleep gates, and the settle iteration elevation together put
+/// every body of the multibody to sleep, which zeroes the velocities the
+/// chatter tests above measure. If this fails, rest quiet is being bought by
+/// awake solving again — the 2 fps regression's shape (rl#392). The driven
+/// interlude makes the pin cover the wake → re-settle → re-sleep path, not
+/// just the spawn settle.
+#[test]
+fn resting_crab_falls_asleep() {
+    use bevy_rapier3d::plugin::context::RapierRigidBodySet;
+
+    fn count(app: &mut App) -> (usize, usize) {
+        let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();
+        let set = set_q.single(app.world()).unwrap();
+        let (mut asleep, mut awake) = (0, 0);
+        for (_, rb) in set.bodies.iter() {
+            if !rb.is_dynamic() {
+                continue;
+            }
+            if rb.is_sleeping() {
+                asleep += 1;
+            } else {
+                awake += 1;
+            }
+        }
+        (asleep, awake)
+    }
+
+    let mut app = flat_headless_app();
+    tick(&mut app, 1);
+    assert!(app.world_mut().resource_mut::<CrabActions>().fill(0, 0.6));
+    tick(&mut app, 64);
+    let (_, awake_driven) = count(&mut app);
+    assert!(
+        awake_driven > 0,
+        "a fully driven crab has no awake bodies — the actuator's torque writes \
+         stopped force-waking, so drives no longer reach the solver"
+    );
+
+    assert!(app.world_mut().resource_mut::<CrabActions>().fill(0, 0.0));
+    settle_to_sleep(&mut app, 512);
+    let (asleep, awake) = count(&mut app);
+    assert!(
+        awake == 0 && asleep > 10,
+        "zero-drive crab still has {awake} awake bodies ({asleep} asleep) 8 s \
+         after the drives went quiet — sleep is not engaging, so rest is being \
+         paid for with awake solver ticks (and the chatter tests are measuring \
+         live solver noise instead of sleep's exact zeros)"
+    );
+
+    let poses: Vec<_> = {
+        let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();
+        let set = set_q.single(app.world()).unwrap();
+        set.bodies
+            .iter()
+            .filter(|(_, rb)| rb.is_dynamic())
+            .map(|(_, rb)| *rb.position())
+            .collect()
+    };
+    tick(&mut app, 64);
+    let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();
+    let set = set_q.single(app.world()).unwrap();
+    for (i, (_, rb)) in set
+        .bodies
+        .iter()
+        .filter(|(_, rb)| rb.is_dynamic())
+        .enumerate()
+    {
+        assert_eq!(
+            rb.position().translation,
+            poses[i].translation,
+            "a sleeping crab body moved — sleep is not bit-exact rest"
+        );
+    }
 }

@@ -29,6 +29,50 @@ const FOOT_FRICTION: Friction = Friction::coefficient(1.5);
 /// velocity-gated, so resting bodies pay nothing.
 const SOFT_CCD: SoftCcd = SoftCcd { prediction: 0.5 };
 
+/// Below this point-speed, a zero-drive crab body's reported motion is contact-solver
+/// noise, not signal (rl#392, the rl#377 source-split): at rest the joint angles sit
+/// static to sub-mrad while the under-converged contact/limit solve on the
+/// near-massless distal links reports up to ~0.7 m/s of velocity chatter and
+/// ~1 mm/tick of pose wander. Raising the crab's sleep threshold over that noise
+/// floor lets rapier's pose-drift sleep check retire the settled multibody from the
+/// solver — rest becomes bit-exact rest (velocities zeroed on sleep), which is what
+/// the rl#340 stage-2 iteration cranking bought at ~3× solver cost, for free.
+/// Anything commanding the crab (any actuator torque write) force-wakes it, so only
+/// zero-drive bodies can cross this gate. `resting_crab_falls_asleep` pins engagement;
+/// the claws/settle chatter tests pin the resulting quiet.
+pub(crate) const CRAB_SLEEP_NOISE_FLOOR: f32 = 0.3;
+
+/// Angular twin of [`CRAB_SLEEP_NOISE_FLOOR`]: the rest-noise angular velocity the
+/// solver reports on the railed claw/leg links reaches ~5 rad/s with the pose static,
+/// which would trip rapier's π/2 sleep sanity gate every step. Raising the body's
+/// `angular_threshold` lifts that gate (fork patch, bddap-bot/rapier@8a5d985); the
+/// pose-drift criterion — which folds real rotation in via the collider extent —
+/// remains the arbiter, so a genuinely tumbling crab still cannot sleep.
+pub(crate) const CRAB_SLEEP_ANGULAR_NOISE_FLOOR: f32 = 10.0;
+
+/// Extra solver iterations a ZERO-DRIVE crab's island runs on top of
+/// [`crate::physics::SOLVER_ITERATIONS`] (rl#392). Two jobs, both zero-drive-only:
+/// on level ground the cheap driven-gait counts never converge the rest contact
+/// stack on the near-massless distal links — the crab visibly creeps (~6 cm/s
+/// measured) and can't pass the sleep gates, while at the elevated total the
+/// settle converges and the multibody falls asleep within ~1 s, after which it
+/// costs nothing; on steep terrain, where a passive crab may slide indefinitely
+/// instead of resting, the elevated count is what keeps the load-bearing
+/// self-stacks resolved under the tumble: at the cheap counts the carapace
+/// crushes ~100 mm into the leg bases (historical FOUGHT findings), and 12
+/// is the measured floor for sleep engagement across BOTH feature graphs — the render build realizes louder rest noise (worst-link spikes 11+ rad/s vs ~5 headless-only) and stays awake at 8 total outer. The actuator flips
+/// this on drive-state edges (`apply_actions`) — island-wide data through
+/// rapier's own per-body lever, not a config fork — so DRIVEN play never pays it.
+pub(crate) const CRAB_SETTLE_EXTRA_ITERATIONS: usize = 12;
+
+fn crab_sleep() -> Sleeping {
+    Sleeping {
+        normalized_linear_threshold: CRAB_SLEEP_NOISE_FLOOR,
+        angular_threshold: CRAB_SLEEP_ANGULAR_NOISE_FLOOR,
+        ..Sleeping::default()
+    }
+}
+
 pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f32> =
     bevy_rapier3d::rapier::dynamics::SpringCoefficients {
         natural_frequency: 400.0,
@@ -151,6 +195,8 @@ pub fn spawn_crab(
             CrabEnvId(env),
             RigidBody::Dynamic,
             SOFT_CCD,
+            crab_sleep(),
+            AdditionalSolverIterations(CRAB_SETTLE_EXTRA_ITERATIONS),
             carapace_collider,
             crab_collision(env),
             ColliderMassProperties::Density(recipe.carapace_density),
@@ -206,6 +252,8 @@ pub fn spawn_crab(
             CrabEnvId(env),
             RigidBody::Dynamic,
             SOFT_CCD,
+            crab_sleep(),
+            AdditionalSolverIterations(CRAB_SETTLE_EXTRA_ITERATIONS),
             collider,
             groups,
             ColliderMassProperties::Density(link.density),

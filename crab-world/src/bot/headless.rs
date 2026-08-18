@@ -135,6 +135,66 @@ pub fn headless_app() -> App {
     })
 }
 
+/// A GCR spot where zero-drive REST is reachable: the default spawn sits on a
+/// mountainside steep enough that a passive crab luges downhill indefinitely
+/// (measured: 50+ m of descent over a 576-tick settle, carapace 1–3 m airborne
+/// — rl#392). Rest-pose assertions (`collider_check`, the reset-test grounded
+/// check) are trajectory lotteries on that luge; they belong on ground the crab
+/// can actually rest on. Scan outward from the origin on a coarse lattice and
+/// take the first point whose local 8-neighbour slope stays under ~5°, so the
+/// pick survives terrain re-bakes instead of pinning a coordinate that goes
+/// stale.
+fn restable_spot(g: &crate::terrain::TerrainGrid) -> bevy::math::Vec2 {
+    const STEP: f32 = 8.0;
+    const PROBE: f32 = 1.0;
+    const MAX_GRADE: f32 = 0.09;
+    for ring in 0..64i32 {
+        for dz in -ring..=ring {
+            for dx in -ring..=ring {
+                if dx.abs() != ring && dz.abs() != ring {
+                    continue;
+                }
+                let (x, z) = (dx as f32 * STEP, dz as f32 * STEP);
+                let h = g.height(x, z);
+                let steep = [
+                    (PROBE, 0.0),
+                    (-PROBE, 0.0),
+                    (0.0, PROBE),
+                    (0.0, -PROBE),
+                    (PROBE, PROBE),
+                    (PROBE, -PROBE),
+                    (-PROBE, PROBE),
+                    (-PROBE, -PROBE),
+                ]
+                .iter()
+                .any(|(ox, oz)| ((g.height(x + ox, z + oz) - h) / PROBE).abs() > MAX_GRADE);
+                if !steep {
+                    return bevy::math::Vec2::new(x, z);
+                }
+            }
+        }
+    }
+    bevy::math::Vec2::ZERO
+}
+
+/// [`headless_app`] with the crab spawned at [`restable_spot`] — the world for
+/// REST-pose measurement on the real GCR ground (rl#293 intent, rl#392 fix).
+pub fn restable_headless_app() -> App {
+    let grid = crate::terrain::TerrainGrid::gcr();
+    let spot = restable_spot(&grid);
+    let mut app = headless_stack(HeadlessStack {
+        num_envs: 1,
+        role: WorldRole::Standalone,
+        grid,
+        visuals: Visuals(false),
+    });
+    app.insert_resource(super::InitialCrabLayout {
+        base_xz: spot,
+        spawns_m: vec![bevy::math::Vec2::ZERO],
+    });
+    app
+}
+
 /// [`headless_app`] on a planar fixture grid, for tests that hand-compute geometry
 /// (part positions, boarding spots, absolute heights) that is only exact on
 /// constant-height ground. 512 m half-extent so band sampling fits
