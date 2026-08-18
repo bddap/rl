@@ -73,8 +73,12 @@ fn fragment(
     let wp = in.world_position.xyz;
     let p = in.world_position.xz;
     // Both footprint derivatives taken HERE, in uniform control flow — every fade
-    // downstream may be consumed inside a look's branch.
-    let fw = max(max(fwidth(p.x), fwidth(p.y)), 1e-4);
+    // downstream may be consumed inside a look's branch. The clamp is a degenerate-
+    // derivative guard only — it must sit BELOW any real footprint, or it lies to
+    // the detail descents: at 1e-4 it capped fw over most of an on-foot down-look
+    // (the crab eye is centimeters up, so near ground is 0.02-0.1 mm/px) and froze
+    // the descent's octave choice there (rl#390).
+    let fw = max(max(fwidth(p.x), fwidth(p.y)), 1e-5);
     let fw_y = max(fwidth(wp.y), 1e-4);
     let base = pbr_input.material.base_color.rgb;
     let n_geo = normalize(in.world_normal);
