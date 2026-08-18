@@ -216,18 +216,16 @@ pub fn tick(app: &mut App, n: u32) {
 }
 
 pub fn pin_single_thread_pools() {
+    // Pin rayon by BUILDING the global pool at width 1, not via RAYON_NUM_THREADS
+    // (bddap/rl#345): the explicit width overrides any inherited env, and
+    // AlreadyInitialized just means an earlier pin (or pre-pin rayon work) built it —
+    // the read-back below distinguishes those two.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build_global();
     // Only write when the value is wrong: this runs again for every in-process eval
     // (the keep-best gate, bddap/rl#233), and `set_var` in a threaded process races any
-    // concurrent `getenv` — an already-correct pin must be a pure read. An INHERITED
-    // non-1 value is overridden, not honored (bddap/rl#345): the pin's whole point is
-    // a fixed reduction order, and an env leak from the launching shell must not
-    // silently widen the pools.
-    if std::env::var("RAYON_NUM_THREADS").as_deref() != Ok("1") {
-        if let Ok(prev) = std::env::var("RAYON_NUM_THREADS") {
-            eprintln!("RAYON_NUM_THREADS={prev} inherited; forcing 1 (single-thread eval pin)");
-        }
-        unsafe { std::env::set_var("RAYON_NUM_THREADS", "1") };
-    }
+    // concurrent `getenv` — an already-correct pin must be a pure read.
     if std::env::var("MATMUL_NUM_THREADS").as_deref() != Ok("1") {
         if let Ok(prev) = std::env::var("MATMUL_NUM_THREADS") {
             eprintln!(
@@ -238,14 +236,12 @@ pub fn pin_single_thread_pools() {
         unsafe { std::env::set_var("MATMUL_NUM_THREADS", "1") };
     }
     TaskPoolOptions::with_num_threads(1).create_default_pools();
-    // Read-back (bddap/rl#345): the env pins are write-only lies once a pool exists —
-    // rayon reads RAYON_NUM_THREADS exactly once, at global-pool build. Touching the
-    // pool HERE forces that build under the pin and proves it took; a wider pool means
-    // rayon work ran before the pin, every reduction since is thread-count-dependent,
-    // and recording such an eval would be mismeasurement — hard-fail instead.
-    // (MATMUL_NUM_THREADS has no read-back: matrixmultiply reads it at its first
-    // matmul and exposes nothing. The rayon assert covers burn-ndarray's pool; the
-    // matmul tree stays env-trust-only.)
+    // Read-back (bddap/rl#345): a wider pool means rayon work ran before the pin,
+    // every reduction since is thread-count-dependent, and recording such an eval
+    // would be mismeasurement — hard-fail instead. (MATMUL_NUM_THREADS has no
+    // read-back: matrixmultiply reads it at its first matmul and exposes nothing.
+    // The rayon assert covers burn-ndarray's pool; the matmul tree stays
+    // env-trust-only.)
     let rayon_threads = rayon::current_num_threads();
     assert_eq!(
         rayon_threads, 1,
