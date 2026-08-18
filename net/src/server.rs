@@ -451,6 +451,10 @@ impl Server {
             local.issue_tick, tick,
             "the host issues exactly one input per assembled tick"
         );
+        // Every query ([`Server::advance`], [`Server::step_next`]) runs at or past this
+        // cursor, so points behind it are unobservable — pruning here bounds the schedule
+        // under join/depart churn (rl#350).
+        self.roster.prune_before(tick);
         self.file_intent(self.me, local.pilot);
         {
             let rostered = self.roster.at(tick);
@@ -650,6 +654,12 @@ impl Server {
         for pm in early {
             self.record_remote(pm.pid, pm.msg);
         }
+    }
+
+    /// Test-only view of the roster schedule's change-point count (rl#350).
+    #[cfg(test)]
+    fn roster_change_points(&self) -> usize {
+        self.roster.change_points()
     }
 
     /// Test-only view of a player's queued (not yet consumed) inputs.
@@ -1345,6 +1355,34 @@ mod tests {
             !s.sim().has_player(PlayerId(1)) && !s.sim().has_player(PlayerId(2)),
             "both leavers despawned once their boundaries passed"
         );
+    }
+
+    /// Join/depart churn keeps the roster schedule bounded (rl#350): one endpoint cycling
+    /// connect → join → disconnect for the life of a round must not grow server memory.
+    #[test]
+    fn churn_does_not_grow_the_roster_schedule() {
+        let mut s = srv(7, &ids(1));
+        let mut t = 0;
+        for _ in 0..50 {
+            let adm = s.admit(crate::SyncStamp::ZERO);
+            while s.sim().tick() <= adm.effective_tick {
+                s.advance(tickmsg(t, 0.0));
+                step_ready(&mut s);
+                t += 1;
+            }
+            s.depart(adm.pid);
+        }
+        for _ in 0..4 {
+            s.advance(tickmsg(t, 0.0));
+            step_ready(&mut s);
+            t += 1;
+        }
+        assert!(
+            s.roster_change_points() <= 2,
+            "schedule pruned to the cursor: {} points after 50 join/leave cycles",
+            s.roster_change_points()
+        );
+        assert_eq!(s.roster(), &[PlayerId(0)], "every joiner departed");
     }
 
     /// `admit` allocates the lowest free [`PlayerId`] and NEVER renumbers an existing one

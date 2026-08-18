@@ -19,6 +19,50 @@ use crate::snapshot::CoreSnapshot;
 use crate::telemetry::{TelemetryEvent, TelemetrySender};
 use crate::transport::{self, PeerWire, Session};
 
+/// Most departed-endpoint ids remembered for the courtesy [`Refusal::Departed`] reply
+/// (rl#350): under join/depart churn the set would otherwise grow one endpoint id per
+/// cycle for the life of the round. Eviction is arbitrary — the reply is best-effort
+/// (an evicted departee's stray ticks are dropped silently, same as any unrostered
+/// endpoint's).
+const DEPARTED_CAP: usize = crate::membership::MAX_MEMBERS;
+
+/// Sustained mid-game join-attempt rate the host processes, and the burst headroom over
+/// it (a party joining at once). Joins are rare human actions; anything past this is a
+/// flood — excess requests are dropped BEFORE admission (rl#350), bounding the
+/// spawn/despawn, log, and telemetry work a sybil dialer can force. Per-source limits
+/// don't hold here (a fresh keypair per attempt is free), so the budget is global.
+const JOIN_RATE_PER_SEC: f64 = 2.0;
+const JOIN_BURST: f64 = 8.0;
+
+/// Token bucket over wall-clock time for [`JOIN_RATE_PER_SEC`]/[`JOIN_BURST`].
+struct JoinBudget {
+    tokens: f64,
+    last: std::time::Instant,
+}
+
+impl Default for JoinBudget {
+    fn default() -> Self {
+        Self {
+            tokens: JOIN_BURST,
+            last: std::time::Instant::now(),
+        }
+    }
+}
+
+impl JoinBudget {
+    fn allow(&mut self, now: std::time::Instant) -> bool {
+        let dt = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + dt * JOIN_RATE_PER_SEC).min(JOIN_BURST);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// One peer's transport-side round state: the tokio runtime the sync façade blocks on,
 /// the live [`Session`], and the roster bookkeeping (endpoint↔player map, departures,
 /// telemetry, the formation sync verdict). Built only by [`connect_and_form_dialing`] /
@@ -32,6 +76,7 @@ pub struct NetDriver {
     early: Vec<PeerMsg>,
     id_map: BTreeMap<EndpointId, PlayerId>,
     departed: std::collections::BTreeSet<EndpointId>,
+    join_budget: JoinBudget,
     telemetry: Option<TelemetrySender>,
     /// The shared-asset verdict this round was formed (or admitted) under — computed by
     /// the ONE arbiter, [`crate::SyncVerdict::between`].
@@ -139,6 +184,16 @@ impl NetDriver {
             }
         }
         for (eid, req) in joins {
+            // Over-budget requests are dropped, not refused: a reply per attempt would hand
+            // a flooder attacker-rate outbound work. A rate-limited legitimate joiner falls
+            // into its JOIN_WELCOME_TIMEOUT and can retry.
+            if !self.join_budget.allow(std::time::Instant::now()) {
+                tracing::debug!(
+                    "join budget exhausted — dropping join from {}",
+                    eid.fmt_short()
+                );
+                continue;
+            }
             self.admit_joiner(server, eid, req);
         }
         let connected = self.rt.block_on(self.session.connected_peers());
@@ -150,6 +205,9 @@ impl NetDriver {
             self.telemetry.as_ref(),
         );
         self.departed.extend(gone);
+        while self.departed.len() > DEPARTED_CAP {
+            self.departed.pop_first();
+        }
     }
 
     fn admit_joiner(&mut self, server: &mut Server, eid: EndpointId, req: JoinRequest) {
@@ -176,7 +234,10 @@ impl NetDriver {
                 }
             }
             Err(refusal) => {
-                tracing::error!("refused mid-game joiner {}: {refusal}", eid.fmt_short());
+                // warn, not error: a refused join is a protocol outcome, not a host fault
+                // (the joiner surfaces its own loud error), and error-level would feed
+                // fleet alerting at joiner-controlled rate (rl#350).
+                tracing::warn!("refused mid-game joiner {}: {refusal}", eid.fmt_short());
                 self.refuse(eid, Refusal::Admission(refusal));
                 if let Some(t) = &self.telemetry {
                     t.send(TelemetryEvent::RosterFailed {
@@ -516,6 +577,7 @@ fn connect_and_form_inner(
         early,
         id_map: frozen.id_map,
         departed: Default::default(),
+        join_budget: Default::default(),
         telemetry,
         sync: frozen.sync,
         stamp,
@@ -642,6 +704,7 @@ pub fn connect_and_join(
                 early: Vec::new(),
                 id_map,
                 departed: Default::default(),
+                join_budget: Default::default(),
                 telemetry,
                 sync,
                 stamp,
@@ -676,6 +739,45 @@ fn server_endpoint(id_map: &BTreeMap<EndpointId, PlayerId>) -> EndpointId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_budget_allows_a_burst_then_refills_at_the_sustained_rate() {
+        let t0 = std::time::Instant::now();
+        let mut b = JoinBudget {
+            tokens: JOIN_BURST,
+            last: t0,
+        };
+        let burst = (0..20).filter(|_| b.allow(t0)).count();
+        assert_eq!(
+            burst as f64, JOIN_BURST,
+            "a same-instant flood gets the burst, no more"
+        );
+        assert!(
+            !b.allow(t0 + Duration::from_millis(100)),
+            "0.1s refills only 0.2 tokens"
+        );
+        // +0.5s refills another 1.0 token onto the 0.2: one allow, then dry again.
+        assert!(
+            b.allow(t0 + Duration::from_millis(600)),
+            "a whole token accrued"
+        );
+        assert!(!b.allow(t0 + Duration::from_millis(600)), "…exactly one");
+    }
+
+    #[test]
+    fn join_budget_caps_refill_at_the_burst() {
+        let t0 = std::time::Instant::now();
+        let mut b = JoinBudget {
+            tokens: JOIN_BURST,
+            last: t0,
+        };
+        let later = t0 + Duration::from_secs(3600);
+        let allowed = (0..20).filter(|_| b.allow(later)).count();
+        assert_eq!(
+            allowed as f64, JOIN_BURST,
+            "an idle hour banks no extra tokens"
+        );
+    }
 
     #[test]
     fn solo_round_advances_through_the_coordinator() {

@@ -39,6 +39,24 @@ impl RosterSchedule {
         floor.max(self.latest_change_tick() + 1)
     }
 
+    /// Drop change-points that can no longer be observed: everything strictly below the
+    /// point `at(tick)` resolves to. Queries only ever run at or past the assemble cursor,
+    /// so pruning at the cursor each tick bounds the schedule under join/depart churn
+    /// (rl#350) instead of letting it grow append-only for the life of the round. The
+    /// surviving latest point keeps [`RosterSchedule::earliest_change_at`]'s append-only
+    /// guarantee intact.
+    pub fn prune_before(&mut self, tick: u64) {
+        if let Some((&effective, _)) = self.points.range(..=tick).next_back() {
+            self.points = self.points.split_off(&effective);
+        }
+    }
+
+    /// Change-point count — observability for the rl#350 bounded-churn tests.
+    #[cfg(test)]
+    pub(crate) fn change_points(&self) -> usize {
+        self.points.len()
+    }
+
     pub fn schedule_change(&mut self, effective_tick: u64, set: &[PlayerId]) {
         let set = sorted(set);
         if let Some(existing) = self.points.get(&effective_tick) {
@@ -108,6 +126,30 @@ mod tests {
         r.schedule_change(20, &ids(3));
         r.schedule_change(20, &[PlayerId(2), PlayerId(0), PlayerId(1)]);
         assert_eq!(r.at(20), ids(3).as_slice());
+        assert_eq!(r.current(), ids(3).as_slice());
+    }
+
+    #[test]
+    fn prune_keeps_the_effective_point_and_the_future() {
+        let mut r = RosterSchedule::frozen(&ids(2));
+        r.schedule_change(10, &ids(3));
+        r.schedule_change(20, &ids(4));
+        r.prune_before(15);
+        assert_eq!(r.change_points(), 2, "tick-0 point dropped, 10 and 20 kept");
+        assert_eq!(r.at(15), ids(3).as_slice(), "the effective point survives");
+        assert_eq!(r.at(20), ids(4).as_slice(), "future points survive");
+        // Append-only stays intact: the next change still lands strictly after 20.
+        assert_eq!(r.earliest_change_at(0), 21);
+    }
+
+    #[test]
+    fn prune_before_the_first_point_is_a_no_op_and_repruning_is_idempotent() {
+        let mut r = RosterSchedule::frozen(&ids(2));
+        r.schedule_change(10, &ids(3));
+        r.prune_before(10);
+        r.prune_before(10);
+        assert_eq!(r.change_points(), 1);
+        assert_eq!(r.at(10), ids(3).as_slice());
         assert_eq!(r.current(), ids(3).as_slice());
     }
 
