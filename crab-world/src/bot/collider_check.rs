@@ -676,9 +676,9 @@ mod load_tests {
     //! rl#312: Sally's body primitives never interpenetrate outside the
     //! designed-contact allowlist — (a) at rest (enforced) and (b) while every
     //! actuator is driven through aggressive deterministic sequences (max
-    //! torque both directions, alternating, seeded-random). (b) still FAILS on
-    //! rl#315, so its test is `#[ignore]`d and stands as the reproduction of
-    //! the finding table, not an invariant. The rl#303 buried-carapace trap
+    //! torque both directions, alternating, seeded-random). Both halves gate
+    //! every build — (b) at residual depth+duration bounds
+    //! ([`LOAD_RESIDUAL_DEPTH_CAP`], rl#315). The rl#303 buried-carapace trap
     //! was legs pinning the shell: self-collision integrity is load-bearing,
     //! so a violation names the offending pair and tick.
 
@@ -700,6 +700,22 @@ mod load_tests {
 
     /// Deterministic seed for the random phase — the test must reproduce.
     const RANDOM_SEED: u64 = 0x5A11_0312;
+
+    /// Residual bounds for the actuator-load half (rl#315). The commands are
+    /// seeded but the sim is NOT run-to-run deterministic (the solver's
+    /// outcome shifts with thread scheduling under machine load): current
+    /// main is usually violation-free, with a rare marginal residual — worst
+    /// observed 13.9 mm on one carpus pair for 8 ticks, vs the 65–120 mm
+    /// fold-throughs held for whole phases that rl#315 tracked. A zero bound
+    /// would flake on that residual; ignoring the test (the old state) gated
+    /// nothing. A pair fails on EITHER bound: depth 25 mm (~1.8× the
+    /// observed residual, far under the catastrophic class) catches deep
+    /// fold-through; 60 ticks (~0.94 s, aggregated across all phases — the
+    /// historical fights held 62–237 ticks) catches a sustained shallower
+    /// fight the depth cap alone would tolerate. A trip is DATA on the
+    /// residual distribution — investigate it, don't bump the bounds.
+    const LOAD_RESIDUAL_DEPTH_CAP: f32 = 0.025;
+    const LOAD_RESIDUAL_TICKS_CAP: u32 = 60;
 
     struct Violation {
         phase: &'static str,
@@ -834,16 +850,17 @@ mod load_tests {
 
     /// rl#312 (b): the same invariant while every actuator is driven through
     /// aggressive deterministic sequences (max torque both directions,
-    /// alternating, seeded-random). Ignored on rl#315: the viscous joint damper
-    /// (`CrabJointId::drive_damping`) + soft-CCD landed there cut the finding
-    /// table from 45 fought pairs / 120 mm to 22 / 102 mm, but closing it needs
-    /// contacts that WIN the static fight, and every contact-spring raise tried
-    /// (nf 300 and 1e6 alike) makes the terrain plant inject energy and explode
-    /// under the live policy (`rl-train eval` now hard-fails on that via
-    /// `PLANT_POSITION_BOUND_M`) — run with `--ignored` to reproduce the table;
-    /// un-ignore when a stiffening survives the terrain eval.
+    /// alternating, seeded-random), gated at the [`LOAD_RESIDUAL_DEPTH_CAP`]
+    /// bounds. Was `#[ignore]`d on rl#315; the fights dissolved between the
+    /// rl#212 rapier-0.35 bump (pinned contact semantics), rl#340 stage 7
+    /// (contact recycling off — per-step joint-based contact filtering
+    /// restored), and the rl#392 solver counts. The viscous joint damper
+    /// (`CrabJointId::drive_damping`) + soft-CCD remain load-bearing, and no
+    /// stiffening of the 30 Hz contact spring was needed (every raise tried,
+    /// nf 300 and 1e6 alike, exploded the terrain plant under the live
+    /// policy — that bound still stands, enforced by
+    /// `PLANT_POSITION_BOUND_M`).
     #[test]
-    #[ignore = "rl#315: limbs interpenetrate under sustained aggressive drive (22 fought pairs with damper + soft-CCD); reproduces the finding table"]
     fn body_primitives_never_interpenetrate_under_actuator_load() {
         let mut app = headless_app();
         tick(&mut app, SETTLE_TICKS);
@@ -856,9 +873,12 @@ mod load_tests {
 
         let mut violations = Vec::new();
 
-        // Pre-drive baseline: the rest invariant must hold before any drive,
-        // or a drive-phase violation is misattributed.
+        // Pre-drive baseline: the rest invariant must hold before any drive
+        // — asserted UNCAPPED here (this is the only rest check on this
+        // terrain world; test (a) runs on the flat one), and so a drive-phase
+        // violation is never misattributed.
         scan(&mut app, &parts, "rest", 0, &mut violations);
+        assert_no_violations(&violations);
 
         // Full-torque holds in both directions, then a per-channel square
         // wave, then seeded-random rows re-drawn every hold window.
@@ -914,6 +934,34 @@ mod load_tests {
             &mut violations,
         );
 
+        // Filter whole PAIRS, not samples, so a failing pair's "ticks seen"
+        // in the report stays its true fight duration. Keys are name-sorted:
+        // a mid-phase rescue re-collects `parts`, which can flip a pair's
+        // scan order and would otherwise split its tick count.
+        let mut pairs: BTreeMap<(&str, &str), (f32, u32)> = BTreeMap::new();
+        for v in &violations {
+            let key = if v.a <= v.b {
+                (&v.a, &v.b)
+            } else {
+                (&v.b, &v.a)
+            };
+            let (depth, ticks) = pairs.entry((key.0, key.1)).or_insert((0.0, 0));
+            *depth = depth.max(v.depth);
+            *ticks += 1;
+        }
+        let offending: Vec<(String, String)> = pairs
+            .iter()
+            .filter(|&(_, &(depth, ticks))| {
+                depth > LOAD_RESIDUAL_DEPTH_CAP || ticks > LOAD_RESIDUAL_TICKS_CAP
+            })
+            .map(|(&(a, b), _)| (a.to_owned(), b.to_owned()))
+            .collect();
+        violations.retain(|v| {
+            offending.iter().any(|(a, b)| {
+                (a.as_str(), b.as_str()) == (v.a.as_str(), v.b.as_str())
+                    || (a.as_str(), b.as_str()) == (v.b.as_str(), v.a.as_str())
+            })
+        });
         assert_no_violations(&violations);
     }
 }
