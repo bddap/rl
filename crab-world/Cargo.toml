@@ -37,6 +37,7 @@ naga = { workspace = true, features = ["termcolor"] }
 clap.workspace = true
 bincode.workspace = true
 libc.workspace = true
+rayon.workspace = true
 tracing.workspace = true
 # Frame-time telemetry (frame_telemetry.rs) — rendered surfaces only.
 otel = { path = "../otel", optional = true }

@@ -3634,6 +3634,7 @@ dependencies = [
  "naga 26.0.0",
  "otel",
  "rand 0.8.5",
+ "rayon",
  "serde",
  "serde_json",
  "test-watchdog",
