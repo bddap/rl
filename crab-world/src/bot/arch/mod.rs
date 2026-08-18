@@ -29,10 +29,9 @@ impl ArchId {
     /// this list is caught by `roundtrips_every_arch` below.
     pub const ALL: &'static [ArchId] = &[Self::Mlp256, Self::Mlp512x3];
 
-    /// The arch a fresh start gets when `--arch` is omitted. Still the 5b-cull winner:
-    /// mlp256 returned as an opt-in after rl#351's cold-start conviction of mlp512x3,
-    /// but the default flips only on Probe G's fix-or-revert verdict. (The trainer's
-    /// CLI help states the default in prose — keep that in sync.)
+    /// The arch a fresh start gets when `--arch` is omitted. The default only moves on
+    /// evidence (the 5b cull picked this one); non-default leaves stay selectable for
+    /// diagnostics. (The trainer's CLI help states the default in prose — keep in sync.)
     pub const DEFAULT: ArchId = Self::Mlp512x3;
 
     /// The stable on-disk / CLI name. Kebab-case, never reused after a cull.
