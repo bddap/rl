@@ -2,7 +2,7 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
 use super::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId};
-use super::headless::{assert_transforms_match_rapier, flat_headless_app, headless_app, tick};
+use super::headless::{assert_transforms_match_rapier, flat_headless_app, tick};
 use super::{CrabSpawns, respawn_crab};
 
 fn part_translations(app: &mut App) -> Vec<Vec3> {
@@ -269,15 +269,19 @@ fn brief_carapace_dip_below_the_sheet_does_not_rescue() {
     assert_crab_sane(&mut app, n_parts, "after a brief dip below the sheet");
 }
 
-/// rl#281 stage 2 end-to-end: on the REAL baked terrain arena the crab must spawn on
-/// the mountainside and settle standing ON the heightfield — surface-relative, since
-/// the local ground is hundreds of meters from y=0. Falling through (thin-surface
-/// tunneling) or launching would show up as a wild relative height.
+/// rl#281 stage 2 end-to-end: on the REAL baked terrain arena the crab must settle
+/// standing ON the heightfield — surface-relative, since the local ground is
+/// hundreds of meters from y=0. Falling through (thin-surface tunneling) or
+/// launching would show up as a wild relative height. On RESTABLE ground (rl#392):
+/// the default spawn's mountainside keeps a passive crab luging downhill and
+/// airborne off lips for the whole window, which made this grounded assert a
+/// solver-trajectory lottery rather than a tunneling check.
 #[test]
 fn crab_lands_sane_on_the_terrain_arena() {
+    use super::headless::restable_headless_app;
     use crate::terrain::TerrainGrid;
 
-    let mut app = headless_app();
+    let mut app = restable_headless_app();
     tick(&mut app, 192);
 
     let g = TerrainGrid::gcr();

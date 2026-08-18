@@ -130,6 +130,22 @@ pub(crate) fn apply_air_drag(
         // dropped for that one tick (at speed = 0 the zero drag arm wins — `min`
         // returns the non-NaN arm even against the cap's 0/0).
         let coeff = (drag.coeff() * speed).min(f_max / speed);
-        force.force += -coeff * vel.linear;
+        // A resting crab must be allowed to SLEEP (rl#392, the rl#377 pattern):
+        // bevy_rapier force-wakes on any Changed ExternalForce, and at rest this
+        // drag feeds on the contact solver's own noise velocity, re-deriving a
+        // not-quite-equal force each tick — a wake loop that pins the sleep timer
+        // at zero forever. Below the sleep band the velocity is noise by
+        // definition and the drag on it is sub-milli-Newton; snap it to exactly
+        // zero and skip the write so sleep can engage. Dissipative drag can never
+        // sustain motion, so nothing physical is lost; in-band the expression and
+        // the write are bit-identical to before (the 300-tick flail pin).
+        let add = if speed < super::body::CRAB_SLEEP_NOISE_FLOOR {
+            Vec3::ZERO
+        } else {
+            -coeff * vel.linear
+        };
+        if add != Vec3::ZERO {
+            force.force += add;
+        }
     }
 }

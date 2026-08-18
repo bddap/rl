@@ -20,8 +20,10 @@ pub use joint_id::{
     constructed_plant_digest, friction_cap_override, joint_angle, plant_provenance, record_plant,
 };
 
-pub(crate) use spawn::random_spawn_rotation;
 pub(in crate::bot) use spawn::set_flail_damping;
+pub(crate) use spawn::{
+    CRAB_SETTLE_EXTRA_ITERATIONS, CRAB_SLEEP_NOISE_FLOOR, random_spawn_rotation,
+};
 pub use spawn::{LIMIT_SOFTNESS, SPAWN_HEIGHT, spawn_crab};
 
 #[cfg(feature = "render")]
