@@ -86,7 +86,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     );
 
     // Verdict binds to reproducibility ONLY. The distance table above is a diagnostic:
-    // this scenario (a spawn-clearance-distance player, ~9 crab statures) is outside
+    // this scenario (a spawn-clearance-distance player, ~13 crab statures) is outside
     // the trained chase domain, so a
     // distance threshold here fails known-good policies (bddap/rl#144). Behavioral
     // pass/fail lives in the one shared chase metric, `rl-train eval --min-progress`

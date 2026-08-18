@@ -1496,12 +1496,12 @@ mod tests {
         .to_meters();
         let moved = (dx * dx + dz * dz).sqrt();
         // The bar pins the LINK (in-world motion reaches the decode), not a physics
-        // magnitude: how far the flail shuffles her is terrain-dependent, and her
-        // spawn locale moves whenever the charge pin does (the layout derives spawn
-        // clearance from it, rl#344) — so it sits well above fixed-point noise and
-        // well below any honest flail displacement.
+        // magnitude: how far the flail shuffles her is terrain-dependent at the
+        // seeded spawn locale, which is fixed (clearance is a taste constant, not
+        // pin arithmetic — rl#397) — so it sits well above fixed-point noise and
+        // well below any honest flail displacement there.
         assert!(
-            moved > 0.2,
+            moved > 0.5,
             "the flailing in-world crab must have moved in the snapshot clients decode \
              (moved {moved:.3} m)"
         );

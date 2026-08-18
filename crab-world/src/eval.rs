@@ -224,9 +224,10 @@ const TARGET_Y: f32 = (TARGET_Y_MIN + TARGET_Y_MAX) / 2.0;
 
 /// Sally's sustained full-charge pace in BODY HEIGHTS per second — THE pinned measured
 /// speed (rl#266), scale-free so each domain folds in its OWN sizing rule: net derives
-/// the sim-side charge speed (× her `CRAB_SCALE` player-heights sim stature) that spawn
-/// clearance and the pursuit-test driver build on, and this eval re-derives the arena
-/// value (× the natural rig height) to re-measure her every run. Pinned FROM the eval's
+/// the sim-side charge speed (× her `CRAB_SCALE` player-heights sim stature) the
+/// pursuit-test driver builds on (spawn clearance is a fixed taste constant that
+/// does NOT track this pin, rl#397), and this eval re-derives the arena value
+/// (× the natural rig height) to re-measure her every run. Pinned FROM the eval's
 /// own instrument ([`BearingReport::sustained_pace_m_per_s`], best pace-probe bearing)
 /// so pin and measurement can never diverge in method — which is also why a change to
 /// the instrument itself re-pins in the SAME change, from the new instrument's reading
@@ -250,9 +251,9 @@ const TARGET_Y: f32 = (TARGET_Y_MIN + TARGET_Y_MAX) / 2.0;
 /// hand-pinned 8.5 sim m/s rotted unnoticed while `progress_m` sat saturated at the
 /// 9 m target (rl#266). Strictly her best 5-seconds-from-rest pace, not a cruise
 /// speed: for a decaying speed profile the max prefix lands at the
-/// [`PACE_WINDOW_MIN_S`] floor, so the opening lunge inflates it a little — the safe
-/// direction for the spawn clearance derived from it. The instrument's saturation
-/// ceiling is [`PACE_PROBE_DISTANCE_M`] / [`PACE_WINDOW_MIN_S`] ≈ 5.9 heights/s
+/// [`PACE_WINDOW_MIN_S`] floor, so the opening lunge inflates it a little. The
+/// instrument's saturation ceiling is
+/// [`PACE_PROBE_DISTANCE_M`] / [`PACE_WINDOW_MIN_S`] ≈ 5.9 heights/s
 /// (`charge_speed_guard_keeps_saturation_headroom`); this re-pin's band edge (5.52)
 /// sits close under it — the next re-pin upward needs a farther ball (rl#280).
 pub const CRAB_CHARGE_SPEED_HEIGHTS_PER_S: f32 = 4.42;
@@ -260,17 +261,16 @@ pub const CRAB_CHARGE_SPEED_HEIGHTS_PER_S: f32 = 4.42;
 /// Fractional drift band around [`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] before the eval
 /// flags. Wide enough for brain-to-brain wobble in the measured pace and the residual
 /// lunge-vs-sustained blur; a retrain that changes her locomotion regime lands well
-/// outside it. At ±25% the spawn-grace guarantee (5 s of charge, net's
-/// `SPAWN_GRACE_SECS`) stays within 4–6.7 s of truth — feel-tolerable; beyond that the
-/// spawn-safety derivation is lying and the pin must be re-measured.
+/// outside it — beyond the band the pin no longer describes her real gait and must
+/// be re-measured.
 pub const CHARGE_SPEED_DRIFT_TOL: f32 = 0.25;
 
 /// Prefix paces count only once this much active time has elapsed: her opening lunge
 /// outpaces the sustained gait (rl#257) and a tiny elapsed divisor would let one
-/// spawn-transient hop dominate. Five seconds is past the lunge and happens to be the
-/// horizon the constant serves (spawn grace) — but it is a measurement floor, not that
-/// feel knob. Ceiling to be aware of: a brain that reaches the ball inside this window
-/// saturates the instrument at target_distance / PACE_WINDOW_MIN_S — the guard still
+/// spawn-transient hop dominate. Five seconds is past the lunge — a measurement
+/// floor, not a feel knob. Ceiling to be aware of: a brain that reaches the ball
+/// inside this window saturates the instrument at
+/// target_distance / PACE_WINDOW_MIN_S — the guard still
 /// flags (saturation is itself far off any honest pin), but the measured number stops
 /// tracking her true pace. That ceiling is why the charge metric reads from the
 /// [`PACE_PROBE_DISTANCE_M`] probe, not the far sweep (rl#280).
@@ -510,8 +510,8 @@ impl CompassSweep {
     }
 
     /// The BEST bearing's sustained pace (arena m/s) — her full charge. Max, not min:
-    /// the speed guard asks how fast she really is (spawn safety cares about her top
-    /// pace), while dead bearings are the headline gate's problem.
+    /// the speed guard asks how fast she really is, while dead bearings are the
+    /// headline gate's problem.
     fn best_sustained_pace_m_per_s(&self) -> f32 {
         self.per_bearing
             .iter()
@@ -589,7 +589,7 @@ impl EvalReport {
 
     /// Fractional drift of the measured charge speed from the pinned
     /// [`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] (+ = faster than pinned). Outside
-    /// [`CHARGE_SPEED_DRIFT_TOL`] the spawn-safety derivation is stale — rl#266.
+    /// [`CHARGE_SPEED_DRIFT_TOL`] the pin is stale — rl#266.
     pub fn charge_speed_drift(&self) -> Option<f32> {
         self.measured_charge_heights_per_s()
             .map(|m| m / CRAB_CHARGE_SPEED_HEIGHTS_PER_S - 1.0)
@@ -851,8 +851,7 @@ pub fn run_eval(
             tracing::warn!(
                 "charge speed drift (rl#266): measured {measured:.3} body-heights/s vs pinned \
                  {CRAB_CHARGE_SPEED_HEIGHTS_PER_S} ({:+.0}%) — re-measure and re-pin \
-                 CRAB_CHARGE_SPEED_HEIGHTS_PER_S; spawn clearance and the pursuit-test pace \
-                 derive from it",
+                 CRAB_CHARGE_SPEED_HEIGHTS_PER_S; the pursuit-test pace derives from it",
                 drift * 100.0,
             );
         }
@@ -1214,9 +1213,7 @@ fn eval_step(
         // and a 3D closing rate under the max-over-bearings × max-over-prefix fold
         // selects that bearing and credits pure vertical descent as charge. A
         // residual stays by choice: gravity still assists the PLANAR component of a
-        // downhill run — a constant systematic of the fixed locale, safe-direction
-        // for the spawn clearance the pin feeds (which is itself planar, so planar
-        // measured now matches planar consumed).
+        // downhill run — a constant systematic of the fixed locale.
         let d_xz = Vec2::new(cpos.x - target.x, cpos.z - target.z).length();
         let p = &mut state.pairs[i];
         if settling {

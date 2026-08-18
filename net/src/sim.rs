@@ -264,23 +264,23 @@ const STARTUP_GRACE_TICKS: u64 = 30;
 /// Sally's sustained full-charge ground speed, grid units per second — MEASURED, not
 /// commanded: her speed is whatever the trained gait strides. Folded from the ONE
 /// scale-free pinned pace ([`crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S`]) ×
-/// her stature ([`CRAB_STATURE`]) so the chase eval re-measures it every run and flags
-/// drift after a retrain (rl#266) instead of the old bare 8_500 rotting silently.
+/// her stature ([`CRAB_STATURE`]) so the pursuit/grace tests drive her at the pace
+/// the instrument last measured. Feeds the test driver ONLY: spawn clearance is a
+/// taste constant that deliberately does not track this pin (rl#397).
+#[cfg(test)]
 const CRAB_CHARGE_SPEED_PER_S: i64 =
     (crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S * CRAB_STATURE * UNIT as f32) as i64;
 
-/// How long a fresh spawn is guaranteed before Sally at full charge can be on them —
-/// the spawn-safety feel knob (rl#257). The old bare 19 m was tuned pre-rl#254 at
-/// 1/35th her real speed and played as "seconds to live"; five seconds of charge is
-/// time to orient and run. Tune on playtest.
-const SPAWN_GRACE_SECS: i64 = 5;
-
-/// Spawn clearance from the crab's sim pos, round-start and joiners alike (rl#247):
-/// [`SPAWN_GRACE_SECS`] of her full charge, not a bare meter count (rl#257). Far
-/// outside her carapace footprint (corner reach ~0.51 m), so no spawn lands inside
-/// her claw shell; `spawn_clearance_matches_crab_body` cross-checks that floor
-/// against every rig.
-const MIN_CRAB_SPAWN_DISTANCE: i64 = CRAB_CHARGE_SPEED_PER_S * SPAWN_GRACE_SECS;
+/// Spawn clearance from the crab's sim pos, round-start and joiners alike (rl#247) —
+/// the spawn-safety feel knob, a FIXED distance (rl#397). It deliberately does NOT
+/// derive from the measured chase-speed pin: an instrument re-pin must never move
+/// where players spawn or how safe a spawn feels (the rl#344 re-pin silently grew
+/// this 1.69×). 7.98 m is the clearance the game was tuned at — ~5 s of charge at
+/// the then-current gait (rl#257), time to orient and run. Tune on playtest, never
+/// by derivation. Far outside her carapace footprint (corner reach ~0.51 m), so no
+/// spawn lands inside her claw shell; `spawn_clearance_matches_crab_body`
+/// cross-checks that floor against every rig.
+const MIN_CRAB_SPAWN_DISTANCE: i64 = (7.98 * UNIT as f64) as i64;
 
 /// [`MIN_CRAB_SPAWN_DISTANCE`] in world meters — the one conversion, so the rl#322
 /// craft-park ring and the tests measure the same clearance the sim enforces.
