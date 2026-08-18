@@ -38,7 +38,12 @@
 //!   requires the key). Provenance rides with the data (rl#341 S2-3): `amplitude=`
 //!   (the terrain relief scalar), `bake=` (the terrain artifact digest, hex), and
 //!   `plant=` (the constructed plant digest, hex — a fallback-body eval is
-//!   distinguishable, S3-4). `settle=` is the settle window in ticks — the one ruler
+//!   distinguishable, S3-4), and `host=` (the CPU-feature fingerprint the floats were
+//!   computed under, rl#345 — matrixmultiply picks its sgemm kernel by these flags at
+//!   run time, so hosts whose fingerprints differ can legitimately score the same
+//!   checkpoint differently; a cross-host splice in a curve is now visible in the
+//!   data. Equal fingerprints do NOT prove equal rounding — thread count and rapier
+//!   stay unpinned dimensions). `settle=` is the settle window in ticks — the one ruler
 //!   knob no other key witnessed (it re-bases `initial_dist`, hence every historical
 //!   `progress_m`, review round 1). When any episode exploded past the position
 //!   bound it appends ` plant_unbounded=true` (bddap/rl#315 — the exploded pairs
@@ -96,7 +101,7 @@ impl EvalReport {
             "EVAL_RESULT schema=2 progress_m={:.4} net_progress_m={:.4} min_pair_m={:.4} \
              min_pair_deg={:.0} total_torque={:.2} target_m={:.2} reached={} \
              reached_count={} pairs={} rescued_pairs={} ticks={} settle={} policy_loaded={} \
-             saturation_mean={:.4} amplitude={:.4} bake={:016x} plant={:016x}",
+             saturation_mean={:.4} amplitude={:.4} bake={:016x} plant={:016x} host={}",
             self.far.mean_progress_m(),
             self.far.mean_net_progress_m(),
             min_pair.progress_m,
@@ -114,6 +119,7 @@ impl EvalReport {
             self.terrain_amplitude,
             crate::terrain::gcr_bake_digest(),
             crate::bot::body::constructed_plant_digest(),
+            host_fingerprint(),
         )
         .expect("writing to a String never fails");
         if self.plant_unbounded() {
@@ -140,6 +146,33 @@ impl EvalReport {
         }
         out.push('\n');
         out
+    }
+}
+
+/// The run-time CPU-feature fingerprint (`host=`, bddap/rl#345). Only the flags
+/// matrixmultiply's sgemm kernel ladder dispatches on — the seam that makes layer-1
+/// f32 rounding host-dependent; a kitchen-sink CPUID dump would churn the value on
+/// flags nothing reads.
+fn host_fingerprint() -> String {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut fp = String::from("x86_64");
+        for (name, hit) in [
+            ("fma", is_x86_feature_detected!("fma")),
+            ("avx2", is_x86_feature_detected!("avx2")),
+            ("avx", is_x86_feature_detected!("avx")),
+            ("sse2", is_x86_feature_detected!("sse2")),
+        ] {
+            if hit {
+                fp.push('+');
+                fp.push_str(name);
+            }
+        }
+        fp
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        std::env::consts::ARCH.to_string()
     }
 }
 
@@ -258,6 +291,7 @@ mod tests {
         );
         assert!(headline.contains(" bake="));
         assert!(headline.contains(" plant="));
+        assert!(headline.contains(" host="));
         assert!(headline.contains(" j_per_m_mean="));
         assert!(wire.ends_with('\n'));
     }
