@@ -24,3 +24,14 @@ Bisect probes (rl#351, post-shortlist):
   locale family as chase-eval). Policy armed (mean|drive| 0.885) but no chase:
   aimless downhill drift, reach 0.00. Verdict on the issue: confounded (1 rl#343
   hard-fail), red-leaning.
+
+- `probe-f-endbound.*`, `probe-f-vs-e-reach.png` — Probe F (2026-08-18): the
+  mlp512x3 single-flip on the same `3ddcf6f` tree that went green as Probe E
+  (arch the ONLY diff; patch archived at
+  `~/.local/state/rl-target/probe-f-mlp512x3-backport.patch`). Cold, flat band
+  ≤9 m, 24 h / 39.1M ticks / 12.7k iters. Train-side reach plateaued 0.26–0.35
+  from ~4k iters (episode-weighted 500-iter buckets), never touching E's 0.6
+  crossing (~2.5k iters) or 0.83–0.87 tail — see the overlay chart. End-of-bound
+  render (patched `rl-demo-3ddcf6f-mlp512x3`, era flat floor): policy armed
+  (mean|drive| 0.869) but no chase. Verdict on the issue: DEGRADED — convicts
+  `56754c32` (mlp256 → mlp512x3) for cold-start learning at this rev.
