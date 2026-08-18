@@ -444,6 +444,13 @@ type LinkId = std::sync::Weak<mpsc::Sender<OutFrame>>;
 
 const OUT_QUEUE_FRAMES: usize = 256;
 
+/// Most concurrent peer links a session holds against INBOUND dials (rl#350). The roster
+/// caps at [`crate::membership::MAX_MEMBERS`] players (≤ MAX_MEMBERS − 1 remote links),
+/// so this leaves headroom for a pending joiner while denying a sybil dialer — each
+/// accepted link costs three tasks plus an [`OUT_QUEUE_FRAMES`] out-queue — unbounded
+/// growth. Our own dials are never refused: we choose them, so they're already bounded.
+const MAX_LINKS: usize = crate::membership::MAX_MEMBERS;
+
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Links = Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>;
@@ -898,6 +905,13 @@ async fn wire_connection(
     let link_id: LinkId = Arc::downgrade(&tx);
     {
         let mut links = links.lock().await;
+        // Inbound capacity gate (rl#350), under the lock so it can't race past the cap. A
+        // known peer's re-dial replaces its link rather than adding one, so it always passes.
+        if !dialed_by_me && links.len() >= MAX_LINKS && !links.contains_key(&peer) {
+            drop(links);
+            conn.close(0u32.into(), b"connection capacity reached");
+            return Ok(());
+        }
         if let Some(existing) = links.get(&peer) {
             // Duplicate link. Keep the lower-dialer connection (see PeerLink::dialer); on a
             // SAME-dialer duplicate (a re-dial) the newer one wins — the old is stale.
