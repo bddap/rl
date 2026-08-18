@@ -899,33 +899,53 @@ mod tests {
                 .query_filtered::<&Transform, With<CrabCarapace>>();
             q.single(app.world()).expect("carapace").translation
         };
-        let carapace_speed = |app: &mut App| -> f32 {
-            let mut q = app
-                .world_mut()
-                .query_filtered::<&Velocity, With<CrabCarapace>>();
-            q.single(app.world()).expect("carapace").linear.length()
+        // Net crab momentum along an axis: mass-weighted linvel summed over every
+        // dynamic body except `exclude` (the rammer; the ground is Fixed, so the
+        // remainder is exactly her multibody). Solver rest chatter is INTERNAL —
+        // links jiggle against each other and the sum stays near zero — while a
+        // ram deposits real net momentum, so this floor and this signal separate
+        // where a single link's peak speed cannot (rl#386).
+        let crab_momentum_x = |app: &mut App, exclude: Option<Entity>| -> f32 {
+            let mut q = app.world_mut().query::<&RapierRigidBodySet>();
+            let set = q.single(app.world()).expect("one rapier context");
+            let excluded = exclude.and_then(|e| set.entity2body().get(&e).copied());
+            set.bodies
+                .iter()
+                .filter(|(h, b)| b.is_dynamic() && Some(*h) != excluded)
+                .map(|(_, b)| b.mass() * b.linvel().x)
+                .sum()
         };
 
         // The zero-action mesh ragdoll never sits STILL — solver rest noise
         // twitch-walks her decimeters over the settle (rl#340 stage 3 measured
         // spawn-to-ram drift spanning x ±0.3 m across bit-level physics
-        // perturbations), so where and at what yaw the ram lands is draw-dependent
-        // and a signed along-axis displacement assert measures her wander, not the
-        // push. The push instrument is her carapace SPEED spike over the ram
-        // window instead, asserted RELATIVE to this same-length pre-ram window —
-        // the live noise floor, so wander creeping up to the signal fails loudly
-        // instead of hollowing the instrument out. Five stage-3 draws measured
-        // push peaks 0.44–0.58 m/s against wander peaks 0.11–0.14; the 0.15
-        // clamp keeps the bar ≥0.3 even if a future plant goes quieter.
+        // perturbations), so where and at what yaw the ram lands is draw-dependent:
+        // a signed displacement assert measures her wander, and a single link's
+        // peak SPEED is a hit-point lottery — rl#386's feature-unified build (a
+        // different bevy plugin set reorders entity/handle allocation, so the
+        // solver draws a different settle pose by construction) drew a graze that
+        // peaked her carapace at 0.56 m/s against a 0.55 wander burst. The push
+        // instrument is her net body momentum along the ram axis (see
+        // `crab_momentum_x`), asserted RELATIVE to the same-length pre-ram window
+        // — the live noise floor, so wander creeping up to the signal fails
+        // loudly instead of hollowing the instrument out. The clamp keeps the bar
+        // meaningful even if a future plant goes quieter.
         const RAM_WINDOW: u32 = 60;
         let mut wander_peak = 0.0f32;
         for _ in 0..RAM_WINDOW {
             tick(&mut app, 1);
-            wander_peak = wander_peak.max(carapace_speed(&mut app));
+            wander_peak = wander_peak.max(crab_momentum_x(&mut app, None).abs());
         }
         let p0 = carapace(&mut app);
 
-        const RAM_SPEED: f32 = 8.0;
+        // 32 m/s, not a flyable ~8: the production craft is ~0.26 kg
+        // ([`VEHICLE_MASS`]) against her multi-kg multibody, so a slow ram's whole
+        // momentum budget (~2 kg·m/s) is comparable to her own twitch-walk CoM
+        // momentum (rl#386 measured wander peaks up to ~0.8 kg·m/s across feature
+        // configs) — the signal must outscale the walk, and speed is the one lever
+        // that leaves the production bundle untouched. Still well under tunneling:
+        // 32 m/s is 0.125 m per solver substep vs her ~0.3 m carapace.
+        const RAM_SPEED: f32 = 32.0;
         let rammer = spawn_ram_vehicle(
             app.world_mut(),
             VehicleKind::Ship,
@@ -935,10 +955,11 @@ mod tests {
                 angular: Vec3::ZERO,
             },
         );
+        // The ram travels −x, so the deposited momentum is −p_x.
         let mut pushed_peak = 0.0f32;
         for _ in 0..RAM_WINDOW {
             tick(&mut app, 1);
-            pushed_peak = pushed_peak.max(carapace_speed(&mut app));
+            pushed_peak = pushed_peak.max(-crab_momentum_x(&mut app, Some(rammer)));
         }
 
         let p1 = carapace(&mut app);
@@ -948,14 +969,14 @@ mod tests {
             .expect("the rammer body persists — nothing despawns it in this app")
             .linear;
         println!(
-            "ram: carapace {p0:?} -> {p1:?}, peak speed {pushed_peak:.2} m/s \
-             (pre-ram wander peak {wander_peak:.2}), rammer v1 {v1:?}"
+            "ram: carapace {p0:?} -> {p1:?}, peak deposited momentum {pushed_peak:.2} kg·m/s \
+             (pre-ram wander momentum peak {wander_peak:.2}), rammer v1 {v1:?}"
         );
         assert!(
-            pushed_peak > 2.0 * wander_peak.max(0.15),
-            "the world must push her: an {RAM_SPEED} m/s ram peaked her carapace at \
-             {pushed_peak:.2} m/s, not clearly above the pre-ram rest wander peak \
-             of {wander_peak:.2}"
+            pushed_peak > 2.0 * wander_peak.max(0.5),
+            "the world must push her: an {RAM_SPEED} m/s ram peaked her net body momentum \
+             at {pushed_peak:.2} kg·m/s along the ram axis, not clearly above the pre-ram \
+             rest wander peak of {wander_peak:.2}"
         );
         assert!(
             v1.x > -0.7 * RAM_SPEED,
