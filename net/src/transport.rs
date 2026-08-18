@@ -451,6 +451,13 @@ const OUT_QUEUE_FRAMES: usize = 256;
 /// growth. Our own dials are never refused: we choose them, so they're already bounded.
 const MAX_LINKS: usize = crate::membership::MAX_MEMBERS;
 
+/// Longest an INBOUND connection may take to finish the bi-stream/HELLO handshake
+/// (rl#350). Without a deadline the gate above is bypassable: `wire_connection` parks in
+/// `accept_bi`/HELLO awaiting bytes only the dialer can send, our 1 s keep-alives hold
+/// the idle connection open forever, and the parked accept tasks accumulate BEFORE the
+/// [`MAX_LINKS`] check ever runs.
+const ACCEPT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Links = Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>;
@@ -627,6 +634,17 @@ impl Session {
 
     pub fn local_addr(&self) -> iroh::EndpointAddr {
         self.endpoint.addr()
+    }
+
+    /// Drop a peer's link NOW — remove it and close the connection. The host uses this to
+    /// reclaim a [`MAX_LINKS`] slot from a connected-but-never-rostered endpoint (rl#350);
+    /// the link's tasks end on the closed connection, and their own `drop_if_same` cleanup
+    /// is a no-op on the already-removed entry.
+    pub async fn disconnect(&self, peer: EndpointId) {
+        let link = self.links.lock().await.remove(&peer);
+        if let Some(link) = link {
+            link.conn.close(0u32.into(), b"disconnected by peer");
+        }
     }
 
     pub async fn connect_direct(&self, addr: impl Into<iroh::EndpointAddr>) -> Result<()> {
@@ -838,16 +856,25 @@ struct GameProto {
 
 impl ProtocolHandler for GameProto {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        if let Err(e) = wire_connection(
-            self.my_id,
-            connection,
-            self.inbox.clone(),
-            self.links.clone(),
-            false,
+        let conn = connection.clone();
+        match tokio::time::timeout(
+            ACCEPT_HANDSHAKE_TIMEOUT,
+            wire_connection(
+                self.my_id,
+                connection,
+                self.inbox.clone(),
+                self.links.clone(),
+                false,
+            ),
         )
         .await
         {
-            tracing::warn!("accepting game connection failed: {e:#}");
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("accepting game connection failed: {e:#}"),
+            Err(_) => {
+                tracing::warn!("inbound connection stalled in handshake — closing");
+                conn.close(0u32.into(), b"handshake timeout");
+            }
         }
         Ok(())
     }

@@ -21,9 +21,9 @@ use crate::transport::{self, PeerWire, Session};
 
 /// Most departed-endpoint ids remembered for the courtesy [`Refusal::Departed`] reply
 /// (rl#350): under join/depart churn the set would otherwise grow one endpoint id per
-/// cycle for the life of the round. Eviction is arbitrary — the reply is best-effort
-/// (an evicted departee's stray ticks are dropped silently, same as any unrostered
-/// endpoint's).
+/// cycle for the life of the round. Overflow clears the set — the reply is best-effort
+/// (a forgotten departee's zombie link is closed by the unrostered grace instead, and
+/// its client surfaces the loss as LinkLost).
 const DEPARTED_CAP: usize = crate::membership::MAX_MEMBERS;
 
 /// Sustained mid-game join-attempt rate the host processes, and the burst headroom over
@@ -33,6 +33,13 @@ const DEPARTED_CAP: usize = crate::membership::MAX_MEMBERS;
 /// don't hold here (a fresh keypair per attempt is free), so the budget is global.
 const JOIN_RATE_PER_SEC: f64 = 2.0;
 const JOIN_BURST: f64 = 8.0;
+
+/// How long the host lets a connected-but-unrostered endpoint linger before closing its
+/// link (rl#350) — comfortably past the joiner-side `JOIN_WELCOME_TIMEOUT`, so a pending
+/// admission is never cut. Without this the transport's link cap is a one-shot fuse: a
+/// burst of silent connections (our keep-alives hold them open) would pin the link table
+/// full for the life of the round, denying every later legitimate join.
+const UNROSTERED_GRACE: Duration = Duration::from_secs(30);
 
 /// Token bucket over wall-clock time for [`JOIN_RATE_PER_SEC`]/[`JOIN_BURST`].
 struct JoinBudget {
@@ -77,6 +84,10 @@ pub struct NetDriver {
     id_map: BTreeMap<EndpointId, PlayerId>,
     departed: std::collections::BTreeSet<EndpointId>,
     join_budget: JoinBudget,
+    /// (Host) First-seen times of connected endpoints not (yet) in `id_map`, for the
+    /// [`UNROSTERED_GRACE`] eviction. Keyed off the live connection set each pump, so it
+    /// is bounded by the transport's link cap.
+    unrostered_since: BTreeMap<EndpointId, std::time::Instant>,
     telemetry: Option<TelemetrySender>,
     /// The shared-asset verdict this round was formed (or admitted) under — computed by
     /// the ONE arbiter, [`crate::SyncVerdict::between`].
@@ -184,6 +195,11 @@ impl NetDriver {
             }
         }
         for (eid, req) in joins {
+            // Already-admitted first, so a duplicate JoinRequest can neither spend budget
+            // nor get its LIVE link disconnected below.
+            if self.id_map.contains_key(&eid) {
+                continue;
+            }
             // Over-budget requests are dropped, not refused: a reply per attempt would hand
             // a flooder attacker-rate outbound work. A rate-limited legitimate joiner falls
             // into its JOIN_WELCOME_TIMEOUT and can retry.
@@ -192,6 +208,12 @@ impl NetDriver {
                     "join budget exhausted — dropping join from {}",
                     eid.fmt_short()
                 );
+                // Close, don't just ignore: an ignored flood connection would sit in the
+                // link table (kept alive by our keep-alives) eating a capacity slot. A
+                // QUIC close is not attacker-directed outbound work the way a refusal
+                // frame would be. A rate-limited legitimate joiner sees "unreachable"
+                // and retries.
+                self.rt.block_on(self.session.disconnect(eid));
                 continue;
             }
             self.admit_joiner(server, eid, req);
@@ -205,15 +227,41 @@ impl NetDriver {
             self.telemetry.as_ref(),
         );
         self.departed.extend(gone);
-        while self.departed.len() > DEPARTED_CAP {
-            self.departed.pop_first();
+        if self.departed.len() > DEPARTED_CAP {
+            // Reset rather than evict by set order — pop_first would evict the SMALLEST
+            // endpoint id, uncorrelated with recency, silently biasing the courtesy away
+            // from exactly the just-departed peers it exists for. A rare full reset is
+            // honest, and an evicted departee's zombie link still surfaces as LinkLost
+            // via the unrostered grace below.
+            self.departed.clear();
+        }
+        // Unrostered-link liveness (rl#350): close any connected endpoint that has held a
+        // link past UNROSTERED_GRACE without becoming rostered — a sybil squatting a
+        // capacity slot, or an evicted departee's zombie. A pending joiner is rostered at
+        // admission, well inside the grace.
+        let now = std::time::Instant::now();
+        let id_map = &self.id_map;
+        self.unrostered_since
+            .retain(|eid, _| connected.contains(eid) && !id_map.contains_key(eid));
+        for eid in connected {
+            if self.id_map.contains_key(&eid) {
+                continue;
+            }
+            let since = *self.unrostered_since.entry(eid).or_insert(now);
+            if now.duration_since(since) > UNROSTERED_GRACE {
+                tracing::info!(
+                    "closing link to {} — connected {UNROSTERED_GRACE:?} without joining",
+                    eid.fmt_short()
+                );
+                self.rt.block_on(self.session.disconnect(eid));
+                self.unrostered_since.remove(&eid);
+            }
         }
     }
 
+    /// Caller ([`NetDriver::pump_host`]'s join loop) has already screened duplicates
+    /// against `id_map` and charged the join budget.
     fn admit_joiner(&mut self, server: &mut Server, eid: EndpointId, req: JoinRequest) {
-        if self.id_map.contains_key(&eid) {
-            return;
-        }
         match may_admit_joiner(self.stamp, &req, server.roster().len()) {
             Ok(()) => {
                 let adm = server.admit(self.stamp);
@@ -578,6 +626,7 @@ fn connect_and_form_inner(
         id_map: frozen.id_map,
         departed: Default::default(),
         join_budget: Default::default(),
+        unrostered_since: Default::default(),
         telemetry,
         sync: frozen.sync,
         stamp,
@@ -705,6 +754,7 @@ pub fn connect_and_join(
                 id_map,
                 departed: Default::default(),
                 join_budget: Default::default(),
+                unrostered_since: Default::default(),
                 telemetry,
                 sync,
                 stamp,
