@@ -13,11 +13,13 @@ use super::step::{EnvStep, MaxPartSpeed};
 
 pub const MAX_EPISODE_TICKS: u32 = 1500;
 
-fn classify_step_end(grabbed: bool, over_cap: bool) -> StepEnd {
+/// `next_value` is this tick's critic value — V of the state the pending action
+/// produced — which a cap truncation must carry for its GAE bootstrap.
+fn classify_step_end(grabbed: bool, over_cap: bool, next_value: NormalizedValue) -> StepEnd {
     if grabbed {
         StepEnd::Terminal
     } else if over_cap {
-        StepEnd::Truncated
+        StepEnd::Truncated { next_value }
     } else {
         StepEnd::Continues
     }
@@ -82,6 +84,7 @@ fn finalize_pending_step(
     d_now: Option<f32>,
     min_tip_dist: Option<f32>,
     over_cap: bool,
+    next_value: NormalizedValue,
     effort_weight: f32,
 ) -> StepFinalize {
     let distance_closed = pending.target_dist.zip(d_now).map(|(prev, now)| prev - now);
@@ -92,7 +95,7 @@ fn finalize_pending_step(
     if grabbed {
         reward += GRAB_REWARD;
     }
-    let end = classify_step_end(grabbed, over_cap);
+    let end = classify_step_end(grabbed, over_cap, next_value);
     StepFinalize {
         transition: Transition {
             obs: pending.obs,
@@ -183,6 +186,7 @@ impl WorkerState {
                     d_now,
                     step.min_tip_dist,
                     over_cap,
+                    step.value,
                     self.mode.effort_weight,
                 );
                 if fin.progress_glitch {
@@ -384,13 +388,18 @@ mod tests {
 
     #[test]
     fn classify_step_end_terminal_vs_truncation() {
-        assert_eq!(classify_step_end(true, false), StepEnd::Terminal);
-        assert_eq!(classify_step_end(true, true), StepEnd::Terminal);
-        assert_eq!(classify_step_end(false, true), StepEnd::Truncated);
-        assert_eq!(classify_step_end(false, false), StepEnd::Continues);
-        assert!(classify_step_end(true, false).ends_segment());
-        assert!(classify_step_end(false, true).ends_segment());
-        assert!(!classify_step_end(false, false).ends_segment());
+        let v = NormalizedValue(0.25);
+        assert_eq!(classify_step_end(true, false, v), StepEnd::Terminal);
+        assert_eq!(classify_step_end(true, true, v), StepEnd::Terminal);
+        assert_eq!(
+            classify_step_end(false, true, v),
+            StepEnd::Truncated { next_value: v },
+            "a truncation carries the successor value for its bootstrap"
+        );
+        assert_eq!(classify_step_end(false, false, v), StepEnd::Continues);
+        assert!(classify_step_end(true, false, v).ends_segment());
+        assert!(classify_step_end(false, true, v).ends_segment());
+        assert!(!classify_step_end(false, false, v).ends_segment());
     }
 
     #[test]
@@ -493,12 +502,14 @@ mod tests {
             target_dist,
         };
         let far_tip = Some(REACH_RADIUS * 4.0);
+        let succ_v = NormalizedValue(0.5);
 
         let r = finalize_pending_step(
             &pend(0.0, Some(1.25)),
             Some(1.0),
             far_tip,
             false,
+            succ_v,
             EFFORT_WEIGHT_DEFAULT,
         );
         assert_eq!(r.transition.end, StepEnd::Continues);
@@ -513,6 +524,7 @@ mod tests {
             Some(1.0),
             Some(0.0),
             false,
+            succ_v,
             EFFORT_WEIGHT_DEFAULT,
         );
         assert_eq!(
@@ -531,9 +543,14 @@ mod tests {
             Some(1.0),
             far_tip,
             true,
+            succ_v,
             EFFORT_WEIGHT_DEFAULT,
         );
-        assert_eq!(r.transition.end, StepEnd::Truncated);
+        assert_eq!(
+            r.transition.end,
+            StepEnd::Truncated { next_value: succ_v },
+            "the cap truncation carries this tick's value as its bootstrap"
+        );
         assert!(r.ended);
 
         let r = finalize_pending_step(
@@ -541,6 +558,7 @@ mod tests {
             Some(0.0),
             far_tip,
             false,
+            succ_v,
             EFFORT_WEIGHT_DEFAULT,
         );
         assert!(

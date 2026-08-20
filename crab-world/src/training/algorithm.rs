@@ -61,20 +61,27 @@ impl Default for PpoConfig {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum StepEnd {
     Continues,
     Terminal,
-    Truncated,
+    /// Cut by the episode cap, not by the task: the successor state exists, so the
+    /// tail bootstraps from ITS value — carried here because the successor never
+    /// enters the buffer (the env resets instead). Bootstrapping from the cut
+    /// state's own value would zero δ at exactly the states a competent policy
+    /// holds until the cap (rl#342 item 4).
+    Truncated {
+        next_value: NormalizedValue,
+    },
 }
 
 impl StepEnd {
     pub(crate) fn ends_segment(self) -> bool {
-        matches!(self, StepEnd::Terminal | StepEnd::Truncated)
+        matches!(self, StepEnd::Terminal | StepEnd::Truncated { .. })
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct NormalizedValue(pub(crate) f32);
 
 #[derive(Clone, Copy)]
@@ -243,7 +250,7 @@ pub(crate) fn compute_gae(
         let value = ret_norm.denormalize(t.value);
         let bootstrap = match t.end {
             StepEnd::Terminal => RealReturn(0.0),
-            StepEnd::Truncated => value,
+            StepEnd::Truncated { next_value } => ret_norm.denormalize(next_value),
             StepEnd::Continues => next_value,
         };
         let delta = RealReturn(t.reward) + bootstrap * gamma - value;
@@ -388,10 +395,10 @@ mod tests {
     }
 
     #[test]
-    fn truncation_bootstraps_unlike_true_terminal() {
+    fn truncation_bootstraps_successor_value_unlike_true_terminal() {
         let gamma = 0.99;
         let lambda = 0.95;
-        let (reward, value) = (1.0, 5.0);
+        let (reward, value, succ_v) = (1.0, 5.0, 11.0);
 
         let id = ReturnNormalizer::new();
         let mut terminal = RolloutBuffer::new();
@@ -400,7 +407,9 @@ mod tests {
 
         let mut truncated = RolloutBuffer::new();
         truncated.push(Transition {
-            end: StepEnd::Truncated,
+            end: StepEnd::Truncated {
+                next_value: NormalizedValue(succ_v),
+            },
             ..t(reward, value, StepEnd::Continues)
         });
         let (adv_trunc, ret_trunc) = compute_gae(&truncated, gamma, lambda, &id);
@@ -411,18 +420,53 @@ mod tests {
             adv_term[0].0
         );
         assert!(
-            (adv_trunc[0].0 - (reward + gamma * value - value)).abs() < 1e-6,
+            (adv_trunc[0].0 - (reward + gamma * succ_v - value)).abs() < 1e-6,
             "trunc: {}",
             adv_trunc[0].0
         );
         assert!(
-            (adv_trunc[0].0 - adv_term[0].0 - gamma * value).abs() < 1e-6,
-            "truncation must bootstrap gamma*value more than a true terminal"
+            (adv_trunc[0].0 - (reward + gamma * value - value)).abs() > 1e-3,
+            "the tail must NOT bootstrap from the cut state's own value"
         );
         assert!(
-            (ret_trunc[0].0 - (reward + gamma * value)).abs() < 1e-6,
+            (ret_trunc[0].0 - (reward + gamma * succ_v)).abs() < 1e-6,
             "ret: {}",
             ret_trunc[0].0
+        );
+    }
+
+    /// Under an identity normalizer the sibling test above passes even if the carried
+    /// value is used raw — a warmed normalizer is what pins the denormalize.
+    #[test]
+    fn truncation_bootstrap_denormalizes_the_carried_value() {
+        let gamma = 0.99;
+        let lambda = 0.95;
+        let (reward, value_raw, succ_raw) = (1.0f32, 5.0f32, 11.0f32);
+
+        let mut norm = ReturnNormalizer::new();
+        let skipped = norm.update(&[-300.0, -100.0, 50.0, -250.0, 0.0, -180.0]);
+        assert_eq!(skipped, 0, "all returns here are finite — none skipped");
+        let (mu, sigma) = (norm.mean(), norm.std());
+        assert!(
+            sigma > 1.0 && mu.abs() > 1.0,
+            "test needs a non-trivial scale/shift"
+        );
+
+        let mut buf = RolloutBuffer::new();
+        buf.push(Transition {
+            end: StepEnd::Truncated {
+                next_value: NormalizedValue((succ_raw - mu) / sigma),
+            },
+            ..t(reward, (value_raw - mu) / sigma, StepEnd::Continues)
+        });
+        let (adv, _) = compute_gae(&buf, gamma, lambda, &norm);
+
+        let want = reward + gamma * succ_raw - value_raw;
+        assert!(
+            (adv[0].0 - want).abs() < 1e-3,
+            "adv {} want {want} — the carried bootstrap must denormalize like every \
+             other value",
+            adv[0].0
         );
     }
 

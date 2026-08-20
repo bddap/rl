@@ -717,9 +717,8 @@ mod tests {
             transitions_before + 1,
             "tick B finalizes exactly the one pending transition"
         );
-        assert_eq!(
-            last.end,
-            StepEnd::Truncated,
+        assert!(
+            matches!(last.end, StepEnd::Truncated { .. }),
             "the over-cap read at tick B must end the transition"
         );
         assert_ne!(
