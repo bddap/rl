@@ -136,7 +136,14 @@ type Evaluator = Box<dyn FnMut(&Path) -> Result<EvalReport, String>>;
 
 pub(crate) struct BestKeeper {
     checkpoint_dir: PathBuf,
-    evaluate: Evaluator,
+    /// `None` = no chase-eval for this run (flat rollout terrain): the eval is
+    /// canonical-GCR by construction, so on a flat world it scores off-distribution
+    /// (rl#351 struck it as a ruler there) and an in-process eval hang can starve the
+    /// learner for the rest of the run (rl#351 Probe H). No evaluator ⇒ no `best/`
+    /// promotion either — a flat run's checkpoints are diagnostic-only anyway — while
+    /// [`Self::maybe_snapshot`] still paces the per-bearing train-reach flush, the
+    /// ruler that IS valid on flat.
+    evaluate: Option<Evaluator>,
     eval_period: Duration,
     /// `None` until the first eval so it fires on the first call: a restart-looping
     /// trainer must not accumulate unevaluated [`EVAL_PERIOD`]-wide dead zones, and a legacy
@@ -147,30 +154,41 @@ pub(crate) struct BestKeeper {
 }
 
 impl BestKeeper {
-    pub(crate) fn new(checkpoint_dir: &Path) -> Self {
-        Self::with_evaluator(
-            checkpoint_dir,
-            EVAL_PERIOD,
-            Box::new(move |dir| {
+    pub(crate) fn new(checkpoint_dir: &Path, terrain: crate::TrainTerrain) -> Self {
+        let evaluate: Option<Evaluator> = match terrain {
+            crate::TrainTerrain::Gcr => Some(Box::new(move |dir| {
                 // The CLI's own defaults (`rl-train eval`), so the gate judges the
                 // IDENTICAL episode the release gate and rl-eval-monitor judge. Safe
                 // in-process only because the trainer already ran the identical
                 // thread-pool pin at boot (`init_process_pools`), making run_eval's
                 // own pin a pure read.
                 crate::eval::run_eval(dir, DEFAULT_EVAL_TICKS, DEFAULT_TARGET_DISTANCE_M, 1.0)
-            }),
-        )
+            })),
+            // See the `evaluate` field doc: off-distribution ruler + learner-wedge
+            // hazard (rl#351).
+            crate::TrainTerrain::Flat => None,
+        };
+        Self::with_evaluator(checkpoint_dir, EVAL_PERIOD, evaluate)
     }
 
-    fn with_evaluator(checkpoint_dir: &Path, eval_period: Duration, evaluate: Evaluator) -> Self {
+    fn with_evaluator(
+        checkpoint_dir: &Path,
+        eval_period: Duration,
+        evaluate: Option<Evaluator>,
+    ) -> Self {
         let best = Progress::load(&checkpoint_dir.join(BEST_SUBDIR).join(PROGRESS_SIDECAR));
-        match best {
-            Some(p) => info!(
+        match (&evaluate, best) {
+            (None, _) => info!(
+                "[best] chase-eval DISABLED for this run: flat rollout terrain — the \
+                 canonical-GCR eval is off-distribution there (rl#351); {BEST_SUBDIR}/ is \
+                 not maintained"
+            ),
+            (Some(_), Some(p)) => info!(
                 "[best] keeping best-by-chase-eval in {}/{BEST_SUBDIR} | resumed best progress {:.3} m",
                 checkpoint_dir.display(),
                 p.get()
             ),
-            None => info!(
+            (Some(_), None) => info!(
                 "[best] keeping best-by-chase-eval in {}/{BEST_SUBDIR} | no progress bar yet — \
                  an existing best/ is scored before any candidate can displace it",
                 checkpoint_dir.display()
@@ -189,7 +207,11 @@ impl BestKeeper {
     /// in the learner thread, and a panic there must degrade to a skipped stamp — not
     /// take down the live training run every period.
     fn eval_dir(&mut self, dir: &Path) -> Result<EvalReport, String> {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.evaluate)(dir)))
+        let evaluate = self
+            .evaluate
+            .as_mut()
+            .expect("eval_dir unreachable without an evaluator — maybe_snapshot guards");
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| evaluate(dir)))
             .unwrap_or_else(|_| Err("chase-eval panicked".to_string()))
     }
 
@@ -209,6 +231,13 @@ impl BestKeeper {
         }
         // Reset even when nothing promotes: the period paces eval SPEND, not successes.
         self.last_eval = Some(Instant::now());
+
+        // No evaluator (flat run): spend nothing, promote nothing — but still return
+        // true so the learner's per-bearing train-reach window flushes on the same
+        // cadence a GCR run's would (that telemetry is the flat probe's ruler, rl#351).
+        if self.evaluate.is_none() {
+            return true;
+        }
 
         // A best/ scored under a retired metric (reach-keyed era, or the +X-only eval)
         // carries no current-metric bar; score the incumbent FIRST so it cannot be
@@ -470,10 +499,10 @@ mod tests {
         BestKeeper::with_evaluator(
             dir,
             Duration::ZERO,
-            Box::new(move |d| {
+            Some(Box::new(move |d| {
                 calls.borrow_mut().push(d.ends_with(BEST_SUBDIR));
                 score.borrow().clone()
-            }),
+            })),
         )
     }
 
@@ -736,13 +765,17 @@ mod tests {
     fn period_gates_eval_spend() {
         let dir = scratch_ckpt("period");
         let calls = Rc::new(RefCell::new(Vec::new()));
-        let mut k = BestKeeper::with_evaluator(&dir, Duration::from_secs(3600), {
-            let calls = calls.clone();
-            Box::new(move |_| {
-                calls.borrow_mut().push(false);
-                Ok(report(5.0, true))
-            })
-        });
+        let mut k = BestKeeper::with_evaluator(
+            &dir,
+            Duration::from_secs(3600),
+            Some({
+                let calls = calls.clone();
+                Box::new(move |_| {
+                    calls.borrow_mut().push(false);
+                    Ok(report(5.0, true))
+                })
+            }),
+        );
         for _ in 0..100 {
             k.maybe_snapshot();
         }
@@ -755,12 +788,27 @@ mod tests {
     }
 
     #[test]
+    fn no_evaluator_spends_nothing_but_paces_the_flush() {
+        let dir = scratch_ckpt("flat");
+        let mut k = BestKeeper::with_evaluator(&dir, Duration::ZERO, None);
+        assert!(
+            k.maybe_snapshot(),
+            "the period must still elapse so the train-reach window flushes (the flat ruler)"
+        );
+        assert!(
+            !dir.join(BEST_SUBDIR).exists(),
+            "no eval ⇒ no best/ promotion"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn evaluator_panic_is_contained() {
         let dir = scratch_ckpt("panic");
         let mut k = BestKeeper::with_evaluator(
             &dir,
             Duration::ZERO,
-            Box::new(|_| panic!("physics world exploded")),
+            Some(Box::new(|_| panic!("physics world exploded"))),
         );
         k.maybe_snapshot();
         assert!(

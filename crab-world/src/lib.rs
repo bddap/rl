@@ -304,10 +304,13 @@ pub struct TrainConfig {
 
     /// DIAGNOSTIC: the ROLLOUT worlds' ground. Default `gcr`, the canonical tile —
     /// the only ground a deployable policy trains on (rl#293). `flat` isolates the
-    /// learning core from terrain (the 1807 flat-ground canary). The eval and the
-    /// plant sidecar/digest stay canonical-GCR either way: the chase eval remains the
-    /// one fixed instrument, and a non-gcr run's checkpoints are diagnostic artifacts,
-    /// never deploy or warm-start candidates.
+    /// learning core from terrain (the 1807 flat-ground canary). The plant
+    /// sidecar/digest stay canonical-GCR either way; under `flat` the periodic
+    /// chase-eval is skipped outright — its canonical-GCR locales are
+    /// off-distribution for a flat-trained policy, and an in-process eval hang can
+    /// starve the learner (rl#351) — so `best/` is not maintained and train-side
+    /// reach telemetry is the run's ruler. A non-gcr run's checkpoints are diagnostic
+    /// artifacts, never deploy or warm-start candidates.
     #[arg(long, env = "RL_TERRAIN", value_enum, default_value_t = TrainTerrain::Gcr)]
     pub terrain: TrainTerrain,
 

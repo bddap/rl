@@ -362,7 +362,7 @@ pub fn run_learner(
     // progress, so a collapse stays confined to `<ckpt>/` (the trainer resumes from it)
     // while the demo/release — which mirror `best/` — hold the best-by-THE-metric gait.
     // Resumes the running bar from the sidecar.
-    let mut best_keeper = crate::training::best::BestKeeper::new(&checkpoint_dir);
+    let mut best_keeper = crate::training::best::BestKeeper::new(&checkpoint_dir, config.terrain);
 
     let compute_threads = bevy::tasks::ComputeTaskPool::get().thread_num();
     eprintln!(
