@@ -172,23 +172,48 @@ pub(crate) struct HorizonOutput {
     pub telemetry: StepTelemetry,
 }
 
-/// The shared build head: derive the run's RNG seed, seed the backend, and init the
-/// requested (or default) architecture. Draw order is part of the same-seed contract —
-/// exactly one backend-RNG draw here on every path.
+/// One RNG stream per training role. The learner is its own stream, not worker 0's:
+/// hashing both to index 0 gave them byte-identical `StdRng` sequences, so every
+/// learner-side draw had an exact twin in worker 0's episode randomness (rl#394).
+#[derive(Clone, Copy, Debug)]
+enum SeedRole {
+    Learner,
+    Worker(usize),
+}
+
+impl SeedRole {
+    fn seed(self, base: u64) -> u64 {
+        let stream = match self {
+            SeedRole::Learner => 0,
+            SeedRole::Worker(i) => i as u64 + 1,
+        };
+        base ^ stream.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+}
+
+/// The shared build head: derive the role's RNG seed and init the requested (or
+/// default) architecture. Only the learner seeds the process-global backend RNG: its
+/// cold-init draw is the one that becomes trained weights, while a worker's init
+/// brain never reaches the learner (every horizon begins by loading the learner
+/// snapshot, the `#[must_use]` refusal blocks rolling on a failed load, and warm-up
+/// output is discarded) — per-build reseeding of the shared global just handed the
+/// last-built world the win (rl#394).
 fn seeded_base(
     config: &TrainConfig,
-    worker_index: usize,
+    role: SeedRole,
     requested: Option<ArchId>,
 ) -> (StdRng, AnyBrain<TrainBackend>, NdArrayDevice) {
     let device = NdArrayDevice::Cpu;
     let base_seed = config.seed.unwrap_or_else(rand::random);
-    let seed = base_seed ^ (worker_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let seed = role.seed(base_seed);
     info!(
-        "Training RNG seed {seed} (base {base_seed}, worker {worker_index}) — pass \
+        "Training RNG seed {seed} (base {base_seed}, {role:?}) — pass \
          --seed {base_seed} to reproduce this run"
     );
     let rng = StdRng::seed_from_u64(seed);
-    <TrainBackend as burn::tensor::backend::Backend>::seed(&device, seed);
+    if matches!(role, SeedRole::Learner) {
+        <TrainBackend as burn::tensor::backend::Backend>::seed(&device, seed);
+    }
     // Cold-start / worker arch: the `--arch` request (a worker's is the learner's
     // resolved arch), defaulting per the registry. A learner's warm resume replaces
     // this brain with the checkpoint's — whose TAG is authoritative — after the
@@ -200,7 +225,7 @@ fn seeded_base(
 
 impl LearnerState {
     pub fn new(config: &TrainConfig, requested: Option<ArchId>) -> Self {
-        let (rng, mut brain, device) = seeded_base(config, 0, requested);
+        let (rng, mut brain, device) = seeded_base(config, SeedRole::Learner, requested);
         let mut obs_normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
         let mut return_normalizer = ReturnNormalizer::new();
         let resumed = warm_start(
@@ -501,7 +526,7 @@ fn warm_start(
 
 impl WorkerState {
     pub fn new_worker(config: &TrainConfig, worker_index: usize, arch: ArchId) -> Self {
-        let (rng, brain, device) = seeded_base(config, worker_index, Some(arch));
+        let (rng, brain, device) = seeded_base(config, SeedRole::Worker(worker_index), Some(arch));
         let n = config.num_envs();
         Self {
             brain: InferenceCachedBrain::new(brain),
@@ -739,6 +764,23 @@ mod tests {
             init_with_seed(0x5EED),
             init_with_seed(0xC0FFEE),
             "different seeds must give different initial weights, else seeding does nothing"
+        );
+    }
+
+    /// rl#394: the learner and worker 0 both hashed stream index 0 and ran
+    /// byte-identical StdRng sequences.
+    #[test]
+    fn every_training_role_gets_its_own_seed() {
+        let base = 0x5EED;
+        let mut seeds: Vec<u64> = (0..8).map(|i| SeedRole::Worker(i).seed(base)).collect();
+        seeds.push(SeedRole::Learner.seed(base));
+        let n = seeds.len();
+        seeds.sort_unstable();
+        seeds.dedup();
+        assert_eq!(
+            seeds.len(),
+            n,
+            "a seed collision aliases two roles' RNG streams"
         );
     }
 }
