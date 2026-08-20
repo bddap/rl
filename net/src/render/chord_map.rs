@@ -310,6 +310,10 @@ const DENSITY_SCALE_SPAN: f64 = 0.95;
 /// minimum on-screen radius of the parent before seeds appear at all (quiet space).
 const SEED_SHRINK: f64 = 0.40;
 const SEED_MIN_PARENT_PX: f64 = 130.0;
+/// Radius floor (rl#384): each level multiplies radius by ~0.2–0.54, so ~1150
+/// levels underflow f64 to 0, and a zero focus radius NaNs the whole canvas via
+/// `ln(0)` → inf scale. Well above subnormals, far below anything visible.
+const MIN_RADIUS: f64 = 1e-300;
 
 /// A node circle in world space (root = unit circle at the origin).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -354,7 +358,7 @@ fn layout_circles(tree: &MapTree) -> Vec<Circle> {
             let step = CIRCLE_STEP.min(1.0 - shrink);
             circles[c] = Circle {
                 center: parent.center + dir_vec(DIRS[slot]) * (parent.radius * step),
-                radius: parent.radius * shrink,
+                radius: (parent.radius * shrink).max(MIN_RADIUS),
             };
         }
     }
@@ -990,5 +994,20 @@ mod tests {
                 "depth {depth} lost its offset from the parent"
             );
         }
+    }
+
+    /// rl#384: at absurd depth (~1150+ zoom levels) the per-level shrink used to
+    /// underflow the focus radius to 0, and `ln(0)` NaN'd the camera → canvas. The
+    /// [`MIN_RADIUS`] floor keeps the camera math finite at any depth.
+    #[test]
+    fn extreme_depth_keeps_camera_math_finite() {
+        let code: Vec<ChordDir> = (0..1300).map(|i| [U, R, D, L][i % 4]).collect();
+        let tree = MapTree::build(&set(&[&code]), &[]);
+        let circles = layout_circles(&tree);
+        let focus = circles[tree.index_of(&code).unwrap()];
+        assert!(focus.radius >= MIN_RADIUS, "radius underflowed");
+        let target_size = 2.0 * focus.radius / FOCUS_FILL;
+        assert!(target_size.ln().is_finite());
+        assert!((CANVAS_PX as f64 / target_size).is_finite());
     }
 }
