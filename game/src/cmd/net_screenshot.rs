@@ -5,7 +5,9 @@ use net::{net_loop, render};
 use crab_world::RenderArgs;
 use crab_world::controls::ControlsOverlayArgs;
 
-use super::shared::{MATCH_SEED, boot_view, gcr_controls, nn_crab_policy, parse_join_dial};
+use super::shared::{
+    ChordScriptArgs, MATCH_SEED, boot_view, gcr_controls, nn_crab_policy, parse_join_dial,
+};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -44,6 +46,10 @@ pub(crate) struct Args {
     /// the hunting crab).
     #[arg(long, value_name = "FRAME", value_parser = clap::value_parser!(u64).range(1..))]
     pilot_walk_at: Option<u64>,
+    // Scripted chord entry + map save (rl#398): drives the combo map on either peer of
+    // a two-peer run — the joined-client's-map repro/evidence surface.
+    #[command(flatten)]
+    chord: ChordScriptArgs,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -94,6 +100,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             args.pilot_walk_at,
         ));
     }
+    args.chord.apply(&mut app)?;
     app.run();
     Ok(())
 }

@@ -6,7 +6,9 @@ use net::sim::PlayerId;
 use crab_world::RenderArgs;
 use crab_world::controls::ControlsOverlayArgs;
 
-use super::shared::{MATCH_SEED, boot_view, gcr_controls, nn_crab_policy};
+use super::shared::{
+    ChordScriptArgs, MATCH_SEED, boot_view, gcr_controls, nn_crab_policy, parse_hold,
+};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -51,27 +53,8 @@ pub(crate) struct Args {
     #[arg(long)]
     debug_overlay: bool,
 
-    /// Scripted chord entry (rl#330 evidence): hold the kb chord modifier
-    /// (right mouse) from this frame — the combo map (rl#358) opens.
-    #[arg(long)]
-    chord_hold_at: Option<u64>,
-    /// Release the scripted chord modifier at this frame, executing the typed code.
-    /// Default: never — the menu stays open into the shot.
-    #[arg(long)]
-    chord_release_at: Option<u64>,
-    /// Scripted code taps while held: `frame:dir`, comma-separated, dir ∈ U|D|L|R
-    /// (e.g. `45:U,55:L`).
-    #[arg(long, value_delimiter = ',')]
-    chord_taps: Vec<String>,
-    /// Extra modifier hold windows beyond --chord-hold-at/--chord-release-at:
-    /// `from:to` pairs, `to` empty for never-release (e.g. `120:180,220:`) — lets one
-    /// clip enter several codes (rl#358 map-growth evidence).
-    #[arg(long, value_delimiter = ',')]
-    chord_holds: Vec<String>,
-    /// Load/persist the shot's discovered-code set here (default: unpersisted,
-    /// empty — an evidence shot must never touch the real save).
-    #[arg(long)]
-    chord_map_file: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    chord: ChordScriptArgs,
 
     /// Capture this many frames as `<out-stem>.NNNN.png` instead of one shot —
     /// evidence clips for the animated ground looks (assemble with ffmpeg).
@@ -177,96 +160,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             args.seed,
         ));
     }
-    if let Some(hold_at) = args.chord_hold_at {
-        let taps = args
-            .chord_taps
-            .iter()
-            .map(|spec| parse_chord_tap(spec))
-            .collect::<Result<Vec<_>>>()?;
-        // The script's frame counter starts at 1 and the modifier must be down before
-        // a tap can buffer — a spec that can't fire must fail loud, not shoot a blank
-        // evidence frame.
-        if hold_at == 0 || taps.iter().any(|&(at, _)| at <= hold_at) {
-            anyhow::bail!("chord frames must be ≥1 and taps after --chord-hold-at");
-        }
-        if args.chord_release_at.is_some_and(|r| r <= hold_at) {
-            anyhow::bail!("--chord-release-at must be after --chord-hold-at");
-        }
-        let mut seen = std::collections::HashSet::new();
-        if let Some(dup) = taps.iter().find(|&&t| !seen.insert(t)) {
-            anyhow::bail!(
-                "duplicate chord tap {}:{:?} (one edge, one tap)",
-                dup.0,
-                dup.1
-            );
-        }
-        let holds = args
-            .chord_holds
-            .iter()
-            .map(|spec| parse_hold(spec))
-            .collect::<Result<Vec<_>>>()?;
-        // The script holds the modifier on ANY covering window, so windows that
-        // touch or overlap silently merge into one capture and the release edge —
-        // the thing that executes the code — never fires between them. Demand a
-        // ≥1-frame gap, in order, and a released primary window before extras.
-        if !holds.is_empty() && args.chord_release_at.is_none() {
-            anyhow::bail!("--chord-holds needs --chord-release-at to close the first window");
-        }
-        let mut windows = vec![(hold_at, args.chord_release_at)];
-        windows.extend(holds.iter().copied());
-        for pair in windows.windows(2) {
-            let (prev, next) = (pair[0], pair[1]);
-            match prev.1 {
-                Some(end) if next.0 > end => {}
-                _ => anyhow::bail!(
-                    "chord hold windows must be in order with a ≥1-frame gap \
-                     (got {:?} then {:?}) — touching windows merge into one capture",
-                    prev,
-                    next
-                ),
-            }
-        }
-        app.insert_resource(
-            render::ChordScript::new(hold_at, args.chord_release_at, taps).with_holds(holds),
-        );
-    } else if !args.chord_taps.is_empty()
-        || args.chord_release_at.is_some()
-        || !args.chord_holds.is_empty()
-    {
-        anyhow::bail!("--chord-taps/--chord-release-at/--chord-holds need --chord-hold-at");
-    }
-    if let Some(file) = args.chord_map_file {
-        app.insert_resource(render::chord_map::DiscoveredCodes::load(Some(file)));
-    }
+    args.chord.apply(&mut app)?;
     app.run();
     Ok(())
-}
-
-fn parse_hold(spec: &str) -> Result<(u64, Option<u64>)> {
-    let (from, to) = spec
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("chord hold {spec:?} is not from:to"))?;
-    let from: u64 = from.parse()?;
-    let to = if to.is_empty() {
-        None
-    } else {
-        let to: u64 = to.parse()?;
-        if to <= from {
-            anyhow::bail!("chord hold {spec:?} releases before it holds");
-        }
-        Some(to)
-    };
-    Ok((from, to))
-}
-
-fn parse_chord_tap(spec: &str) -> Result<(u64, crab_world::chord::ChordDir)> {
-    let (frame, dir) = spec
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("chord tap {spec:?} is not frame:dir"))?;
-    // One UDLR alphabet — the chord map's codec, not a second letter match.
-    let dir = match render::chord_map::code_from_str(dir).as_deref() {
-        Some([d]) => *d,
-        _ => anyhow::bail!("chord tap dir {dir:?} is not U|D|L|R"),
-    };
-    Ok((frame.parse()?, dir))
 }
