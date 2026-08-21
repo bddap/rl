@@ -114,6 +114,14 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
     scope.push(|w| {
         w.remove_resource::<super::articulation::RemoteCraftWatch>();
     });
+    // The combo map's replicated session set is round state riding a PERSISTENT
+    // resource (the save must survive rounds; the last session's map must not) —
+    // clear just that field (rl#398).
+    scope.push(|w| {
+        if let Some(mut map) = w.get_resource_mut::<super::chord_map::DiscoveredCodes>() {
+            map.set_session(Default::default());
+        }
+    });
     world.insert_resource(RoundScope(scope));
 }
 
@@ -1150,12 +1158,20 @@ pub(super) fn drive_client_sim(world: &mut World) {
 
     // rl#398: publish the adopted snapshots' discovered chord codes to the combo
     // map — one unconditional path on both arms (the solo/host arm just mirrors its
-    // own stamp back through the same seam a wire client consumes).
+    // own stamp back through the same seam a wire client consumes). Compared through
+    // the immutable deref first: writing every frame would mark the resource changed
+    // every frame, arming any future `Changed<DiscoveredCodes>` reader to fire
+    // constantly (the set changes at most once per adopted snapshot).
     {
-        let remote = world.non_send::<GameState>().client.discovered().clone();
-        world
-            .resource_mut::<super::chord_map::DiscoveredCodes>()
-            .set_remote(remote);
+        let session = world
+            .non_send::<GameState>()
+            .client
+            .session_discovered()
+            .clone();
+        let mut map = world.resource_mut::<super::chord_map::DiscoveredCodes>();
+        if *map.session() != session {
+            map.set_session(session);
+        }
     }
 
     // Chronic input-starvation surface (rl#213): reports appear at most once per second per

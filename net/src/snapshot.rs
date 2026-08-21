@@ -178,13 +178,7 @@ impl CoreSnapshot {
             let len = r.byte()? as usize;
             let mut code = Vec::with_capacity(len);
             for _ in 0..len {
-                code.push(match r.byte()? {
-                    0 => ChordDir::Up,
-                    1 => ChordDir::Down,
-                    2 => ChordDir::Left,
-                    3 => ChordDir::Right,
-                    _ => return Err(SnapshotDecodeError::BadTag),
-                });
+                code.push(ChordDir::try_from(r.byte()?).map_err(|()| SnapshotDecodeError::BadTag)?);
             }
             discovered.insert(code);
         }

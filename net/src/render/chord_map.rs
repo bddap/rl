@@ -94,7 +94,7 @@ pub struct DiscoveredCodes {
     /// mirrored back through the same seam. Rendered (union with `codes`) but never
     /// persisted: the SAVE stays codes this player PLAYED (the rl#358 directive) —
     /// joining a session shows the party's map, it doesn't grant it.
-    remote: BTreeSet<Vec<ChordDir>>,
+    session: BTreeSet<Vec<ChordDir>>,
     file: Option<PathBuf>,
 }
 
@@ -105,7 +105,13 @@ impl DiscoveredCodes {
             match std::fs::read_to_string(path) {
                 Ok(text) => {
                     for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                        match code_from_str(line) {
+                        // The length cap is part of "well-formed": the snapshot wire
+                        // format carries a u8 code length (rl#398), and play can't
+                        // produce >255 taps (only registry-accepted codes are ever
+                        // inserted) — so an overlong line is hand-edited/corrupt
+                        // state, skipped like any other malformed line rather than
+                        // left to trip the encoder's bug-trap when this save hosts.
+                        match code_from_str(line).filter(|c| c.len() <= u8::MAX as usize) {
                             Some(code) => {
                                 codes.insert(code);
                             }
@@ -130,20 +136,27 @@ impl DiscoveredCodes {
         }
         Self {
             codes,
-            remote: BTreeSet::new(),
+            session: BTreeSet::new(),
             file,
         }
     }
 
+    /// The current session set — the publisher ([`super::driver`]) compares against
+    /// this through an immutable deref before writing, so the every-frame publish
+    /// only marks the resource changed when the set actually changed.
+    pub(super) fn session(&self) -> &BTreeSet<Vec<ChordDir>> {
+        &self.session
+    }
+
     /// Adopt the session's replicated discovered set (wholesale — each snapshot
     /// carries the full set, so the newest one simply replaces).
-    pub fn set_remote(&mut self, remote: BTreeSet<Vec<ChordDir>>) {
-        self.remote = remote;
+    pub(super) fn set_session(&mut self, session: BTreeSet<Vec<ChordDir>>) {
+        self.session = session;
     }
 
     /// What the map renders: the local save UNION the session's replicated set.
-    fn visible(&self) -> BTreeSet<Vec<ChordDir>> {
-        self.codes.union(&self.remote).cloned().collect()
+    fn rendered(&self) -> BTreeSet<Vec<ChordDir>> {
+        self.codes.union(&self.session).cloned().collect()
     }
 
     /// Record a played code; returns whether it is NEW (the growth moment). Saves
@@ -726,7 +739,7 @@ fn drive_chord_map(
     panel_node.display = Display::Flex;
 
     let focus_code = state.focus.clone();
-    let tree = MapTree::build(&discovered.visible(), &focus_code);
+    let tree = MapTree::build(&discovered.rendered(), &focus_code);
     let focus = tree
         .index_of(&focus_code)
         .expect("the entered path was just inserted into the tree");
@@ -928,12 +941,12 @@ mod tests {
     fn remote_codes_render_but_never_persist() {
         let mut codes = DiscoveredCodes::load(None);
         assert!(codes.insert(&[U, L]));
-        codes.set_remote(set(&[&[D, D], &[U, L]]));
-        assert_eq!(codes.visible(), set(&[&[U, L], &[D, D]]));
+        codes.set_session(set(&[&[D, D], &[U, L]]));
+        assert_eq!(codes.rendered(), set(&[&[U, L], &[D, D]]));
         assert_eq!(codes.codes(), &set(&[&[U, L]]), "save is local plays only");
         // A wholesale re-adopt replaces (a session leave/rejoin shrinks it back).
-        codes.set_remote(BTreeSet::new());
-        assert_eq!(codes.visible(), set(&[&[U, L]]));
+        codes.set_session(BTreeSet::new());
+        assert_eq!(codes.rendered(), set(&[&[U, L]]));
     }
 
     /// Discovered-only (the rl#358 directive): the tree holds played codes and their

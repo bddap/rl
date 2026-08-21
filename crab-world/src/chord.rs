@@ -20,6 +20,22 @@ pub enum ChordDir {
     Right,
 }
 
+/// THE dir↔byte codec (`d as u8` is the inverse), stated once beside the enum so a
+/// variant change can't silently drift the wire encoding or any index table built
+/// on declaration order.
+impl TryFrom<u8> for ChordDir {
+    type Error = ();
+    fn try_from(b: u8) -> Result<Self, ()> {
+        match b {
+            0 => Ok(Self::Up),
+            1 => Ok(Self::Down),
+            2 => Ok(Self::Left),
+            3 => Ok(Self::Right),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Quit's code, shared by every surface (GCR and the demo) so it stays one muscle
 /// memory — and one constant, so a margin-driven change (each surface's tests require
 /// Quit ≥2 taps longer than its longest other code) can't land on one table and not
