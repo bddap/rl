@@ -143,10 +143,10 @@ impl ClientSim {
         }
     }
 
-    /// The session's host-stamped discovered chord codes out of the last adopted
-    /// snapshot (rl#398) — empty until one lands (and always empty on the solo arm's
-    /// own emissions until the host driver stamps it).
-    pub fn discovered(&self) -> &BTreeSet<Vec<crab_world::chord::ChordDir>> {
+    /// The SESSION's host-stamped discovered chord codes out of the last adopted
+    /// snapshot (rl#398) — not this client's own discoveries (those live in the
+    /// render map's save). Empty until a stamped snapshot lands.
+    pub fn session_discovered(&self) -> &BTreeSet<Vec<crab_world::chord::ChordDir>> {
         &self.discovered
     }
 
@@ -224,6 +224,22 @@ mod tests {
 
     fn ids(n: u8) -> Vec<PlayerId> {
         (0..n).map(PlayerId).collect()
+    }
+
+    /// rl#398: the host-stamped discovered set survives the stash/re-stamp seam —
+    /// adopt exposes it and the mirror re-emit carries it (the existing server
+    /// mirror test runs with EMPTY sets, which a dropped re-stamp would also pass).
+    #[test]
+    fn discovered_codes_stash_and_restamp() {
+        use crab_world::chord::ChordDir::{Down as D, Up as U};
+        let mut client = ClientSim::new(7, &ids(2), PlayerId(0));
+        let mut snap = client.core_snapshot();
+        assert!(snap.discovered.is_empty(), "empty until a stamp lands");
+        snap.discovered = BTreeSet::from([vec![U, D], vec![D]]);
+        let stamped = snap.discovered.clone();
+        client.apply_core_snapshot(snap);
+        assert_eq!(*client.session_discovered(), stamped);
+        assert_eq!(client.core_snapshot().discovered, stamped, "mirror re-emit");
     }
 
     #[test]
