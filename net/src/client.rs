@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crab_world::vehicle::{PilotCommand, VehicleKind};
 
@@ -79,6 +79,11 @@ pub struct ClientSim {
     /// [`Self::submit_local_input`]. Starts at 0.
     next_issue_tick: u64,
     next_apply_tick: u64,
+    /// The last adopted snapshot's host-stamped discovered chord codes (rl#398) — the
+    /// session's combo-map space. Stashed like `input_next` (rider metadata the sim
+    /// never holds) and re-stamped by [`Self::core_snapshot`] for the mirror re-emit;
+    /// the render map draws its local save UNION this.
+    discovered: BTreeSet<Vec<crab_world::chord::ChordDir>>,
 }
 
 impl ClientSim {
@@ -95,6 +100,7 @@ impl ClientSim {
             input_next: BTreeMap::new(),
             next_issue_tick: 0,
             next_apply_tick: 0,
+            discovered: BTreeSet::new(),
         }
     }
 
@@ -118,6 +124,7 @@ impl ClientSim {
             input_next: BTreeMap::new(),
             next_issue_tick: at_tick,
             next_apply_tick: at_tick,
+            discovered: BTreeSet::new(),
         }
     }
 
@@ -136,6 +143,13 @@ impl ClientSim {
         }
     }
 
+    /// The session's host-stamped discovered chord codes out of the last adopted
+    /// snapshot (rl#398) — empty until one lands (and always empty on the solo arm's
+    /// own emissions until the host driver stamps it).
+    pub fn discovered(&self) -> &BTreeSet<Vec<crab_world::chord::ChordDir>> {
+        &self.discovered
+    }
+
     pub fn sim(&self) -> &Sim {
         &self.sim
     }
@@ -149,6 +163,7 @@ impl ClientSim {
     pub fn core_snapshot(&self) -> CoreSnapshot {
         let mut snap = self.sim.core_snapshot();
         snap.input_next = self.input_next.clone();
+        snap.discovered = self.discovered.clone();
         let bytes = snap.to_bytes();
         CoreSnapshot::from_bytes(&bytes).expect("a freshly-built snapshot must round-trip")
     }
@@ -157,6 +172,7 @@ impl ClientSim {
         let applied_tick = snapshot.tick;
         let next_unconsumed = snapshot.input_next.get(&self.me).copied().unwrap_or(0);
         self.input_next = snapshot.input_next.clone();
+        self.discovered = snapshot.discovered.clone();
         self.sim.apply_core_snapshot(snapshot);
         self.next_apply_tick = applied_tick;
         // Prune to the still-unconsumed window — see the doc above.

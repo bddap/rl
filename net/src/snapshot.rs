@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crab_world::chord::ChordDir;
 
 use crate::sim::{Crab, Outcome, Player, PlayerId, PlayerStatus, Pos};
 use crate::wire::{pos_bytes, pos_from_bytes};
@@ -32,6 +34,16 @@ pub struct CoreSnapshot {
     /// stamps it, and the client's `ClientSim` stashes + re-stamps it, so it is outside
     /// `state_hash` (like `roster`).
     pub input_next: BTreeMap<PlayerId, u64>,
+    /// The host's discovered chord codes (rl#398) — what its combo map shows — so a
+    /// joined client's map opens onto the session's discovered space instead of only
+    /// its own save. HOST-render-owned progression metadata, not sim state (same
+    /// rider pattern as `input_next`, outside `state_hash`):
+    /// [`Sim::core_snapshot`](crate::sim::Sim::core_snapshot) leaves it empty, the
+    /// host driver stamps it from its map save before broadcast, and the client's
+    /// `ClientSim` stashes + re-stamps it. Riding the (full-state, safe-to-lose)
+    /// snapshot keeps replication on the one existing state path — no join-time
+    /// special case, and mid-session host discoveries propagate for free.
+    pub discovered: BTreeSet<Vec<ChordDir>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +107,14 @@ impl CoreSnapshot {
             out.push(id.0);
             out.extend_from_slice(&next.to_le_bytes());
         }
+
+        out.extend_from_slice(&(self.discovered.len() as u32).to_le_bytes());
+        for code in &self.discovered {
+            // u8 length: the deepest real code is ~a dozen taps; 255 is unreachable
+            // by play, so overflow here is a bug, not a case to degrade around.
+            out.push(u8::try_from(code.len()).expect("chord code deeper than 255"));
+            out.extend(code.iter().map(|&d| d as u8));
+        }
         out
     }
 
@@ -152,6 +172,23 @@ impl CoreSnapshot {
             input_next.insert(id, u64::from_le_bytes(r.take()?));
         }
 
+        let n_discovered = u32::from_le_bytes(r.take::<4>()?) as usize;
+        let mut discovered = BTreeSet::new();
+        for _ in 0..n_discovered {
+            let len = r.byte()? as usize;
+            let mut code = Vec::with_capacity(len);
+            for _ in 0..len {
+                code.push(match r.byte()? {
+                    0 => ChordDir::Up,
+                    1 => ChordDir::Down,
+                    2 => ChordDir::Left,
+                    3 => ChordDir::Right,
+                    _ => return Err(SnapshotDecodeError::BadTag),
+                });
+            }
+            discovered.insert(code);
+        }
+
         if !r.is_empty() {
             return Err(SnapshotDecodeError::TrailingBytes);
         }
@@ -163,6 +200,7 @@ impl CoreSnapshot {
             outcome,
             roster,
             input_next,
+            discovered,
         })
     }
 }
@@ -235,6 +273,18 @@ mod tests {
         // Server-stamped watermarks (`Sim::core_snapshot` leaves them empty) — nonempty here so
         // the roundtrip exercises the map encoding.
         snap.input_next = BTreeMap::from([(PlayerId(0), 7), (PlayerId(1), 0)]);
+        // Host-stamped discovered codes (also empty out of `Sim::core_snapshot`) —
+        // varied lengths covering all four directions, pinning the dir alphabet.
+        snap.discovered = BTreeSet::from([
+            vec![ChordDir::Up, ChordDir::Left],
+            vec![
+                ChordDir::Down,
+                ChordDir::Right,
+                ChordDir::Up,
+                ChordDir::Down,
+            ],
+            vec![ChordDir::Left],
+        ]);
         snap
     }
 
@@ -264,6 +314,17 @@ mod tests {
         assert_eq!(
             CoreSnapshot::from_bytes(&bytes),
             Err(SnapshotDecodeError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn unknown_chord_dir_is_rejected() {
+        let mut bytes = sample().to_bytes();
+        // The last discovered code's final dir byte is the buffer's last byte.
+        *bytes.last_mut().unwrap() = 4;
+        assert_eq!(
+            CoreSnapshot::from_bytes(&bytes),
+            Err(SnapshotDecodeError::BadTag)
         );
     }
 

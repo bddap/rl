@@ -40,7 +40,10 @@ use crate::snapshot::CoreSnapshot;
 // would reject the widened Welcome and the unknown tag.
 // v23: snapshot players carry altitude + carried velocity (rl#355 — the on-foot
 // momentum state); a v22 peer would mis-frame every snapshot after the handshake.
-pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/23";
+// v24: snapshot carries the host's discovered chord codes (rl#398 — the joined
+// client's combo map shows the session's discovered space); a v23 peer would see
+// trailing bytes on every snapshot.
+pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/24";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
 
