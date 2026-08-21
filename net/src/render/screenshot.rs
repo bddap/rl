@@ -202,6 +202,10 @@ pub struct PilotScript {
     /// Hold every flight axis at zero while piloting instead of the default full
     /// forward drive — parked-craft captures (rl#377) need a body at rest.
     park: bool,
+    /// Tap round-RESTART at these frames — replays a recorded session's spawn path
+    /// (each restart draws the next rl#305 layout off the seed's stream), so a
+    /// sighting anchored to "restart N of seed S" is reachable headlessly (rl#372).
+    restart_taps: Vec<u64>,
     frame: u64,
 }
 
@@ -215,8 +219,15 @@ impl PilotScript {
             slide_holds: Vec::new(),
             straight: false,
             park: false,
+            restart_taps: Vec::new(),
             frame: 0,
         }
+    }
+
+    /// See [`Self::restart_taps`].
+    pub fn with_restart_taps(mut self, taps: Vec<u64>) -> Self {
+        self.restart_taps = taps;
+        self
     }
 
     pub fn with_jump_holds(mut self, holds: Vec<(u64, Option<u64>)>) -> Self {
@@ -328,6 +339,9 @@ fn drive_pilot_script(
         return;
     };
     script.frame += 1;
+    if script.restart_taps.contains(&script.frame) {
+        pending.restart = true;
+    }
     if script.toggle_at.contains(&script.frame) {
         // The game has no cycle verb anymore (one board code per vehicle, rl#330) —
         // the script keeps its historical foot→plane→ship→foot order locally so the

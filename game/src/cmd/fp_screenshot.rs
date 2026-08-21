@@ -97,6 +97,12 @@ pub(crate) struct Args {
     #[arg(long)]
     walk_straight: bool,
 
+    /// Tap round-RESTART at these frames (comma-separated) — each restart draws the
+    /// next rl#305 layout off the seed's stream, so a sighting anchored to
+    /// "restart N of seed S" is reachable headlessly (rl#372).
+    #[arg(long, value_delimiter = ',')]
+    restart_taps: Vec<u64>,
+
     /// Hold every flight axis at zero while piloting instead of the default full
     /// forward drive — parked-craft captures (rl#377).
     #[arg(long)]
@@ -137,6 +143,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         || !args.jump_holds.is_empty()
         || !args.sprint_holds.is_empty()
         || !args.slide_holds.is_empty()
+        || !args.restart_taps.is_empty()
     {
         let parse_holds = |specs: &[String]| {
             specs
@@ -150,7 +157,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
                 .with_sprint_holds(parse_holds(&args.sprint_holds)?)
                 .with_slide_holds(parse_holds(&args.slide_holds)?)
                 .with_straight_walk(args.walk_straight)
-                .with_park(args.pilot_park),
+                .with_park(args.pilot_park)
+                .with_restart_taps(args.restart_taps),
         );
     }
     if let Some(hz) = args.frame_hz {
