@@ -72,6 +72,16 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
     round_resource::<FlightInput>(world, &mut scope);
     round_resource::<CameraPitch>(world, &mut scope);
     round_resource::<CameraYaw>(world, &mut scope);
+    // The teardown reset IS a vehicle exit when the round ends mid-flight; without
+    // this line the transition log skips the exit and the next ride reads
+    // `OnFoot -> X` with no `X -> OnFoot` before it (rl#400: telemetry could not
+    // segment rides across a round boundary).
+    scope.push(|w| {
+        let vehicle = w.resource::<LocalVehicle>();
+        if vehicle.kind().is_some() {
+            info!("vehicle: {:?} -> OnFoot (round end)", vehicle.context());
+        }
+    });
     round_resource::<LocalVehicle>(world, &mut scope);
     round_resource::<RenderClock>(world, &mut scope);
     round_resource::<super::articulation::RemoteVehicle>(world, &mut scope);
