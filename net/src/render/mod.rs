@@ -114,6 +114,8 @@ fn data_dir() -> Option<PathBuf> {
 
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use audio::ExternalBus;
+// The game CLI wires script resources onto built apps without its own bevy dep.
+pub use bevy::app::App;
 pub use render_mode::RenderMode;
 pub use screenshot::{
     ChordScript, FrameDtModel, PilotScript, ScreenshotConfig, build_net_screenshot_app,
