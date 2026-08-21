@@ -63,6 +63,7 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
         art_buf: std::collections::VecDeque::new(),
         stalled: false,
         logged_statuses: BTreeMap::new(),
+        pending_pump: None,
     });
     scope.push(|w| {
         w.remove_non_send::<GameState>();
@@ -342,6 +343,24 @@ pub(super) struct GameState {
     /// Last logged per-player status, so Alive→Downed/Extracted edges (a crab strike landing,
     /// an extraction) each leave exactly one log line on every peer.
     logged_statuses: BTreeMap<PlayerId, PlayerStatus>,
+    /// The host tick mid-pump (rl#396), if any: paying a tick's whole 2-3-step physics
+    /// pump inline in the crossing frame made TV frametimes bimodal, so the crossing
+    /// frame runs only the exchange + the FIRST owed step, the rest spread one per
+    /// frame ([`step_pending_pump`]) and force-complete before the next exchange
+    /// ([`complete_pending_pump`]). While `Some`, the client sim sits one tick behind
+    /// the exchanged tick — the [`RenderClock`] write adds it back so render time
+    /// never rewinds. Always `None` on a remote-adopt client (its frames are cheap;
+    /// the host is the one peer that pumps physics).
+    pending_pump: Option<PendingPump>,
+}
+
+/// A started-but-unfinalized host tick (rl#396): the slot inputs snapshotted at its
+/// exchange plus the owed physics steps not yet run. Finalize — pose collect + hunt
+/// feed, authoritative sim step, snapshot + articulation broadcast — happens at
+/// owed-complete, so the wire still sees whole 30 Hz ticks.
+struct PendingPump {
+    inputs: crate::crab_slot::SlotInputs,
+    remaining: u32,
 }
 
 const JITTER_BUF_MAX: usize = 3;
@@ -554,8 +573,9 @@ impl LocalControl {
 }
 
 /// This frame's render time, written once per frame at the end of
-/// [`drive_client_sim`]: the last stepped/adopted sim tick plus the accumulator
-/// fraction into the next. THE one clock every [`super::pose::PoseWindow`] sampler
+/// [`drive_client_sim`]: the last exchanged/adopted sim tick plus the accumulator
+/// fraction into the next (on the host, a tick mid-deferral counts as exchanged —
+/// rl#396). THE one clock every [`super::pose::PoseWindow`] sampler
 /// reads — the cockpit, the remote craft models, the wireframe pass, and the crab
 /// body parts (both arms, rl#274) — so their notions of "now" cannot drift apart
 /// within a frame.
@@ -844,104 +864,157 @@ fn publish_pilot_commands(world: &mut World) {
     world.resource_mut::<VehicleControls>().0 = entries;
 }
 
-/// (Host) Drain every server tick this frame's exchange made ready: pump the crab
-/// world, step the authoritative sim, broadcast the snapshot + articulation, and mirror
-/// the step into our own client. Host-paced: `exchange` assembled one tick per issued
-/// local input, so this drains exactly what this frame issued (a remote can delay
-/// nothing — rl#195).
-fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
-    loop {
+/// (Host) Start the server tick this frame's exchange assembled: capture `prev`,
+/// snapshot the slot inputs, and run only the FIRST owed physics step — the rest
+/// spread one per frame ([`step_pending_pump`]) and the tick finalizes at
+/// owed-complete ([`complete_pending_pump`]), force-run before the next exchange.
+/// Host-paced: `exchange` assembled at most the one tick this frame's issued local
+/// input completed (a remote can delay nothing — rl#195), and `advance` asserts the
+/// previous tick was stepped, so a missed force-complete fails loud.
+fn start_host_tick(world: &mut World, me: PilotId, armed: bool) {
+    {
+        let state = world.non_send::<GameState>();
+        debug_assert!(
+            state.pending_pump.is_none(),
+            "tick started over a live pending pump — complete_pending_pump precedes exchange"
+        );
+        if !state
+            .server()
+            .expect("server_auth ⇒ a server")
+            .next_tick_ready()
         {
-            let state = world.non_send::<GameState>();
-            if !state
-                .server()
-                .expect("server_auth ⇒ a server")
-                .next_tick_ready()
-            {
-                break;
-            }
+            return;
         }
-        {
-            let mut state = world.non_send_mut::<GameState>();
-            state.prev = SimSnapshot::capture(&state.client);
-        }
+    }
+    {
+        let mut state = world.non_send_mut::<GameState>();
+        state.prev = SimSnapshot::capture(&state.client);
+    }
+    let inputs = {
+        let state = world.non_send::<GameState>();
+        crate::crab_slot::slot_inputs(state.server().expect("server_auth ⇒ a server").sim())
+    };
+    let remaining = if armed {
+        crate::crab_slot::pump_fixed_steps(world, 1);
+        crate::cadence::steps_for_tick(inputs.stepping_into) - 1
+    } else {
+        0
+    };
+    world.non_send_mut::<GameState>().pending_pump = Some(PendingPump { inputs, remaining });
+    if remaining == 0 {
+        // Nothing to spread (the unarmed crab-less screenshot host pumps no physics)
+        // — finalize inline, frame-identical to the pre-rl#396 inline pump.
+        complete_pending_pump(world, me, armed);
+    }
+}
 
-        let inputs = {
-            let state = world.non_send::<GameState>();
-            crate::crab_slot::slot_inputs(state.server().expect("server_auth ⇒ a server").sim())
-        };
-        let (crab_poses, shadows) = if armed {
-            let poses = crate::crab_slot::pump_crab_slot(world, &inputs);
-            if let Some(p) = read_vehicle_pose(world, me) {
-                world
-                    .resource_mut::<LocalVehicle>()
-                    .update_pose(inputs.stepping_into, p);
-                world.resource_mut::<super::pos_trace::PosTrace>().craft(
-                    inputs.stepping_into,
-                    p.pos,
-                    p.orient,
-                );
-            }
-            (poses, pilot_shadows(world))
-        } else {
-            // The one unarmed host: the crab-less screenshot path
-            // (fp-screenshot without a checkpoint) — no crab world to read,
-            // so the sim's crabs hold their spawn poses, clawless. Poses stay
-            // mandatory; this is a diagnostics surface, not a served round.
-            (inputs.fallback.clone(), BTreeMap::new())
-        };
-        let (bytes, restarted) = {
-            let mut state = world.non_send_mut::<GameState>();
-            let stepped = state
-                .server_mut()
-                .expect("server_auth ⇒ a server")
-                .step_next(&crab_poses, shadows);
-            (stepped.snapshot, stepped.restarted)
-        };
-        let mut snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
-            .expect("the authoritative server's snapshot must decode");
-        // rl#398: stamp the host's OWN discovered chord codes onto the outgoing
-        // snapshot (rider metadata like `input_next` — the sim emits it empty) so a
-        // joined client's combo map opens onto the session's discovered space. The
-        // local save only, never the union: a replicated set stashed from some
-        // earlier session this peer JOINED must not relay into rounds it hosts.
-        snap.discovered = world
-            .resource::<super::chord_map::DiscoveredCodes>()
-            .codes()
-            .clone();
-        let articulation = armed.then(|| crate::render::articulation::capture(world, snap.tick));
-        {
-            let state = world.non_send::<GameState>();
-            state.coord.broadcast_step(&snap, articulation.as_ref());
+/// One deferred physics step toward the pending host tick, on a frame that crossed no
+/// tick; the last owed step finalizes in the same frame (the finalize tail — sim step
+/// + broadcast — is cheap next to a physics step).
+fn step_pending_pump(world: &mut World, me: PilotId, armed: bool) {
+    let Some(remaining) = world
+        .non_send::<GameState>()
+        .pending_pump
+        .as_ref()
+        .map(|p| p.remaining)
+    else {
+        return;
+    };
+    if remaining > 1 {
+        crate::crab_slot::pump_fixed_steps(world, 1);
+        world
+            .non_send_mut::<GameState>()
+            .pending_pump
+            .as_mut()
+            .expect("checked above")
+            .remaining -= 1;
+    } else {
+        complete_pending_pump(world, me, armed);
+    }
+}
+
+/// Force-complete the pending host tick: run every still-owed physics step now, then
+/// finalize — collect the crab poses + feed the next hunt, step the authoritative sim,
+/// broadcast the snapshot + articulation, and mirror the step into our own client.
+/// Runs before each exchange (the sim must sit at tick N before tick N+1's input
+/// applies) and as [`step_pending_pump`]'s owed-complete tail. No-op when nothing is
+/// pending.
+fn complete_pending_pump(world: &mut World, me: PilotId, armed: bool) {
+    let Some(pending) = world.non_send_mut::<GameState>().pending_pump.take() else {
+        return;
+    };
+    let inputs = pending.inputs;
+    let (crab_poses, shadows) = if armed {
+        let poses = crate::crab_slot::pump_slot_steps(world, pending.remaining, &inputs);
+        if let Some(p) = read_vehicle_pose(world, me) {
+            world
+                .resource_mut::<LocalVehicle>()
+                .update_pose(inputs.stepping_into, p);
+            world.resource_mut::<super::pos_trace::PosTrace>().craft(
+                inputs.stepping_into,
+                p.pos,
+                p.orient,
+            );
         }
-        if let Some(art) = &articulation {
-            // The host renders its OWN Sally through the same windows a client
-            // adopts (rl#274) — one interpolation mechanism on both arms.
-            super::articulation::feed_crab_part_windows(world, art);
-            super::articulation::publish_remote_vehicles(world, art.tick, &art.vehicles, me);
+        (poses, pilot_shadows(world))
+    } else {
+        // The one unarmed host: the crab-less screenshot path
+        // (fp-screenshot without a checkpoint) — no crab world to read,
+        // so the sim's crabs hold their spawn poses, clawless. Poses stay
+        // mandatory; this is a diagnostics surface, not a served round.
+        (inputs.fallback.clone(), BTreeMap::new())
+    };
+    let (bytes, restarted) = {
+        let mut state = world.non_send_mut::<GameState>();
+        let stepped = state
+            .server_mut()
+            .expect("server_auth ⇒ a server")
+            .step_next(&crab_poses, shadows);
+        (stepped.snapshot, stepped.restarted)
+    };
+    let mut snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
+        .expect("the authoritative server's snapshot must decode");
+    // rl#398: stamp the host's OWN discovered chord codes onto the outgoing
+    // snapshot (rider metadata like `input_next` — the sim emits it empty) so a
+    // joined client's combo map opens onto the session's discovered space. The
+    // local save only, never the union: a replicated set stashed from some
+    // earlier session this peer JOINED must not relay into rounds it hosts.
+    snap.discovered = world
+        .resource::<super::chord_map::DiscoveredCodes>()
+        .codes()
+        .clone();
+    let articulation = armed.then(|| crate::render::articulation::capture(world, snap.tick));
+    {
+        let state = world.non_send::<GameState>();
+        state.coord.broadcast_step(&snap, articulation.as_ref());
+    }
+    if let Some(art) = &articulation {
+        // The host renders its OWN Sally through the same windows a client
+        // adopts (rl#274) — one interpolation mechanism on both arms.
+        super::articulation::feed_crab_part_windows(world, art);
+        super::articulation::publish_remote_vehicles(world, art.tick, &art.vehicles, me);
+    }
+    {
+        let mut state = world.non_send_mut::<GameState>();
+        // Same per-tick latch clear as the adopt arm: an Ongoing tick means the
+        // round is (or just became, via RESTART) live, so the next decision must
+        // report even if this frame's unbounded catch-up drain also re-decides it.
+        if snap.outcome == Outcome::Ongoing {
+            state.reported_outcome = false;
         }
-        {
-            let mut state = world.non_send_mut::<GameState>();
-            // Same per-tick latch clear as the adopt arm: an Ongoing tick means the
-            // round is (or just became, via RESTART) live, so the next decision must
-            // report even if this frame's unbounded catch-up drain also re-decides it.
-            if snap.outcome == Outcome::Ongoing {
-                state.reported_outcome = false;
-            }
-            state.client.apply_core_snapshot(snap);
-        }
-        if restarted && armed {
-            let spawns: Vec<crate::sim::Pos> = world
-                .non_send::<GameState>()
-                .server()
-                .expect("server_auth ⇒ a server")
-                .sim()
-                .crabs()
-                .iter()
-                .map(|c| c.pos())
-                .collect();
-            crate::crab_slot::restart_crabs_to_spawns(world, &spawns);
-        }
+        state.client.apply_core_snapshot(snap);
+    }
+    if restarted && armed {
+        let spawns: Vec<crate::sim::Pos> = world
+            .non_send::<GameState>()
+            .server()
+            .expect("server_auth ⇒ a server")
+            .sim()
+            .crabs()
+            .iter()
+            .map(|c| c.pos())
+            .collect();
+        crate::crab_slot::restart_crabs_to_spawns(world, &spawns);
     }
 }
 
@@ -1101,9 +1174,10 @@ fn record_tick_trace(world: &mut World) {
 
 /// The per-frame fixed-tick driver: accumulate render time, then per crossed tick
 /// assemble local control, exchange it through the [`Coordinator`], and run the
-/// role's arm — the host pumps + steps + broadcasts ([`pump_host_ticks`]); a remote
-/// client adopts what [`exchange_tick`]'s jitter buffer released. Ends by writing the
-/// frame's [`RenderClock`] and perf stats.
+/// role's arm — the host starts its tick's spread pump ([`start_host_tick`], rl#396);
+/// a remote client adopts what [`exchange_tick`]'s jitter buffer released. Frames
+/// that cross no tick pay one deferred physics step ([`step_pending_pump`]). Ends by
+/// writing the frame's [`RenderClock`] and perf stats.
 pub(super) fn drive_client_sim(world: &mut World) {
     let sim_started = std::time::Instant::now();
     let armed = world
@@ -1133,6 +1207,13 @@ pub(super) fn drive_client_sim(world: &mut World) {
         world.non_send_mut::<GameState>().accumulator -= TICK_DT;
         applied += 1;
 
+        if role == PeerRole::ServerAuth {
+            // The previous tick's deferred steps must land before this tick's input
+            // applies: the sim sits at tick N when tick N+1 assembles (rl#396), and
+            // `Server::advance` asserts it.
+            complete_pending_pump(world, me, armed);
+        }
+
         let local = take_local_control(world);
         let sim_input = local.sim_input();
         let tick = exchange_tick(world, role, &local);
@@ -1146,7 +1227,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
 
         if role == PeerRole::ServerAuth {
             publish_pilot_commands(world);
-            pump_host_ticks(world, me, armed);
+            start_host_tick(world, me, armed);
         }
 
         record_tick_trace(world);
@@ -1154,6 +1235,14 @@ pub(super) fn drive_client_sim(world: &mut World) {
         if let Some(t) = &tel {
             sample_telemetry(world, t, roster_len, tick.issue_tick, sim_input);
         }
+    }
+
+    // A frame that crossed no tick pays one deferred physics step instead (rl#396) —
+    // this spread is the whole point: every frame carries ~one step, none a whole
+    // tick. A crossing frame already ran its step (and any force-completed
+    // remainder), so it never doubles up here.
+    if applied == 0 {
+        step_pending_pump(world, me, armed);
     }
 
     // rl#398: publish the adopted snapshots' discovered chord codes to the combo
@@ -1192,7 +1281,10 @@ pub(super) fn drive_client_sim(world: &mut World) {
     let clock = {
         let state = world.non_send::<GameState>();
         RenderClock {
-            tick: state.client.sim().tick(),
+            // Mid-deferral (rl#396) the host's sim sits one tick behind the exchanged
+            // tick while the accumulator already crossed — count the pending tick or
+            // render time rewinds ~a full tick on every crossing frame.
+            tick: state.client.sim().tick() + u64::from(state.pending_pump.is_some()),
             frac: render_frac(state.accumulator, state.stalled),
         }
     };
@@ -1215,10 +1307,113 @@ pub(super) fn drive_client_sim(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::{
-        FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, PlaneControl, jitter_take,
-        render_frac,
+        FlightControl, GameState, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, PlaneControl,
+        RenderClock, drive_client_sim, install_round, jitter_take, render_frac,
     };
-    use crate::sim::{Input, buttons};
+    use crate::sim::{Input, TICK_DT, buttons};
+    use bevy::prelude::*;
+
+    /// rl#396: the host spreads a tick's 2-3-step physics pump across frames. The
+    /// crossing frame runs the exchange + only the FIRST owed step (the sim tick
+    /// holds while [`RenderClock`] counts the pending tick, so render time never
+    /// rewinds); a non-crossing frame runs the rest and finalizes; a back-to-back
+    /// crossing force-completes first — `Server::advance` asserts on an unstepped
+    /// tick, so a missed force-complete would panic right here.
+    #[test]
+    fn host_pump_spreads_steps_across_frames() {
+        use crab_world::bot::headless::{
+            HeadlessStack, WorldRole, force_serial_schedules, headless_stack,
+            pin_single_thread_pools,
+        };
+
+        pin_single_thread_pools();
+        let me = crate::sim::PlayerId(0);
+        let mut client = crate::client::ClientSim::new(0xC0FFEE, &[me], me);
+        let spawns = super::super::app::seed_round_crabs(&mut client, 1);
+        let mut app = headless_stack(HeadlessStack {
+            num_envs: spawns.len(),
+            role: WorldRole::Standalone,
+            grid: std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(16_384.0)),
+            visuals: crab_world::Visuals(false),
+        });
+        app.add_plugins(crate::crab_slot::NnCrabPlugin::new(
+            spawns
+                .iter()
+                .map(|_| crab_world::policy::Policy::rest())
+                .collect(),
+            spawns.clone(),
+        ));
+        crate::crab_slot::arm(app.world_mut());
+        crate::crab_slot::park_fixed_auto_pump(&mut app);
+        crate::crab_slot::restart_crabs_to_spawns(app.world_mut(), &spawns);
+        force_serial_schedules(&mut app);
+        // Spawn the crab world's Update-side entities before installing the round.
+        for _ in 0..8 {
+            app.update();
+        }
+        let coord = super::coordinator(None, client.peers(), client.me(), client.sim().clone());
+        install_round(app.world_mut(), client, coord);
+        app.insert_resource(super::super::chord_map::DiscoveredCodes::load(None));
+        app.init_resource::<crab_world::debug_overlay::SimFrameStats>();
+
+        let world = app.world_mut();
+        let mut render_time = 0.0_f64;
+        let mut drive = |world: &mut World, dt: f64| {
+            world
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f64(dt));
+            drive_client_sim(world);
+            let clock = *world.resource::<RenderClock>();
+            let now = clock.tick as f64 + clock.frac as f64;
+            assert!(
+                now >= render_time,
+                "render time rewound: {render_time} -> {now}"
+            );
+            render_time = now;
+            (
+                world.non_send::<GameState>().client.sim().tick(),
+                world.non_send::<GameState>().pending_pump.is_some(),
+                clock,
+            )
+        };
+
+        let t0 = world.non_send::<GameState>().client.sim().tick();
+
+        // Crossing frame: exchange + first owed step only — the sim tick holds, the
+        // pump goes pending, and the clock counts the tick being stepped into.
+        let (tick, pending, clock) = drive(world, TICK_DT * 1.01);
+        assert_eq!(tick, t0, "the crossing frame must not finalize the tick");
+        assert!(pending, "the crossing frame leaves the tick pending");
+        assert_eq!(clock.tick, t0 + 1, "the clock counts the pending tick");
+        assert_eq!(
+            world
+                .resource::<crab_world::debug_overlay::SimFrameStats>()
+                .ticks,
+            1
+        );
+
+        // Non-crossing frame: the remaining owed step(s) land and the tick
+        // finalizes — sim step, snapshot, broadcast.
+        let (tick, pending, clock) = drive(world, 0.001);
+        assert_eq!(tick, t0 + 1, "owed-complete finalizes the tick");
+        assert!(!pending);
+        assert_eq!(clock.tick, t0 + 1);
+
+        // Back-to-back crossings: each force-completes the previous pending tick
+        // before its exchange (Server::advance asserts otherwise), then defers its
+        // own — sustained tick rate is preserved one tick behind.
+        let (tick, pending, _) = drive(world, TICK_DT * 1.01);
+        assert_eq!(tick, t0 + 1);
+        assert!(pending);
+        let (tick, pending, clock) = drive(world, TICK_DT * 1.01);
+        assert_eq!(
+            tick,
+            t0 + 2,
+            "the crossing force-completed the pending tick"
+        );
+        assert!(pending, "and deferred its own");
+        assert_eq!(clock.tick, t0 + 3);
+    }
 
     #[test]
     fn piloting_feeds_the_sim_a_neutral_foot_input_except_restart() {

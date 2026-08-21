@@ -467,8 +467,9 @@ pub(crate) fn slot_inputs(sim: &Sim) -> SlotInputs {
 /// (sensing, policy forward, actuation, physics), read the crabs'
 /// world poses + claws for [`Server::step_next`](crate::server::Server::step_next),
 /// and feed the NEXT tick's hunt targets. [`pump_slot_steps`] is the same seam at an
-/// explicit step count (the probes' 1:1 cadence) — pump→collect→feed ordering has one
-/// owner.
+/// explicit step count — the probes' 1:1 cadence, and the render driver's rl#396
+/// spread pump, which runs early steps via [`pump_fixed_steps`] and finalizes the
+/// tick here with the residue, so collect+feed still happen exactly once per tick.
 pub(crate) fn pump_crab_slot(world: &mut World, inputs: &SlotInputs) -> Vec<CrabPose> {
     pump_slot_steps(
         world,
