@@ -890,8 +890,17 @@ fn pump_host_ticks(world: &mut World, me: PilotId, armed: bool) {
                 .step_next(&crab_poses, shadows);
             (stepped.snapshot, stepped.restarted)
         };
-        let snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
+        let mut snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
             .expect("the authoritative server's snapshot must decode");
+        // rl#398: stamp the host's OWN discovered chord codes onto the outgoing
+        // snapshot (rider metadata like `input_next` — the sim emits it empty) so a
+        // joined client's combo map opens onto the session's discovered space. The
+        // local save only, never the union: a replicated set stashed from some
+        // earlier session this peer JOINED must not relay into rounds it hosts.
+        snap.discovered = world
+            .resource::<super::chord_map::DiscoveredCodes>()
+            .codes()
+            .clone();
         let articulation = armed.then(|| crate::render::articulation::capture(world, snap.tick));
         {
             let state = world.non_send::<GameState>();
@@ -1137,6 +1146,16 @@ pub(super) fn drive_client_sim(world: &mut World) {
         if let Some(t) = &tel {
             sample_telemetry(world, t, roster_len, tick.issue_tick, sim_input);
         }
+    }
+
+    // rl#398: publish the adopted snapshots' discovered chord codes to the combo
+    // map — one unconditional path on both arms (the solo/host arm just mirrors its
+    // own stamp back through the same seam a wire client consumes).
+    {
+        let remote = world.non_send::<GameState>().client.discovered().clone();
+        world
+            .resource_mut::<super::chord_map::DiscoveredCodes>()
+            .set_remote(remote);
     }
 
     // Chronic input-starvation surface (rl#213): reports appear at most once per second per

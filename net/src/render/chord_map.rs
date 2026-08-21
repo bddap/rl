@@ -89,6 +89,12 @@ pub fn code_from_str(s: &str) -> Option<Vec<ChordDir>> {
 #[derive(Resource)]
 pub struct DiscoveredCodes {
     codes: BTreeSet<Vec<ChordDir>>,
+    /// The session's replicated discovered set (rl#398) — on a joined client, the
+    /// host's map out of the adopted snapshots; on the solo/host arm, its own set
+    /// mirrored back through the same seam. Rendered (union with `codes`) but never
+    /// persisted: the SAVE stays codes this player PLAYED (the rl#358 directive) —
+    /// joining a session shows the party's map, it doesn't grant it.
+    remote: BTreeSet<Vec<ChordDir>>,
     file: Option<PathBuf>,
 }
 
@@ -122,7 +128,22 @@ impl DiscoveredCodes {
                 }
             }
         }
-        Self { codes, file }
+        Self {
+            codes,
+            remote: BTreeSet::new(),
+            file,
+        }
+    }
+
+    /// Adopt the session's replicated discovered set (wholesale — each snapshot
+    /// carries the full set, so the newest one simply replaces).
+    pub fn set_remote(&mut self, remote: BTreeSet<Vec<ChordDir>>) {
+        self.remote = remote;
+    }
+
+    /// What the map renders: the local save UNION the session's replicated set.
+    fn visible(&self) -> BTreeSet<Vec<ChordDir>> {
+        self.codes.union(&self.remote).cloned().collect()
     }
 
     /// Record a played code; returns whether it is NEW (the growth moment). Saves
@@ -154,7 +175,9 @@ impl DiscoveredCodes {
         true
     }
 
-    fn codes(&self) -> &BTreeSet<Vec<ChordDir>> {
+    /// The LOCAL save's codes only — what the host stamps onto outgoing snapshots
+    /// ([`super::driver`]); replicated codes never relay onward through this peer.
+    pub(super) fn codes(&self) -> &BTreeSet<Vec<ChordDir>> {
         &self.codes
     }
 }
@@ -703,7 +726,7 @@ fn drive_chord_map(
     panel_node.display = Display::Flex;
 
     let focus_code = state.focus.clone();
-    let tree = MapTree::build(discovered.codes(), &focus_code);
+    let tree = MapTree::build(&discovered.visible(), &focus_code);
     let focus = tree
         .index_of(&focus_code)
         .expect("the entered path was just inserted into the tree");
@@ -897,6 +920,20 @@ mod tests {
         let reloaded = DiscoveredCodes::load(Some(file.clone()));
         assert_eq!(reloaded.codes(), fresh.codes());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// rl#398: the session's replicated set joins the RENDERED map but never the
+    /// SAVE — remote codes are the party's map, not this player's progression.
+    #[test]
+    fn remote_codes_render_but_never_persist() {
+        let mut codes = DiscoveredCodes::load(None);
+        assert!(codes.insert(&[U, L]));
+        codes.set_remote(set(&[&[D, D], &[U, L]]));
+        assert_eq!(codes.visible(), set(&[&[U, L], &[D, D]]));
+        assert_eq!(codes.codes(), &set(&[&[U, L]]), "save is local plays only");
+        // A wholesale re-adopt replaces (a session leave/rejoin shrinks it back).
+        codes.set_remote(BTreeSet::new());
+        assert_eq!(codes.visible(), set(&[&[U, L]]));
     }
 
     /// Discovered-only (the rl#358 directive): the tree holds played codes and their

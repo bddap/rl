@@ -1316,6 +1316,9 @@ impl Sim {
             // none. [`crate::server::Server::step_next`] stamps them; the client's `ClientSim`
             // stashes + re-stamps them for its mirror re-emit.
             input_next: std::collections::BTreeMap::new(),
+            // Discovered chord codes are HOST-render progression metadata (rl#398), not
+            // sim state — the host driver stamps them; `ClientSim` stashes + re-stamps.
+            discovered: std::collections::BTreeSet::new(),
         }
     }
 
@@ -1330,6 +1333,9 @@ impl Sim {
             // Coordination metadata, not sim state — the client's `ClientSim` stashes it
             // (prediction-window prune + mirror re-emit) before handing the snapshot here.
             input_next: _,
+            // Likewise render-side metadata (rl#398): stashed by `ClientSim`, read by
+            // the combo map, never sim state.
+            discovered: _,
         } = snapshot;
         self.tick = tick;
         self.players = players;
