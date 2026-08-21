@@ -343,24 +343,20 @@ pub(super) struct GameState {
     /// Last logged per-player status, so Alive→Downed/Extracted edges (a crab strike landing,
     /// an extraction) each leave exactly one log line on every peer.
     logged_statuses: BTreeMap<PlayerId, PlayerStatus>,
-    /// The host tick mid-pump (rl#396), if any: paying a tick's whole 2-3-step physics
-    /// pump inline in the crossing frame made TV frametimes bimodal, so the crossing
-    /// frame runs only the exchange + the FIRST owed step, the rest spread one per
-    /// frame ([`step_pending_pump`]) and force-complete before the next exchange
-    /// ([`complete_pending_pump`]). While `Some`, the client sim sits one tick behind
-    /// the exchanged tick — the [`RenderClock`] write adds it back so render time
-    /// never rewinds. Always `None` on a remote-adopt client (its frames are cheap;
-    /// the host is the one peer that pumps physics).
-    pending_pump: Option<PendingPump>,
-}
-
-/// A started-but-unfinalized host tick (rl#396): the slot inputs snapshotted at its
-/// exchange plus the owed physics steps not yet run. Finalize — pose collect + hunt
-/// feed, authoritative sim step, snapshot + articulation broadcast — happens at
-/// owed-complete, so the wire still sees whole 30 Hz ticks.
-struct PendingPump {
-    inputs: crate::crab_slot::SlotInputs,
-    remaining: u32,
+    /// The host tick mid-pump (rl#396): the owed physics steps not yet run, if a tick
+    /// is started but unfinalized. Paying a tick's whole 2-3-step physics pump inline
+    /// in the crossing frame made TV frametimes bimodal, so the crossing frame runs
+    /// only the exchange + the FIRST owed step, the rest spread one per frame
+    /// ([`step_pending_pump`]) and force-complete before the next exchange
+    /// ([`complete_pending_pump`]) — finalize (pose collect + hunt feed,
+    /// authoritative sim step, snapshot + articulation broadcast) happens at
+    /// owed-complete, so the wire still sees whole 30 Hz ticks. While `Some`, the
+    /// client sim sits one tick behind the exchanged tick — the [`RenderClock`] write
+    /// adds it back so render time never rewinds. Just a step count: the tick's slot
+    /// inputs are re-derived at finalize, identical by construction (nothing touches
+    /// the server sim between start and complete). Always `None` on a remote-adopt
+    /// client (its frames are cheap; the host is the one peer that pumps physics).
+    pending_pump: Option<u32>,
 }
 
 const JITTER_BUF_MAX: usize = 3;
@@ -864,12 +860,12 @@ fn publish_pilot_commands(world: &mut World) {
     world.resource_mut::<VehicleControls>().0 = entries;
 }
 
-/// (Host) Start the server tick this frame's exchange assembled: capture `prev`,
-/// snapshot the slot inputs, and run only the FIRST owed physics step — the rest
-/// spread one per frame ([`step_pending_pump`]) and the tick finalizes at
-/// owed-complete ([`complete_pending_pump`]), force-run before the next exchange.
-/// Host-paced: `exchange` assembled at most the one tick this frame's issued local
-/// input completed (a remote can delay nothing — rl#195), and `advance` asserts the
+/// (Host) Start the server tick this frame's exchange assembled: capture `prev` and
+/// run only the FIRST owed physics step — the rest spread one per frame
+/// ([`step_pending_pump`]) and the tick finalizes at owed-complete
+/// ([`complete_pending_pump`]), force-run before the next exchange. Host-paced:
+/// `exchange` assembled at most the one tick this frame's issued local input
+/// completed (a remote can delay nothing — rl#195), and `advance` asserts the
 /// previous tick was stepped, so a missed force-complete fails loud.
 fn start_host_tick(world: &mut World, me: PilotId, armed: bool) {
     {
@@ -887,20 +883,25 @@ fn start_host_tick(world: &mut World, me: PilotId, armed: bool) {
         }
     }
     {
+        // The capture stays HERE, not in the finalize: mid-pump `prev == now`, so the
+        // scene's prev→now interpolation holds the crossing frame at the last stepped
+        // tick instead of rewinding a tick — the interpolation-side twin of the
+        // RenderClock pending bump. Moving it next to `step_next` reintroduces the
+        // rewind.
         let mut state = world.non_send_mut::<GameState>();
         state.prev = SimSnapshot::capture(&state.client);
     }
-    let inputs = {
-        let state = world.non_send::<GameState>();
-        crate::crab_slot::slot_inputs(state.server().expect("server_auth ⇒ a server").sim())
-    };
     let remaining = if armed {
+        let stepping_into = {
+            let state = world.non_send::<GameState>();
+            state.client.sim().tick() + 1
+        };
         crate::crab_slot::pump_fixed_steps(world, 1);
-        crate::cadence::steps_for_tick(inputs.stepping_into) - 1
+        crate::cadence::steps_for_tick(stepping_into) - 1
     } else {
         0
     };
-    world.non_send_mut::<GameState>().pending_pump = Some(PendingPump { inputs, remaining });
+    world.non_send_mut::<GameState>().pending_pump = Some(remaining);
     if remaining == 0 {
         // Nothing to spread (the unarmed crab-less screenshot host pumps no physics)
         // — finalize inline, frame-identical to the pre-rl#396 inline pump.
@@ -912,22 +913,12 @@ fn start_host_tick(world: &mut World, me: PilotId, armed: bool) {
 /// tick; the last owed step finalizes in the same frame (the finalize tail — sim step
 /// + broadcast — is cheap next to a physics step).
 fn step_pending_pump(world: &mut World, me: PilotId, armed: bool) {
-    let Some(remaining) = world
-        .non_send::<GameState>()
-        .pending_pump
-        .as_ref()
-        .map(|p| p.remaining)
-    else {
+    let Some(remaining) = world.non_send::<GameState>().pending_pump else {
         return;
     };
     if remaining > 1 {
         crate::crab_slot::pump_fixed_steps(world, 1);
-        world
-            .non_send_mut::<GameState>()
-            .pending_pump
-            .as_mut()
-            .expect("checked above")
-            .remaining -= 1;
+        world.non_send_mut::<GameState>().pending_pump = Some(remaining - 1);
     } else {
         complete_pending_pump(world, me, armed);
     }
@@ -940,12 +931,17 @@ fn step_pending_pump(world: &mut World, me: PilotId, armed: bool) {
 /// applies) and as [`step_pending_pump`]'s owed-complete tail. No-op when nothing is
 /// pending.
 fn complete_pending_pump(world: &mut World, me: PilotId, armed: bool) {
-    let Some(pending) = world.non_send_mut::<GameState>().pending_pump.take() else {
+    let Some(remaining) = world.non_send_mut::<GameState>().pending_pump.take() else {
         return;
     };
-    let inputs = pending.inputs;
+    // Identical to a capture at start: the server sim is untouched between start and
+    // complete (physics steps mutate only the crab world; exchange only assembles).
+    let inputs = {
+        let state = world.non_send::<GameState>();
+        crate::crab_slot::slot_inputs(state.server().expect("server_auth ⇒ a server").sim())
+    };
     let (crab_poses, shadows) = if armed {
-        let poses = crate::crab_slot::pump_slot_steps(world, pending.remaining, &inputs);
+        let poses = crate::crab_slot::pump_slot_steps(world, remaining, &inputs);
         if let Some(p) = read_vehicle_pose(world, me) {
             world
                 .resource_mut::<LocalVehicle>()
