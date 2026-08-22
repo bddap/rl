@@ -23,7 +23,7 @@ use bevy_rapier3d::prelude::Velocity;
 use crate::bot::body::{CrabCarapace, CrabEnvId};
 use crate::physics::PHYSICS_HZ;
 use crate::terrain::Terrain;
-use crate::vehicle::Vehicle;
+use crate::vehicle::{Vehicle, VehicleKind};
 
 /// Sample cadence in physics ticks: 64 Hz / 6 ≈ 10.7 Hz. Flights last seconds, so an
 /// arc is tens of samples.
@@ -49,6 +49,51 @@ struct SallyTrack {
     tick: u64,
     /// Comma-joined compact-JSON samples for the batch under construction.
     buf: String,
+    /// Each pilot's craft kind last tick — the vehicle-transition edge detector
+    /// (rl#403). Diffing the live craft SET catches every edge including exits (the
+    /// rl#400 gap: the despawn side had no log at all), and only worlds with real
+    /// craft bodies — the host's — carry this plugin, so remotes don't duplicate.
+    riding: std::collections::BTreeMap<u8, VehicleKind>,
+}
+
+/// The mode edges between two craft snapshots: (player, from, to), `None` = on foot.
+/// Pure so the exit/board/morph cases are testable without capturing tracing output.
+fn mode_edges(
+    prev: &std::collections::BTreeMap<u8, VehicleKind>,
+    now: &std::collections::BTreeMap<u8, VehicleKind>,
+) -> Vec<(u8, Option<VehicleKind>, Option<VehicleKind>)> {
+    let mut edges = Vec::new();
+    for (&player, &kind) in now {
+        match prev.get(&player) {
+            None => edges.push((player, None, Some(kind))),
+            Some(&p) if p != kind => edges.push((player, Some(p), Some(kind))),
+            _ => {}
+        }
+    }
+    for (&player, &kind) in prev {
+        if !now.contains_key(&player) {
+            edges.push((player, Some(kind), None));
+        }
+    }
+    edges
+}
+
+/// One first-class vehicle-mode transition (rl#403): `None` = on foot. Target
+/// literal must stay in lockstep with `otel::VEHICLE_TRANSITION_TARGET` (tracing
+/// macros only accept a literal target; the test below guards drift).
+fn transition(player: u8, from: Option<VehicleKind>, to: Option<VehicleKind>) {
+    let mode = |k: Option<VehicleKind>| match k {
+        None => "foot",
+        Some(VehicleKind::Plane) => "plane",
+        Some(VehicleKind::Ship) => "ship",
+    };
+    tracing::info!(
+        target: "vehicle_transition",
+        player,
+        from = mode(from),
+        to = mode(to),
+        "vehicle transition"
+    );
 }
 
 /// One body's compact-JSON sample appended to the batch buffer. `who` is the
@@ -89,6 +134,14 @@ fn sample(
 ) {
     st.tick += 1;
     let tick = st.tick;
+    let now: std::collections::BTreeMap<u8, VehicleKind> =
+        crafts.iter().map(|(v, ..)| (v.pilot.0, v.kind)).collect();
+    if now != st.riding {
+        for (player, from, to) in mode_edges(&st.riding, &now) {
+            transition(player, from, to);
+        }
+        st.riding = now;
+    }
     if tick.is_multiple_of(SAMPLE_EVERY_TICKS) {
         let t_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -141,6 +194,30 @@ mod tests {
     #[test]
     fn target_matches_otel_filter() {
         assert_eq!(otel::SALLY_TRACK_TARGET, "sally_track");
+        assert_eq!(otel::VEHICLE_TRANSITION_TARGET, "vehicle_transition");
+    }
+
+    /// rl#403: every mode edge is reported — board (foot→craft), morph
+    /// (craft→craft), and the exit the rl#400 log lines lost (craft→foot).
+    #[test]
+    fn mode_edges_cover_board_morph_and_exit() {
+        use std::collections::BTreeMap;
+
+        use super::mode_edges;
+        use crate::vehicle::VehicleKind::{Plane, Ship};
+
+        let prev: BTreeMap<u8, _> = [(1, Plane), (2, Ship)].into();
+        let now: BTreeMap<u8, _> = [(1, Ship), (3, Plane)].into();
+        let edges = mode_edges(&prev, &now);
+        assert_eq!(
+            edges,
+            vec![
+                (1, Some(Plane), Some(Ship)), // morph
+                (3, None, Some(Plane)),       // board
+                (2, Some(Ship), None),        // exit
+            ]
+        );
+        assert!(mode_edges(&now, &now).is_empty());
     }
 
     /// rl#401: a ridden craft is IN the batch — its rigidbody is the only physics

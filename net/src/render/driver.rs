@@ -1271,6 +1271,8 @@ pub(super) fn drive_client_sim(world: &mut World) {
 
         record_tick_trace(world);
 
+        super::net_track::sample(world, role == PeerRole::ServerAuth, sim_input);
+
         if let Some(t) = &tel {
             sample_telemetry(world, t, roster_len, tick.issue_tick, sim_input);
         }

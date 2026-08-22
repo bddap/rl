@@ -7831,6 +7831,7 @@ dependencies = [
  "iroh",
  "iroh-mdns-address-lookup",
  "n0-future",
+ "otel",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rapier3d",

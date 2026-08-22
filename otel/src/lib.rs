@@ -15,6 +15,19 @@ const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:4318";
 /// stderr/journal, so the fmt layer drops them while the OTLP log layer ships them.
 pub const SALLY_TRACK_TARGET: &str = "sally_track";
 
+/// Target of the controller-input summary batches (`net::render::net_track`, rl#403):
+/// same export-only contract as [`SALLY_TRACK_TARGET`].
+pub const INPUT_TRACK_TARGET: &str = "input_track";
+
+/// Target of the vehicle-mode transition events (`crab_world::sally_track`, rl#403):
+/// rare first-class events (player, from-mode, to-mode). Forced past quiet RUST_LOG
+/// defaults like the batch targets, but NOT dropped from stderr — a boarding edge is
+/// worth a journal line.
+pub const VEHICLE_TRANSITION_TARGET: &str = "vehicle_transition";
+
+/// The ~1 Hz batch targets: export-only (dropped from the stderr fmt layer).
+const BATCH_TARGETS: &[&str] = &[SALLY_TRACK_TARGET, INPUT_TRACK_TARGET];
+
 #[must_use = "telemetry stops and unflushed data is lost when the guard is dropped"]
 pub struct OtelGuard {
     logger_provider: Option<opentelemetry_sdk::logs::SdkLoggerProvider>,
@@ -56,17 +69,14 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
     // The flight-recorder target rides on top of whatever RUST_LOG asks for: surfaces
     // default to `warn`-ish filters (rl-demo pre-sets RUST_LOG), and a recorder that a
     // quieter default silently disables is the gap rl#332 exists to close.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"))
-        .add_directive(
-            format!("{SALLY_TRACK_TARGET}=info")
-                .parse()
-                .expect("static directive"),
-        );
+    let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    for t in BATCH_TARGETS.iter().chain([&VEHICLE_TRANSITION_TARGET]) {
+        filter = filter.add_directive(format!("{t}=info").parse().expect("static directive"));
+    }
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
-            meta.target() != SALLY_TRACK_TARGET
+            !BATCH_TARGETS.contains(&meta.target())
         }));
 
     let endpoint = resolve_endpoint(args.enabled);

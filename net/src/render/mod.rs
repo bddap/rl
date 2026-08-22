@@ -92,6 +92,7 @@ mod controls_sync;
 mod driver;
 mod input;
 mod menu;
+mod net_track;
 mod pos_trace;
 mod pose;
 mod render_mode;

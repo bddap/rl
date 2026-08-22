@@ -59,3 +59,5 @@ tracing.workspace = true
 [dev-dependencies]
 test-watchdog = { path = "../test-watchdog" }
 crab-world = { path = "../crab-world" }
+# The net_track targets must match otel's constants (tracing wants literal targets).
+otel = { path = "../otel" }
