@@ -37,15 +37,29 @@ pub const fn brake_coeff_max(mass: f32) -> f32 {
 pub const PHYSICS_SUBSTEPS: usize = 2;
 
 /// (outer, internal-PGS, internal-stabilization) solver iterations — the other
-/// half of the [`PHYSICS_SUBSTEPS`] driven budget (rationale there). Outer 4 is
-/// rapier's default; the internal counts at 2 are load-bearing for DRIVEN
-/// momentum honesty, not rest quiet: at 1/1 the airborne self-contact thrash
-/// leaks 0.31–0.58 m/s² of phantom COM force across realization draws —
-/// straddling the rl#321 0.5 ceiling and approaching the pre-fix 0.64 scale —
-/// while 2/2 measures 0.25–0.39 with real margin, for <1 ms/tick over 1/1
-/// (4/4 buys nothing further; 2/2 is the knee). A ZERO-DRIVE crab gets its
-/// rest convergence from `CRAB_SETTLE_EXTRA_ITERATIONS` on the outer count.
-pub const SOLVER_ITERATIONS: (usize, usize, usize) = (4, 2, 2);
+/// half of the [`PHYSICS_SUBSTEPS`] driven budget (rationale there). The
+/// internal counts at 2 are load-bearing for DRIVEN momentum honesty, not rest
+/// quiet: at 1/1 the airborne self-contact thrash leaks 0.31–0.58 m/s² of
+/// phantom COM force across realization draws — straddling the rl#321 0.5
+/// ceiling and approaching the pre-fix 0.64 scale — while 2/2 measures
+/// 0.25–0.39 with real margin, for <1 ms/tick over 1/1 (4/4 buys nothing
+/// further; 2/2 is the knee). Outer 2 (down from rapier's default 4, rl#396
+/// stage 4): the driven-gait step is ~96% solver and outer count is its price —
+/// the rapier-profiler probe measured 5.4→3.5 ms/substep (vel-resolution
+/// 3.9→2.0 ms) for outer 4→2 on the GCR driven crab, the shave that fits the
+/// step-carrying frame under the TV's 16.7 ms vsync budget — while the rl#321
+/// phantom residual stayed at its noise floor and chase-eval was unchanged.
+/// Stabilization at 3 (not 2) buys back the CONTACT-DEPTH convergence the
+/// outer cut halved, and 3 is the whole corridor: at 2×(2/2/2) the rl#312
+/// actuator-load interpenetration residual crossed its 25 mm/60-tick caps
+/// (27.6 mm, 66 ticks — vs main's worst-observed 13.9 mm/8 ticks), while at
+/// 2×(2/2/4) the extra positional projection makes the REST crab creep —
+/// `armed_visual_crab_stays_finite_and_grounded` drifts 12 m off spawn,
+/// deterministically. Stab sweeps are nearly free (3.51→3.54 ms/substep for
+/// 2→4) because PGS+assembly own the solver's cost. A ZERO-DRIVE crab gets
+/// its rest convergence from `CRAB_SETTLE_EXTRA_ITERATIONS` on the outer
+/// count, unchanged on top of this.
+pub const SOLVER_ITERATIONS: (usize, usize, usize) = (2, 2, 3);
 
 fn fixed_timestep() -> TimestepMode {
     TimestepMode::Fixed {
