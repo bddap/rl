@@ -28,10 +28,15 @@ bevy = { workspace = true, features = [
     "bevy_log",
 ] }
 bevy_rapier3d = { workspace = true, features = ["dim3"] }
-# Already in the tree via bevy_rapier3d (same fork rev the workspace patch pins); a
-# direct dep only to switch on rapier's `profiler` feature, which is what makes the
-# pipeline counters the rl#396 step profile reads actually time anything.
-rapier3d = { git = "https://github.com/bddap-bot/rapier", rev = "8a5d9859edbcd3fca6eeb6bd53bd6acb32cf00c5", features = [
+# Already in the tree via bevy_rapier3d (the workspace [patch] rewrites this to the
+# fork); a direct dep only to switch on rapier's `profiler` feature, which is what
+# makes the pipeline counters the rl#396 step profile reads actually time anything.
+# Deliberately a crates-io spec, NOT a second copy of the fork's git rev: the [patch]
+# stays the one rev pin, and this resolves THROUGH it to the same package. The req
+# must name the fork's exact prerelease version (caret reqs skip prereleases); if the
+# fork ever bumps its version string, this fails resolution loudly — fix the one line
+# — rather than silently splitting the graph into a with- and without-profiler copy.
+rapier3d = { version = "0.35.0-glamx0.2", default-features = false, features = [
     "profiler",
 ] }
 bevy_egui = { workspace = true, optional = true }

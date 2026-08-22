@@ -126,7 +126,9 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let physics = crab_world::physics::PHYSICS_SUBSTEPS as f64 * pct(&sub, 0.50);
     println!(
         "\nstep p50 split: wall {:.2} ms ≈ physics {:.2} + NN forward {:.3} + other {:.2} \
-         (sense/act/schedule)",
+         (sense/act/schedule)\nheadless numbers are a FLOOR for the windowed host's \
+         per-step cost (no render contention, lighter FixedMain, broadcast tail \
+         unmeasured) — a floor that busts the budget is conclusive, one that fits is not",
         wall_p50,
         physics,
         profile.policy_forward_ms,

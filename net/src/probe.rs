@@ -666,7 +666,14 @@ fn crab_mech_energy(world: &mut World) -> f32 {
 
 /// One pumped fixed step's cost (rl#396): `wall_ms` is the whole `FixedMain` pass —
 /// sensing, policy forward, actuation, all substeps, writeback — i.e. what a
-/// step-carrying render frame pays on top of its own render work. The rapier
+/// step-carrying render frame pays on top of its own render work. Headless on an
+/// otherwise-idle box this is a FLOOR for the windowed host's per-step cost, not an
+/// estimate of it: the deployed step shares cores with the pipelined render, and the
+/// probe's FixedMain is lighter (no pose sentinel, no vehicle plugin), and the
+/// tick-finalize frame additionally carries the driver's broadcast tail
+/// (`server.step_next` + articulation capture) that only `finalize_ms`'s
+/// collect+feed half models. A floor that busts the vsync budget is conclusive; a
+/// floor that fits only fails to rule fitting out. The rapier
 /// counter fields carry the LAST substep only: bevy_rapier loops
 /// `PHYSICS_SUBSTEPS` inside one fixed pass and rapier resets its counters per
 /// substep, so a whole-step physics share reads as ~`PHYSICS_SUBSTEPS × substep_ms`.
