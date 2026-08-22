@@ -972,9 +972,9 @@ fn phantom_force_instrument() {
     };
 
     // "old-solver" rows pin the 2026-07-28 findings' conditions (sub=2 it=4 was
-    // the shipped config then; rl#340 stage 2 moved shipping to sub=4 it=8/4/4 —
-    // the internal 4/4 now leaks into every row via `rapier_context_init`, so
-    // rows are comparable to each other, not to the dated findings).
+    // the shipped config then; shipping has since moved and the CURRENT internal
+    // counts leak into every row via `rapier_context_init`, so rows are
+    // comparable to each other, not to the dated findings).
     let (ship_sub, ship_it) = (
         crate::physics::PHYSICS_SUBSTEPS,
         crate::physics::SOLVER_ITERATIONS.0,
