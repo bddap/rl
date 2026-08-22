@@ -201,6 +201,19 @@ pub struct Vehicle {
     throttle: f32,
 }
 
+#[cfg(test)]
+impl Vehicle {
+    /// A bare component for tests outside this module (`throttle` is private so live
+    /// bodies only enter play through [`manage_vehicles`]).
+    pub(crate) fn test_body(pilot: PilotId, kind: VehicleKind) -> Self {
+        Self {
+            pilot,
+            kind,
+            throttle: 0.0,
+        }
+    }
+}
+
 /// The boarding player's walker state in the arena frame — where a fresh craft
 /// materialises (rl#258: the vehicle appears where the player is, one entity swaps form,
 /// velocity conserved). The net bridge authors it from the authoritative sim;

@@ -1,7 +1,13 @@
-//! Sally flight recorder (bddap/rl#332): continuous ~10 Hz carapace kinematics from
-//! every live surface, shipped over the process' existing OTLP pipe so the owner's
-//! next "Sally flying" sighting can be reconstructed from a real track instead of
-//! soak proxies. Bothouse-side extraction/plotting: `bothouse/telemetry/sally-track`.
+//! Sally flight recorder (bddap/rl#332): continuous ~10 Hz kinematics from every live
+//! surface, shipped over the process' existing OTLP pipe so the owner's next "Sally
+//! flying" sighting can be reconstructed from a real track instead of soak proxies.
+//! Bothouse-side extraction/plotting: `bothouse/telemetry/sally-track`.
+//!
+//! Two body kinds per batch, discriminated by key (rl#401): crab samples carry
+//! `"c":<env>`, craft samples carry `"veh":<pilot>,"kind":<wire byte>`. Crafts are in
+//! the batch because a ride was otherwise invisible: the piloted walker only MIRRORS
+//! the craft's pose in the fixed-point sim, so the craft rigidbody here is the one
+//! physics source of ride motion — a whole TV flight session read as a parked world.
 //!
 //! Frame-path budget (the standing input-latency constraint): per physics tick this
 //! is one counter increment; ~10 Hz it formats ~90 bytes per crab into a buffer; 1 Hz
@@ -17,6 +23,7 @@ use bevy_rapier3d::prelude::Velocity;
 use crate::bot::body::{CrabCarapace, CrabEnvId};
 use crate::physics::PHYSICS_HZ;
 use crate::terrain::Terrain;
+use crate::vehicle::Vehicle;
 
 /// Sample cadence in physics ticks: 64 Hz / 6 ≈ 10.7 Hz. Flights last seconds, so an
 /// arc is tens of samples.
@@ -44,36 +51,73 @@ struct SallyTrack {
     buf: String,
 }
 
+/// One body's compact-JSON sample appended to the batch buffer. `who` is the
+/// body-kind discriminator pair(s), e.g. `"c":0` or `"veh":0,"kind":2`.
+fn push_sample(
+    buf: &mut String,
+    t_ms: u64,
+    tick: u64,
+    who: std::fmt::Arguments<'_>,
+    tf: &Transform,
+    vel: &Velocity,
+    terrain: Option<&Terrain>,
+) {
+    let p = tf.translation;
+    let v = vel.linear;
+    if !buf.is_empty() {
+        buf.push(',');
+    }
+    let _ = write!(
+        buf,
+        r#"{{"t":{t_ms},"k":{tick},{who},"p":[{:.2},{:.2},{:.2}],"v":[{:.2},{:.2},{:.2}]"#,
+        p.x, p.y, p.z, v.x, v.y, v.z
+    );
+    // Above-ground height, the discriminator the rl#332 geometry work showed
+    // matters (world-shallow arcs over receding slopes read as "flight").
+    // Surfaces without a physics world (no Terrain) just omit it.
+    if let Some(t) = terrain {
+        let _ = write!(buf, r#","a":{:.2}"#, p.y - t.height(p.x, p.z));
+    }
+    buf.push('}');
+}
+
 fn sample(
     mut st: ResMut<SallyTrack>,
     terrain: Option<Res<Terrain>>,
     crabs: Query<(&CrabEnvId, &Transform, &Velocity), With<CrabCarapace>>,
+    crafts: Query<(&Vehicle, &Transform, &Velocity)>,
 ) {
     st.tick += 1;
     let tick = st.tick;
-    if tick.is_multiple_of(SAMPLE_EVERY_TICKS) && !crabs.is_empty() {
+    if tick.is_multiple_of(SAMPLE_EVERY_TICKS) {
         let t_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let terrain = terrain.as_deref();
+        let buf = &mut st.buf;
         for (id, tf, vel) in &crabs {
-            let p = tf.translation;
-            let v = vel.linear;
-            if !st.buf.is_empty() {
-                st.buf.push(',');
-            }
-            let _ = write!(
-                st.buf,
-                r#"{{"t":{t_ms},"k":{tick},"c":{},"p":[{:.2},{:.2},{:.2}],"v":[{:.2},{:.2},{:.2}]"#,
-                id.0, p.x, p.y, p.z, v.x, v.y, v.z
+            push_sample(
+                buf,
+                t_ms,
+                tick,
+                format_args!(r#""c":{}"#, id.0),
+                tf,
+                vel,
+                terrain,
             );
-            // Above-ground height, the discriminator the rl#332 geometry work showed
-            // matters (world-shallow arcs over receding slopes read as "flight").
-            // Surfaces without a physics world (no Terrain) just omit it.
-            if let Some(t) = &terrain {
-                let _ = write!(st.buf, r#","a":{:.2}"#, p.y - t.height(p.x, p.z));
-            }
-            st.buf.push('}');
+        }
+        // Ridden crafts (rl#401): `kind` is the wire byte (1 plane, 2 ship).
+        for (v, tf, vel) in &crafts {
+            push_sample(
+                buf,
+                t_ms,
+                tick,
+                format_args!(r#""veh":{},"kind":{}"#, v.pilot.0, v.kind as u8),
+                tf,
+                vel,
+                terrain,
+            );
         }
     }
     if tick.is_multiple_of(EMIT_EVERY_TICKS) && !st.buf.is_empty() {
@@ -87,8 +131,42 @@ fn sample(
 
 #[cfg(test)]
 mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+    use bevy_rapier3d::prelude::Velocity;
+
+    use super::{SAMPLE_EVERY_TICKS, SallyTrack, sample};
+    use crate::vehicle::{PilotId, Vehicle, VehicleKind};
+
     #[test]
     fn target_matches_otel_filter() {
         assert_eq!(otel::SALLY_TRACK_TARGET, "sally_track");
+    }
+
+    /// rl#401: a ridden craft is IN the batch — its rigidbody is the only physics
+    /// source of ride motion (the sim's piloted walker merely mirrors it), so a
+    /// tracker without craft samples records a parked world through a whole flight.
+    #[test]
+    fn crafts_are_sampled_with_pilot_and_kind() {
+        let mut world = World::new();
+        world.init_resource::<SallyTrack>();
+        world.spawn((
+            Vehicle::test_body(PilotId(3), VehicleKind::Ship),
+            Transform::from_xyz(100.0, 20.0, -50.0),
+            Velocity::linear(Vec3::new(8.0, 1.0, -2.0)),
+        ));
+        for _ in 0..SAMPLE_EVERY_TICKS {
+            world.run_system_once(sample).expect("bare world");
+        }
+        let buf = &world.resource::<SallyTrack>().buf;
+        assert!(
+            buf.contains(r#""veh":3,"kind":2"#),
+            "craft sample must carry pilot + wire-byte kind, got: {buf}"
+        );
+        assert!(
+            buf.contains(r#""p":[100.00,20.00,-50.00]"#)
+                && buf.contains(r#""v":[8.00,1.00,-2.00]"#),
+            "craft sample must carry the craft's own kinematics, got: {buf}"
+        );
     }
 }
