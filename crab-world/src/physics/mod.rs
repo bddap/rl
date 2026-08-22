@@ -46,9 +46,13 @@ pub const PHYSICS_SUBSTEPS: usize = 2;
 /// further; 2/2 is the knee). Outer 2 (down from rapier's default 4, rl#396
 /// stage 4): the driven-gait step is ~96% solver and outer count is its price —
 /// the rapier-profiler probe measured 5.4→3.5 ms/substep (vel-resolution
-/// 3.9→2.0 ms) for outer 4→2 on the GCR driven crab, the shave that fits the
-/// step-carrying frame under the TV's 16.7 ms vsync budget — while the rl#321
-/// phantom residual stayed at its noise floor and chase-eval was unchanged.
+/// 3.9→2.0 ms) for outer 4→2 on the GCR driven crab. The rl#396 stage-2 TV
+/// ruler put the step-carrying frame right AT the 16.7 ms vsync budget
+/// (~15 Hz of ~30 ms present pairs from just-missed frames); this shave is
+/// the margin that moves it inside. Outer 3 is NOT a milder option: it
+/// measured 4.5 vs 4.4 ms/substep against outer 4 — noise; the drop is at 2.
+/// The rl#321 phantom residual stayed at its noise floor and chase-eval did
+/// not regress (0.17→0.26 m mean pair progress, deployed release brain).
 /// Stabilization at 3 (not 2) buys back the CONTACT-DEPTH convergence the
 /// outer cut halved, and 3 is the whole corridor: at 2×(2/2/2) the rl#312
 /// actuator-load interpenetration residual crossed its 25 mm/60-tick caps
@@ -56,9 +60,12 @@ pub const PHYSICS_SUBSTEPS: usize = 2;
 /// 2×(2/2/4) the extra positional projection makes the REST crab creep —
 /// `armed_visual_crab_stays_finite_and_grounded` drifts 12 m off spawn,
 /// deterministically. Stab sweeps are nearly free (3.51→3.54 ms/substep for
-/// 2→4) because PGS+assembly own the solver's cost. A ZERO-DRIVE crab gets
-/// its rest convergence from `CRAB_SETTLE_EXTRA_ITERATIONS` on the outer
-/// count, unchanged on top of this.
+/// 2→4) because PGS+assembly own the solver's cost. A ZERO-DRIVE crab still
+/// gets `CRAB_SETTLE_EXTRA_ITERATIONS` ADDED to the outer count, so its
+/// settle total moved 16→14 — inside spawn.rs's measured bracket (awake at 8
+/// total, the floor was set against 16); headless sleep engagement is
+/// re-pinned green by `resting_crab_falls_asleep`, the render graph only by
+/// the armed smoke's grounded/finite bound.
 pub const SOLVER_ITERATIONS: (usize, usize, usize) = (2, 2, 3);
 
 fn fixed_timestep() -> TimestepMode {
