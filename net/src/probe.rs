@@ -41,13 +41,24 @@ struct Probe {
 }
 
 impl Probe {
-    fn new(policy: crab_world::policy::Policy, seed: u64, visuals: crab_world::Visuals) -> Self {
+    /// `deterministic` pins single-thread pools + serial schedules for the hash-log
+    /// probes; the rl#396 step profile passes `false` — it measures wall time, so it
+    /// must run the production threading, and pinning is a process-global one-way
+    /// door the profile process never opens.
+    fn new(
+        policy: crab_world::policy::Policy,
+        seed: u64,
+        visuals: crab_world::Visuals,
+        deterministic: bool,
+    ) -> Self {
         use crab_world::bot::headless::{
             HeadlessStack, WorldRole, force_serial_schedules, headless_stack,
             pin_single_thread_pools,
         };
 
-        pin_single_thread_pools();
+        if deterministic {
+            pin_single_thread_pools();
+        }
 
         let me = PlayerId(0);
         let sim = Sim::new(seed, &[me]);
@@ -68,7 +79,9 @@ impl Probe {
         arm(app.world_mut());
         park_fixed_auto_pump(&mut app);
         restart_crabs_to_spawns(app.world_mut(), &spawns);
-        force_serial_schedules(&mut app);
+        if deterministic {
+            force_serial_schedules(&mut app);
+        }
 
         Self {
             app,
@@ -197,7 +210,7 @@ pub fn run_headless_probe(
     log_every: u64,
     visuals: crab_world::Visuals,
 ) -> Vec<ProbeSample> {
-    let mut probe = Probe::new(policy, seed, visuals);
+    let mut probe = Probe::new(policy, seed, visuals, true);
     probe.log_every = log_every.max(1);
     for _ in 0..ticks {
         probe.tick();
@@ -226,7 +239,7 @@ pub fn run_vehicle_stability_probe(
 ) -> StabilityResult {
     use crab_world::vehicle::{VehicleKind, spawn_ram_vehicle};
 
-    let mut probe = Probe::new(policy, seed, crab_world::Visuals(false));
+    let mut probe = Probe::new(policy, seed, crab_world::Visuals(false), true);
     for _ in 0..warmup {
         probe.tick();
     }
@@ -373,7 +386,7 @@ pub fn run_flight_soak(
     const COOLDOWN: u64 = 512; // ticks after an event before re-arming
 
     std::fs::create_dir_all(out_dir)?;
-    let mut probe = Probe::new(policy, seed, crab_world::Visuals(false));
+    let mut probe = Probe::new(policy, seed, crab_world::Visuals(false), true);
     probe.log_every = u64::MAX; // sampling below, not via Probe::sample
     probe.app.insert_resource(ZeroDriveAfter(None));
     probe.app.add_systems(
@@ -649,4 +662,182 @@ fn crab_mech_energy(world: &mut World) -> f32 {
             0.5 * m * v.length_squared() + 0.5 * w.dot(i_world * w) + m * g * rb.center_of_mass().y
         })
         .sum()
+}
+
+/// One pumped fixed step's cost (rl#396): `wall_ms` is the whole `FixedMain` pass —
+/// sensing, policy forward, actuation, all substeps, writeback — i.e. what a
+/// step-carrying render frame pays on top of its own render work. The rapier
+/// counter fields carry the LAST substep only: bevy_rapier loops
+/// `PHYSICS_SUBSTEPS` inside one fixed pass and rapier resets its counters per
+/// substep, so a whole-step physics share reads as ~`PHYSICS_SUBSTEPS × substep_ms`.
+#[derive(Clone, Copy, Debug)]
+pub struct StepSample {
+    pub tick: u64,
+    pub wall_ms: f64,
+    pub substep_ms: f64,
+    pub solver_ms: f64,
+    pub collision_ms: f64,
+    pub vel_res_ms: f64,
+    pub vel_asm_ms: f64,
+}
+
+pub struct StepProfile {
+    pub steps: Vec<StepSample>,
+    /// Per-tick finalize (pose collect + hunt feed) — the pump tail the crossing
+    /// frame pays once per tick on top of its step.
+    pub finalize_ms: Vec<f64>,
+    /// Per-tick `Update`-schedule wrap — headless here, so a floor for the windowed
+    /// host's non-render per-frame work, not an estimate of it.
+    pub update_ms: Vec<f64>,
+    /// Sparse activity trace — the ruler discipline: a profile window must SHOW the
+    /// crab hunting (distance changing, carapace walking), or it measured the
+    /// settled scene the rl#396 stage-2 ruler was corrected for.
+    pub activity: Vec<ProbeSample>,
+    /// Isolated `Policy::act` mean — the NN forward alone, no world around it.
+    pub policy_forward_ms: f64,
+}
+
+/// Profile the host's driven step in an ACTIVE-hunt scene: the prey kites away
+/// whenever the crab closes inside `KITE_INSIDE_M`, so the chase never settles and
+/// every measured step drives an awake, walking crab — the scene the TV actually
+/// pays for (rl#396 stage-4 ruler correction), not the asleep-sim rest scene.
+/// Cadence is the production 64:30 staircase (`steps_for_tick`), each owed step
+/// pumped and timed individually — the render driver's spread-pump granularity.
+pub fn run_step_profile(
+    policy: crab_world::policy::Policy,
+    seed: u64,
+    warmup_ticks: u64,
+    ticks: u64,
+) -> StepProfile {
+    use bevy_rapier3d::plugin::context::RapierContextSimulation;
+    use std::time::Instant;
+
+    // The prey holds the chase at the band the stage-4 TV windows measured
+    // (prey 2.6–14 m, continuously moving).
+    const KITE_INSIDE_M: f32 = 6.0;
+
+    // NN forward alone, before the world takes the policy. A zero obs is fine:
+    // the forward is dense matmuls, cost is data-independent.
+    let policy_forward_ms = {
+        let obs = [0.0f32; crab_world::bot::sensor::OBS_SIZE];
+        for _ in 0..32 {
+            std::hint::black_box(policy.act(std::hint::black_box(&obs)));
+        }
+        const N: u32 = 512;
+        let t = Instant::now();
+        for _ in 0..N {
+            std::hint::black_box(policy.act(std::hint::black_box(&obs)));
+        }
+        t.elapsed().as_secs_f64() * 1e3 / N as f64
+    };
+
+    let mut probe = Probe::new(policy, seed, crab_world::Visuals(false), false);
+    probe.log_every = u64::MAX; // sampled below at the activity cadence, not per tick
+
+    let mut out = StepProfile {
+        steps: Vec::new(),
+        finalize_ms: Vec::new(),
+        update_ms: Vec::new(),
+        activity: Vec::new(),
+        policy_forward_ms,
+    };
+
+    let me = PlayerId(0);
+    for i in 0..(warmup_ticks + ticks) {
+        let measured = i >= warmup_ticks;
+
+        // Kite input for this tick, rotated into the player's local frame (players
+        // spawn with a round heading, so world axes are NOT walk axes).
+        let crab = probe.sim.crabs()[0].pos();
+        let prey = probe.sim.player(me);
+        let input = prey
+            .and_then(|p| {
+                let (dx, dz) = Pos {
+                    x: p.pos().x - crab.x,
+                    z: p.pos().z - crab.z,
+                }
+                .to_meters();
+                let d = (dx * dx + dz * dz).sqrt();
+                (d > 0.1 && d < KITE_INSIDE_M).then(|| {
+                    let (ux, uz) = (dx / d, dz / d);
+                    let (sin, cos) = crate::cordic::trig::sin_cos(p.yaw());
+                    let (sin, cos) = (
+                        sin as f32 / crate::cordic::trig::ONE as f32,
+                        cos as f32 / crate::cordic::trig::ONE as f32,
+                    );
+                    // advance_player: world v = (sin·f + cos·s, cos·f − sin·s).
+                    Input::from_axes(cos * ux - sin * uz, sin * ux + cos * uz)
+                })
+            })
+            .unwrap_or_else(|| Input::from_axes(0.0, 0.0));
+        let prey = prey.map(|p| p.pos());
+
+        let inputs = crab_slot::slot_inputs(&probe.sim);
+
+        let t = Instant::now();
+        probe.app.update();
+        let update_ms = t.elapsed().as_secs_f64() * 1e3;
+
+        if i == 0 {
+            // The rapier context entity spawns on the app's first pass, so the
+            // counters can only arm here, not at construction.
+            let world = probe.app.world_mut();
+            let mut q = world.query::<&mut RapierContextSimulation>();
+            q.single_mut(world)
+                .expect("headless_stack spawns exactly one rapier context")
+                .pipeline
+                .counters
+                .enable();
+        }
+
+        for _ in 0..crate::cadence::steps_for_tick(inputs.stepping_into) {
+            let t = Instant::now();
+            crab_slot::pump_fixed_steps(probe.app.world_mut(), 1);
+            let wall_ms = t.elapsed().as_secs_f64() * 1e3;
+            if !measured {
+                continue;
+            }
+            let world = probe.app.world_mut();
+            let mut q = world.query::<&RapierContextSimulation>();
+            let c = &q
+                .single(world)
+                .expect("headless_stack spawns exactly one rapier context")
+                .pipeline
+                .counters;
+            out.steps.push(StepSample {
+                tick: inputs.stepping_into,
+                wall_ms,
+                substep_ms: c.step_time.time_ms(),
+                solver_ms: c.stages.solver_time.time_ms(),
+                collision_ms: c.stages.collision_detection_time.time_ms(),
+                vel_res_ms: c.solver.velocity_resolution_time.time_ms(),
+                vel_asm_ms: c.solver.velocity_assembly_time.time_ms(),
+            });
+        }
+
+        let t = Instant::now();
+        // Steps already pumped above; a zero-step pump is finalize alone (pose
+        // collect + hunt feed), the same split the render driver's spread pump runs.
+        let mut poses = crab_slot::pump_slot_steps(probe.app.world_mut(), 0, &inputs);
+        let finalize_ms = t.elapsed().as_secs_f64() * 1e3;
+        for p in &mut poses {
+            // Pursuit profile: no downs (module doc) — the pose crosses, the claws don't.
+            p.claws.clear();
+        }
+        probe.sim.step(
+            &std::collections::BTreeMap::from([(me, input)]),
+            Externals::crabs_only(&poses),
+        );
+
+        if measured {
+            out.finalize_ms.push(finalize_ms);
+            out.update_ms.push(update_ms);
+            let tick = probe.sim.tick();
+            if out.activity.is_empty() || tick.is_multiple_of(64) {
+                probe.sample(tick, prey);
+                out.activity.push(*probe.samples.last().unwrap());
+            }
+        }
+    }
+    out
 }

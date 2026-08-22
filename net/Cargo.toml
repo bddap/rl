@@ -28,6 +28,12 @@ bevy = { workspace = true, features = [
     "bevy_log",
 ] }
 bevy_rapier3d = { workspace = true, features = ["dim3"] }
+# Already in the tree via bevy_rapier3d (same fork rev the workspace patch pins); a
+# direct dep only to switch on rapier's `profiler` feature, which is what makes the
+# pipeline counters the rl#396 step profile reads actually time anything.
+rapier3d = { git = "https://github.com/bddap-bot/rapier", rev = "8a5d9859edbcd3fca6eeb6bd53bd6acb32cf00c5", features = [
+    "profiler",
+] }
 bevy_egui = { workspace = true, optional = true }
 # Mic capture for voice notes (rl#378). Already in the tree transitively via
 # bevy_audio → rodio, so this adds no new crate to the build.
