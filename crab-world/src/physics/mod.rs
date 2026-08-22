@@ -34,6 +34,17 @@ pub const fn brake_coeff_max(mass: f32) -> f32 {
 /// rl#377 source-split), so the global counts only need to carry the actively
 /// driven crab. Substeps dominate cost (~5 ms/substep fixed in the driven probe);
 /// 2 is the pre-stage-2 value the 60 fps game shipped with.
+///
+/// Do NOT drop to 1 to buy frame budget (rl#396 stage 6): it does halve the
+/// driven step (`game step-profile` p50 9.10→5.43 ms, same TV brain/scene), but
+/// the doubled per-solve dt changes the PLANT, not just its convergence — the
+/// rest-pose driven crab walks metres off spawn within ~3 s
+/// (`armed_visual_crab_stays_finite_and_grounded`, red across the whole
+/// iteration matrix (2,2,2)→(4,2,2)/(2,4,4) while the substeps=2 control stayed
+/// green 3/3 in the same environment), and the rl#312 actuator-load
+/// interpenetration residual busts its 25 mm cap (28.05 mm). Iteration raises —
+/// the sanctioned compensation — don't move either wall, so the cost stays
+/// paid at 2.
 pub const PHYSICS_SUBSTEPS: usize = 2;
 
 /// (outer, internal-PGS, internal-stabilization) solver iterations — the other
