@@ -180,10 +180,11 @@ const GAIT_GLIDE_S: f32 = 0.06;
 /// (steps −30.7 LUFS mastered, swish −26.8) lands a few dB above the bed stack
 /// so the listener's own sounds read as foreground without drowning the world;
 /// engines are mastered hot (−19.0 / −19.6 LUFS, loudnorm I=−16 — steady hums
-/// take it) so full activation lands ~−18 LUFS, over the ship's ~−21 LUFS wind
-/// rumble and the plane's cruise wind. The loudest SAMPLED layer is an engine;
-/// the −8 LUFS full-throttle wind roar overtakes everything by design — speed
-/// drowns the motor. Headroom is budgeted on the worst-case SUM: walking a lush
+/// take it); the ship thruster's full activation lands ~−18 LUFS over its
+/// ~−21 LUFS wind rumble, while the plane prop sits ~3 dB lower (rl#402 —
+/// sustained flight fatigue) alongside its muffled cruise wind. The loudest
+/// SAMPLED layer is the thruster; the on-foot full-fall wind roar still
+/// overtakes everything by design — speed drowns the motor. Headroom is budgeted on the worst-case SUM: walking a lush
 /// valley stacks four beds (Σ 0.72) + steps 0.7 + swish 0.35 ≈ 1.77 of level,
 /// but the beds' instantaneous amplitude sits far under their ~0.84 true peaks,
 /// so a step transient (0.7 × 0.84 ≈ 0.59) plus swish and beds stays clear of
@@ -247,7 +248,9 @@ const LAYERS: [LayerDef; 9] = [
     },
     LayerDef {
         file: "ambience/plane-engine.wav",
-        level: 1.15,
+        // ~3 dB under the ship thruster (rl#402): the prop buzz read as too much
+        // over a whole flight; the ship's hum never drew the same complaint.
+        level: 0.8,
         gain: plane_engine,
         glide_tau_s: BED_GLIDE_S,
         seal: Seal::Blend,

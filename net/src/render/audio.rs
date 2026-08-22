@@ -131,8 +131,9 @@ pub(super) const FULL_WIND_MPS: f32 = crab_world::vehicle::PLANE_TOP_SPEED_MPS;
 /// The plane airstream's level under [`WIND_MASTER`] — the ONE plane-wind knob.
 /// In the cockpit the wind sits UNDER the engine and the speed roar, not on top
 /// of the mix (owner acceptance call, rl#357); body and whistle both ride the
-/// gain this scales, so it moves the whole airstream together.
-pub(super) const PLANE_WIND_LEVEL: f32 = 0.5;
+/// gain this scales, so it moves the whole airstream together. Pulled down ~4 dB
+/// and darkened (rl#402: sustained flight was aurally fatiguing).
+pub(super) const PLANE_WIND_LEVEL: f32 = 0.32;
 
 /// The ship's audible-band ceiling, m/s — it never nears plane speeds (sustained
 /// top ~2.5, a dive slightly past), so its wind and thruster layers normalize
@@ -288,11 +289,14 @@ pub(super) fn profile(kind: Option<VehicleKind>, speed_mps: f32) -> [f32; 5] {
     let n = ((speed_mps - floor) / (ceil - floor)).clamp(0.0, 1.0);
     match kind {
         None => [MASTER * n.powf(1.4), 300.0 + 2200.0 * n, 0.0, 0.0, 0.5],
+        // Muffled relative to the rl#357 mix (rl#402): the cutoff tops at 2.2 kHz
+        // instead of 4 kHz and the whistle sits lower and quieter — the speed cue
+        // (pitch and loudness still rise with n) survives, the hiss does not.
         Some(VehicleKind::Plane) => [
             MASTER * PLANE_WIND_LEVEL * n.powf(1.3),
-            600.0 + 3400.0 * n,
-            900.0 + 2100.0 * n,
-            0.4 * n * n,
+            500.0 + 1700.0 * n,
+            800.0 + 1400.0 * n,
+            0.18 * n * n,
             0.15,
         ],
         Some(VehicleKind::Ship) => [
@@ -466,14 +470,16 @@ mod tests {
         assert!(settled_rms(None, 0.15) < 0.01);
     }
 
-    /// Timbres genuinely differ: at the same airspeed the ship's spectrum sits far
-    /// darker than the plane's. Compared via zero-crossing rate — a cheap spectral
-    /// centroid proxy needing no FFT.
+    /// Timbres genuinely differ: at full roar the ship's spectrum sits far darker
+    /// than the plane's (each at its own band's top — the rl#402 muffle pulled the
+    /// plane's low-speed brightness close enough to the ship's that a same-airspeed
+    /// compare at 3 m/s no longer separates them). Compared via zero-crossing rate
+    /// — a cheap spectral centroid proxy needing no FFT.
     #[test]
     fn plane_brighter_than_ship() {
         let zcr = |kind| {
             let targets = Arc::new(WindTargets::default());
-            targets.store(profile(kind, 3.0));
+            targets.store(profile(kind, FULL_WIND_MPS));
             let mut s = WindStream::new(targets);
             let lead = SAMPLE_RATE as usize / 2;
             let _ = s.by_ref().take(lead).count();
