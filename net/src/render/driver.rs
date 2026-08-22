@@ -695,10 +695,43 @@ fn apply_vehicle_request(world: &mut World) {
         VehicleRequest::Exit if vehicle.kind().is_some() => Some(LocalVehicle::OnFoot),
         _ => None,
     };
+    // Orientation hand-off (rl#399), THE one place a mode switch carries the view
+    // across. Stepping out keeps looking where the craft pointed: yaw already
+    // carries through the sim (the pilot shadow mirrors the nose every piloted
+    // tick, rl#258), but the on-foot pitch is a client-side accumulator
+    // ([`CameraPitch`]) the flight never syncs — it must be set here or the foot
+    // camera resumes on a stale value. Yaw is set too for the not-Alive camera
+    // arm, which reads [`CameraYaw`] instead of the sim. Boarding needs nothing:
+    // the craft spawns with the walker's facing (rl#258), and craft→craft morphs
+    // the body in place, pose untouched.
+    let exit_pose = match (&*vehicle, &next) {
+        (LocalVehicle::Flying { poses, .. }, Some(LocalVehicle::OnFoot)) => poses.latest(),
+        _ => None,
+    };
     if let Some(next) = next {
         info!("vehicle: {:?} -> {:?}", vehicle.context(), next.context());
         *vehicle = next;
     }
+    if let Some(pose) = exit_pose {
+        let (yaw, pitch) = exit_look_angles(pose.orient);
+        world.resource_mut::<CameraPitch>().0 = pitch;
+        world.resource_mut::<CameraYaw>().0 = yaw;
+    }
+}
+
+/// The on-foot look angles that keep the camera pointing where the craft's nose
+/// points — the exit half of the rl#399 hand-off, the inverse of
+/// [`super::scene::look_direction`]. Pitch clamps to the on-foot [`PITCH_LIMIT`];
+/// roll has no on-foot analogue and drops.
+fn exit_look_angles(orient: Quat) -> (f32, f32) {
+    let nose = orient * Vec3::Z;
+    let yaw = nose.x.atan2(nose.z).rem_euclid(std::f32::consts::TAU);
+    let pitch = nose
+        .y
+        .clamp(-1.0, 1.0)
+        .asin()
+        .clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    (yaw, pitch)
 }
 
 /// Assemble this tick's [`LocalControl`] from the pending foot input (drained: the yaw
@@ -1539,5 +1572,31 @@ mod tests {
         // arm, cleared by any adopting iteration and surviving zero-drain frames) is
         // not unit-tested: a remote-adopt GameState needs a live NetDriver. This
         // pins the pure half; the arm is the one line beside jitter_take's call.
+    }
+
+    /// rl#399: stepping out of a craft must keep looking where the nose pointed —
+    /// [`super::exit_look_angles`] is the inverse of the on-foot camera's `look_direction`,
+    /// so feeding its angles back through must reproduce the nose direction. Roll is
+    /// dropped by design. [`super::PITCH_LIMIT`] (1.5 rad) < π/2, so a nose steeper
+    /// than 1.5 rad clamps and would not round-trip; the cases stay at ≤1.2 rad.
+    #[test]
+    fn exit_look_angles_match_the_craft_nose() {
+        use super::super::scene::look_direction;
+        use bevy::math::{EulerRot, Quat, Vec3};
+        for (yaw, pitch, roll) in [
+            (0.0, 0.0, 0.0),
+            (2.1, 0.4, 0.0),
+            (-1.3, -0.9, 1.0),
+            (3.0, 1.2, -2.0),
+        ] {
+            let orient = Quat::from_euler(EulerRot::YXZ, yaw, -pitch, roll);
+            let (cam_yaw, cam_pitch) = super::exit_look_angles(orient);
+            let nose = (orient * Vec3::Z).normalize();
+            let look = look_direction(cam_yaw, cam_pitch);
+            assert!(
+                nose.dot(look) > 0.9999,
+                "exit view diverged from the nose: yaw={yaw} pitch={pitch} roll={roll} nose={nose:?} look={look:?}"
+            );
+        }
     }
 }

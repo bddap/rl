@@ -57,6 +57,12 @@ impl PoseWindow {
         self.buf[2] = Some((tick, p));
     }
 
+    /// The newest pushed pose, no interpolation — the mode-switch orientation
+    /// hand-off (rl#399) reads the craft's final attitude here.
+    pub(super) fn latest(&self) -> Option<Pose> {
+        self.buf[2].map(|(_, p)| p)
+    }
+
     pub(super) fn sample(&self, now_tick: u64, tick_frac: f32) -> Option<Pose> {
         use crate::cadence::cumulative_steps;
         use crate::sim::TICK_HZ;
