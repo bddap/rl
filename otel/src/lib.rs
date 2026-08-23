@@ -25,6 +25,12 @@ pub const INPUT_TRACK_TARGET: &str = "input_track";
 /// worth a journal line.
 pub const VEHICLE_TRANSITION_TARGET: &str = "vehicle_transition";
 
+/// Target of in-game screenshot events (`net::render::live_screenshot`, rl#405):
+/// rare first-class events naming the written PNG so tooling can fetch it. Same
+/// contract as [`VEHICLE_TRANSITION_TARGET`] — forced past quiet RUST_LOG, kept on
+/// stderr.
+pub const SCREENSHOT_TARGET: &str = "screenshot";
+
 /// The ~1 Hz batch targets: export-only (dropped from the stderr fmt layer).
 const BATCH_TARGETS: &[&str] = &[SALLY_TRACK_TARGET, INPUT_TRACK_TARGET];
 
@@ -70,7 +76,10 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
     // default to `warn`-ish filters (rl-demo pre-sets RUST_LOG), and a recorder that a
     // quieter default silently disables is the gap rl#332 exists to close.
     let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    for t in BATCH_TARGETS.iter().chain([&VEHICLE_TRANSITION_TARGET]) {
+    for t in BATCH_TARGETS
+        .iter()
+        .chain([&VEHICLE_TRANSITION_TARGET, &SCREENSHOT_TARGET])
+    {
         filter = filter.add_directive(format!("{t}=info").parse().expect("static directive"));
     }
     let fmt_layer = tracing_subscriber::fmt::layer()

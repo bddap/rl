@@ -91,6 +91,7 @@ pub mod chord_map;
 mod controls_sync;
 mod driver;
 mod input;
+mod live_screenshot;
 mod menu;
 mod net_track;
 mod pos_trace;

@@ -15,6 +15,7 @@ render = [
     "bevy_rapier3d/default",
     "dep:bevy_egui",
     "dep:cpal",
+    "dep:chrono",
 ]
 
 [dependencies]
@@ -43,6 +44,10 @@ bevy_egui = { workspace = true, optional = true }
 # Mic capture for voice notes (rl#378). Already in the tree transitively via
 # bevy_audio → rodio, so this adds no new crate to the build.
 cpal = { version = "0.15", optional = true }
+# Screenshot filenames (rl#405). Already in the tree via bevy's dep graph.
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+], optional = true }
 rand.workspace = true
 serde.workspace = true
 bincode.workspace = true

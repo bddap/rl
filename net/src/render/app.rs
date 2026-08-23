@@ -66,6 +66,8 @@ pub fn build_windowed_app(
     super::chord_map::install(&mut app, super::chord_map::default_save_path());
     // Voice notes (rl#378): record / review / confirm, wav to disk.
     super::voice::install(&mut app);
+    // In-game screenshot (rl#405): L3+R3 chord / F12, PNG + OTLP line.
+    super::live_screenshot::install(&mut app);
     // Outside Playing every chord dispatcher is gated off, so a capture there could
     // only pop the full-screen combo map and promise commands whose release does
     // nothing — keep the capture Idle instead (right after it would have opened, so
