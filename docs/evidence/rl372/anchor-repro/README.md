@@ -56,9 +56,52 @@ Same class as the deliberately-fenced limitation recorded in
 there believed confined to below the moon's elevation floor). At this locale
 the terrain is mountain-scale: occluders sit 25–170 m up-slope and cast long
 shadows at legal elevations, so the seam manifests inside the traversal band
-the floor is supposed to fence off. Root-cause (why the near cascade's shadow
-map misses the far terrain caster at some view orientations, given casters are
-depth-pancaked) is the next increment.
+the floor is supposed to fence off. Root cause below — it is receiver-side, and
+everything in this section up to here describes the pre-fix build.
+
+## Root cause
+
+Instrumented probes (light-NDC of the receiver per cascade, per pose) localized
+the seam on the RECEIVER side, not the caster side: bevy fits each cascade's
+ortho volume to the camera-frustum slice and `world_to_directional_light_local`
+returns UNSHADOWED for any sample outside that volume — including light-ward of
+the near plane (`ndc.z > 1`), where depth pancaking has flattened every caster,
+so an ejected receiver can never be shadowed. Three human-scale defaults each
+ejected near-field receivers in this ~0.05 m-stature world (rl#256):
+
+- `minimum_distance` 0.1 — the fitted volume started 2 player-heights out; the
+  capsule (0.05 m from the camera) sat in front of the slice and its light-z
+  crossed the fitted near plane as a function of camera yaw alone. Measured at
+  cascade 0: yaw 70 → z_ndc 0.784 (in, shadowed ✓), yaw 90 → 1.0013 (out, forced
+  lit ✗), yaw 110 → 1.0027 (out ✗) — the flip matrix exactly.
+- `shadow_depth_bias` 0.02 — world METERS: 40% of a player height, pushing
+  near-apex samples past the near plane whenever the moon is behind the camera
+  (the frustum apex is then the volume's most light-ward corner).
+- `first_cascade_far_bound` 20 — made cascade-0 texels ~1.7 cm, so the
+  1.8-texel normal bias displaced samples ~3 cm (over half a player height),
+  same ejection.
+
+Culling was exonerated empirically (forcing CPU culling changes nothing; shadow
+phases carry casters at every yaw) and DEPTH_CLIP_CONTROL=true at runtime
+(hardware pancaking active). A stock-mesh occluder on the light ray also failed
+to shadow the capsule at yaw 90 — receiver-side, caster-independent.
+
+Fix (crab-world/src/moon.rs, stature-scaled shadow config): `minimum_distance
+0.0`, `first_cascade_far_bound 2.0`, `shadow_depth_bias ≈0.00056` (the 0.02
+stock scaled by the stature ratio, 0.02/1.8 × 0.05). Full matrix
+re-rendered fixed — every pose above now shows the capsule shadowed, with the
+el37 far-hillside brightening preserved:
+
+| pose | before | after |
+|---|---|---|
+| el34 yaw90 | `el34-yaw90-sunlit.png` | `el34-yaw90-fixed.png` |
+| el34 yaw110 | `el34-yaw110-sunlit-edge.png` | `el34-yaw110-fixed.png` |
+| el29 yaw90 | `el29-yaw90-sunlit.png` | `el29-yaw90-fixed.png` |
+
+The original playtest report ("a corner of the screen renders the hill as if
+sunny") is the same seam on near ground-corner fragments (< 0.1 m at the frame
+edge), and the rl#387 fence (near-cascade receivers missing far-caster shadows
+below the elevation floor) is this mechanism too.
 
 ## Bounds of the sweep (what did NOT show an artifact)
 

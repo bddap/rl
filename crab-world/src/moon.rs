@@ -294,17 +294,41 @@ impl Plugin for MoonPlugin {
 /// comes from [`sync_moon_light`], the ONE Moon→light mapping, which runs
 /// before the first render (the just-inserted resource is `is_changed`).
 fn spawn_moon_light(mut commands: Commands) {
-    // Cascades stretched from the ~150 m default to mountain scale: the vista
-    // world's 30 m grid pitch makes coarse far cascades invisible (rl#281 st 3).
+    // Shadow config is STATURE-SCALED (rl#372) on top of the mountain-scale
+    // maximum (rl#281 st 3: the vista world's 30 m grid pitch makes coarse far
+    // cascades invisible, hence 9000 m). Bevy's defaults assume a 1.8 m human;
+    // this world's player is ~0.05 m (rl#256 — same reason the FP camera's near
+    // plane is stature-scaled in net). Bevy treats a shadow sample outside the
+    // view-fitted cascade volume as unshadowed, and depth pancaking makes an
+    // ejection past the volume's light-ward plane unshadowable — mechanism,
+    // probes, and repro matrix: docs/evidence/rl372/anchor-repro. Three
+    // human-scale defaults each ejected near-field receivers:
+    // - minimum_distance 0.1 started the fitted volume 2 player-heights out;
+    //   everything nearer (the near ground corner, an adjacent player) could
+    //   fall light-ward outside it at view orientations where the moon is
+    //   behind the camera. 0.0 fits the volume to everything visible up to
+    //   each cascade's far bound (bias offsets can still eject the last few
+    //   mm at the boundary — margins there are texel-scale, not player-scale).
+    // - first_cascade_far_bound 20.0 gave the near cascade ~1.7 cm texels, so
+    //   the 1.8-texel normal bias displaced samples ~3 cm — over half a player
+    //   height, enough to eject near-apex samples past the near plane. 2.0 is
+    //   still ~40 player heights of high-resolution near field and shrinks the
+    //   normal bias to ~3 mm.
+    // - shadow_depth_bias is in WORLD meters: the 0.02 default is 40% of a
+    //   player height, same ejection. Scaled by the stature ratio like net's
+    //   FP_NEAR; 0.05 is PLAYER_HEIGHT's value, unimportable here (net depends
+    //   on crab-world).
     commands.spawn((
         MoonLight,
         DirectionalLight {
             shadow_maps_enabled: true,
+            shadow_depth_bias: 0.02 / 1.8 * 0.05,
             ..default()
         },
         bevy::light::CascadeShadowConfigBuilder {
             maximum_distance: 9000.0,
-            first_cascade_far_bound: 20.0,
+            first_cascade_far_bound: 2.0,
+            minimum_distance: 0.0,
             ..default()
         }
         .build(),
