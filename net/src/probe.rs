@@ -31,6 +31,11 @@ pub struct ProbeSample {
     /// (absolute y is a mountainside elevation on terrain, meaningless as one).
     pub carapace_above_ground: f32,
     pub min_claw_to_target_m: f32,
+    /// Every dynamic body in the world asleep this tick — rest converged to
+    /// rapier sleep (bit-exact zeros), the rl#392 rest contract. Only meaningful
+    /// for zero-drive probes on restable ground: a driven crab is force-woken
+    /// every tick and a passive crab on steep terrain may slide indefinitely.
+    pub crab_asleep: bool,
 }
 
 struct Probe {
@@ -50,6 +55,7 @@ impl Probe {
         seed: u64,
         visuals: crab_world::Visuals,
         deterministic: bool,
+        grid: std::sync::Arc<crab_world::terrain::TerrainGrid>,
     ) -> Self {
         use crab_world::bot::headless::{
             HeadlessStack, WorldRole, force_serial_schedules, headless_stack,
@@ -70,9 +76,7 @@ impl Probe {
         let mut app = headless_stack(HeadlessStack {
             num_envs: spawns.len(),
             role: WorldRole::Standalone,
-            // The probe models the GCR host, so it steps the host's ground — the
-            // canonical terrain bake (rl#209, rl#293).
-            grid: crab_world::terrain::TerrainGrid::gcr(),
+            grid,
             visuals,
         });
         app.add_plugins(NnCrabPlugin::new(vec![policy], spawns.clone()));
@@ -162,6 +166,24 @@ impl Probe {
             })
             .unwrap_or((0.0, 0.0, 0.0, 0.0));
 
+        let crab_asleep = {
+            use bevy_rapier3d::plugin::context::RapierRigidBodySet;
+            let set = world
+                .query::<&RapierRigidBodySet>()
+                .single(world)
+                .expect("the probe world has exactly one rapier context");
+            let mut any_dynamic = false;
+            let all_asleep = set
+                .bodies
+                .iter()
+                .filter(|(_, rb)| rb.is_dynamic())
+                .all(|(_, rb)| {
+                    any_dynamic = true;
+                    rb.is_sleeping()
+                });
+            any_dynamic && all_asleep
+        };
+
         let target = world.resource::<CrabTargets>().get(0);
         let min_claw_to_target_m = target
             .map(|target| {
@@ -185,6 +207,7 @@ impl Probe {
             carapace_y,
             carapace_above_ground,
             min_claw_to_target_m,
+            crab_asleep,
         });
     }
 
@@ -203,14 +226,21 @@ impl Probe {
 /// skin and the rl#116 pose sentinel all live — which is the
 /// exact configuration the GCR play-day crash showed no headless test covered. The
 /// determinism/behavior probes pass `Visuals(false)`, matching what they hash.
+///
+/// `grid`: the hash-log probes step [`TerrainGrid::gcr`] — the host's canonical
+/// ground (rl#209, rl#293) — so their logs stay comparable run-to-run. Tests whose
+/// promise needs RESTABLE ground (a zero-drive crab settling to sleep) pass a flat
+/// grid instead: on the canonical bake a passive crab may legitimately slide down
+/// a mountainside forever (rl#406), which is terrain physics, not a probe signal.
 pub fn run_headless_probe(
     policy: crab_world::policy::Policy,
     seed: u64,
     ticks: u64,
     log_every: u64,
     visuals: crab_world::Visuals,
+    grid: std::sync::Arc<crab_world::terrain::TerrainGrid>,
 ) -> Vec<ProbeSample> {
-    let mut probe = Probe::new(policy, seed, visuals, true);
+    let mut probe = Probe::new(policy, seed, visuals, true, grid);
     probe.log_every = log_every.max(1);
     for _ in 0..ticks {
         probe.tick();
@@ -239,7 +269,13 @@ pub fn run_vehicle_stability_probe(
 ) -> StabilityResult {
     use crab_world::vehicle::{VehicleKind, spawn_ram_vehicle};
 
-    let mut probe = Probe::new(policy, seed, crab_world::Visuals(false), true);
+    let mut probe = Probe::new(
+        policy,
+        seed,
+        crab_world::Visuals(false),
+        true,
+        crab_world::terrain::TerrainGrid::gcr(),
+    );
     for _ in 0..warmup {
         probe.tick();
     }
@@ -386,7 +422,13 @@ pub fn run_flight_soak(
     const COOLDOWN: u64 = 512; // ticks after an event before re-arming
 
     std::fs::create_dir_all(out_dir)?;
-    let mut probe = Probe::new(policy, seed, crab_world::Visuals(false), true);
+    let mut probe = Probe::new(
+        policy,
+        seed,
+        crab_world::Visuals(false),
+        true,
+        crab_world::terrain::TerrainGrid::gcr(),
+    );
     probe.log_every = u64::MAX; // sampling below, not via Probe::sample
     probe.app.insert_resource(ZeroDriveAfter(None));
     probe.app.add_systems(
@@ -738,7 +780,13 @@ pub fn run_step_profile(
         t.elapsed().as_secs_f64() * 1e3 / N as f64
     };
 
-    let mut probe = Probe::new(policy, seed, crab_world::Visuals(false), false);
+    let mut probe = Probe::new(
+        policy,
+        seed,
+        crab_world::Visuals(false),
+        false,
+        crab_world::terrain::TerrainGrid::gcr(),
+    );
     probe.log_every = u64::MAX; // sampled below at the activity cadence, not per tick
 
     let mut out = StepProfile {

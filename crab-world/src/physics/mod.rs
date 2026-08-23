@@ -41,7 +41,9 @@ pub const fn brake_coeff_max(mass: f32) -> f32 {
 /// rest-pose driven crab walks metres off spawn within ~3 s
 /// (`armed_visual_crab_stays_finite_and_grounded`, red across the whole
 /// iteration matrix (2,2,2)→(4,2,2)/(2,4,4) while the substeps=2 control stayed
-/// green 3/3 in the same environment), and the rl#312 actuator-load
+/// green 3/3 in the same environment — a reading on the pre-rl#406 mountainside
+/// ruler, so treat the magnitude as indicative; the binding disqualifier is
+/// next), and the rl#312 actuator-load
 /// interpenetration residual busts its 25 mm cap (28.05 mm). Iteration raises —
 /// the sanctioned compensation — don't move either wall, so the cost stays
 /// paid at 2.
@@ -67,16 +69,20 @@ pub const PHYSICS_SUBSTEPS: usize = 2;
 /// Stabilization at 3 (not 2) buys back the CONTACT-DEPTH convergence the
 /// outer cut halved, and 3 is the whole corridor: at 2×(2/2/2) the rl#312
 /// actuator-load interpenetration residual crossed its 25 mm/60-tick caps
-/// (27.6 mm, 66 ticks — vs main's worst-observed 13.9 mm/8 ticks), while at
-/// 2×(2/2/4) the extra positional projection makes the REST crab creep —
-/// `armed_visual_crab_stays_finite_and_grounded` drifts 12 m off spawn,
-/// deterministically. Stab sweeps are nearly free (3.51→3.54 ms/substep for
+/// (27.6 mm, 66 ticks — vs main's worst-observed 13.9 mm/8 ticks). The stab-4
+/// disqualifier ("REST crab creeps 12 m") is RETRACTED (rl#406): that ruler was
+/// the old mountainside armed smoke, where a zero-drive crab legitimately
+/// slides 12-18 m at EVERY solver mix tried ((2,2,3) and (4,2,2) measured
+/// overlapping bands) and the verdict flipped on float perturbations as small
+/// as sally.glb's visual entities existing — so stab 3-vs-4 was never actually
+/// discriminated; 3 stands on "sufficient for the rl#312 caps, extra buys
+/// nothing measured". Stab sweeps are nearly free (3.51→3.54 ms/substep for
 /// 2→4) because PGS+assembly own the solver's cost. A ZERO-DRIVE crab still
 /// gets `CRAB_SETTLE_EXTRA_ITERATIONS` ADDED to the outer count, so its
 /// settle total moved 16→14 — inside spawn.rs's measured bracket (awake at 8
-/// total, the floor was set against 16); headless sleep engagement is
-/// re-pinned green by `resting_crab_falls_asleep`, the render graph only by
-/// the armed smoke's grounded/finite bound.
+/// total, the floor was set against 16); sleep engagement is pinned by
+/// `resting_crab_falls_asleep` (headless graph) and the flat-ground armed
+/// smoke's sleep bound (render graph, rl#406).
 pub const SOLVER_ITERATIONS: (usize, usize, usize) = (2, 2, 3);
 
 fn fixed_timestep() -> TimestepMode {
