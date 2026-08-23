@@ -1065,6 +1065,7 @@ fn sample_telemetry(
     roster_len: usize,
     issue_tick: u64,
     sim_input: Input,
+    pilot: Option<crate::client::PilotIntent>,
 ) {
     let due = {
         let mut state = world.non_send_mut::<GameState>();
@@ -1072,7 +1073,7 @@ fn sample_telemetry(
         if due {
             state.next_tel_tick = next_sample_tick(state.client.sim().tick());
             t.send(TelemetryEvent::tick(state.client.sim(), roster_len));
-            t.send(TelemetryEvent::input(issue_tick, sim_input));
+            t.send(TelemetryEvent::input(issue_tick, sim_input, pilot.as_ref()));
         }
         due
     };
@@ -1274,7 +1275,14 @@ pub(super) fn drive_client_sim(world: &mut World) {
         super::net_track::sample(world, role == PeerRole::ServerAuth, sim_input);
 
         if let Some(t) = &tel {
-            sample_telemetry(world, t, roster_len, tick.issue_tick, sim_input);
+            sample_telemetry(
+                world,
+                t,
+                roster_len,
+                tick.issue_tick,
+                sim_input,
+                local.pilot_intent(),
+            );
         }
     }
 
@@ -1353,6 +1361,118 @@ mod tests {
     };
     use crate::sim::{Input, TICK_DT, buttons};
     use bevy::prelude::*;
+
+    /// rl#409 repro: a ship boarded on a live host must answer the stick BOTH before
+    /// and after an in-round RESTART. The 2026-08-21 session's dead-stick window
+    /// opened at a double RESTART while piloting: the walker track jumped to the
+    /// rl#322 park ring and the craft then ignored ~6 min of stick input.
+    #[test]
+    fn ship_answers_the_stick_before_and_after_a_restart() {
+        use crab_world::bot::headless::{
+            HeadlessStack, WorldRole, force_serial_schedules, headless_stack,
+            pin_single_thread_pools,
+        };
+        use crab_world::vehicle::{Vehicle, VehicleKind};
+
+        pin_single_thread_pools();
+        let me = crate::sim::PlayerId(0);
+        let mut client = crate::client::ClientSim::new(0xC0FFEE, &[me], me);
+        let spawns = super::super::app::seed_round_crabs(&mut client, 1);
+        let mut app = headless_stack(HeadlessStack {
+            num_envs: spawns.len(),
+            role: WorldRole::Standalone,
+            grid: std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(16_384.0)),
+            visuals: crab_world::Visuals(false),
+        });
+        app.add_plugins(crate::crab_slot::NnCrabPlugin::new(
+            spawns
+                .iter()
+                .map(|_| crab_world::policy::Policy::rest())
+                .collect(),
+            spawns.clone(),
+        ));
+        app.add_plugins(crab_world::vehicle::VehiclePlugin);
+        crate::crab_slot::arm(app.world_mut());
+        crate::crab_slot::park_fixed_auto_pump(&mut app);
+        crate::crab_slot::restart_crabs_to_spawns(app.world_mut(), &spawns);
+        force_serial_schedules(&mut app);
+        for _ in 0..8 {
+            app.update();
+        }
+        let coord = super::coordinator(None, client.peers(), client.me(), client.sim().clone());
+        install_round(app.world_mut(), client, coord);
+        app.insert_resource(super::super::chord_map::DiscoveredCodes::load(None));
+        app.init_resource::<crab_world::debug_overlay::SimFrameStats>();
+
+        let world = app.world_mut();
+        // One full tick per call: a crossing frame (exchange + first owed step) then a
+        // non-crossing frame that finalizes the spread pump (rl#396).
+        fn tick(world: &mut World) {
+            for dt in [TICK_DT * 1.01, 0.001] {
+                world
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_secs_f64(dt));
+                drive_client_sim(world);
+            }
+        }
+        fn craft_pos(world: &mut World) -> Option<Vec3> {
+            let mut q = world.query::<(&Transform, &Vehicle)>();
+            q.iter(world).next().map(|(t, _)| t.translation)
+        }
+        // Hold full forward stick for `ticks`, then release.
+        fn fly(world: &mut World, ticks: u32) {
+            world.resource_mut::<super::FlightInput>().left = Vec2::new(0.0, 1.0);
+            for _ in 0..ticks {
+                tick(world);
+            }
+            world.resource_mut::<super::FlightInput>().left = Vec2::ZERO;
+        }
+
+        world.resource_mut::<super::PendingInput>().vehicle =
+            Some(super::VehicleRequest::Board(VehicleKind::Ship));
+        for _ in 0..3 {
+            tick(world);
+        }
+        let boarded = craft_pos(world).unwrap_or_else(|| {
+            let state = world.non_send::<GameState>();
+            let intents = state.coord.server().map(|s| s.pilot_intents().len());
+            let controls = world
+                .get_resource::<crab_world::vehicle::VehicleControls>()
+                .map(|c| c.0.len());
+            let lv = world.resource::<super::LocalVehicle>().context();
+            panic!(
+                "the boarding request spawns the craft — intents {intents:?}, \
+                 controls {controls:?}, local vehicle {lv:?}"
+            )
+        });
+
+        fly(world, 90);
+        let flown = craft_pos(world).expect("the craft persists while the intent is filed");
+        assert!(
+            (flown - boarded).length() > 1.0,
+            "sanity: a fresh ship answers the stick ({boarded} -> {flown})"
+        );
+
+        // The session shape: RESTART double-tapped ~0.64 s (~19 ticks) apart, then the
+        // craft sat parked long past rapier's sleep timer before the stick came back.
+        world.resource_mut::<super::PendingInput>().restart = true;
+        for _ in 0..19 {
+            tick(world);
+        }
+        world.resource_mut::<super::PendingInput>().restart = true;
+        for _ in 0..300 {
+            tick(world);
+        }
+        let parked = craft_pos(world).expect("the craft survives a RESTART (rl#322 park)");
+
+        fly(world, 90);
+        let after = craft_pos(world).expect("the craft persists across the post-restart fly");
+        assert!(
+            (after - parked).length() > 1.0,
+            "rl#409: the ship ignores the stick after an in-round RESTART \
+             (parked {parked}, still at {after})"
+        );
+    }
 
     /// rl#396: the host spreads a tick's 2-3-step physics pump across frames. The
     /// crossing frame runs the exchange + only the FIRST owed step (the sim tick

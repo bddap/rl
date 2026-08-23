@@ -225,7 +225,8 @@ async fn run_net(args: Args) -> Result<()> {
                     client.sim(),
                     client.sim().players().count(),
                 ));
-                t.send(TelemetryEvent::input(issue_tick, input));
+                // The scripted CLI client never pilots.
+                t.send(TelemetryEvent::input(issue_tick, input, None));
             }
             if !reported_outcome && client.sim().outcome() != net::sim::Outcome::Ongoing {
                 reported_outcome = true;

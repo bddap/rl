@@ -28,13 +28,16 @@ enum OutcomeWire {
     Wiped,
 }
 
-pub const TELEMETRY_ALPN: &[u8] = b"bddap-rl-telemetry/1";
+/// Bump on any bincode-incompatible [`TelemetryEvent`] layout change (`/2`: the
+/// rl#409 pilot rider) — a skewed peer then refuses at connect instead of killing
+/// the stream with a generic decode error on the first incompatible frame.
+pub const TELEMETRY_ALPN: &[u8] = b"bddap-rl-telemetry/2";
 
 pub const TELEMETRY_SERVICE_NAME: &str = "bddap-rl-telemetry";
 
 pub const DEFAULT_KEY_PATH: &str = "~/.config/rl-telemetry/collector.key";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TelemetryEvent {
     RosterForming {
         live: usize,
@@ -76,6 +79,17 @@ pub enum TelemetryEvent {
         forward: i16,
         look: i16,
         buttons: u8,
+        /// While piloting: the flight command, axes quantized ×127 —
+        /// `[throttle_trim, thrust x, y, z, pitch, roll, yaw, match_velocity]`.
+        /// `None` on foot. rl#409's dead-stick window was undiagnosable because the
+        /// sampled input is the pilot-MASKED foot input — neutral while piloting
+        /// regardless of the stick; this field is the split between "the stick never
+        /// reached the intent path" (neutral here) and "the craft ignored a live
+        /// command" (non-neutral here, parked craft track per rl#401). A plain
+        /// `Option` — no `skip_serializing_if`: the wire is bincode, which cannot
+        /// decode an omitted field, so skipping would kill the collector's stream on
+        /// the first on-foot sample.
+        pilot: Option<[i8; 8]>,
     },
     RoundDecided {
         #[serde(with = "OutcomeWire")]
@@ -97,13 +111,26 @@ impl TelemetryEvent {
         }
     }
 
-    pub fn input(tick: u64, input: Input) -> Self {
+    pub fn input(tick: u64, input: Input, pilot: Option<&crate::client::PilotIntent>) -> Self {
+        let q = |v: f32| (v.clamp(-1.0, 1.0) * 127.0) as i8;
         TelemetryEvent::Input {
             tick,
             strafe: input.move_strafe,
             forward: input.move_forward,
             look: input.look_yaw,
             buttons: input.buttons,
+            pilot: pilot.map(|p| {
+                [
+                    q(p.throttle_trim),
+                    q(p.thrust[0]),
+                    q(p.thrust[1]),
+                    q(p.thrust[2]),
+                    q(p.pitch),
+                    q(p.roll),
+                    q(p.yaw),
+                    p.match_velocity as i8,
+                ]
+            }),
         }
     }
 
@@ -164,9 +191,16 @@ impl TelemetryEvent {
                 forward,
                 look,
                 buttons,
-            } => format!(
-                "input@{tick:>6} strafe={strafe:>5} fwd={forward:>5} look={look:>5} btn={buttons:#04x}"
-            ),
+                pilot,
+            } => {
+                let pilot = match pilot {
+                    Some(p) => format!(" pilot={p:?}"),
+                    None => String::new(),
+                };
+                format!(
+                    "input@{tick:>6} strafe={strafe:>5} fwd={forward:>5} look={look:>5} btn={buttons:#04x}{pilot}"
+                )
+            }
             TelemetryEvent::RoundDecided {
                 outcome,
                 tick,
@@ -566,6 +600,35 @@ mod tests {
         }
     }
 
+    /// The rl#409 pilot-command rider must survive the bincode wire in BOTH arms:
+    /// `None` (on foot — a `skip_serializing_if` here would omit the Option tag and
+    /// kill the collector's decode on the first on-foot sample) and `Some` (the
+    /// quantized command, rails and match_velocity intact).
+    #[test]
+    fn input_event_pilot_field_roundtrips_bincode() {
+        let intent = crate::client::PilotIntent {
+            kind: crab_world::vehicle::VehicleKind::Ship,
+            throttle_trim: -1.0,
+            thrust: [1.0, 0.5, -1.0],
+            pitch: 0.0,
+            roll: 1.0,
+            yaw: -0.5,
+            match_velocity: true,
+        };
+        for pilot in [None, Some(&intent)] {
+            let event = TelemetryEvent::input(7, Input::default(), pilot);
+            let bytes = bincode::serialize(&event).expect("serializes");
+            let back: TelemetryEvent = bincode::deserialize(&bytes).expect("round-trips");
+            assert_eq!(back, event);
+        }
+        let TelemetryEvent::Input { pilot, .. } =
+            TelemetryEvent::input(7, Input::default(), Some(&intent))
+        else {
+            unreachable!()
+        };
+        assert_eq!(pilot, Some([-127, 127, 63, -127, 0, 127, -63, 1]));
+    }
+
     /// A Fault arriving while the sampled queue is saturated must still be
     /// delivered — the whole point of the side-channel is to surface faults. A
     /// uniform bounded `try_send` would drop it along with the ticks.
@@ -598,6 +661,7 @@ mod tests {
                 forward: 0,
                 look: 0,
                 buttons: 0,
+                pilot: None,
             }
             .is_sheddable()
         );
