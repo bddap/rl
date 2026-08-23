@@ -50,6 +50,11 @@
 #import rl::ground::looks::watershed::art
 #endif
 
+// Global diffuse-albedo scale on every look's output (rl#404: "reduce ground
+// reflectance"). Modest by design; the moon-brightness knob is FULL_MOON_LUX
+// (moon.rs), not this.
+const GROUND_REFLECTANCE: f32 = 0.8;
+
 // x: macro, y: meso (look-owned structure gains); z: grain, w: relief
 // (scaffold-owned detail gains, modulated by art()'s grain/relief fields).
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> strengths: vec4<f32>;
@@ -113,7 +118,10 @@ fn fragment(
     // max(): the octave stack's extreme negative tail can sum past -1, and a
     // negative multiplier inverts color under lighting — floor at black.
     rgb *= max(1.0 + fine_color(p, fw, strengths.z * a.grain), 0.0);
-    pbr_input.material.base_color = vec4(rgb, pbr_input.material.base_color.a);
+    // Ground reflectance (rl#404): one global albedo scale, applied AFTER art()
+    // so look logic and the veg/snow masks (built from unscaled base) are
+    // untouched. The one knob for "the ground bounces too much light".
+    pbr_input.material.base_color = vec4(rgb * GROUND_REFLECTANCE, pbr_input.material.base_color.a);
     pbr_input.material.perceptual_roughness = a.roughness;
     pbr_input.material.emissive = vec4(
         pbr_input.material.emissive.rgb + a.emissive,

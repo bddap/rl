@@ -5,9 +5,11 @@
 
 use bevy::prelude::*;
 
-/// Full-moon illuminance (lux, stylized — real moonlight is ~0.3 lux; this is the
-/// vista look's tuned brightness, carried over from the pre-moon static light).
-const FULL_MOON_LUX: f32 = 9500.0;
+/// Full-moon illuminance (lux, stylized — real moonlight is ~0.3 lux). Tuned so a
+/// full-moon ground vista renders at 30% of the pre-moon static light's mean
+/// linear luminance (rl#404 — measured on screenshots, not scaled on the
+/// constant: the 400-lux ambient floor makes as-rendered ≠ proportional-in-lux).
+const FULL_MOON_LUX: f32 = 2300.0;
 
 /// The hue knob turns only the hue of an otherwise fixed pastel: saturation 1.0 /
 /// lightness 0.925 in HSL, chosen so the default hue reproduces the pre-moon
@@ -61,9 +63,9 @@ pub struct Moon {
 }
 
 impl Default for Moon {
-    /// Reproduces the pre-moon static light: its euler-angle transform pointed
-    /// the light along -(0.644, 0.367, 0.671), its color was `hsl(220°)`, and a
-    /// full moon carries the same illuminance.
+    /// Reproduces the pre-moon static light's pose and color: its euler-angle
+    /// transform pointed the light along -(0.644, 0.367, 0.671) and its color
+    /// was `hsl(220°)`. Illuminance is dimmer than that light was (rl#404).
     fn default() -> Self {
         Self {
             azimuth_deg: RISE_AZIMUTH_DEG,
