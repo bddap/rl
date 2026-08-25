@@ -3,7 +3,7 @@ use clap::Parser;
 
 #[derive(Parser)]
 pub(crate) struct Args {
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", value_parser = crab_world::absolute_dir)]
     checkpoint: std::path::PathBuf,
 }
 

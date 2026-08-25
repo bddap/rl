@@ -218,7 +218,9 @@ pub fn record_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
 /// world spawns — the overrides are read-once.
 pub fn adopt_recorded_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
     let path = ckpt_dir.join(PLANT_FILENAME);
-    let recorded = match std::fs::read_to_string(&path) {
+    // Via the one asset byte path (rl#411): the shipped default checkpoint's sidecar
+    // is an asset like its brain; absolute dev dirs pass through on native.
+    let recorded = match crate::assets::read_asset_to_string(&path) {
         Ok(text) => parse_plant(&text).map_err(|e| format!("{}: {e}", path.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Plant {
             friction_cap: None,

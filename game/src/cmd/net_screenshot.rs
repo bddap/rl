@@ -30,7 +30,7 @@ pub(crate) struct Args {
     cam_fov: f32,
     #[arg(long, default_value_t = 8.0)]
     cam_pitch: f32,
-    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV)]
+    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV, value_parser = crab_world::absolute_dir)]
     nn_crab_checkpoint: Option<std::path::PathBuf>,
     #[command(flatten)]
     render: RenderArgs,

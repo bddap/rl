@@ -92,7 +92,7 @@ struct DemoArgs {
 
     /// Checkpoint dir to hot-reload weights from as they change — the live
     /// training view.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", value_parser = crab_world::absolute_dir)]
     live_checkpoint_dir: Option<PathBuf>,
 
     /// Drive the crab from the gamepad instead of the policy.

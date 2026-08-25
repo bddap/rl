@@ -89,8 +89,17 @@ pub fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
 pub struct CheckpointArgs {
     /// Directory of checkpoint files: loaded on startup if one is present; the
     /// trainer also saves here periodically and on exit.
-    #[arg(long, default_value = "checkpoints")]
+    #[arg(long, default_value = "checkpoints", value_parser = absolute_dir)]
     pub checkpoint_dir: PathBuf,
+}
+
+/// clap `value_parser` for every user-supplied checkpoint-dir flag: absolutize against
+/// CWD at parse time, so a relative flag keeps meaning "relative to where you ran the
+/// command". Required because the load stack's byte fetch is [`assets::read_asset`]
+/// (rl#411), which roots RELATIVE paths under the asset tree — the portable spelling
+/// reserved for shipped assets — so user paths must enter the stack absolute.
+pub fn absolute_dir(s: &str) -> std::io::Result<PathBuf> {
+    std::path::absolute(s)
 }
 
 /// The render-surface knob, flattened by every binary that opens a view on the crab world —

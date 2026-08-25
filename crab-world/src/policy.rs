@@ -59,10 +59,10 @@ enum PolicyState {
 
 fn checkpoint_digest(dir: &Path) -> u64 {
     let paths = CheckpointDir::new(dir);
-    let Ok(mut bytes) = std::fs::read(paths.brain_file()) else {
+    let Ok(mut bytes) = crate::assets::read_asset(&paths.brain_file()) else {
         return 0;
     };
-    if let Ok(norm) = std::fs::read(paths.normalizer_path()) {
+    if let Ok(norm) = crate::assets::read_asset(&paths.normalizer_path()) {
         bytes.extend_from_slice(&norm);
     }
     crate::fnv::fnv1a(&bytes)
@@ -498,6 +498,10 @@ impl Policy {
         }
     }
 
+    /// NATIVE/DEV-ONLY affordance (rl#411): hot-follow polls the live dir's mtime via
+    /// `std::fs` — the trainer-kiosk loop, deliberately outside the one asset byte
+    /// path. A platform without a filesystem simply never sets a live dir; the armed
+    /// boot load is the portable path.
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
     pub(crate) fn try_hot_reload(&mut self) -> bool {
         let Some(dir) = self.live_dir.clone() else {
@@ -674,7 +678,9 @@ impl Policy {
 /// construction (rl#232): keep-best's `best/` joins because it is such a subdir, and
 /// dropping in more dirs (or symlinks — another run's ckpt, another architecture)
 /// extends the cycle with no code change; each brain's arch comes from its own envelope
-/// at load time.
+/// at load time. NATIVE/DEV-ONLY like hot-reload (rl#411): roster enumeration is a
+/// `read_dir` over synced checkpoint dirs — a platform without a filesystem has a
+/// roster of one (its baked default weights) and the swap button is inert.
 fn brain_slots(primary: &Path) -> Vec<PathBuf> {
     let mut subs: Vec<PathBuf> = std::fs::read_dir(primary)
         .into_iter()

@@ -14,7 +14,8 @@ impl CrabAssets {
     }
 }
 
-/// The SKIN asset, `None` unless a digest-matched sally.glb resolved
+/// The SKIN asset in its ASSET-TREE form (ready for `AssetServer::load`), `None`
+/// unless a digest-matched sally.glb resolved
 /// ([`crate::mesh_fallback::usable_model_path`]). Visual-only: physics builds
 /// [`rig::baked_recipe`] regardless (rl#340 stage 10) — this only decides whether
 /// the skin loads over it.

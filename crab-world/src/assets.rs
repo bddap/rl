@@ -37,6 +37,27 @@ pub fn bevy_asset_path() -> PathBuf {
     asset_root().join("assets")
 }
 
+/// THE byte fetch for every asset read that happens outside an `AssetServer` load
+/// (rl#411): the glb digest gate, the checkpoint set (brain/normalizer envelopes,
+/// plant sidecar, checkpoint digest), the glyph packaging probe. One body, one tree —
+/// the same `bevy_asset_path()` the `AssetServer` mounts — so porting the byte source
+/// (a web/embedded build swaps this body for its baked byte table) ports every one of
+/// those consumers at once instead of leaving stray `std::fs` reads behind.
+///
+/// `path` is asset-tree-relative (the portable form). An ABSOLUTE path passes through
+/// (`Path::join` semantics, same as bevy's own `FileAssetReader`) — that is the
+/// native-only dev affordance (`CRAB_MODEL_PATH`, explicit `--checkpoint` dirs,
+/// trainer run dirs) and fails naturally on a platform with no filesystem.
+pub fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(bevy_asset_path().join(path))
+}
+
+/// [`read_asset`] for text assets (the plant sidecar).
+pub fn read_asset_to_string(path: &Path) -> std::io::Result<String> {
+    String::from_utf8(read_asset(path)?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// What a load path does when an asset it wants is not there (rl#375, owner
 /// directive): every release repeatedly shipped code without its assets and the
 /// resulting degradation was silent-by-design, found by ear. So missing-asset is now
@@ -99,7 +120,7 @@ pub fn require_glyphs<I: IntoIterator<Item = &'static str>>(paths: I) {
     let base = bevy_asset_path();
     for p in paths {
         let full = base.join(p);
-        if !full.exists() {
+        if read_asset(Path::new(p)).is_err() {
             missing_asset(
                 &full,
                 "control glyph not found",

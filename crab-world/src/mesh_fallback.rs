@@ -27,35 +27,37 @@ impl Surface {
     }
 }
 
-/// Resolve the crab model file: `CRAB_MODEL_PATH` (absolute, or relative to the
-/// asset root) with `sally.glb` under `BEVY_ASSET_ROOT/assets` as the default.
-pub fn model_path() -> Option<PathBuf> {
-    resolve(
-        std::env::var_os("CRAB_MODEL_PATH").as_deref(),
-        &crate::assets::asset_root(),
-        |p| p.exists(),
-    )
+/// The model's ASSET path — the form every render-side consumer speaks (rl#411: the
+/// digest gate fetches it via [`crate::assets::read_asset`], the skin hands it to the
+/// `AssetServer`, so both ride the one asset tree): `CRAB_MODEL_PATH`
+/// (asset-tree-relative, or an absolute native dev path) with `sally.glb` as the
+/// default.
+fn model_rel() -> PathBuf {
+    rel_from(std::env::var_os("CRAB_MODEL_PATH").as_deref())
 }
 
-fn resolve(
-    crab_model_path: Option<&std::ffi::OsStr>,
-    asset_root: &std::path::Path,
-    exists: impl Fn(&std::path::Path) -> bool,
-) -> Option<PathBuf> {
-    let rel = crab_model_path.map_or_else(|| PathBuf::from("sally.glb"), PathBuf::from);
-    if rel.is_absolute() {
-        return exists(&rel).then_some(rel);
-    }
-    let asset = asset_root.join("assets").join(rel);
-    exists(&asset).then_some(asset)
+fn rel_from(crab_model_path: Option<&std::ffi::OsStr>) -> PathBuf {
+    crab_model_path.map_or_else(|| PathBuf::from("sally.glb"), PathBuf::from)
+}
+
+/// The model's real FILE path, for the offline native tooling that reads and bakes it
+/// (meshfit). Render surfaces never touch this — they gate on [`usable_model`].
+pub fn model_path() -> Option<PathBuf> {
+    let p = crate::assets::bevy_asset_path().join(model_rel());
+    p.exists().then_some(p)
 }
 
 fn checked_model() -> Result<PathBuf, String> {
-    let Some(path) = model_path() else {
-        return Err(MESH_ABSENT_REASON.to_string());
+    let rel = model_rel();
+    let bytes = match crate::assets::read_asset(&rel) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(MESH_ABSENT_REASON.to_string());
+        }
+        Err(e) => return Err(format!("crab model {rel:?}: read: {e}")),
     };
-    checked_skin(&path)?;
-    Ok(path)
+    checked_skin(&rel, &bytes)?;
+    Ok(rel)
 }
 
 /// The skin digest gate: the asset's bytes must be EXACTLY the ones the committed
@@ -65,9 +67,8 @@ fn checked_model() -> Result<PathBuf, String> {
 /// mismatched mesh over it would silently fork render from physics. A re-fit is a
 /// deliberate offline event (`cargo run -p meshfit -- bake`), never a side effect
 /// of swapping a file.
-fn checked_skin(p: &std::path::Path) -> Result<(), String> {
-    let bytes = std::fs::read(p).map_err(|e| format!("crab model {p:?}: read: {e}"))?;
-    let digest = crate::fnv::fnv1a(&bytes);
+fn checked_skin(p: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let digest = crate::fnv::fnv1a(bytes);
     if digest != crate::bot::rig::BAKED_ASSET_DIGEST {
         return Err(format!(
             "crab model {p:?}: digest {digest:#018x} does not match the baked collider \
@@ -81,10 +82,11 @@ fn checked_skin(p: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The memoized skin verdict: `Ok(path)` iff a model resolves AND its bytes match
-/// the baked digest — the only state in which the skin may be drawn. `Err` carries
-/// the human-facing reason for the banner/collider-view surfaces. Physics never
-/// consults this (rl#340 stage 10).
+/// The memoized skin verdict: `Ok(asset path)` iff the model's bytes fetch through
+/// the one asset path AND match the baked digest — the only state in which the skin
+/// may be drawn; the path is the ASSET-tree form, ready for `AssetServer::load`.
+/// `Err` carries the human-facing reason for the banner/collider-view surfaces.
+/// Physics never consults this (rl#340 stage 10).
 pub fn usable_model() -> &'static Result<PathBuf, String> {
     static VERDICT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     VERDICT.get_or_init(checked_model)
@@ -160,60 +162,28 @@ mod banner {
 }
 
 #[cfg(test)]
-mod model_path_tests {
-    use super::resolve;
+mod tests {
+    use super::{checked_skin, rel_from};
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn relative_resolves_under_asset_root() {
-        let got = resolve(Some("sally.glb".as_ref()), Path::new("/srv/app"), |p| {
-            p == Path::new("/srv/app/assets/sally.glb")
-        });
-        assert_eq!(got, Some(PathBuf::from("/srv/app/assets/sally.glb")));
-    }
-
-    #[test]
-    fn defaults_to_sally_under_asset_root() {
-        let got = resolve(None, Path::new("/crate"), |p| {
-            p == Path::new("/crate/assets/sally.glb")
-        });
-        assert_eq!(got, Some(PathBuf::from("/crate/assets/sally.glb")));
-    }
-
-    #[test]
-    fn absolute_path_used_as_is() {
-        let got = resolve(Some("/models/x.glb".as_ref()), Path::new("/srv"), |p| {
-            p == Path::new("/models/x.glb")
-        });
-        assert_eq!(got, Some(PathBuf::from("/models/x.glb")));
-    }
-
-    #[test]
-    fn none_when_missing() {
+    fn defaults_to_sally_and_honors_the_override() {
+        assert_eq!(rel_from(None), PathBuf::from("sally.glb"));
         assert_eq!(
-            resolve(Some("sally.glb".as_ref()), Path::new("/srv"), |_| false),
-            None
+            rel_from(Some("models/x.glb".as_ref())),
+            PathBuf::from("models/x.glb")
         );
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::checked_skin;
 
     #[test]
     fn present_but_mismatched_glb_refuses_the_skin() {
-        let dir = std::env::temp_dir().join(format!("rl154-badglb-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bad = dir.join("sally.glb");
-        std::fs::write(&bad, b"this is not a glb, it is garbage bytes").unwrap();
-
-        let status = checked_skin(&bad);
+        let status = checked_skin(
+            Path::new("sally.glb"),
+            b"this is not a glb, it is garbage bytes",
+        );
         assert!(
             status.is_err(),
-            "a present-but-mismatched glb must refuse the skin (rl#154/rl#340 stage 10)"
+            "present-but-mismatched glb bytes must refuse the skin (rl#154/rl#340 stage 10)"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

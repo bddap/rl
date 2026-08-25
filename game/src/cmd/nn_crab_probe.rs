@@ -6,7 +6,7 @@ use net::render::nn_crab_policy;
 
 #[derive(Parser)]
 pub(crate) struct Args {
-    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV)]
+    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV, value_parser = crab_world::absolute_dir)]
     checkpoint: Option<std::path::PathBuf>,
     #[arg(long, default_value_t = 1200)]
     ticks: u64,

@@ -105,6 +105,11 @@ pub fn nn_crab_policy(flag: Option<PathBuf>) -> Result<(PathBuf, crab_world::pol
     // The env fallback is clap's, declared on each subcommand's checkpoint flag
     // ([`CHECKPOINT_ENV`]). `fp-screenshot` deliberately opts OUT of it: there the flag
     // ARMS a crab at all, so the env would seed one into a shot meant to have none.
+    // The default weights are an ASSET (rl#411): `weights/` under the asset tree,
+    // fetched — brain, normalizer, plant sidecar, digest — through the one asset byte
+    // path (`crab_world::assets::read_asset`), so an embedded/web bundle serves them
+    // like any asset. An explicit flag is the native dev affordance (clap absolutizes
+    // it, so it reads via the same path's absolute passthrough).
     let dir = flag.unwrap_or_else(|| {
         crab_world::assets::asset_root()
             .join("assets")

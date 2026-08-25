@@ -9,7 +9,7 @@ use net::render::nn_crab_policy;
 /// (an empty run is a CENSORED negative at the printed tick budget).
 #[derive(Parser)]
 pub(crate) struct Args {
-    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV)]
+    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV, value_parser = crab_world::absolute_dir)]
     checkpoint: Option<std::path::PathBuf>,
     /// Sim ticks to soak (64 ticks ≈ 1 s of sim time at the probe's 1:1 cadence).
     #[arg(long, default_value_t = 500_000)]

@@ -28,7 +28,7 @@ pub(crate) struct Args {
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
 
-    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV)]
+    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV, value_parser = crab_world::absolute_dir)]
     nn_crab_checkpoint: Vec<std::path::PathBuf>,
 
     #[command(flatten)]

@@ -362,7 +362,10 @@ pub(crate) fn read_envelope(
     path: &Path,
     expected: ArtifactKind,
 ) -> Result<CheckpointEnvelope, EnvelopeError> {
-    let bytes = std::fs::read(path).map_err(|e| match e.kind() {
+    // Byte fetch via the one asset path (rl#411): checkpoint artifacts under the
+    // asset tree (the shipped default weights) read like any asset; absolute
+    // trainer/dev dirs pass through unchanged on native.
+    let bytes = crate::assets::read_asset(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => EnvelopeError::Absent,
         _ => EnvelopeError::Io(e),
     })?;

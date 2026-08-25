@@ -33,7 +33,7 @@ pub(crate) struct Args {
     // No `env` here, unlike the other surfaces: this flag is the OPT-IN to arm a crab at all
     // (`.map(..)` below), so an exported RL_CRAB_CHECKPOINT_DIR would silently seed a crab into
     // an evidence shot that is meant to have none.
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", value_parser = crab_world::absolute_dir)]
     nn_crab_checkpoint: Option<std::path::PathBuf>,
 
     #[command(flatten)]

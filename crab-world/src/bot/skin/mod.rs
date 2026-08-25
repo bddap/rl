@@ -19,13 +19,12 @@ pub fn register(app: &mut App) {
     else {
         return;
     };
-    let rel = model
-        .strip_prefix(crate::assets::bevy_asset_path())
-        .map_or_else(|_| model.clone(), std::path::Path::to_path_buf);
+    // `CrabModelPath` is already the asset-tree form (rl#411) — the same path the
+    // digest gate fetched through the one asset byte path.
     let scene = app
         .world()
         .resource::<AssetServer>()
-        .load(GltfAssetLabel::Scene(0).from_asset(rel));
+        .load(GltfAssetLabel::Scene(0).from_asset(model));
     app.insert_resource(CrabModel { scene });
     pairing::register(app);
     weights::register(app);
