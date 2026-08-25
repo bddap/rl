@@ -20,10 +20,6 @@ pub const CHECKPOINT_ENV: &str = "RL_CRAB_CHECKPOINT_DIR";
 /// Everything the windowed game needs to launch, platform inputs already resolved.
 pub struct GameConfig {
     pub launch: Launch,
-    /// LAN-discovery window when forming from a lobby.
-    pub discover_secs: u64,
-    /// Peers to wait for before the discovery window may close early.
-    pub expect: usize,
     /// Telemetry collector to dial (fleet launchers pass one).
     pub telemetry: Option<EndpointId>,
     /// Checkpoint dirs, one armed crab each; empty = the default weights under the
@@ -41,7 +37,13 @@ pub enum Launch {
     Menu,
     /// Scripted formation, no menu: form a match now — dialing an explicit host, or
     /// discovering — and boot straight into the round (solo when nobody shows).
-    Lobby { dial: Option<EndpointId> },
+    Lobby {
+        dial: Option<EndpointId>,
+        /// LAN-discovery window.
+        discover_secs: u64,
+        /// Peers to wait for before the discovery window may close early.
+        expect: usize,
+    },
 }
 
 pub fn run_game(config: GameConfig) -> Result<()> {
@@ -57,11 +59,15 @@ pub fn run_game(config: GameConfig) -> Result<()> {
             seed,
             telemetry: config.telemetry,
         },
-        Launch::Lobby { dial } => {
+        Launch::Lobby {
+            dial,
+            discover_secs,
+            expect,
+        } => {
             let result = net_loop::connect_and_form_dialing(
                 seed,
-                config.discover_secs,
-                config.expect,
+                discover_secs,
+                expect,
                 net_loop::DialTargets {
                     host: dial,
                     collector: config.telemetry,

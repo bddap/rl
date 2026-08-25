@@ -68,7 +68,7 @@ pub struct OtelArgs {
 
 pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
     // Arm the frametime sink on every path: with export off the flusher replays into
-    // the no-op global meter, exactly as before the recorder/sink split (rl#411).
+    // the no-op global meter.
     frametime_sink::install();
     // `log`-crate records (wgpu_hal, rapier, …) reach this subscriber via
     // tracing-subscriber's default `tracing-log` feature: every `.init()` below installs

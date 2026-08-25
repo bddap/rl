@@ -110,8 +110,6 @@ pub fn build_windowed_app(
                 super::audio::drive_muffle,
                 super::audio::drive_wind,
                 super::audio::trace_wind_speed,
-                // Update rather than OnEnter: the beds decode asynchronously via the
-                // AssetServer, so the spawn waits for them (idempotent once spawned).
                 super::ambience::spawn_ambience,
                 super::ambience::update_context,
                 super::ambience::drive_layers,

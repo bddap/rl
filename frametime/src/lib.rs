@@ -81,7 +81,7 @@ static SINK: OnceLock<Sink> = OnceLock::new();
 /// refused loudly.
 pub fn install_sink(sink: impl Fn(SnapshotRx) + Send + Sync + 'static) {
     if SINK.set(Box::new(sink)).is_err() {
-        tracing::error!("frametime sink installed twice — keeping the first");
+        panic!("frametime sink installed twice — one process, one sink");
     }
 }
 

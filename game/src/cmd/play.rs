@@ -39,14 +39,14 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let launch = if args.host || args.join.is_some() {
         Launch::Lobby {
             dial: parse_join_dial(args.join.as_deref())?,
+            discover_secs: args.discover_secs,
+            expect: args.expect,
         }
     } else {
         Launch::Menu
     };
     run_game(GameConfig {
         launch,
-        discover_secs: args.discover_secs,
-        expect: args.expect,
         telemetry: args.telemetry,
         nn_crab_checkpoints: args.nn_crab_checkpoint,
         view: args.render,

@@ -3,7 +3,7 @@
 //! exports through the existing OTLP pipe with the process Resource (host.name =
 //! device, service.version = build digest). With export disabled the global meter is
 //! a no-op, so the thread idles at ~2 wakeups/s and the recorder still costs the
-//! frame path nothing — the pre-split behavior, unchanged.
+//! frame path nothing.
 
 use std::time::Duration;
 
