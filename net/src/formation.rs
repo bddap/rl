@@ -63,7 +63,12 @@ impl FormationDriver {
     /// A lobby (the menu path): no discovery timeout; the HOST's explicit
     /// [`Self::set_starting`] arms agreement (rl#94 liveness — a joiner-role core's is
     /// inert by construction, see `Membership::set_starting`).
-    pub fn lobby(session: &transport::Session, role: Role, expect: usize, stamp: crate::SyncStamp) -> Self {
+    pub fn lobby(
+        session: &transport::Session,
+        role: Role,
+        expect: usize,
+        stamp: crate::SyncStamp,
+    ) -> Self {
         Self {
             core: FormationCore::host_triggered(role, session.endpoint_id(), expect, stamp, 0),
             start: Instant::now(),
@@ -288,13 +293,11 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let unwrap_agreed = |r: Option<Result<Formation>>, who: &str| match r
-            .expect("resolved")
-            .expect(who)
-        {
-            Formation::Agreed(f) => f,
-            Formation::Alone => panic!("{who}: fell back to solo despite peers being present"),
-        };
+        let unwrap_agreed =
+            |r: Option<Result<Formation>>, who: &str| match r.expect("resolved").expect(who) {
+                Formation::Agreed(f) => f,
+                Formation::Alone => panic!("{who}: fell back to solo despite peers being present"),
+            };
         let (r0, r1, r2) = (
             unwrap_agreed(r0, "s0 forms"),
             unwrap_agreed(r1, "s1 forms"),

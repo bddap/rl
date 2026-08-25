@@ -16,11 +16,11 @@ use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
 use tokio::sync::mpsc;
 
+pub use net_proto::codec::PeerWire;
 use net_proto::codec::{
     ALPN, Codec, Frame, MAX_FRAME_LEN, StateAssembler, StateCodec, decode_peer_wire,
     parse_state_datagram, state_datagrams,
 };
-pub use net_proto::codec::PeerWire;
 
 const SERVICE_NAME: &str = "bddap-rl-game";
 
@@ -200,7 +200,10 @@ impl Session {
     /// Dial a peer by explicit address (a join code). Non-blocking: the dial runs on the
     /// internal runtime; poll the returned channel for the verdict (callers use it for
     /// diagnostics — a failed dial is non-fatal while discovery may still find the peer).
-    pub fn dial(&self, addr: impl Into<iroh::EndpointAddr>) -> std::sync::mpsc::Receiver<Result<()>> {
+    pub fn dial(
+        &self,
+        addr: impl Into<iroh::EndpointAddr>,
+    ) -> std::sync::mpsc::Receiver<Result<()>> {
         let (tx, rx) = std::sync::mpsc::channel();
         let endpoint = self.endpoint.clone();
         let inbox = self.inbox_tx.clone();
