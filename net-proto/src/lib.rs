@@ -60,8 +60,11 @@ pub fn may_arm_crabs(sync: Option<SyncVerdict>) -> bool {
 /// digests the [`SyncVerdict`] is judged from. One value threaded from the launch
 /// site to [`membership::Membership`], so a new identity axis rides the existing
 /// plumbing instead of growing every signature by another scalar.
-/// Fields are `pub(crate)` so [`SyncStamp::local`] is the only cross-crate
-/// constructor BY CONSTRUCTION — a launcher cannot hand-roll a dishonest stamp.
+/// Fields are `pub(crate)`: [`SyncStamp::local`] is the honest constructor, and
+/// [`SyncStamp::from_wire`] the link layer's decode path — a REMOTE stamp is
+/// untrusted by nature (the verdict compares digests, never believes them), so
+/// what the privacy protects is the LOCAL path: a launcher reaching for a stamp
+/// finds `local`, not a field-by-field hand-roll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncStamp {
     /// [`crab_world::bot::rig::baked_body_digest`] (rl#340 stage 10: every peer constructs the baked body).

@@ -37,21 +37,10 @@
         "nix-shell --run 'cargo build --release -p rl-train'",
         "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
         "nix-shell --run 'cargo test -q -- --test-threads=2'",
-        "nix-shell --run 'cargo test -q -p crab-world --release --lib rest_pose_has_zero_torque_and_no_progress -- --ignored --exact eval::tests::rest_pose_has_zero_torque_and_no_progress --test-threads=1'"
-      ],
-      "why": "the chase-eval measurement seam (rl#341 S2-5): the physical path — run_eval through real batched bevy+rapier worlds, the fold, every guard — had ZERO executed coverage because its only end-to-end test is #[ignore]d (too heavy for every workspace change). First-match-wins shadows the general rust rule, so this rule carries the full landing matrix PLUS the --ignored end-to-end run (release, ~1 min after kache-warm compile); a regression in the settle/active split, the running min, the rescue forfeit, or the batched env wiring now fails a landing that touches the seam"
-    },
-    {
-      "paths": ["net-proto/**"],
-      "tests": [
-        "nix-shell --run 'cargo fmt --check'",
-        "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
-        "nix-shell --run 'cargo build --release -p rl-train'",
-        "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
-        "nix-shell --run 'cargo test -q -- --test-threads=2'",
+        "nix-shell --run 'cargo test -q -p crab-world --release --lib rest_pose_has_zero_torque_and_no_progress -- --ignored --exact eval::tests::rest_pose_has_zero_torque_and_no_progress --test-threads=1'",
         "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto'"
       ],
-      "why": "the protocol core (rl#411 stage 2) is platform-free BY CONSTRUCTION — no tokio, no iroh, wasm32-checkable — and the wasm32 check is the machine that enforces it: a tokio/iroh/std-clock dependency sneaking back in fails this command, not a review. First-match-wins shadows the general rust rule, so the full landing matrix rides along"
+      "why": "the chase-eval measurement seam (rl#341 S2-5): the physical path — run_eval through real batched bevy+rapier worlds, the fold, every guard — had ZERO executed coverage because its only end-to-end test is #[ignore]d (too heavy for every workspace change). First-match-wins shadows the general rust rule, so this rule carries the full landing matrix PLUS the --ignored end-to-end run (release, ~1 min after kache-warm compile); a regression in the settle/active split, the running min, the rescue forfeit, or the batched env wiring now fails a landing that touches the seam"
     },
     {
       "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".cargo/config.toml", "**/*.wgsl", "crab-world/assets/**", "crab-world/tests/data/**"],
@@ -60,9 +49,10 @@
         "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
         "nix-shell --run 'cargo build --release -p rl-train'",
         "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
-        "nix-shell --run 'cargo test -q -- --test-threads=2'"
+        "nix-shell --run 'cargo test -q -- --test-threads=2'",
+        "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto'"
       ],
-      "why": "AGENTS.md's pre-submission contract, workspace-wide: the crates interlock (net/game consume crab-world's sim seams), so per-crate scoping would miss cross-crate breakage; --test-threads=2 because the live trainer saturates the cores and the heavy physics tests hang at default parallelism; assets and golden data ride the same rule because the suite consumes them (terrain fixtures, golden-env data, controls-display images). The two ISOLATED --release builds are the literal configs rl-release.service ships, which workspace feature-unification MASKS (bothouse#79/#97, formerly botq's hardcoded rl build matrix): `-p rl-train` is the trainer/eval build — default features only (wgpu, no render), where rl#275's ungated `pub use` of render-gated code broke E0432 while every workspace-level build stayed green; `-p rl-demo -p game -p rl-update-ui` is the deck-bundle build — render on WITHOUT the trainer's wgpu, the symmetric unification gap"
+      "why": "AGENTS.md's pre-submission contract, workspace-wide, plus the rl#411 platform-freedom check: net-proto (the protocol core) must stay wasm32-green, and its wasm build breaks from DEP-side edits too (crab-world, workspace Cargo.toml) — so the check rides the general rule for every rust touch, not a net-proto-scoped one; it is a seconds-cheap cargo check when warm. The crates interlock (net/game consume crab-world's sim seams), so per-crate scoping would miss cross-crate breakage; --test-threads=2 because the live trainer saturates the cores and the heavy physics tests hang at default parallelism; assets and golden data ride the same rule because the suite consumes them (terrain fixtures, golden-env data, controls-display images). The two ISOLATED --release builds are the literal configs rl-release.service ships, which workspace feature-unification MASKS (bothouse#79/#97, formerly botq's hardcoded rl build matrix): `-p rl-train` is the trainer/eval build — default features only (wgpu, no render), where rl#275's ungated `pub use` of render-gated code broke E0432 while every workspace-level build stayed green; `-p rl-demo -p game -p rl-update-ui` is the deck-bundle build — render on WITHOUT the trainer's wgpu, the symmetric unification gap"
     }
   ]
 }
