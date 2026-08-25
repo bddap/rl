@@ -300,23 +300,47 @@ impl AmbienceTargets {
     }
 }
 
-/// The ECS-side handle: shared targets plus the decoded beds (loaded once at app
-/// build; a bed that failed to load is an empty slice = a silent layer).
-#[derive(Resource, Clone)]
+/// The ECS-side handle: shared targets plus the beds, each loading → ready. The
+/// AssetServer owns the bed IO (rl#411: the ONE asset path — the same reader stack
+/// that serves glyphs and gltf serves wavs); [`materialize_beds`] seals and pins
+/// the samples as each decode arrives.
+#[derive(Resource)]
 pub(super) struct AmbienceChannel {
+    targets: Arc<AmbienceTargets>,
+    beds: [Bed; LAYERS.len()],
+}
+
+enum Bed {
+    Loading(Handle<crab_world::wav::MonoPcm>),
+    Ready(Arc<[f32]>),
+}
+
+impl AmbienceChannel {
+    /// The pinned samples, once no bed is still loading.
+    fn ready(&self) -> Option<[Arc<[f32]>; LAYERS.len()]> {
+        self.beds
+            .iter()
+            .map(|bed| match bed {
+                Bed::Ready(samples) => Some(Arc::clone(samples)),
+                Bed::Loading(_) => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|beds| beds.try_into().unwrap_or_else(|_| unreachable!()))
+    }
+}
+
+/// The bed mixer as a bevy audio asset: `decoder()` hands the audio thread a fresh
+/// infinite stream sharing the channel's targets and the pinned beds.
+#[derive(Asset, TypePath)]
+pub(super) struct AmbienceMix {
     targets: Arc<AmbienceTargets>,
     beds: [Arc<[f32]>; LAYERS.len()],
 }
 
-/// The bed mixer as a bevy audio asset: `decoder()` hands the audio thread a fresh
-/// infinite stream sharing the channel's targets and beds.
-#[derive(Asset, TypePath)]
-pub(super) struct AmbienceMix(AmbienceChannel);
-
 impl Decodable for AmbienceMix {
     type Decoder = AmbienceStream;
     fn decoder(&self) -> AmbienceStream {
-        AmbienceStream::new(self.0.targets.clone(), self.0.beds.clone())
+        AmbienceStream::new(self.targets.clone(), self.beds.clone())
     }
 }
 
@@ -325,33 +349,49 @@ impl Decodable for AmbienceMix {
 pub(super) struct AmbienceAudio;
 
 pub(super) fn install(app: &mut App) {
+    app.init_asset::<crab_world::wav::MonoPcm>();
+    app.register_asset_loader(crab_world::wav::WavLoader);
     app.add_audio_source::<AmbienceMix>();
     app.init_resource::<AmbientContext>();
+    let server = app.world().resource::<AssetServer>().clone();
     app.insert_resource(AmbienceChannel {
         targets: Arc::default(),
-        beds: std::array::from_fn(|i| load_bed(&LAYERS[i])),
+        beds: std::array::from_fn(|i| Bed::Loading(server.load(LAYERS[i].file))),
     });
+    app.add_systems(Update, materialize_beds);
 }
 
-fn load_bed(def: &LayerDef) -> Arc<[f32]> {
-    let path = crab_world::assets::bevy_asset_path().join(def.file);
-    match crab_world::wav::read_mono_44k(&path) {
-        Ok(mut pcm) => {
-            if let Seal::Blend = def.seal {
-                seal_loop(&mut pcm);
+/// Seal + pin each bed as its asset arrives. A failed load — absent OR
+/// unreadable/corrupt, either way bytes a release must carry are not usable —
+/// goes through the game-wide missing-asset chokepoint (rl#375): panic by
+/// default, a silent layer under RL_ALLOW_MISSING_ASSETS=1.
+pub(super) fn materialize_beds(
+    mut channel: ResMut<AmbienceChannel>,
+    pcm: Res<Assets<crab_world::wav::MonoPcm>>,
+    mut failed: MessageReader<bevy::asset::AssetLoadFailedEvent<crab_world::wav::MonoPcm>>,
+) {
+    for event in failed.read() {
+        for bed in &mut channel.beds {
+            if matches!(bed, Bed::Loading(handle) if handle.id() == event.id) {
+                crab_world::assets::missing_asset(
+                    std::path::Path::new(event.path.path()),
+                    &format!("ambient bed unusable: {}", event.error),
+                    "rl-release-build packages assets/ambience/ at release time; a dev \
+                     checkout fetches the CC0 beds with scripts/fetch-ambience.sh.",
+                );
+                *bed = Bed::Ready(Arc::from([]));
             }
-            pcm.into()
         }
-        Err(e) => {
-            // Absent OR unreadable/corrupt: either way the bytes a release must carry
-            // are not usable — same packaging-bug class, same chokepoint (rl#375).
-            crab_world::assets::missing_asset(
-                &path,
-                &format!("ambient bed unusable: {e}"),
-                "rl-release-build packages assets/ambience/ at release time; a dev \
-                 checkout fetches the CC0 beds with scripts/fetch-ambience.sh.",
-            );
-            Arc::from([])
+    }
+    for (def, bed) in LAYERS.iter().zip(&mut channel.beds) {
+        if let Bed::Loading(handle) = bed
+            && let Some(asset) = pcm.get(&*handle)
+        {
+            let mut samples = asset.0.to_vec();
+            if let Seal::Blend = def.seal {
+                seal_loop(&mut samples);
+            }
+            *bed = Bed::Ready(samples.into());
         }
     }
 }
@@ -369,21 +409,34 @@ fn seal_loop(pcm: &mut Vec<f32>) {
     pcm.truncate(len - n);
 }
 
+/// Spawn the round's ambience once the beds are pinned — an Update system rather
+/// than an OnEnter one because the AssetServer decodes the beds asynchronously; a
+/// round entered before they land starts its ambience a few frames in.
 pub(super) fn spawn_ambience(
     mut commands: Commands,
     mut assets: ResMut<Assets<AmbienceMix>>,
     channel: Res<AmbienceChannel>,
+    playing: Query<(), With<AmbienceAudio>>,
 ) {
-    // Only reachable under RL_ALLOW_MISSING_ASSETS=1 (load_bed panics otherwise):
-    // no beds → nothing to play; the load-time log already said why.
-    if channel.beds.iter().all(|b| b.is_empty()) {
+    if !playing.is_empty() {
+        return;
+    }
+    let Some(beds) = channel.ready() else {
+        return; // still decoding — retry next frame
+    };
+    // All-empty is only reachable under RL_ALLOW_MISSING_ASSETS=1 (materialize_beds
+    // panics otherwise): no beds → nothing to play; the load log already said why.
+    if beds.iter().all(|b| b.is_empty()) {
         return;
     }
     // Start the round silent regardless of how the last one ended.
     channel.targets.silence();
     commands.spawn((
         AmbienceAudio,
-        AudioPlayer(assets.add(AmbienceMix(channel.clone()))),
+        AudioPlayer(assets.add(AmbienceMix {
+            targets: channel.targets.clone(),
+            beds,
+        })),
         // The stream is infinite; Once just means "no restart logic".
         PlaybackSettings::ONCE,
     ));
@@ -821,6 +874,22 @@ mod tests {
         };
         assert_eq!(plane_engine(&on_foot), 0.0);
         assert_eq!(ship_thruster(&on_foot), 0.0);
+    }
+
+    /// The evidence generators read the fetched beds straight off the dev fs —
+    /// offline tooling with no App, not the game's asset path. Absent/unusable
+    /// beds come back empty; the generators skip with a note.
+    fn load_bed(def: &LayerDef) -> Arc<[f32]> {
+        let path = crab_world::assets::bevy_asset_path().join(def.file);
+        match crab_world::wav::read_mono_44k(&path) {
+            Ok(mut pcm) => {
+                if let Seal::Blend = def.seal {
+                    seal_loop(&mut pcm);
+                }
+                pcm.into()
+            }
+            Err(_) => Arc::from([]),
+        }
     }
 
     /// Not a test — the evidence generator for rl#357: renders a biome walk

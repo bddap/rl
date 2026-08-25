@@ -62,6 +62,41 @@ pub fn parse_mono_44k(b: &[u8]) -> Result<Vec<f32>, String> {
     Err("no data chunk".into())
 }
 
+/// A decoded bed as f32 samples in −1..1 — [`parse_mono_44k`]'s strict contract as
+/// a bevy asset, so sampled audio rides the ONE asset path (rl#411): whatever
+/// reader the platform mounts (native fs, HTTP, embedded bytes) serves wavs too.
+#[derive(bevy::asset::Asset, bevy::reflect::TypePath)]
+pub struct MonoPcm(pub std::sync::Arc<[f32]>);
+
+/// `.wav` [`bevy::asset::AssetLoader`] under the [`parse_mono_44k`] contract — a
+/// wav in any other format is a load ERROR (the fetch pipeline ships 16-bit mono
+/// PCM at [`SAMPLE_RATE`]; a runtime resampler would be a second conversion path).
+#[derive(bevy::reflect::TypePath)]
+pub struct WavLoader;
+
+impl bevy::asset::AssetLoader for WavLoader {
+    type Asset = MonoPcm;
+    type Settings = ();
+    type Error = std::io::Error;
+
+    async fn load(
+        &self,
+        reader: &mut dyn bevy::asset::io::Reader,
+        _settings: &(),
+        _load_context: &mut bevy::asset::LoadContext<'_>,
+    ) -> Result<MonoPcm, Self::Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        parse_mono_44k(&bytes)
+            .map(|pcm| MonoPcm(pcm.into()))
+            .map_err(std::io::Error::other)
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["wav"]
+    }
+}
+
 /// RIFF/WAVE writer for tests and evidence generators (net's wind/ambience clips,
 /// the rl#359 instrument clips): 16-bit mono PCM at [`SAMPLE_RATE`] — the same
 /// (only) format the reader accepts.
