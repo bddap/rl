@@ -49,7 +49,16 @@ pub fn bevy_asset_path() -> PathBuf {
 /// native-only dev affordance (`CRAB_MODEL_PATH`, explicit `--checkpoint` dirs,
 /// trainer run dirs) and fails naturally on a platform with no filesystem.
 pub fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
-    std::fs::read(bevy_asset_path().join(path))
+    std::fs::read(asset_file_path(path))
+}
+
+/// [`read_asset`]'s path resolution WITHOUT the read — for the NATIVE-ONLY fs
+/// affordances that must observe the same file the asset path serves (the hot-reload
+/// mtime poll, the brain-swap roster `read_dir`) and for operator-facing labels that
+/// should name the real file. Web/embedded builds have no fs peer for this — their
+/// consumers are the fs affordances that are inert there by construction.
+pub fn asset_file_path(path: &Path) -> PathBuf {
+    bevy_asset_path().join(path)
 }
 
 /// [`read_asset`] for text assets (the plant sidecar).

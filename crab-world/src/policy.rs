@@ -431,9 +431,11 @@ impl Policy {
         // Stat BEFORE loading (mirroring `try_hot_reload`): stamping a post-load mtime
         // would skip a save that landed mid-load — forever, if it was the run's final
         // save (the rl#215 class). A stale-early stamp costs one redundant reload.
-        let mtime = std::fs::metadata(CheckpointDir::new(dir).brain_file())
-            .and_then(|m| m.modified())
-            .ok();
+        let mtime = std::fs::metadata(crate::assets::asset_file_path(
+            &CheckpointDir::new(dir).brain_file(),
+        ))
+        .and_then(|m| m.modified())
+        .ok();
         match load_brain_normalizer(dir, &self.device) {
             Loaded::Fit(brain, normalizer) => {
                 // rl#285: a roster slot synced from a different run must not arm into
@@ -507,7 +509,10 @@ impl Policy {
         let Some(dir) = self.live_dir.clone() else {
             return false;
         };
-        let brain_bin = CheckpointDir::new(&dir).brain_file();
+        // The mtime poll observes the same file the asset byte path serves
+        // (`asset_file_path`: root-joined for a relative dir, passthrough for the
+        // absolutized flag dirs).
+        let brain_bin = crate::assets::asset_file_path(&CheckpointDir::new(&dir).brain_file());
         let Ok(mtime) = std::fs::metadata(&brain_bin).and_then(|m| m.modified()) else {
             return false;
         };
@@ -682,12 +687,18 @@ impl Policy {
 /// `read_dir` over synced checkpoint dirs — a platform without a filesystem has a
 /// roster of one (its baked default weights) and the swap button is inert.
 fn brain_slots(primary: &Path) -> Vec<PathBuf> {
-    let mut subs: Vec<PathBuf> = std::fs::read_dir(primary)
+    // Enumerate on the real fs location (`asset_file_path` — the relative default
+    // weights dir lives under the asset root), but return slots in PRIMARY's form so
+    // every slot loads and labels the same way the primary does.
+    let mut subs: Vec<PathBuf> = std::fs::read_dir(crate::assets::asset_file_path(primary))
         .into_iter()
         .flatten()
         .flatten()
-        .map(|entry| entry.path())
-        .filter(|dir| dir.is_dir() && CheckpointDir::new(dir).brain_file().is_file())
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| primary.join(entry.file_name()))
+        .filter(|dir| {
+            crate::assets::asset_file_path(&CheckpointDir::new(dir).brain_file()).is_file()
+        })
         .collect();
     subs.sort();
     let mut slots = vec![primary.to_owned()];

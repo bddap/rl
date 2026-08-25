@@ -105,16 +105,15 @@ pub fn nn_crab_policy(flag: Option<PathBuf>) -> Result<(PathBuf, crab_world::pol
     // The env fallback is clap's, declared on each subcommand's checkpoint flag
     // ([`CHECKPOINT_ENV`]). `fp-screenshot` deliberately opts OUT of it: there the flag
     // ARMS a crab at all, so the env would seed one into a shot meant to have none.
-    // The default weights are an ASSET (rl#411): `weights/` under the asset tree,
+    // The default weights are an ASSET (rl#411): the asset-tree-relative `weights/`,
     // fetched — brain, normalizer, plant sidecar, digest — through the one asset byte
     // path (`crab_world::assets::read_asset`), so an embedded/web bundle serves them
     // like any asset. An explicit flag is the native dev affordance (clap absolutizes
     // it, so it reads via the same path's absolute passthrough).
-    let dir = flag.unwrap_or_else(|| {
-        crab_world::assets::asset_root()
-            .join("assets")
-            .join("weights")
-    });
+    let dir = flag.unwrap_or_else(|| PathBuf::from("weights"));
+    // Operator-facing spelling of `dir`: the real native file path (the relative
+    // default names its file under the asset root, not the cwd).
+    let shown = crab_world::assets::asset_file_path(&dir);
     // Weights↔world (rl#281 stage 6, the rl-demo pattern): adopt the checkpoint's
     // recorded plant — arena + friction cap — before arming, so the brain plays in the
     // world it trained in and GCR serves a terrain brain its baked tile. Multi-binding
@@ -122,21 +121,21 @@ pub fn nn_crab_policy(flag: Option<PathBuf>) -> Result<(PathBuf, crab_world::pol
     if let Err(err) = crab_world::bot::body::adopt_recorded_plant(&dir) {
         anyhow::bail!(
             "checkpoint under {} records a plant this launch can't adopt — {err}",
-            dir.display()
+            shown.display()
         );
     }
     match crab_world::policy::load_armed(&dir) {
-        Ok(policy) => Ok((dir, policy)),
+        Ok(policy) => Ok((shown, policy)),
         Err(CheckpointUnusable::Missing) => anyhow::bail!(
             "rl#114: no trained crab brain (brain.bin) under {} — the giant crab IS the trained NN \
              body (\"Sally\"), and there is no integer stand-in. Point this command's checkpoint \
              flag or {CHECKPOINT_ENV} at a trained checkpoint dir (deploy/rl-update must set it, \
              and EVERY device needs the IDENTICAL brain + crab model), then relaunch.",
-            dir.display()
+            shown.display()
         ),
         Err(CheckpointUnusable::Refused(why)) => anyhow::bail!(
             "checkpoint under {} was REFUSED — {why}. Fix the checkpoint, then relaunch.",
-            dir.display()
+            shown.display()
         ),
         Err(CheckpointUnusable::Mismatch(RigDims { obs, action })) => {
             let RigDims {
@@ -149,7 +148,7 @@ pub fn nn_crab_policy(flag: Option<PathBuf>) -> Result<(PathBuf, crab_world::pol
                  {rig_act} act. Sally would launch as an inert rest-pose statue, so refusing to \
                  launch instead. Retrain/redeploy a checkpoint for this rig, or run a binary \
                  whose rig matches the checkpoint.",
-                dir.display()
+                shown.display()
             )
         }
     }
