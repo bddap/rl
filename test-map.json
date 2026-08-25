@@ -15,6 +15,11 @@
       "why": "prose, licenses, and evidence artifacts (screenshots/logs recorded under docs/evidence)"
     },
     {
+      "paths": [".github/**"],
+      "tests": [],
+      "why": "CI workflow definitions — exercised only by dispatching them on GitHub Actions; no local runner exists, and a broken workflow fails loudly at dispatch"
+    },
+    {
       "paths": ["scripts/**", "otel/proof-rl-otel.sh"],
       "tests": [],
       "why": "operator tooling (profiling, terrain bake, asset fetch) and live proof scripts — exercised by use against a running system, no offline harness"
