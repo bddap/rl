@@ -88,7 +88,7 @@ pub async fn form_match(
             me: me.0,
         });
     }
-    if stamp.body_digest != 0 {
+    if stamp.body_digest() != 0 {
         if !outcome.sync.body {
             tracing::warn!(
                 "GCR: crab BODY NOT synced across peers (a peer has a different sally.glb \
@@ -104,7 +104,7 @@ pub async fn form_match(
             );
         }
     }
-    if stamp.plant_digest != 0 {
+    if stamp.plant_digest() != 0 {
         if !outcome.sync.plant {
             tracing::warn!(
                 "GCR: the PLANT is NOT synced across peers (a peer resolves a different arena, \

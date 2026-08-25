@@ -42,6 +42,18 @@
       "why": "the chase-eval measurement seam (rl#341 S2-5): the physical path — run_eval through real batched bevy+rapier worlds, the fold, every guard — had ZERO executed coverage because its only end-to-end test is #[ignore]d (too heavy for every workspace change). First-match-wins shadows the general rust rule, so this rule carries the full landing matrix PLUS the --ignored end-to-end run (release, ~1 min after kache-warm compile); a regression in the settle/active split, the running min, the rescue forfeit, or the batched env wiring now fails a landing that touches the seam"
     },
     {
+      "paths": ["net-proto/**"],
+      "tests": [
+        "nix-shell --run 'cargo fmt --check'",
+        "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
+        "nix-shell --run 'cargo build --release -p rl-train'",
+        "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
+        "nix-shell --run 'cargo test -q -- --test-threads=2'",
+        "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto'"
+      ],
+      "why": "the protocol core (rl#411 stage 2) is platform-free BY CONSTRUCTION — no tokio, no iroh, wasm32-checkable — and the wasm32 check is the machine that enforces it: a tokio/iroh/std-clock dependency sneaking back in fails this command, not a review. First-match-wins shadows the general rust rule, so the full landing matrix rides along"
+    },
+    {
       "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".cargo/config.toml", "**/*.wgsl", "crab-world/assets/**", "crab-world/tests/data/**"],
       "tests": [
         "nix-shell --run 'cargo fmt --check'",

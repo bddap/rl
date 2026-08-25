@@ -20,6 +20,7 @@ render = [
 
 [dependencies]
 crab-world = { path = "../crab-world" }
+net-proto = { path = "../net-proto" }
 bevy = { workspace = true, features = [
     "std",
     "multi_threaded",

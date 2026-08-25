@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use iroh::EndpointId;
+use iroh_base::EndpointId;
 
 use crab_world::fnv::Fnv;
 
@@ -14,7 +14,7 @@ const STABLE_FOR: Duration = Duration::from_millis(1500);
 
 pub const JOIN_WINDOW: Duration = Duration::from_secs(20);
 
-pub(crate) const MAX_MEMBERS: usize = u8::MAX as usize + 1;
+pub const MAX_MEMBERS: usize = u8::MAX as usize + 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Beat {
@@ -368,7 +368,7 @@ mod tests {
     use super::*;
 
     fn eid(i: u8) -> EndpointId {
-        iroh::SecretKey::from_bytes(&[i; 32]).public()
+        iroh_base::SecretKey::from_bytes(&[i; 32]).public()
     }
 
     fn at(base: Instant, ms: u64) -> Instant {

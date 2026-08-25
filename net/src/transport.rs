@@ -12,6 +12,7 @@ use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
 use tokio::sync::mpsc;
 
+use crate::SyncStamp;
 use crate::articulation::CrabArticulation;
 use crate::client::{PilotIntent, TickMsg};
 use crate::membership::{self, Beat};
@@ -244,33 +245,25 @@ impl Codec for Beat {
 
 impl Codec for JoinRequest {
     const KIND: Frame = Frame::JoinRequest;
-    type Bytes = [u8; 17];
+    type Bytes = [u8; SyncStamp::WIRE_LEN];
 
-    fn encode(&self) -> [u8; 17] {
-        let mut out = [0u8; 17];
-        out[0..8].copy_from_slice(&self.stamp.body_digest.to_le_bytes());
-        out[8..16].copy_from_slice(&self.stamp.plant_digest.to_le_bytes());
-        out[16] = self.stamp.crab_count;
-        out
+    fn encode(&self) -> [u8; SyncStamp::WIRE_LEN] {
+        self.stamp.to_wire()
     }
 
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = body;
-        let body_digest = u64::from_le_bytes(take(&mut r, 8, "body_digest")?.try_into().unwrap());
-        let plant_digest = u64::from_le_bytes(take(&mut r, 8, "plant_digest")?.try_into().unwrap());
-        let crab_count = take(&mut r, 1, "crab_count")?[0];
+        let stamp = SyncStamp::from_wire(
+            take(&mut r, SyncStamp::WIRE_LEN, "stamp")?
+                .try_into()
+                .unwrap(),
+        );
         anyhow::ensure!(
             r.is_empty(),
             "join-request frame has {} trailing bytes",
             r.len()
         );
-        Ok(JoinRequest {
-            stamp: crate::SyncStamp {
-                body_digest,
-                plant_digest,
-                crab_count,
-            },
-        })
+        Ok(JoinRequest { stamp })
     }
 }
 
@@ -286,9 +279,7 @@ impl Codec for Admission {
         for pid in &self.roster {
             b.push(pid.0);
         }
-        b.extend_from_slice(&self.host_stamp.body_digest.to_le_bytes());
-        b.extend_from_slice(&self.host_stamp.plant_digest.to_le_bytes());
-        b.push(self.host_stamp.crab_count);
+        b.extend_from_slice(&self.host_stamp.to_wire());
         b
     }
 
@@ -302,21 +293,17 @@ impl Codec for Admission {
         for _ in 0..n {
             roster.push(PlayerId(take(&mut r, 1, "roster pid")?[0]));
         }
-        let body_digest =
-            u64::from_le_bytes(take(&mut r, 8, "host body_digest")?.try_into().unwrap());
-        let plant_digest =
-            u64::from_le_bytes(take(&mut r, 8, "host plant_digest")?.try_into().unwrap());
-        let crab_count = take(&mut r, 1, "host crab_count")?[0];
+        let host_stamp = SyncStamp::from_wire(
+            take(&mut r, SyncStamp::WIRE_LEN, "host stamp")?
+                .try_into()
+                .unwrap(),
+        );
         anyhow::ensure!(r.is_empty(), "welcome frame has {} trailing bytes", r.len());
         Ok(Admission {
             pid,
             effective_tick,
             roster,
-            host_stamp: crate::SyncStamp {
-                body_digest,
-                plant_digest,
-                crab_count,
-            },
+            host_stamp,
         })
     }
 }
@@ -1371,14 +1358,20 @@ mod tests {
         assert!(CoreSnapshot::decode(&body[..body.len() - 1]).is_err());
     }
 
+    /// Stamps are honest-by-construction outside the core ([`SyncStamp::local`] is the
+    /// one cross-crate constructor), so wire tests assemble theirs through the codec.
+    fn test_stamp(body: u64, plant: u64, count: u8) -> SyncStamp {
+        let mut w = [0u8; SyncStamp::WIRE_LEN];
+        w[0..8].copy_from_slice(&body.to_le_bytes());
+        w[8..16].copy_from_slice(&plant.to_le_bytes());
+        w[16] = count;
+        SyncStamp::from_wire(w)
+    }
+
     #[test]
     fn join_request_wire_roundtrips() {
         let req = JoinRequest {
-            stamp: crate::SyncStamp {
-                body_digest: 0xdead_beef_cafe_f00d,
-                plant_digest: 0x7e44_a100_0bad_5eed,
-                crab_count: 3,
-            },
+            stamp: test_stamp(0xdead_beef_cafe_f00d, 0x7e44_a100_0bad_5eed, 3),
         };
         assert_eq!(
             JoinRequest::decode(JoinRequest::encode(&req).as_ref()).unwrap(),
@@ -1399,11 +1392,7 @@ mod tests {
                 pid: PlayerId(2),
                 effective_tick: 1_234_567,
                 roster,
-                host_stamp: crate::SyncStamp {
-                    body_digest: 0xA1B2_C3D4,
-                    plant_digest: 0x5E6F_7081,
-                    crab_count: 3,
-                },
+                host_stamp: test_stamp(0xA1B2_C3D4, 0x5E6F_7081, 3),
             };
             assert_eq!(
                 Admission::decode(Admission::encode(&adm).as_ref()).unwrap(),

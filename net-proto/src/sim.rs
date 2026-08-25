@@ -105,11 +105,11 @@ pub const UNIT: i64 = 100_000;
 /// stature.
 const PLAYER_SPEED_HEIGHTS_PER_S: f32 = 166.0 * 30.0 / (1000.0 * 1.8);
 
-pub(crate) const PLAYER_SPEED: i64 =
+pub const PLAYER_SPEED: i64 =
     (PLAYER_SPEED_HEIGHTS_PER_S * PLAYER_HEIGHT * UNIT as f32 / TICK_HZ as f32 + 0.5) as i64;
 
 /// Sprint pace (rl#355) — 1.8× walk, the common run multiplier. Feel knob.
-pub(crate) const SPRINT_SPEED: i64 = PLAYER_SPEED * 9 / 5;
+pub const SPRINT_SPEED: i64 = PLAYER_SPEED * 9 / 5;
 
 /// On-foot gravity, grid units per tick² — folded from the ONE gravity the crafts fall
 /// under, so a plane-exit handoff (rl#355) keeps falling at the rate the cockpit
@@ -284,7 +284,7 @@ const MIN_CRAB_SPAWN_DISTANCE: i64 = (7.98 * UNIT as f64) as i64;
 
 /// [`MIN_CRAB_SPAWN_DISTANCE`] in world meters — the one conversion, so the rl#322
 /// craft-park ring and the tests measure the same clearance the sim enforces.
-pub(crate) const MIN_CRAB_SPAWN_DISTANCE_M: f32 = MIN_CRAB_SPAWN_DISTANCE as f32 / UNIT as f32;
+pub const MIN_CRAB_SPAWN_DISTANCE_M: f32 = MIN_CRAB_SPAWN_DISTANCE as f32 / UNIT as f32;
 
 /// Spacing between player spawn slots along the z=0 spawn line.
 const SPAWN_SLOT_PITCH: i64 = player_heights(2.0 / 1.8);
@@ -292,7 +292,7 @@ const SPAWN_SLOT_PITCH: i64 = player_heights(2.0 / 1.8);
 /// Reach-the-objective radius.
 pub const EXTRACT_RADIUS: i64 = player_heights(2.0 / 1.8);
 
-pub(crate) const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
+pub const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
 
 /// A fresh entropy seed for a real GCR launch (rl#305): the whole run layout
 /// derives deterministically from the match seed, so the game entrypoints draw this
@@ -459,14 +459,14 @@ pub fn meters_to_grid(m: f32) -> i64 {
 }
 
 /// [`meters_to_grid`] at f64 — for heights that ride the f64 terrain sampler (rl#355).
-pub(crate) fn meters_to_grid_f64(m: f64) -> i64 {
+pub fn meters_to_grid_f64(m: f64) -> i64 {
     (m * UNIT as f64) as i64
 }
 
 /// Meters-per-second onto the per-tick velocity grid — THE m/s → sim-velocity rule
 /// (rl#355), stated once so the craft-velocity bridge cannot drift from the sim's own
 /// speed constants.
-pub(crate) fn mps_to_grid_per_tick(mps: f64) -> i64 {
+pub fn mps_to_grid_per_tick(mps: f64) -> i64 {
     (mps * UNIT as f64 / TICK_HZ as f64) as i64
 }
 
@@ -476,7 +476,7 @@ pub(crate) fn mps_to_grid_per_tick(mps: f64) -> i64 {
 /// same surface the sim will land the walker on. Samples the committed GCR bake (the
 /// one world every peer ships, already this sim's spawn-bounds source) at f64, the
 /// same entry the render path uses.
-pub(crate) fn ground_at(pos: Pos) -> i64 {
+pub fn ground_at(pos: Pos) -> i64 {
     let (x, z) = pos.to_meters_f64();
     meters_to_grid_f64(crab_world::terrain::TerrainGrid::gcr().height_f64(x, z))
 }
@@ -662,7 +662,7 @@ pub struct Externals<'a> {
 
 impl<'a> Externals<'a> {
     /// Crab poses with nobody piloting.
-    pub(crate) fn crabs_only(crabs: &'a [CrabPose]) -> Self {
+    pub fn crabs_only(crabs: &'a [CrabPose]) -> Self {
         const NO_PILOTS: &BTreeMap<PlayerId, PilotPose> = &BTreeMap::new();
         Self {
             crabs,
@@ -672,9 +672,9 @@ impl<'a> Externals<'a> {
 }
 
 /// Every crab held at its current sim pose, clawless — the test feed for steps where
-/// the crabs are scenery (setup ticks, walker tests).
-#[cfg(test)]
-pub(crate) fn hold_poses(sim: &Sim) -> Vec<CrabPose> {
+/// the crabs are scenery (setup ticks, walker tests). Not `cfg(test)`: `net`'s tests
+/// consume it too, and a downstream crate's test cfg can't see ours.
+pub fn hold_poses(sim: &Sim) -> Vec<CrabPose> {
     sim.crabs()
         .iter()
         .map(|c| CrabPose {
@@ -1153,8 +1153,7 @@ impl Sim {
     }
 
     // Live only via `ClientSim::reconcile_local_prediction` (render-only) outside
-    // tests — dead render-off (rl#248).
-    #[cfg_attr(not(feature = "render"), allow(dead_code))]
+    // tests (rl#248).
     pub(crate) fn predict_player(&mut self, id: PlayerId, inp: Input) {
         if self.outcome != Outcome::Ongoing {
             return;

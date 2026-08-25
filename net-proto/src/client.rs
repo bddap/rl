@@ -193,9 +193,8 @@ impl ClientSim {
         adopted
     }
 
-    // Live only via the render driver outside tests — dead render-off (rl#248).
-    #[cfg_attr(not(feature = "render"), allow(dead_code))]
-    pub(crate) fn reconcile_local_prediction(&mut self) {
+    // Live only via `net`'s render driver outside tests (rl#248).
+    pub fn reconcile_local_prediction(&mut self) {
         let me = self.me;
         // Ascending `BTreeMap` order = issue order, which the facing-relative mover requires
         // (each tick's yaw feeds the next tick's translation).

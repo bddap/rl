@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crab-world",
     "net",
+    "net-proto",
     "rl-train",
     "rl-demo",
     "game",
@@ -42,6 +43,8 @@ rayon = "1"
 ctor = "1.0.9"
 
 iroh = "1"
+# The protocol core's ONLY iroh surface: EndpointId, a pure ed25519 key (rl#411).
+iroh-base = { version = "1", default-features = false, features = ["key"] }
 # The type iroh's send_datagram takes; already in the tree transitively via iroh.
 bytes = "1"
 iroh-mdns-address-lookup = "0.4"
