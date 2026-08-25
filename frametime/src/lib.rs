@@ -1,14 +1,18 @@
-//! Frame-time telemetry with a frame path that can never stall the render loop
-//! (bddap/rl#309): the render thread owns a fixed-size log-bucketed histogram —
-//! recording is float math + an array increment, no allocation, no lock, no syscall.
-//! ~1 Hz of accumulated frames it snapshots the buckets into a lock-free bounded
-//! queue (backpressure drops the OLDEST second — a lost second is fine, growth is
-//! not) and a background thread replays snapshots into the OTLP metrics SDK, which
-//! exports through the existing OTLP-over-iroh pipe with the process Resource
-//! (host.name = device, service.version = build digest).
+//! The RECORDER half of frame-time telemetry (bddap/rl#309), platform-free by
+//! construction: the render thread owns a fixed-size log-bucketed histogram —
+//! recording is float math + an array increment, no allocation, no lock, no
+//! syscall — and ~1 Hz of accumulated frames it snapshots the buckets into a
+//! lock-free bounded queue (backpressure drops the OLDEST second — a lost second
+//! is fine, growth is not).
+//!
+//! What happens to the snapshots is the SINK's business, and the sink is the
+//! platform seam (rl#411): the process' telemetry init registers one via
+//! [`install_sink`] before the app boots — natively `otel` spawns a flusher
+//! thread that replays snapshots into the OTLP metrics SDK; a platform with no
+//! exporter installs nothing and the bounded queue sheds the snapshots. This
+//! crate itself has no thread, no clock, and no exporter dependency.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
 
 use crossbeam_queue::ArrayQueue;
 
@@ -24,13 +28,13 @@ const MAX_MS: f64 = 1000.0;
 /// Seconds of frames per snapshot — the owner's "flush ~1 Hz" bound on frame-path RAM.
 const FLUSH_EVERY_SECS: f32 = 1.0;
 
-/// Snapshots the queue holds before dropping oldest: a few seconds of exporter stall
+/// Snapshots the queue holds before dropping oldest: a few seconds of sink stall
 /// is absorbed, anything longer sheds data instead of RAM.
 const QUEUE_DEPTH: usize = 8;
 
 /// Upper boundaries of buckets `0..BUCKETS-1` (the last bucket is open-ended), in ms:
-/// `1000^((j+1)/64)`. Passed verbatim to the SDK histogram so its bucketing of the
-/// replayed [`midpoint_ms`] values reproduces the frame-path counts exactly.
+/// `1000^((j+1)/64)`. A sink that re-buckets the replayed [`midpoint_ms`] values with
+/// these boundaries reproduces the frame-path counts exactly.
 pub fn boundaries_ms() -> Vec<f64> {
     (0..BUCKETS - 1)
         .map(|j| MAX_MS.powf((j + 1) as f64 / BUCKETS as f64))
@@ -38,7 +42,7 @@ pub fn boundaries_ms() -> Vec<f64> {
 }
 
 /// Geometric midpoint of bucket `i` — strictly inside `(boundary[i-1], boundary[i])`,
-/// so the SDK re-buckets a replayed midpoint into exactly bucket `i`.
+/// so a sink re-buckets a replayed midpoint into exactly bucket `i`.
 pub fn midpoint_ms(i: usize) -> f64 {
     MAX_MS.powf((i as f64 + 0.5) / BUCKETS as f64)
 }
@@ -53,10 +57,36 @@ pub fn bucket_index(dt_ms: f64) -> usize {
     idx.clamp(0.0, (BUCKETS - 1) as f64) as usize
 }
 
-type Snapshot = [u32; BUCKETS];
+/// One second of bucketed frame counts — what crosses the recorder→sink queue.
+pub type Snapshot = [u32; BUCKETS];
+
+/// The sink's end of the snapshot queue.
+pub struct SnapshotRx(Arc<ArrayQueue<Snapshot>>);
+
+impl SnapshotRx {
+    /// Oldest pending snapshot, if any. Lock-free; safe to poll from anywhere.
+    pub fn pop(&self) -> Option<Snapshot> {
+        self.0.pop()
+    }
+}
+
+type Sink = Box<dyn Fn(SnapshotRx) + Send + Sync>;
+
+static SINK: OnceLock<Sink> = OnceLock::new();
+
+/// Register the process' snapshot sink — called once by telemetry init, BEFORE the
+/// app boots a recorder. The sink receives each recorder's [`SnapshotRx`] and owns
+/// draining it (natively: spawn a flusher thread; a poll-driven platform can stash
+/// the rx and drain it from its own loop). A second install is a wiring bug and is
+/// refused loudly.
+pub fn install_sink(sink: impl Fn(SnapshotRx) + Send + Sync + 'static) {
+    if SINK.set(Box::new(sink)).is_err() {
+        tracing::error!("frametime sink installed twice — keeping the first");
+    }
+}
 
 /// The render-thread half: owns the fixed buckets, pushes a snapshot every
-/// [`FLUSH_EVERY_SECS`] of accumulated frame time. Create once via [`spawn`].
+/// [`FLUSH_EVERY_SECS`] of accumulated frame time. Create once via [`start`].
 pub struct FrameTelemetry {
     counts: Snapshot,
     seconds: f32,
@@ -80,17 +110,15 @@ impl FrameTelemetry {
     }
 }
 
-/// Build the recorder and start the flusher thread. The flusher replays snapshots into
-/// an SDK histogram from [`crate::meter`]; with telemetry disabled that meter is the
-/// global no-op, so the thread idles at ~2 wakeups/s and the recorder still costs the
-/// frame path nothing.
-pub fn spawn() -> FrameTelemetry {
+/// Build the recorder and hand its queue to the installed sink. With no sink
+/// installed (a surface that never armed telemetry export) the bounded queue sheds
+/// snapshots and the recorder still costs the frame path nothing.
+pub fn start() -> FrameTelemetry {
     let queue = Arc::new(ArrayQueue::new(QUEUE_DEPTH));
-    let flusher_queue = Arc::clone(&queue);
-    std::thread::Builder::new()
-        .name("otel-frametime".into())
-        .spawn(move || flusher(flusher_queue))
-        .expect("spawning otel-frametime flusher");
+    match SINK.get() {
+        Some(sink) => sink(SnapshotRx(Arc::clone(&queue))),
+        None => tracing::debug!("no frametime sink installed — frame histograms drop"),
+    }
     FrameTelemetry {
         counts: [0; BUCKETS],
         seconds: 0.0,
@@ -98,40 +126,24 @@ pub fn spawn() -> FrameTelemetry {
     }
 }
 
-fn flusher(queue: Arc<ArrayQueue<Snapshot>>) {
-    let histogram = crate::meter()
-        .f64_histogram("rl.frame_time_ms")
-        .with_unit("ms")
-        .with_boundaries(boundaries_ms())
-        .build();
-    loop {
-        std::thread::sleep(Duration::from_millis(500));
-        while let Some(counts) = queue.pop() {
-            for (i, &c) in counts.iter().enumerate() {
-                let mid = midpoint_ms(i);
-                for _ in 0..c {
-                    histogram.record(mid, &[]);
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The SDK buckets a value into the first bucket whose upper bound is >= it
-    /// (last bucket open-ended). The replay midpoints must round-trip: SDK bucket
-    /// of midpoint(i) == i, and our own frame-path index agrees.
+    /// An OTLP-style sink buckets a value into the first bucket whose upper bound is
+    /// >= it (last bucket open-ended). The replay midpoints must round-trip: sink
+    /// bucket of midpoint(i) == i, and our own frame-path index agrees.
     #[test]
     fn midpoints_rebucket_to_their_own_bucket() {
         let bounds = boundaries_ms();
         assert_eq!(bounds.len(), BUCKETS - 1);
         for i in 0..BUCKETS {
             let mid = midpoint_ms(i);
-            let sdk_bucket = bounds.iter().position(|b| mid <= *b).unwrap_or(BUCKETS - 1);
-            assert_eq!(sdk_bucket, i, "SDK would misfile midpoint of bucket {i}");
+            let sink_bucket = bounds.iter().position(|b| mid <= *b).unwrap_or(BUCKETS - 1);
+            assert_eq!(
+                sink_bucket, i,
+                "a sink would misfile midpoint of bucket {i}"
+            );
             assert_eq!(bucket_index(mid), i, "frame-path index disagrees at {i}");
         }
     }

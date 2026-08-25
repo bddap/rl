@@ -12,7 +12,7 @@
 
 fn main() {
     let _otel = otel::init("frametime-smoke", otel::OtelArgs { enabled: true });
-    let mut telemetry = otel::frametime::spawn();
+    let mut telemetry = frametime::start();
     // Three seconds of 80 fps with a couple of 100 ms hitches per second.
     for _ in 0..3 {
         for _ in 0..118 {

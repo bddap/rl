@@ -1,6 +1,6 @@
 use std::env;
 
-pub mod frametime;
+mod frametime_sink;
 
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::Resource;
@@ -67,6 +67,9 @@ pub struct OtelArgs {
 }
 
 pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
+    // Arm the frametime sink on every path: with export off the flusher replays into
+    // the no-op global meter, exactly as before the recorder/sink split (rl#411).
+    frametime_sink::install();
     // `log`-crate records (wgpu_hal, rapier, …) reach this subscriber via
     // tracing-subscriber's default `tracing-log` feature: every `.init()` below installs
     // the LogTracer bridge itself. Do NOT also call `tracing_log::LogTracer::init()` here —

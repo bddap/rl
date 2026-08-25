@@ -21,9 +21,9 @@ opentelemetry-otlp = { version = "0.28", default-features = false, features = [
 ] }
 opentelemetry-appender-tracing = "0.28"
 tracing = { workspace = true }
-# Lock-free bounded queue for the frame-time snapshot hop (frametime.rs) — already in
-# the tree transitively.
-crossbeam-queue = "0.3"
+# The portable recorder half of frame-time telemetry; this crate provides its native
+# OTLP sink (frametime_sink.rs).
+frametime = { path = "../frametime" }
 # tracing-subscriber's default `tracing-log` feature installs the `log`->tracing bridge
 # (wgpu_hal, rapier, …) inside `.init()`, so no direct tracing-log dep here — a pre-set
 # LogTracer makes `.init()` panic (see init()).

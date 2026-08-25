@@ -9,6 +9,7 @@ members = [
     "game",
     "rl-update-ui",
     "otel",
+    "frametime",
     "meshfit",
     "test-watchdog",
 ]

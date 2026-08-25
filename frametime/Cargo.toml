@@ -1,0 +1,15 @@
+[package]
+name = "frametime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "frametime"
+path = "src/lib.rs"
+
+[dependencies]
+# Lock-free bounded queue for the frame-time snapshot hop — already in the tree
+# transitively.
+crossbeam-queue = "0.3"
+tracing = { workspace = true }

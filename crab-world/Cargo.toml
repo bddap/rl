@@ -9,7 +9,7 @@ name = "crab_world"
 path = "src/lib.rs"
 
 [features]
-render = ["bevy/default", "bevy_rapier3d/default", "dep:otel"]
+render = ["bevy/default", "bevy_rapier3d/default", "dep:frametime"]
 
 wgpu = ["burn/wgpu"]
 
@@ -39,8 +39,9 @@ bincode.workspace = true
 libc.workspace = true
 rayon.workspace = true
 tracing.workspace = true
-# Frame-time telemetry (frame_telemetry.rs) — rendered surfaces only.
-otel = { path = "../otel", optional = true }
+# Frame-time telemetry recorder (frame_telemetry.rs) — rendered surfaces only. The
+# exporter half stays out of this crate: binaries arm it via otel::init (rl#411).
+frametime = { path = "../frametime", optional = true }
 
 [[example]]
 name = "perf_collapse_smoke"
@@ -48,6 +49,9 @@ required-features = ["render"]
 
 [dev-dependencies]
 test-watchdog = { path = "../test-watchdog" }
+# Tests pin the tracing-target constants to otel's; the perf_collapse_smoke example
+# arms real export.
+otel = { path = "../otel" }
 # The runtime never parses the glb (colliders come from the baked table, bddap/rl#20);
 # only the skin-weight audit tests still read it directly.
 gltf.workspace = true
