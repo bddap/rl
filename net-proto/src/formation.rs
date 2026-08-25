@@ -25,31 +25,27 @@ pub struct Frozen {
 }
 
 pub struct FormationCore {
-    me: EndpointId,
-    expect: usize,
     m: Membership,
     early: Vec<(EndpointId, TickMsg)>,
-    /// Whether we've EVER received a direct beat from any peer this formation — gates
-    /// the solo fallback ([`is_alone_now`]).
-    ever_heard_peer: bool,
-    last_live: usize,
     last_roster: Vec<EndpointId>,
-    last_beat_ms: Option<u64>,
+    /// The epoch-aligned deadline for the next beat. A deadline (not a
+    /// last-beat-plus-interval gap) so a poller's ms-level jitter can never skip a
+    /// beat slot and silently halve the protocol rate.
+    next_beat_ms: u64,
     /// `None` in lobby (host-triggered) mode, where the solo fallbacks never fire.
     alone_deadline_ms: Option<u64>,
 }
 
 /// What one [`FormationCore::step`] asks the driver to do, in field order: broadcast
-/// `beat`, surface the roster/live changes, then act on `outcome` — so the agreeing
+/// `beat`, surface the roster change, then act on `outcome` — so the agreeing
 /// step still broadcasts its final beat first, exactly like the old loop.
 pub struct Step {
     /// Broadcast to all peers when `Some` — the core owns the [`BEAT_EVERY_MS`] cadence,
     /// so an over-eager driver (a 60Hz frame loop) still beats at the protocol rate.
     pub beat: Option<Beat>,
-    /// The live roster, when it changed this step (feeds the lobby UI).
+    /// The live roster, when it changed this step (feeds the lobby UI and the
+    /// forming-progress print/telemetry).
     pub roster_changed: Option<Vec<EndpointId>>,
-    /// The live count, when it changed this step (feeds progress prints/telemetry).
-    pub live_changed: Option<usize>,
     pub outcome: Option<Outcome>,
 }
 
@@ -65,8 +61,6 @@ pub enum Outcome {
 pub struct Agreement {
     pub roster: Vec<EndpointId>,
     pub early: Vec<(EndpointId, TickMsg)>,
-    /// ms since the core's epoch (the driver anchors it at formation start).
-    pub elapsed_ms: u64,
     /// [`Membership::sync_verdict`] sampled at the close instant.
     pub sync: SyncVerdict,
 }
@@ -82,10 +76,9 @@ impl FormationCore {
         now_ms: u64,
     ) -> Self {
         Self::build(
-            me,
-            expect,
             Membership::new(me, expect, now_ms).with_stamp(stamp),
             Some(now_ms + discover_secs.max(1) * 1000),
+            now_ms,
         )
     }
 
@@ -99,23 +92,18 @@ impl FormationCore {
         now_ms: u64,
     ) -> Self {
         Self::build(
-            me,
-            expect,
             Membership::host_triggered(role, me, expect, now_ms).with_stamp(stamp),
             None,
+            now_ms,
         )
     }
 
-    fn build(me: EndpointId, expect: usize, m: Membership, alone_deadline_ms: Option<u64>) -> Self {
+    fn build(m: Membership, alone_deadline_ms: Option<u64>, now_ms: u64) -> Self {
         Self {
-            me,
-            expect,
             m,
             early: Vec::new(),
-            ever_heard_peer: false,
-            last_live: 0,
             last_roster: Vec::new(),
-            last_beat_ms: None,
+            next_beat_ms: now_ms,
             alone_deadline_ms,
         }
     }
@@ -125,9 +113,6 @@ impl FormationCore {
     }
 
     pub fn on_beat(&mut self, from: EndpointId, beat: &Beat, now_ms: u64) {
-        if from != self.me {
-            self.ever_heard_peer = true;
-        }
         self.m.on_beat(from, beat, now_ms);
     }
 
@@ -139,52 +124,55 @@ impl FormationCore {
 
     pub fn step(&mut self, now_ms: u64) -> Step {
         let status = self.m.poll(now_ms);
-        let beat = self
-            .last_beat_ms
-            .is_none_or(|t| now_ms.saturating_sub(t) >= BEAT_EVERY_MS)
-            .then(|| {
-                self.last_beat_ms = Some(now_ms);
-                self.m.beat()
-            });
+        let outcome = match status {
+            Status::Agreed { roster } => Some(Outcome::Agreed(Agreement {
+                roster,
+                early: std::mem::take(&mut self.early),
+                sync: self.m.sync_verdict(),
+            })),
+            Status::Failed => Some(
+                if self.alone_deadline_ms.is_some()
+                    && is_alone_at_timeout(self.m.expect(), self.m.live_set().len())
+                {
+                    Outcome::Alone
+                } else {
+                    Outcome::Failed
+                },
+            ),
+            Status::Forming { live } => self
+                .alone_deadline_ms
+                .is_some_and(|deadline| {
+                    is_alone_now(
+                        self.m.expect(),
+                        live,
+                        self.m.ever_heard_direct(),
+                        now_ms >= deadline,
+                    )
+                })
+                .then_some(Outcome::Alone),
+        };
+        // Beat when the schedule says so — and unconditionally on a terminal step, so
+        // the closing beat (the host's GO in lobby mode) always goes out, exactly like
+        // the old every-tick loop.
+        let due = now_ms >= self.next_beat_ms;
+        let beat = (due || outcome.is_some()).then(|| {
+            if due {
+                self.next_beat_ms += BEAT_EVERY_MS;
+                if self.next_beat_ms <= now_ms {
+                    // A stalled poller resumes the cadence without a beat burst.
+                    self.next_beat_ms = now_ms + BEAT_EVERY_MS;
+                }
+            }
+            self.m.beat()
+        });
         let roster = self.m.live_set();
         let roster_changed = (roster != self.last_roster).then(|| {
             self.last_roster = roster.clone();
             roster
         });
-
-        let mut live_changed = None;
-        let outcome = match status {
-            Status::Agreed { roster } => Some(Outcome::Agreed(Agreement {
-                roster,
-                early: std::mem::take(&mut self.early),
-                elapsed_ms: now_ms,
-                sync: self.m.sync_verdict(),
-            })),
-            Status::Failed => {
-                if self.alone_deadline_ms.is_some()
-                    && is_alone_at_timeout(self.expect, self.m.live_set().len())
-                {
-                    Some(Outcome::Alone)
-                } else {
-                    Some(Outcome::Failed)
-                }
-            }
-            Status::Forming { live } => {
-                if live != self.last_live {
-                    self.last_live = live;
-                    live_changed = Some(live);
-                }
-                self.alone_deadline_ms
-                    .is_some_and(|deadline| {
-                        is_alone_now(self.expect, live, self.ever_heard_peer, now_ms >= deadline)
-                    })
-                    .then_some(Outcome::Alone)
-            }
-        };
         Step {
             beat,
             roster_changed,
-            live_changed,
             outcome,
         }
     }
@@ -339,6 +327,43 @@ mod tests {
     }
 
     #[test]
+    fn jittered_ticks_never_skip_a_beat_slot() {
+        // A driver ticking at ~BEAT_EVERY_MS whose ms readings jitter late (252) then
+        // land on time (500): a gap-based check would see 500-252 < 250 and skip,
+        // halving the real beat rate; the epoch-aligned deadline must not.
+        let mut c = FormationCore::new(eid(1), 2, 30, SyncStamp::ZERO, 0);
+        for t in [0, BEAT_EVERY_MS + 2, 2 * BEAT_EVERY_MS] {
+            assert!(
+                c.step(t).beat.is_some(),
+                "beat due at every ~250ms tick (t={t})"
+            );
+        }
+    }
+
+    #[test]
+    fn agreeing_step_always_beats_so_the_hosts_go_reaches_joiners() {
+        // The closing beat carries the host's start=true GO in lobby mode; if the
+        // terminal step could fall between beat deadlines and stay silent, a joiner
+        // would never see the GO and lobby forever.
+        let mut c = FormationCore::new(eid(1), 1, 1, SyncStamp::ZERO, 0);
+        assert!(c.step(0).beat.is_some());
+        let s = c.step(1400);
+        assert!(
+            s.beat.is_some() && s.outcome.is_none(),
+            "still forming at 1400"
+        );
+        let s = c.step(1520); // between deadlines (next is 1650) AND past STABLE_FOR
+        assert!(
+            matches!(s.outcome, Some(Outcome::Agreed(_))),
+            "stability window closed"
+        );
+        assert!(
+            s.beat.is_some(),
+            "the terminal step must beat regardless of cadence"
+        );
+    }
+
+    #[test]
     fn lone_core_with_expect_one_agrees_on_itself() {
         let me = eid(1);
         let mut c = FormationCore::new(me, 1, 1, SyncStamp::ZERO, 0);
@@ -347,7 +372,6 @@ mod tests {
             match c.step(t).outcome {
                 Some(Outcome::Agreed(a)) => {
                     assert_eq!(a.roster, vec![me]);
-                    assert_eq!(a.elapsed_ms, t);
                     break;
                 }
                 Some(_) => panic!("expect==1 must agree on itself, never solo/fail"),

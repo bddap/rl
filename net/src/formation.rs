@@ -43,6 +43,7 @@ pub async fn form_match(
         "forming match on the LAN (need {expect} player(s), solo if alone after {discover_secs}s)…"
     );
 
+    let formed_at = Instant::now();
     let agreement = match run_barrier(
         session,
         my_eid,
@@ -77,7 +78,7 @@ pub async fn form_match(
     println!(
         "match formed: {} participant(s), barrier agreed in {:.1}s",
         id_map.len(),
-        Duration::from_millis(agreement.elapsed_ms).as_secs_f64()
+        formed_at.elapsed().as_secs_f64()
     );
     if let Some(t) = telemetry {
         t.send(TelemetryEvent::RosterAgreed {
@@ -193,10 +194,11 @@ async fn run_barrier(
         if let Some(beat) = &step.beat {
             session.broadcast(beat).await;
         }
-        if let (Some(c), Some(roster)) = (lobby, step.roster_changed) {
-            let _ = c.roster_tx.send(roster);
-        }
-        if let Some(live) = step.live_changed {
+        if let Some(roster) = step.roster_changed {
+            let live = roster.len();
+            if let Some(c) = lobby {
+                let _ = c.roster_tx.send(roster);
+            }
             println!("forming: {live}/{expect} player(s) live, waiting for agreement…");
             if let Some(t) = telemetry {
                 t.send(TelemetryEvent::RosterForming { live, expect });

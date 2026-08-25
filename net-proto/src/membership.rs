@@ -82,6 +82,10 @@ pub struct Membership {
     /// stale roster: a GO seen while our sets disagreed does not close us, and a set change
     /// after a GO re-gates on the new hash. The joiner's sole close trigger in the lobby.
     host_go_on_my_roster: bool,
+    /// Whether ANY direct beat from a peer has ever arrived — unlike `peers`, this
+    /// survives expiry, so it distinguishes "never saw anyone" from "saw someone and
+    /// lost them". Gates the formation solo fallback.
+    heard_direct: bool,
     local: crate::SyncStamp,
 }
 
@@ -129,6 +133,7 @@ impl Membership {
             started: now_ms,
             lobby: LobbyMode::Off,
             host_go_on_my_roster: false,
+            heard_direct: false,
             local: crate::SyncStamp::ZERO,
         }
     }
@@ -165,8 +170,17 @@ impl Membership {
         self.peers.len() + 1 < MAX_MEMBERS
     }
 
+    pub fn expect(&self) -> usize {
+        self.expect
+    }
+
+    pub fn ever_heard_direct(&self) -> bool {
+        self.heard_direct
+    }
+
     pub fn on_beat(&mut self, from: EndpointId, beat: &Beat, now_ms: u64) {
         if from != self.me {
+            self.heard_direct = true;
             self.tombstones.remove(&from);
             if self.peers.contains_key(&from) || self.has_room_for_one_more() {
                 let view = self.peers.entry(from).or_insert(PeerView {
