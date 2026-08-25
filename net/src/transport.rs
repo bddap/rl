@@ -56,7 +56,16 @@ pub async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
         .context("endpoint has no address lookup registry")?
         .add(mdns.clone());
 
-    publish_lan_addr(&endpoint, SERVICE_NAME).await?;
+    // Publish our LAN address once a direct addr exists — in the background, so "is
+    // networking up?" is a discovery property, never a boot gate (rl#411 stage 2): a
+    // session binds instantly and solo play needs no network at all. Peers can't
+    // mDNS-find us until this lands, which is exactly discovery's own timeline.
+    let ep = endpoint.clone();
+    tokio::spawn(async move {
+        if let Err(e) = publish_lan_addr(&ep, SERVICE_NAME).await {
+            tracing::warn!("LAN address publish failed (undiscoverable until retry): {e:#}");
+        }
+    });
     Ok((endpoint, mdns))
 }
 
@@ -112,7 +121,14 @@ const ACCEPT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
-type Links = Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>;
+// A std (not tokio) mutex: every critical section is a plain map touch with no await
+// inside, and the sync lock is what lets the whole send/poll surface below be called
+// straight from the frame loop — no runtime, no block_on (rl#411 stage 2).
+type Links = Arc<std::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>;
+
+fn locked(links: &Links) -> std::sync::MutexGuard<'_, BTreeMap<EndpointId, PeerLink>> {
+    links.lock().expect("links critical sections don't panic")
+}
 
 #[derive(Clone, Debug)]
 struct PeerLink {
@@ -148,8 +164,8 @@ impl Session {
         self.endpoint.id()
     }
 
-    pub async fn connected_peers(&self) -> Vec<EndpointId> {
-        self.links.lock().await.keys().copied().collect()
+    pub fn connected_peers(&self) -> Vec<EndpointId> {
+        locked(&self.links).keys().copied().collect()
     }
 
     pub fn local_addr(&self) -> iroh::EndpointAddr {
@@ -160,8 +176,8 @@ impl Session {
     /// reclaim a [`MAX_LINKS`] slot from a connected-but-never-rostered endpoint (rl#350);
     /// the link's tasks end on the closed connection, and their own `drop_if_same` cleanup
     /// is a no-op on the already-removed entry.
-    pub async fn disconnect(&self, peer: EndpointId) {
-        let link = self.links.lock().await.remove(&peer);
+    pub fn disconnect(&self, peer: EndpointId) {
+        let link = locked(&self.links).remove(&peer);
         if let Some(link) = link {
             link.conn.close(0u32.into(), b"disconnected by peer");
         }
@@ -183,7 +199,7 @@ impl Session {
         .await
     }
 
-    pub async fn send<M: Codec>(&self, peer: EndpointId, msg: &M) {
+    pub fn send<M: Codec>(&self, peer: EndpointId, msg: &M) {
         const {
             assert!(
                 !M::KIND.via_datagram(),
@@ -191,10 +207,10 @@ impl Session {
             )
         }
         let bytes = msg.encode();
-        self.send_frame(peer, M::KIND, bytes.as_ref().into()).await;
+        self.send_frame(peer, M::KIND, bytes.as_ref().into());
     }
 
-    pub async fn broadcast<M: Codec>(&self, msg: &M) {
+    pub fn broadcast<M: Codec>(&self, msg: &M) {
         const {
             assert!(
                 !M::KIND.via_datagram(),
@@ -202,14 +218,14 @@ impl Session {
             )
         }
         let bytes = msg.encode();
-        self.broadcast_frame(M::KIND, bytes.as_ref().into()).await;
+        self.broadcast_frame(M::KIND, bytes.as_ref().into());
     }
 
     /// Broadcast a state frame over unreliable unordered datagrams — fire-and-forget: no
     /// retransmit, no ordering, no writer queue to wedge. Under congestion the QUIC buffer
     /// drops the OLDEST buffered datagram first, which for full-state frames is exactly
     /// right (stale state is worthless).
-    pub async fn broadcast_state<M: StateCodec>(&self, msg: &M) {
+    pub fn broadcast_state<M: StateCodec>(&self, msg: &M) {
         const {
             assert!(
                 M::KIND.via_datagram(),
@@ -239,7 +255,7 @@ impl Session {
             .into_iter()
             .map(bytes::Bytes::from)
             .collect();
-        let links = self.links.lock().await;
+        let links = locked(&self.links);
         for link in links.values() {
             for frag in &frags {
                 send_state_datagram(&link.conn, frag.clone());
@@ -247,9 +263,9 @@ impl Session {
         }
     }
 
-    async fn send_frame(&self, peer: EndpointId, kind: Frame, body: Arc<[u8]>) {
+    fn send_frame(&self, peer: EndpointId, kind: Frame, body: Arc<[u8]>) {
         let wedged = {
-            let links = self.links.lock().await;
+            let links = locked(&self.links);
             let Some(link) = links.get(&peer) else { return };
             match link.send.try_send(OutFrame { kind, body }) {
                 Err(mpsc::error::TrySendError::Full(_)) => Some(Arc::downgrade(&link.send)),
@@ -258,14 +274,14 @@ impl Session {
         };
         if let Some(link_id) = wedged {
             tracing::warn!(%peer, ?kind, "peer outbound queue full (not draining) — dropping link");
-            drop_if_same(&self.links, peer, &link_id).await;
+            drop_if_same(&self.links, peer, &link_id);
         }
     }
 
-    async fn broadcast_frame(&self, kind: Frame, body: Arc<[u8]>) {
+    fn broadcast_frame(&self, kind: Frame, body: Arc<[u8]>) {
         let mut wedged: Vec<(EndpointId, LinkId)> = Vec::new();
         {
-            let links = self.links.lock().await;
+            let links = locked(&self.links);
             for (id, link) in links.iter() {
                 if let Err(mpsc::error::TrySendError::Full(_)) = link.send.try_send(OutFrame {
                     kind,
@@ -277,7 +293,7 @@ impl Session {
         }
         for (id, link_id) in wedged {
             tracing::warn!(%id, "peer outbound queue full (not draining) — dropping link");
-            drop_if_same(&self.links, id, &link_id).await;
+            drop_if_same(&self.links, id, &link_id);
         }
     }
 
@@ -299,7 +315,7 @@ pub async fn start_session() -> Result<Session> {
     let my_id = endpoint.id();
 
     let (inbox_tx, inbox_rx) = mpsc::channel(256);
-    let links: Links = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
+    let links: Links = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
 
     let handler = GameProto {
         my_id,
@@ -327,7 +343,7 @@ pub async fn start_session() -> Result<Session> {
                     if my_id.as_bytes() >= peer.as_bytes() {
                         continue;
                     }
-                    if links.lock().await.contains_key(&peer) {
+                    if locked(&links).contains_key(&peer) {
                         continue;
                     }
                     match endpoint.connect(peer, ALPN).await {
@@ -440,7 +456,7 @@ async fn wire_connection(
     let tx = Arc::new(tx);
     let link_id: LinkId = Arc::downgrade(&tx);
     {
-        let mut links = links.lock().await;
+        let mut links = locked(&links);
         // Inbound capacity gate (rl#350), under the lock so it can't race past the cap. A
         // known peer's re-dial replaces its link rather than adding one, so it always passes.
         if !dialed_by_me && links.len() >= MAX_LINKS && !links.contains_key(&peer) {
@@ -491,7 +507,7 @@ async fn wire_connection(
                 }
             }
         }
-        drop_if_same(&links_for_writer, peer, &writer_id).await;
+        drop_if_same(&links_for_writer, peer, &writer_id);
     });
 
     let links_for_reader = links.clone();
@@ -505,7 +521,7 @@ async fn wire_connection(
         if let Err(e) = read_loop(recv, peer, reader_inbox).await {
             tracing::warn!(%peer, "peer read loop ended on a protocol violation: {e:#}");
         }
-        drop_if_same(&links_for_reader, peer, &reader_id).await;
+        drop_if_same(&links_for_reader, peer, &reader_id);
     });
 
     let links_for_dgram = links.clone();
@@ -517,7 +533,7 @@ async fn wire_connection(
         if let Err(e) = datagram_loop(conn, peer, inbox).await {
             tracing::warn!(%peer, "peer datagram loop ended on a protocol violation: {e:#}");
         }
-        drop_if_same(&links_for_dgram, peer, &link_id).await;
+        drop_if_same(&links_for_dgram, peer, &link_id);
     });
     Ok(())
 }
@@ -576,8 +592,8 @@ async fn read_loop(
     }
 }
 
-async fn drop_if_same(links: &Links, id: EndpointId, failed: &LinkId) {
-    let mut links = links.lock().await;
+fn drop_if_same(links: &Links, id: EndpointId, failed: &LinkId) {
+    let mut links = locked(links);
     if links
         .get(&id)
         .is_some_and(|l| std::sync::Weak::ptr_eq(&Arc::downgrade(&l.send), failed))

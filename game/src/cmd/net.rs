@@ -157,13 +157,13 @@ async fn run_net(args: Args) -> Result<()> {
             // (`depart_gone_peers`): a rostered peer whose link is gone left the match; drop its
             // stream + roster entry (nothing ever waits on it). This harness sends no refusals,
             // so the returned departed endpoints go unused.
-            let connected = session.connected_peers().await;
+            let connected = session.connected_peers();
             let _ = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected, tel.as_ref());
             srv.advance(msg);
             for stepped in host_world.step_ready_ticks(srv) {
                 let snap = net::snapshot::CoreSnapshot::from_bytes(&stepped.snapshot)
                     .expect("the authoritative server's snapshot must decode");
-                session.broadcast_state(&snap).await;
+                session.broadcast_state(&snap);
                 snapshots_io += 1;
                 client.apply_core_snapshot(snap);
                 if let Some(w) = hash_log.as_mut() {
@@ -179,7 +179,7 @@ async fn run_net(args: Args) -> Result<()> {
             // Chronic input-starvation surface (rl#213) — the one shared drain policy.
             net::telemetry::surface_starvation(Some(srv), tel.as_ref());
         } else {
-            session.send(server_eid, &msg).await;
+            session.send(server_eid, &msg);
             // The adopt callback can't `?`; collect the per-adopt observations and write them after,
             // where the error propagates through normal control flow.
             let mut adopted_hashes: Vec<(u64, u64)> = Vec::new();
@@ -198,7 +198,7 @@ async fn run_net(args: Args) -> Result<()> {
                     writeln!(w, "{line}").context("writing hash log")?;
                 }
             }
-            if server_down.is_none() && !session.connected_peers().await.contains(&server_eid) {
+            if server_down.is_none() && !session.connected_peers().contains(&server_eid) {
                 server_down = Some(net_loop::ServerDown::LinkLost);
             }
         }
@@ -213,7 +213,7 @@ async fn run_net(args: Args) -> Result<()> {
             info!(
                 "tick={:>5} peers={} statehash={:#018x}",
                 client.sim().tick(),
-                session.connected_peers().await.len(),
+                session.connected_peers().len(),
                 client.sim().state_hash(),
             );
         }

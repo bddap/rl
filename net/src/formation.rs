@@ -179,9 +179,7 @@ async fn run_barrier(
                         "refusing mid-formation join from {}: still forming",
                         from.from.fmt_short()
                     );
-                    session
-                        .send(from.from, &crate::server::Refusal::Forming)
-                        .await;
+                    session.send(from.from, &crate::server::Refusal::Forming);
                 }
                 PeerWire::Snapshot(_)
                 | PeerWire::Articulation(_)
@@ -192,7 +190,7 @@ async fn run_barrier(
 
         let step = core.step(now_ms);
         if let Some(beat) = &step.beat {
-            session.broadcast(beat).await;
+            session.broadcast(beat);
         }
         if let Some(roster) = step.roster_changed {
             let live = roster.len();

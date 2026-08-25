@@ -161,7 +161,7 @@ impl NetDriver {
     }
 
     fn refuse(&self, eid: EndpointId, verdict: Refusal) {
-        self.rt.block_on(self.session.send(eid, &verdict));
+        self.session.send(eid, &verdict);
     }
 
     /// (Host) One tick's whole inbound pump: drain every queued frame, filing rostered
@@ -213,12 +213,12 @@ impl NetDriver {
                 // QUIC close is not attacker-directed outbound work the way a refusal
                 // frame would be. A rate-limited legitimate joiner sees "unreachable"
                 // and retries.
-                self.rt.block_on(self.session.disconnect(eid));
+                self.session.disconnect(eid);
                 continue;
             }
             self.admit_joiner(server, eid, req);
         }
-        let connected = self.rt.block_on(self.session.connected_peers());
+        let connected = self.session.connected_peers();
         let gone = depart_gone_peers(
             server,
             &mut self.id_map,
@@ -253,7 +253,7 @@ impl NetDriver {
                     "closing link to {} — connected {UNROSTERED_GRACE:?} without joining",
                     eid.fmt_short()
                 );
-                self.rt.block_on(self.session.disconnect(eid));
+                self.session.disconnect(eid);
                 self.unrostered_since.remove(&eid);
             }
         }
@@ -266,7 +266,7 @@ impl NetDriver {
             Ok(()) => {
                 let adm = server.admit(self.stamp);
                 self.id_map.insert(eid, adm.pid);
-                self.rt.block_on(self.session.send(eid, &adm));
+                self.session.send(eid, &adm);
                 tracing::info!(
                     "admitted joiner {} as {:?}, roster change effective at tick {}",
                     eid.fmt_short(),
@@ -300,7 +300,7 @@ impl NetDriver {
     /// (snapshots + render articulation — see the module doc: adopted, never re-stepped),
     /// and fail loudly the tick the host link dies or refuses us.
     fn exchange_client(&mut self, msg: &TickMsg) -> Result<Exchanged, ServerDown> {
-        self.rt.block_on(self.session.send(self.server_eid, msg));
+        self.session.send(self.server_eid, msg);
         let mut down = Exchanged::default();
         while let Some(from) = self.session.try_recv() {
             match from.msg {
@@ -328,7 +328,7 @@ impl NetDriver {
                 | PeerWire::Welcome(_) => {}
             }
         }
-        let connected = self.rt.block_on(self.session.connected_peers());
+        let connected = self.session.connected_peers();
         if !connected.contains(&self.server_eid) {
             return Err(ServerDown::LinkLost);
         }
@@ -339,12 +339,10 @@ impl NetDriver {
     /// [`CrabArticulation`]) DOWN to every client. Non-blocking: fire-and-forget datagrams
     /// (rl#259), so a dead peer can never hold this (main-thread) call.
     fn broadcast_step(&self, snapshot: &CoreSnapshot, articulation: Option<&CrabArticulation>) {
-        self.rt.block_on(async {
-            self.session.broadcast_state(snapshot).await;
-            if let Some(art) = articulation {
-                self.session.broadcast_state(art).await;
-            }
-        });
+        self.session.broadcast_state(snapshot);
+        if let Some(art) = articulation {
+            self.session.broadcast_state(art);
+        }
     }
 }
 
@@ -700,7 +698,7 @@ pub fn connect_and_join(
             }
         }
         let telemetry = connect_telemetry(collector, my_eid).await;
-        session.send(host, &JoinRequest { stamp }).await;
+        session.send(host, &JoinRequest { stamp });
         let verdict = await_admission(&mut session, host).await;
         anyhow::Ok((session, verdict, telemetry))
     })?;
