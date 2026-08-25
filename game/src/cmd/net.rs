@@ -163,7 +163,7 @@ async fn run_net(args: Args) -> Result<()> {
             for stepped in host_world.step_ready_ticks(srv) {
                 let snap = net::snapshot::CoreSnapshot::from_bytes(&stepped.snapshot)
                     .expect("the authoritative server's snapshot must decode");
-                session.broadcast_snapshot(&snap).await;
+                session.broadcast_state(&snap).await;
                 snapshots_io += 1;
                 client.apply_core_snapshot(snap);
                 if let Some(w) = hash_log.as_mut() {
@@ -179,7 +179,7 @@ async fn run_net(args: Args) -> Result<()> {
             // Chronic input-starvation surface (rl#213) — the one shared drain policy.
             net::telemetry::surface_starvation(Some(srv), tel.as_ref());
         } else {
-            session.send_to(server_eid, &msg).await;
+            session.send(server_eid, &msg).await;
             // The adopt callback can't `?`; collect the per-adopt observations and write them after,
             // where the error propagates through normal control flow.
             let mut adopted_hashes: Vec<(u64, u64)> = Vec::new();

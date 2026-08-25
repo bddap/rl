@@ -10,6 +10,7 @@ test_watchdog::arm!();
 pub mod articulation;
 pub mod cadence;
 pub mod client;
+pub mod codec;
 pub mod cordic;
 pub mod formation;
 pub mod membership;
