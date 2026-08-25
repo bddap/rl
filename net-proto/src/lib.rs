@@ -11,6 +11,7 @@ pub mod articulation;
 pub mod cadence;
 pub mod client;
 pub mod cordic;
+pub mod formation;
 pub mod membership;
 pub mod roster;
 pub mod server;

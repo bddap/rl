@@ -1,14 +1,19 @@
-use std::collections::BTreeMap;
+//! The native async driver around the platform-free formation core
+//! ([`net_proto::formation::FormationCore`], rl#411 stage 2): transport I/O, lobby
+//! channel plumbing, cancellation, and user-facing prints live here; every protocol
+//! decision — beats, timeouts, agreement, the solo fallbacks — is the core's.
+
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use iroh::EndpointId;
 
-use crate::client::{ClientSim, PeerMsg, TickMsg};
-use crate::membership::{BEAT_EVERY_MS, Membership, Role, Status};
-use crate::sim::PlayerId;
+use crate::membership::{BEAT_EVERY_MS, Role};
 use crate::telemetry::{self, TelemetryEvent, TelemetrySender};
-use crate::transport::{self, PeerWire, Session};
+use crate::transport::{self, PeerWire};
+
+use net_proto::formation::{FormationCore, Outcome};
+pub use net_proto::formation::{Frozen, assign_player_ids, early_peer_msgs, solo_client_for};
 
 pub struct LobbyControl {
     pub role: Role,
@@ -17,17 +22,10 @@ pub struct LobbyControl {
     pub roster_tx: std::sync::mpsc::Sender<Vec<EndpointId>>,
 }
 
-pub struct Frozen {
-    pub id_map: BTreeMap<EndpointId, PlayerId>,
-    pub me: PlayerId,
-    pub early: Vec<(EndpointId, TickMsg)>,
-    pub sync: crate::SyncVerdict,
-}
-
 pub enum Formation {
     Agreed(Frozen),
     /// Formation ended with only us live — play solo. Fires only in the genuinely-alone
-    /// case: see [`is_alone_now`] / [`is_alone_at_timeout`].
+    /// case: see the core's `is_alone_now` / `is_alone_at_timeout`.
     Alone,
     Cancelled,
 }
@@ -45,7 +43,7 @@ pub async fn form_match(
         "forming match on the LAN (need {expect} player(s), solo if alone after {discover_secs}s)…"
     );
 
-    let outcome = match run_barrier(
+    let agreement = match run_barrier(
         session,
         my_eid,
         discover_secs,
@@ -56,7 +54,7 @@ pub async fn form_match(
     )
     .await
     {
-        Ok(BarrierResult::Agreed(o)) => o,
+        Ok(BarrierResult::Agreed(a)) => a,
         Ok(BarrierResult::Alone) => {
             println!("no other peer found within {discover_secs}s — starting a solo round");
             return Ok(Formation::Alone);
@@ -74,22 +72,22 @@ pub async fn form_match(
             return Err(e);
         }
     };
-    let id_map = assign_player_ids(my_eid, &outcome.roster)?;
+    let id_map = assign_player_ids(my_eid, &agreement.roster)?;
     let me = id_map[&my_eid];
     println!(
         "match formed: {} participant(s), barrier agreed in {:.1}s",
         id_map.len(),
-        outcome.elapsed.as_secs_f64()
+        Duration::from_millis(agreement.elapsed_ms).as_secs_f64()
     );
     if let Some(t) = telemetry {
         t.send(TelemetryEvent::RosterAgreed {
-            members: telemetry::short_ids(&outcome.roster),
-            roster_hash: crate::membership::roster_hash(&outcome.roster),
+            members: telemetry::short_ids(&agreement.roster),
+            roster_hash: crate::membership::roster_hash(&agreement.roster),
             me: me.0,
         });
     }
     if stamp.body_digest() != 0 {
-        if !outcome.sync.body {
+        if !agreement.sync.body {
             tracing::warn!(
                 "GCR: crab BODY NOT synced across peers (a peer has a different sally.glb \
                  / no model / a different baked collider table or binary version — it \
@@ -105,7 +103,7 @@ pub async fn form_match(
         }
     }
     if stamp.plant_digest() != 0 {
-        if !outcome.sync.plant {
+        if !agreement.sync.plant {
             tracing::warn!(
                 "GCR: the PLANT is NOT synced across peers (a peer resolves a different arena, \
                  terrain bake, or joint-friction cap — its ground would disagree with the poses \
@@ -120,30 +118,24 @@ pub async fn form_match(
             );
         }
     }
+    let sync = agreement.sync;
+    let early = agreement.early;
     Ok(Formation::Agreed(Frozen {
         id_map,
         me,
-        early: outcome.early,
-        sync: outcome.sync,
+        early,
+        sync,
     }))
 }
 
-struct BarrierOutcome {
-    roster: Vec<EndpointId>,
-    early: Vec<(EndpointId, TickMsg)>,
-    elapsed: Duration,
-    /// [`Membership::sync_verdict`] sampled at the close instant.
-    sync: crate::SyncVerdict,
-}
-
 enum BarrierResult {
-    Agreed(BarrierOutcome),
+    Agreed(net_proto::formation::Agreement),
     Alone,
     Cancelled,
 }
 
 async fn run_barrier(
-    session: &mut Session,
+    session: &mut transport::Session,
     me: EndpointId,
     discover_secs: u64,
     expect: usize,
@@ -151,22 +143,13 @@ async fn run_barrier(
     lobby: Option<&LobbyControl>,
     stamp: crate::SyncStamp,
 ) -> Result<BarrierResult> {
-    // The membership core's clock is injected millis (platform-free); this driver
-    // anchors it here — `start.elapsed()` is the ms axis every core call reads.
+    // The core's clock is injected millis; this driver anchors the axis here.
     let start = Instant::now();
-    let mut m = match lobby {
-        Some(c) => Membership::host_triggered(c.role, me, expect, 0),
-        None => Membership::new(me, expect, 0),
-    }
-    .with_stamp(stamp);
-    let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
+    let mut core = match lobby {
+        Some(c) => FormationCore::host_triggered(c.role, me, expect, stamp, 0),
+        None => FormationCore::new(me, expect, discover_secs, stamp, 0),
+    };
     let mut ticker = tokio::time::interval(Duration::from_millis(BEAT_EVERY_MS));
-    let mut last_live = 0usize;
-    let mut last_roster: Vec<EndpointId> = Vec::new();
-    // Whether we've EVER received a direct beat from any peer this formation — gates the
-    // solo fallback ([`is_alone_now`]).
-    let mut ever_heard_peer = false;
-    let alone_deadline_ms = discover_secs.max(1) * 1000;
 
     loop {
         ticker.tick().await;
@@ -180,20 +163,14 @@ async fn run_barrier(
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
             if c.start_rx.try_recv().is_ok() {
-                m.set_starting();
+                core.set_starting();
             }
         }
 
         while let Some(from) = session.try_recv() {
             match from.msg {
-                PeerWire::Beat(beat) => {
-                    // A direct beat from a peer — latch it (gates the solo fallback).
-                    if from.from != me {
-                        ever_heard_peer = true;
-                    }
-                    m.on_beat(from.from, &beat, now_ms);
-                }
-                PeerWire::Tick(msg) => early.push((from.from, msg)),
+                PeerWire::Beat(beat) => core.on_beat(from.from, &beat, now_ms),
+                PeerWire::Tick(msg) => core.on_early_tick(from.from, msg),
                 // A dialer that catches us mid-formation would otherwise get silence and
                 // misdiagnose "host unreachable" (rl#245) — tell it we're busy instead.
                 PeerWire::JoinRequest(_) => {
@@ -212,141 +189,37 @@ async fn run_barrier(
             }
         }
 
-        let status = m.poll(now_ms);
-        session.broadcast(&m.beat()).await;
-
-        if let Some(c) = lobby {
-            let roster = m.live_set();
-            if roster != last_roster {
-                let _ = c.roster_tx.send(roster.clone());
-                last_roster = roster;
+        let step = core.step(now_ms);
+        if let Some(beat) = &step.beat {
+            session.broadcast(beat).await;
+        }
+        if let (Some(c), Some(roster)) = (lobby, step.roster_changed) {
+            let _ = c.roster_tx.send(roster);
+        }
+        if let Some(live) = step.live_changed {
+            println!("forming: {live}/{expect} player(s) live, waiting for agreement…");
+            if let Some(t) = telemetry {
+                t.send(TelemetryEvent::RosterForming { live, expect });
             }
         }
-
-        match status {
-            Status::Agreed { roster } => {
-                return Ok(BarrierResult::Agreed(BarrierOutcome {
-                    roster,
-                    early,
-                    elapsed: Duration::from_millis(now_ms),
-                    sync: m.sync_verdict(),
-                }));
-            }
-            Status::Failed => {
-                if lobby.is_none() && is_alone_at_timeout(expect, m.live_set().len()) {
-                    return Ok(BarrierResult::Alone);
-                }
-                anyhow::bail!(
-                    "match formation failed: peers never agreed on one roster within the join window \
-                     (too few players showed up, or a peer kept appearing/disappearing, or a link is \
-                     one-way). Relaunch together."
-                );
-            }
-            Status::Forming { live } => {
-                // Solo fallback — DEFAULT (non-lobby) path only ([`is_alone_now`]; `live`
-                // is fresh from the `poll` above).
-                if lobby.is_none()
-                    && is_alone_now(expect, live, ever_heard_peer, now_ms >= alone_deadline_ms)
-                {
-                    return Ok(BarrierResult::Alone);
-                }
-                if live != last_live {
-                    println!("forming: {live}/{expect} player(s) live, waiting for agreement…");
-                    last_live = live;
-                    if let Some(t) = telemetry {
-                        t.send(TelemetryEvent::RosterForming { live, expect });
-                    }
-                }
-            }
+        match step.outcome {
+            Some(Outcome::Agreed(a)) => return Ok(BarrierResult::Agreed(a)),
+            Some(Outcome::Alone) => return Ok(BarrierResult::Alone),
+            Some(Outcome::Failed) => anyhow::bail!(
+                "match formation failed: peers never agreed on one roster within the join window \
+                 (too few players showed up, or a peer kept appearing/disappearing, or a link is \
+                 one-way). Relaunch together."
+            ),
+            None => {}
         }
     }
-}
-
-fn is_alone_now(expect: usize, live: usize, ever_heard_peer: bool, past_deadline: bool) -> bool {
-    expect > 1 && !ever_heard_peer && live == 1 && past_deadline
-}
-
-fn is_alone_at_timeout(expect: usize, live: usize) -> bool {
-    expect > 1 && live == 1
-}
-
-pub fn solo_client_for(seed: u64) -> ClientSim {
-    let me = PlayerId(0);
-    ClientSim::new(seed, &[me], me)
-}
-
-pub fn early_peer_msgs(frozen: &Frozen) -> Vec<PeerMsg> {
-    frozen
-        .early
-        .iter()
-        .filter_map(|(from, msg)| {
-            frozen
-                .id_map
-                .get(from)
-                .map(|&pid| PeerMsg { pid, msg: *msg })
-        })
-        .collect()
-}
-
-pub fn assign_player_ids(
-    me: EndpointId,
-    roster: &[EndpointId],
-) -> Result<BTreeMap<EndpointId, PlayerId>> {
-    let mut all: Vec<EndpointId> = roster.to_vec();
-    all.push(me);
-    all.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-    all.dedup();
-    anyhow::ensure!(
-        all.len() <= u8::MAX as usize + 1,
-        "too many players: {}",
-        all.len()
-    );
-    Ok(all
-        .into_iter()
-        .enumerate()
-        .map(|(i, eid)| (eid, PlayerId(i as u8)))
-        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::SyncStamp;
-
-    fn eid(i: u8) -> EndpointId {
-        iroh::SecretKey::from_bytes(&[i; 32]).public()
-    }
-
-    #[test]
-    fn assign_player_ids_is_identical_regardless_of_roster_order() {
-        let me = eid(2);
-        let a = assign_player_ids(me, &[eid(1), eid(3), eid(2)]).unwrap();
-        let b = assign_player_ids(me, &[eid(3), eid(2), eid(1)]).unwrap();
-        assert_eq!(a, b, "id assignment must not depend on input order");
-        let mut ids = [eid(1), eid(2), eid(3)];
-        ids.sort_by(|x, y| x.as_bytes().cmp(y.as_bytes()));
-        for (i, id) in ids.iter().enumerate() {
-            assert_eq!(a[id], PlayerId(i as u8), "id at sort position {i}");
-        }
-    }
-
-    #[test]
-    fn assign_player_ids_dedups_self_in_roster() {
-        let me = eid(5);
-        let map = assign_player_ids(me, &[eid(5), eid(7)]).unwrap();
-        assert_eq!(map.len(), 2, "self must not be double-counted");
-        let mut got: Vec<PlayerId> = vec![map[&eid(5)], map[&eid(7)]];
-        got.sort();
-        assert_eq!(got, vec![PlayerId(0), PlayerId(1)]);
-    }
-
-    #[test]
-    fn player_zero_is_host_of() {
-        let roster = [eid(9), eid(3), eid(6)];
-        let map = assign_player_ids(eid(3), &roster).unwrap();
-        let host = crate::membership::host_of(&roster);
-        assert_eq!(map[&host], PlayerId(0), "host_of must hold PlayerId(0)");
-    }
+    use crate::sim::PlayerId;
 
     #[test]
     #[ignore = "binds real iroh UDP endpoints; run explicitly with --ignored"]
@@ -423,53 +296,5 @@ mod tests {
         s0.shutdown().await;
         s1.shutdown().await;
         s2.shutdown().await;
-    }
-
-    #[test]
-    fn alone_fallback_fires_only_when_defaulted_networked_never_heard_and_truly_alone() {
-        assert!(
-            is_alone_now(2, 1, false, true),
-            "defaulted-networked + never-heard + alone + past the window ⇒ solo"
-        );
-
-        assert!(
-            !is_alone_now(2, 1, false, false),
-            "before the discovery window we keep waiting, never solo early"
-        );
-        assert!(
-            !is_alone_now(2, 2, false, true),
-            "a peer is present (live>=2) ⇒ the real barrier stays in force, never solo"
-        );
-        assert!(
-            !is_alone_now(1, 1, false, true),
-            "expect==1 is a deliberate solo-over-network — the barrier forms {{self}}, not a fallback"
-        );
-        assert!(
-            !is_alone_now(2, 1, true, true),
-            "heard a peer then lost it ⇒ a link FAILURE (loud Failed/relaunch), not a silent solo"
-        );
-        assert!(!is_alone_now(4, 3, false, true));
-    }
-
-    #[test]
-    fn timeout_fallback_solos_when_alone_at_window_expiry_else_stays_loud() {
-        assert!(
-            is_alone_at_timeout(2, 1),
-            "defaulted-networked + alone at JOIN_WINDOW expiry ⇒ solo, not error (incl. the \
-             phantom-flicker and discover_secs>=JOIN_WINDOW cases)"
-        );
-        assert!(
-            !is_alone_at_timeout(2, 2),
-            "peers present at expiry that never agreed ⇒ a real multi-peer fault, stay loud"
-        );
-        assert!(
-            !is_alone_at_timeout(2, 5),
-            "any live>=2 at expiry stays the loud Failed, never a silent solo"
-        );
-        assert!(
-            !is_alone_at_timeout(1, 1),
-            "expect==1 is a deliberate solo-over-network — the barrier forms {{self}} and \
-             never reaches a JOIN_WINDOW Failed for this to catch"
-        );
     }
 }
