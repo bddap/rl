@@ -5,7 +5,7 @@ use anyhow::Result;
 use iroh::EndpointId;
 
 use crate::client::{ClientSim, PeerMsg, TickMsg};
-use crate::membership::{BEAT_EVERY, Membership, Role, Status};
+use crate::membership::{BEAT_EVERY_MS, Membership, Role, Status};
 use crate::sim::PlayerId;
 use crate::telemetry::{self, TelemetryEvent, TelemetrySender};
 use crate::transport::{self, PeerWire, Session};
@@ -151,24 +151,26 @@ async fn run_barrier(
     lobby: Option<&LobbyControl>,
     stamp: crate::SyncStamp,
 ) -> Result<BarrierResult> {
+    // The membership core's clock is injected millis (platform-free); this driver
+    // anchors it here — `start.elapsed()` is the ms axis every core call reads.
     let start = Instant::now();
     let mut m = match lobby {
-        Some(c) => Membership::host_triggered(c.role, me, expect, start),
-        None => Membership::new(me, expect, start),
+        Some(c) => Membership::host_triggered(c.role, me, expect, 0),
+        None => Membership::new(me, expect, 0),
     }
     .with_stamp(stamp);
     let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
-    let mut ticker = tokio::time::interval(BEAT_EVERY);
+    let mut ticker = tokio::time::interval(Duration::from_millis(BEAT_EVERY_MS));
     let mut last_live = 0usize;
     let mut last_roster: Vec<EndpointId> = Vec::new();
     // Whether we've EVER received a direct beat from any peer this formation — gates the
     // solo fallback ([`is_alone_now`]).
     let mut ever_heard_peer = false;
-    let alone_deadline = start + Duration::from_secs(discover_secs.max(1));
+    let alone_deadline_ms = discover_secs.max(1) * 1000;
 
     loop {
         ticker.tick().await;
-        let now = Instant::now();
+        let now_ms = start.elapsed().as_millis() as u64;
 
         if let Some(c) = lobby {
             match c.cancel_rx.try_recv() {
@@ -189,7 +191,7 @@ async fn run_barrier(
                     if from.from != me {
                         ever_heard_peer = true;
                     }
-                    m.on_beat(from.from, &beat, now);
+                    m.on_beat(from.from, &beat, now_ms);
                 }
                 PeerWire::Tick(msg) => early.push((from.from, msg)),
                 // A dialer that catches us mid-formation would otherwise get silence and
@@ -210,7 +212,7 @@ async fn run_barrier(
             }
         }
 
-        let status = m.poll(now);
+        let status = m.poll(now_ms);
         session.broadcast(&m.beat()).await;
 
         if let Some(c) = lobby {
@@ -226,7 +228,7 @@ async fn run_barrier(
                 return Ok(BarrierResult::Agreed(BarrierOutcome {
                     roster,
                     early,
-                    elapsed: now.duration_since(start),
+                    elapsed: Duration::from_millis(now_ms),
                     sync: m.sync_verdict(),
                 }));
             }
@@ -244,7 +246,7 @@ async fn run_barrier(
                 // Solo fallback — DEFAULT (non-lobby) path only ([`is_alone_now`]; `live`
                 // is fresh from the `poll` above).
                 if lobby.is_none()
-                    && is_alone_now(expect, live, ever_heard_peer, now >= alone_deadline)
+                    && is_alone_now(expect, live, ever_heard_peer, now_ms >= alone_deadline_ms)
                 {
                     return Ok(BarrierResult::Alone);
                 }

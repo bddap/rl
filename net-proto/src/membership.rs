@@ -1,18 +1,21 @@
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use iroh_base::EndpointId;
 
 use crab_world::fnv::Fnv;
 
-const MEMBER_TIMEOUT: Duration = Duration::from_secs(3);
+// The core's whole time axis is injected milliseconds (rl#411 stage 2): every `now_ms`
+// below is a caller-supplied monotone reading from an arbitrary epoch — only
+// differences are ever taken, so the epoch cancels and no platform clock is touched.
 
-pub const BEAT_EVERY: Duration = Duration::from_millis(250);
+const MEMBER_TIMEOUT_MS: u64 = 3_000;
 
-const STABLE_FOR: Duration = Duration::from_millis(1500);
+pub const BEAT_EVERY_MS: u64 = 250;
 
-pub const JOIN_WINDOW: Duration = Duration::from_secs(20);
+const STABLE_FOR_MS: u64 = 1_500;
+
+pub const JOIN_WINDOW_MS: u64 = 20_000;
 
 pub const MAX_MEMBERS: usize = u8::MAX as usize + 1;
 
@@ -59,16 +62,16 @@ pub struct Membership {
     me: EndpointId,
     expect: usize,
     peers: BTreeMap<EndpointId, PeerView>,
-    tombstones: BTreeMap<EndpointId, Instant>,
+    tombstones: BTreeMap<EndpointId, u64>,
     /// When the agreement predicate (see [`Membership::poll`]) most recently became true
     /// AND on which roster hash, or `None` if it is currently false. Keying on the hash
     /// (not just a bool) means *any* change to our agreed set rewinds the timer — even
     /// the (impossible-on-a-real-LAN but cheap-to-rule-out) case where every peer's set
     /// flips S→S′ in the same poll with no peer ever observing disagreement. Closing
-    /// requires `Some((t, h))` with `h == my_hash` and `now - t >= STABLE_FOR`. Maintained
+    /// requires `Some((t, h))` with `h == my_hash` and `now - t >= STABLE_FOR_MS`. Maintained
     /// only in `poll`.
-    agreed_since: Option<(Instant, u64)>,
-    started: Instant,
+    agreed_since: Option<(u64, u64)>,
+    started: u64,
     /// How the barrier closes — see [`LobbyMode`]. The roster a peer freezes is the same
     /// `live_set` in every mode (only the close *moment* differs), so determinism is
     /// untouched.
@@ -94,7 +97,7 @@ enum LobbyMode {
 
 #[derive(Debug, Clone, Copy)]
 struct PeerView {
-    last_direct: Instant,
+    last_direct: u64,
     advertised: Option<u64>,
     started: bool,
     /// `None` until a direct beat arrives — a relay-only peer stays unverified on
@@ -116,14 +119,14 @@ pub enum Role {
 }
 
 impl Membership {
-    pub fn new(me: EndpointId, expect: usize, now: Instant) -> Self {
+    pub fn new(me: EndpointId, expect: usize, now_ms: u64) -> Self {
         Self {
             me,
             expect: expect.max(1),
             peers: BTreeMap::new(),
             tombstones: BTreeMap::new(),
             agreed_since: None,
-            started: now,
+            started: now_ms,
             lobby: LobbyMode::Off,
             host_go_on_my_roster: false,
             local: crate::SyncStamp::ZERO,
@@ -137,18 +140,18 @@ impl Membership {
 
     /// Begin a host-triggered (interactive lobby) formation — the boot menu's networked
     /// Host/Join. Same agreement core as [`Membership::new`], but the close trigger is a
-    /// host's explicit GO ([`Membership::set_starting`]) instead of the [`STABLE_FOR`]
+    /// host's explicit GO ([`Membership::set_starting`]) instead of the [`STABLE_FOR_MS`]
     /// timer; only a [`Role::Host`] can command it. `expect` is still the participant
     /// floor. The frozen roster is identical to the timer path — only the close *moment*
     /// changes.
-    pub fn host_triggered(role: Role, me: EndpointId, expect: usize, now: Instant) -> Self {
+    pub fn host_triggered(role: Role, me: EndpointId, expect: usize, now_ms: u64) -> Self {
         let lobby = match role {
             Role::Host => LobbyMode::Host { started: false },
             Role::Joiner => LobbyMode::Joiner,
         };
         Self {
             lobby,
-            ..Self::new(me, expect, now)
+            ..Self::new(me, expect, now_ms)
         }
     }
 
@@ -162,17 +165,17 @@ impl Membership {
         self.peers.len() + 1 < MAX_MEMBERS
     }
 
-    pub fn on_beat(&mut self, from: EndpointId, beat: &Beat, now: Instant) {
+    pub fn on_beat(&mut self, from: EndpointId, beat: &Beat, now_ms: u64) {
         if from != self.me {
             self.tombstones.remove(&from);
             if self.peers.contains_key(&from) || self.has_room_for_one_more() {
                 let view = self.peers.entry(from).or_insert(PeerView {
-                    last_direct: now,
+                    last_direct: now_ms,
                     advertised: None,
                     started: false,
                     stamp: None,
                 });
-                view.last_direct = now;
+                view.last_direct = now_ms;
                 view.advertised = Some(beat.roster_hash());
                 view.started = beat.start;
                 view.stamp = Some(beat.stamp);
@@ -191,7 +194,7 @@ impl Membership {
                 self.peers.insert(
                     id,
                     PeerView {
-                        last_direct: now,
+                        last_direct: now_ms,
                         advertised: None,
                         started: false,
                         stamp: None,
@@ -247,19 +250,19 @@ impl Membership {
         }
     }
 
-    pub fn poll(&mut self, now: Instant) -> Status {
+    pub fn poll(&mut self, now_ms: u64) -> Status {
         let expired: Vec<EndpointId> = self
             .peers
             .iter()
-            .filter(|(_, v)| now.duration_since(v.last_direct) >= MEMBER_TIMEOUT)
+            .filter(|(_, v)| now_ms.saturating_sub(v.last_direct) >= MEMBER_TIMEOUT_MS)
             .map(|(id, _)| *id)
             .collect();
         for id in expired {
             self.peers.remove(&id);
-            self.tombstones.insert(id, now);
+            self.tombstones.insert(id, now_ms);
         }
         self.tombstones
-            .retain(|_, &mut t| now.duration_since(t) < MEMBER_TIMEOUT);
+            .retain(|_, &mut t| now_ms.saturating_sub(t) < MEMBER_TIMEOUT_MS);
 
         let live = self.live_set();
         let my_hash = roster_hash(&live);
@@ -277,13 +280,13 @@ impl Membership {
         // keyed on the hash, not just a bool.
         self.agreed_since = match (agreed_now, self.agreed_since) {
             (true, Some((t, h))) if h == my_hash => Some((t, h)),
-            (true, _) => Some((now, my_hash)),
+            (true, _) => Some((now_ms, my_hash)),
             (false, _) => None,
         };
 
         let held = self
             .agreed_since
-            .is_some_and(|(since, _)| now.duration_since(since) >= STABLE_FOR);
+            .is_some_and(|(since, _)| now_ms.saturating_sub(since) >= STABLE_FOR_MS);
         let close = held
             && match self.lobby {
                 LobbyMode::Host { started } => started,
@@ -291,7 +294,7 @@ impl Membership {
                 LobbyMode::Off => true,
             };
         let timed_out =
-            self.lobby == LobbyMode::Off && now.duration_since(self.started) >= JOIN_WINDOW;
+            self.lobby == LobbyMode::Off && now_ms.saturating_sub(self.started) >= JOIN_WINDOW_MS;
         if close {
             Status::Agreed { roster: live }
         } else if timed_out {
@@ -371,8 +374,8 @@ mod tests {
         iroh_base::SecretKey::from_bytes(&[i; 32]).public()
     }
 
-    fn at(base: Instant, ms: u64) -> Instant {
-        base + Duration::from_millis(ms)
+    fn at(base: u64, ms: u64) -> u64 {
+        base + ms
     }
 
     fn bt(members: Vec<EndpointId>) -> Beat {
@@ -490,7 +493,7 @@ mod tests {
         let decoded = decode_beat(&encode_beat(&beat_c(vec![eid(1)], 3))).unwrap();
         assert_eq!(decoded.stamp.crab_count, 3, "the count survives the wire");
 
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let mut ids = [eid(1), eid(2)];
         ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         let (host, client) = (ids[0], ids[1]);
@@ -529,7 +532,7 @@ mod tests {
 
     #[test]
     fn assets_synced_only_when_all_peers_share_one_nonzero_digest() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (ida, idb) = (eid(1), eid(2));
         const ASSET: u64 = 0x5A11_0000_C0DE_4321;
 
@@ -568,7 +571,7 @@ mod tests {
 
     #[test]
     fn plant_synced_only_when_all_peers_share_one_nonzero_digest() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (ida, idb) = (eid(1), eid(2));
         const PLANT: u64 = 0x7E44_A100_0BAD_5EED;
         let bt_plant = |members: Vec<EndpointId>, plant_digest: u64| Beat {
@@ -610,7 +613,7 @@ mod tests {
 
     #[test]
     fn relay_only_peer_blocks_the_asset_gate() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (me, direct, relayed) = (eid(1), eid(2), eid(3));
         const ASSET: u64 = 0x9999_8888_7777_6666;
         let mut a = Membership::new(me, 3, t0).with_stamp(stamp(ASSET, 0, 0));
@@ -630,11 +633,11 @@ mod tests {
 
     #[test]
     fn lone_peer_with_expect_one_waits_then_agrees_on_itself() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let mut m = Membership::new(eid(1), 1, t0);
         assert_eq!(m.poll(t0), Status::Forming { live: 1 });
         assert_eq!(m.poll(at(t0, 500)), Status::Forming { live: 1 });
-        match m.poll(at(t0, STABLE_FOR.as_millis() as u64 + 1)) {
+        match m.poll(at(t0, STABLE_FOR_MS + 1)) {
             Status::Agreed { roster, .. } => assert_eq!(roster, vec![eid(1)]),
             other => panic!("lone peer should agree on itself, got {other:?}"),
         }
@@ -642,21 +645,18 @@ mod tests {
 
     #[test]
     fn lone_peer_expecting_more_times_out_instead_of_freezing_solo() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let mut m = Membership::new(eid(1), 2, t0);
         assert_eq!(
-            m.poll(at(t0, STABLE_FOR.as_millis() as u64 + 100)),
+            m.poll(at(t0, STABLE_FOR_MS + 100)),
             Status::Forming { live: 1 }
         );
-        assert_eq!(
-            m.poll(at(t0, JOIN_WINDOW.as_millis() as u64 + 1)),
-            Status::Failed
-        );
+        assert_eq!(m.poll(at(t0, JOIN_WINDOW_MS + 1)), Status::Failed);
     }
 
     #[test]
     fn two_peers_converge_and_freeze_the_identical_set() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (ida, idb) = (eid(1), eid(2));
         let mut a = Membership::new(ida, 2, t0);
         let mut b = Membership::new(idb, 2, t0);
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn staggered_join_makes_everyone_wait_for_the_late_peer() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (ida, idb, idc) = (eid(1), eid(2), eid(3));
         let mut a = Membership::new(ida, 3, t0);
         let mut b = Membership::new(idb, 3, t0);
@@ -728,7 +728,7 @@ mod tests {
 
     #[test]
     fn phantom_endpoint_expires_and_is_excluded() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (ida, idb, idp) = (eid(1), eid(2), eid(9));
         let mut a = Membership::new(ida, 2, t0);
         let mut b = Membership::new(idb, 2, t0);
@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn divergent_views_never_freeze_mismatched_sets() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (ida, idb, idc) = (eid(1), eid(2), eid(3));
         let mut a = Membership::new(ida, 2, t0);
         let mut b = Membership::new(idb, 2, t0);
@@ -799,14 +799,14 @@ mod tests {
 
     #[test]
     fn flickering_agreement_never_closes() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (ida, idb) = (eid(1), eid(2));
         let mut a = Membership::new(ida, 2, t0);
         let other = eid(7);
         let agree = bt(vec![ida, idb]);
         let disagree = bt(vec![ida, idb, other]);
         let mut t = 0u64;
-        while t <= JOIN_WINDOW.as_millis() as u64 - 1000 {
+        while t <= JOIN_WINDOW_MS - 1000 {
             let now = at(t0, t);
             let bb = if (t / 250).is_multiple_of(2) {
                 &agree
@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn late_joiner_within_settle_rewinds_everyone_off_the_partial_set() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (ida, idb, idc) = (eid(1), eid(2), eid(3));
         let mut a = Membership::new(ida, 2, t0);
         let mut b = Membership::new(idb, 2, t0);
@@ -859,12 +859,12 @@ mod tests {
         for roster in froze.values() {
             assert_eq!(roster, &abc);
         }
-        assert!(join_at < STABLE_FOR.as_millis() as u64);
+        assert!(join_at < STABLE_FOR_MS);
     }
 
     #[test]
     fn relayed_phantom_does_not_ping_pong_back_into_the_set() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (ida, idb, idp) = (eid(1), eid(2), eid(9));
         let mut a = Membership::new(ida, 2, t0);
         let mut b = Membership::new(idb, 2, t0);
@@ -907,11 +907,11 @@ mod tests {
 
     #[test]
     fn fails_cleanly_when_agreement_never_reached() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let mut m = Membership::new(eid(1), 1, t0);
         let mut t = 0u64;
         let mut saw_failed = false;
-        while t <= JOIN_WINDOW.as_millis() as u64 + 2000 {
+        while t <= JOIN_WINDOW_MS + 2000 {
             let now = at(t0, t);
             let transient = eid((t / 250 % 200 + 10) as u8);
             m.on_beat(transient, &bt(vec![transient]), now);
@@ -929,13 +929,13 @@ mod tests {
 
     #[test]
     fn host_triggered_joiner_waits_for_the_go_then_both_freeze_the_identical_set() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (idh, idj) = (eid(1), eid(2));
         let mut h = Membership::host_triggered(Role::Host, idh, 2, t0);
         let mut j = Membership::host_triggered(Role::Joiner, idj, 2, t0);
 
         let mut t = 0u64;
-        while t <= STABLE_FOR.as_millis() as u64 + 1000 {
+        while t <= STABLE_FOR_MS + 1000 {
             let now = at(t0, t);
             let (bh, bj) = (h.beat(), j.beat());
             h.on_beat(idj, &bj, now);
@@ -954,8 +954,7 @@ mod tests {
         h.set_starting();
         let mut froze_h = None;
         let mut froze_j = None;
-        while t <= STABLE_FOR.as_millis() as u64 + 4000 && (froze_h.is_none() || froze_j.is_none())
-        {
+        while t <= STABLE_FOR_MS + 4000 && (froze_h.is_none() || froze_j.is_none()) {
             let now = at(t0, t);
             let (bh, bj) = (h.beat(), j.beat());
             h.on_beat(idj, &bj, now);
@@ -980,7 +979,7 @@ mod tests {
 
     #[test]
     fn host_go_on_a_mismatched_roster_does_not_close_a_joiner() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (idh, idj) = (eid(1), eid(2));
         let mut j = Membership::host_triggered(Role::Joiner, idj, 2, t0);
 
@@ -991,7 +990,7 @@ mod tests {
         };
         let mut t = 0u64;
         let mut closed = false;
-        while t <= STABLE_FOR.as_millis() as u64 + 2000 {
+        while t <= STABLE_FOR_MS + 2000 {
             let now = at(t0, t);
             j.on_beat(idh, &host_go_on_partial, now);
             if matches!(j.poll(now), Status::Agreed { .. }) {
@@ -1012,7 +1011,7 @@ mod tests {
         // `start` on the wire. A timer barrier and a JOINER both stay silent on the GO
         // even after `set_starting`, so a joiner can never command a start it isn't
         // entitled to.
-        let t0 = Instant::now();
+        let t0 = 0u64;
         for mut m in [
             Membership::new(eid(1), 1, t0),
             Membership::host_triggered(Role::Joiner, eid(1), 2, t0),
@@ -1031,7 +1030,7 @@ mod tests {
 
     #[test]
     fn host_clicking_start_during_a_late_join_does_not_freeze_a_partial_set() {
-        let t0 = Instant::now();
+        let t0 = 0u64;
         let (idh, idj, idc) = (eid(1), eid(2), eid(3));
         let mut h = Membership::host_triggered(Role::Host, idh, 3, t0);
         let mut j = Membership::host_triggered(Role::Joiner, idj, 3, t0);
@@ -1069,7 +1068,7 @@ mod tests {
             "all three must converge and freeze {{H,J,C}}"
         );
         assert!(
-            join_at < STABLE_FOR.as_millis() as u64,
+            join_at < STABLE_FOR_MS,
             "C must join within the settle window for this to test the rewind"
         );
     }
