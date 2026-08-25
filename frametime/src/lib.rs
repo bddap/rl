@@ -130,9 +130,10 @@ pub fn start() -> FrameTelemetry {
 mod tests {
     use super::*;
 
-    /// An OTLP-style sink buckets a value into the first bucket whose upper bound is
-    /// >= it (last bucket open-ended). The replay midpoints must round-trip: sink
-    /// bucket of midpoint(i) == i, and our own frame-path index agrees.
+    /// An OTLP-style sink buckets a value into the first bucket whose upper bound
+    /// is at least it (last bucket open-ended). The replay midpoints must
+    /// round-trip: sink bucket of midpoint(i) == i, and our own frame-path index
+    /// agrees.
     #[test]
     fn midpoints_rebucket_to_their_own_bucket() {
         let bounds = boundaries_ms();
