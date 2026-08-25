@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use super::shared::nn_crab_policy;
+use net::render::nn_crab_policy;
 
 /// rl#332: long headless soak hunting Sally's "flight" — sustained altitude /
 /// vertical velocity beyond legitimate locomotion. Dumps a rolling state window
@@ -9,7 +9,7 @@ use super::shared::nn_crab_policy;
 /// (an empty run is a CENSORED negative at the printed tick budget).
 #[derive(Parser)]
 pub(crate) struct Args {
-    #[arg(long, value_name = "DIR", env = super::shared::CHECKPOINT_ENV)]
+    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV)]
     checkpoint: Option<std::path::PathBuf>,
     /// Sim ticks to soak (64 ticks ≈ 1 s of sim time at the probe's 1:1 cadence).
     #[arg(long, default_value_t = 500_000)]

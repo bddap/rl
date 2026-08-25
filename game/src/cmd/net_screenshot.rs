@@ -5,9 +5,8 @@ use net::{net_loop, render};
 use crab_world::RenderArgs;
 use crab_world::controls::ControlsOverlayArgs;
 
-use super::shared::{
-    ChordScriptArgs, MATCH_SEED, boot_view, gcr_controls, nn_crab_policy, parse_join_dial,
-};
+use super::shared::{ChordScriptArgs, MATCH_SEED, boot_view, gcr_controls, parse_join_dial};
+use net::render::nn_crab_policy;
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -31,7 +30,7 @@ pub(crate) struct Args {
     cam_fov: f32,
     #[arg(long, default_value_t = 8.0)]
     cam_pitch: f32,
-    #[arg(long, value_name = "DIR", env = super::shared::CHECKPOINT_ENV)]
+    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV)]
     nn_crab_checkpoint: Option<std::path::PathBuf>,
     #[command(flatten)]
     render: RenderArgs,

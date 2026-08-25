@@ -1,6 +1,33 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Pin the asset root for this process — an entry adapter passes it via its config
+/// (rl#411: `run_game(GameConfig)`), BEFORE anything resolves an asset. Pinning twice
+/// is a wiring bug and dies loudly: a second root would mean two asset paths in one
+/// process, the exact drift the one-path rule forbids.
+pub fn set_asset_root(root: PathBuf) {
+    if let Err(root) = ROOT.set(root) {
+        panic!(
+            "asset root configured twice (second value {}) — one process, one asset root",
+            root.display()
+        );
+    }
+}
+
+/// The asset root of record: the pinned config value, else the native default —
+/// binaries without a config entrypoint (probes, trainers) resolve the same way the
+/// native adapter does.
 pub fn asset_root() -> PathBuf {
+    ROOT.get().cloned().unwrap_or_else(native_asset_root)
+}
+
+/// How NATIVE launches find assets: the deploy env override, else the dev checkout
+/// (this crate's manifest dir, so a fresh clone's `cargo run` finds the committed
+/// glyphs regardless of cwd). Entry adapters resolve this into their config; only
+/// native code may call it — a web adapter supplies its own root.
+pub fn native_asset_root() -> PathBuf {
     std::env::var_os("BEVY_ASSET_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf())

@@ -6,9 +6,8 @@ use net::sim::PlayerId;
 use crab_world::RenderArgs;
 use crab_world::controls::ControlsOverlayArgs;
 
-use super::shared::{
-    ChordScriptArgs, MATCH_SEED, boot_view, gcr_controls, nn_crab_policy, parse_hold,
-};
+use super::shared::{ChordScriptArgs, MATCH_SEED, boot_view, gcr_controls, parse_hold};
+use net::render::nn_crab_policy;
 
 #[derive(Parser)]
 pub(crate) struct Args {

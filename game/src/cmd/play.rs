@@ -1,12 +1,14 @@
 use anyhow::Result;
 use clap::Parser;
 use iroh::EndpointId;
-use net::{formation, net_loop, render};
+use net::render::{GameConfig, Launch, run_game};
 
 use crab_world::RenderArgs;
 
-use super::shared::{boot_view, nn_crab_policies, parse_join_dial};
+use super::shared::parse_join_dial;
 
+/// The native argv→[`GameConfig`] adapter — the game body itself is
+/// [`net::render::run_game`], shared with the web adapter (rl#411).
 #[derive(Parser)]
 pub(crate) struct Args {
     #[arg(long, conflicts_with = "join")]
@@ -26,7 +28,7 @@ pub(crate) struct Args {
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
 
-    #[arg(long, value_name = "DIR", env = super::shared::CHECKPOINT_ENV)]
+    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV)]
     nn_crab_checkpoint: Vec<std::path::PathBuf>,
 
     #[command(flatten)]
@@ -34,43 +36,20 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    let nn_crabs = nn_crab_policies(args.nn_crab_checkpoint)?;
-    // Per-launch entropy (rl#305): the run layout derives from this seed, so real play
-    // opens somewhere fresh every launch (and every in-round RESTART re-draws); the
-    // authoritative sim logs the seed for repro. Screenshot/probe tools keep the pinned
-    // [`super::shared::MATCH_SEED`] instead.
-    let seed = net::sim::random_match_seed();
-    let boot = if args.host || args.join.is_some() {
-        let dial = parse_join_dial(args.join.as_deref())?;
-        let result = net_loop::connect_and_form_dialing(
-            seed,
-            args.discover_secs,
-            args.expect,
-            net_loop::DialTargets {
-                host: dial,
-                collector: args.telemetry,
-            },
-            net::SyncStamp::local(nn_crabs.len() as u8),
-        )?;
-        match result {
-            net_loop::MatchResult::Joined(joined) => {
-                let (client, driver) = *joined;
-                render::Boot::Round(Box::new((client, Some(driver))))
-            }
-            net_loop::MatchResult::Alone => {
-                render::Boot::Round(Box::new((formation::solo_client_for(seed), None)))
-            }
-            net_loop::MatchResult::Cancelled => {
-                unreachable!("scripted --host/--join has no lobby to cancel")
-            }
+    let launch = if args.host || args.join.is_some() {
+        Launch::Lobby {
+            dial: parse_join_dial(args.join.as_deref())?,
         }
     } else {
-        render::Boot::Menu {
-            seed,
-            telemetry: args.telemetry,
-        }
+        Launch::Menu
     };
-    let boot_view = boot_view(args.render);
-    render::build_windowed_app(boot, nn_crabs, boot_view)?.run();
-    Ok(())
+    run_game(GameConfig {
+        launch,
+        discover_secs: args.discover_secs,
+        expect: args.expect,
+        telemetry: args.telemetry,
+        nn_crab_checkpoints: args.nn_crab_checkpoint,
+        view: args.render,
+        asset_root: crab_world::assets::native_asset_root(),
+    })
 }

@@ -97,6 +97,7 @@ mod net_track;
 mod pos_trace;
 mod pose;
 mod render_mode;
+mod run_game;
 mod scene;
 mod screenshot;
 #[cfg(test)]
@@ -116,6 +117,9 @@ fn data_dir() -> Option<PathBuf> {
 
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use audio::ExternalBus;
+pub use run_game::{
+    CHECKPOINT_ENV, GameConfig, Launch, nn_crab_policies, nn_crab_policy, run_game,
+};
 // The game CLI wires script resources onto built apps without its own bevy dep.
 pub use bevy::app::App;
 pub use render_mode::RenderMode;

@@ -5,7 +5,9 @@ use net::{net_loop, render};
 
 use crab_world::RenderArgs;
 
-use super::shared::{boot_view, nn_crab_policies};
+use net::render::nn_crab_policies;
+
+use super::shared::boot_view;
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -13,7 +15,7 @@ pub(crate) struct Args {
     host: EndpointId,
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
-    #[arg(long, value_name = "DIR", env = super::shared::CHECKPOINT_ENV)]
+    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV)]
     nn_crab_checkpoint: Vec<std::path::PathBuf>,
     #[command(flatten)]
     render: RenderArgs,

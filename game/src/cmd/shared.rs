@@ -9,11 +9,6 @@ use net::sim::{Input, PlayerId, TICK_DT};
 /// from the seed, rl#305). Real play draws [`net::sim::random_match_seed`] instead.
 pub(crate) const MATCH_SEED: u64 = 0x6372_6162;
 
-/// The checkpoint-dir env fallback the deploy scripts export (deploy/rl-update sets it).
-/// Named ONCE here and referenced by every `--nn-crab-checkpoint` / `--checkpoint` flag that
-/// honors it, so the flags and the error prose below can't drift apart.
-pub(crate) const CHECKPOINT_ENV: &str = "RL_CRAB_CHECKPOINT_DIR";
-
 /// The view this binary boots in — every GCR surface is [`Surface::Game`], so the
 /// surface is named once rather than at each entrypoint.
 pub(crate) fn boot_view(args: crab_world::RenderArgs) -> crab_world::BootView {
@@ -26,81 +21,6 @@ pub(crate) fn gcr_controls(
     args: &crab_world::controls::ControlsOverlayArgs,
 ) -> Result<crab_world::controls::ControlsOverrides<net::controls::GcrControls>> {
     args.resolve().map_err(anyhow::Error::msg)
-}
-
-/// The launch gate: resolve the checkpoint dir and load it in ONE read — the returned
-/// [`Policy`] is armed by construction, never re-read by the plugin (rl#241: a
-/// classify-then-reload gate can straddle a checkpoint swap and arm a rest-pose statue
-/// it never vetted). Returns the resolved dir alongside for operator-facing labels.
-pub(crate) fn nn_crab_policy(
-    flag: Option<std::path::PathBuf>,
-) -> Result<(std::path::PathBuf, crab_world::policy::Policy)> {
-    use crab_world::policy::{CheckpointUnusable, RigDims};
-    // The env fallback is clap's, declared on each subcommand's checkpoint flag ([`CHECKPOINT_ENV`]).
-    // `fp-screenshot` deliberately opts OUT of it: there the flag ARMS a crab at all, so the env
-    // would seed one into a shot meant to have none.
-    let dir = flag.unwrap_or_else(|| {
-        crab_world::assets::asset_root()
-            .join("assets")
-            .join("weights")
-    });
-    // Weights↔world (rl#281 stage 6, the rl-demo pattern): adopt the checkpoint's
-    // recorded plant — arena + friction cap — before arming, so the brain plays in the
-    // world it trained in and GCR serves a terrain brain its baked tile. Multi-binding
-    // launches adopt each dir in turn; a disagreeing sidecar refuses here, at t=0.
-    if let Err(err) = crab_world::bot::body::adopt_recorded_plant(&dir) {
-        anyhow::bail!(
-            "checkpoint under {} records a plant this launch can't adopt — {err}",
-            dir.display()
-        );
-    }
-    match crab_world::policy::load_armed(&dir) {
-        Ok(policy) => Ok((dir, policy)),
-        Err(CheckpointUnusable::Missing) => anyhow::bail!(
-            "rl#114: no trained crab brain (brain.bin) under {} — the giant crab IS the trained NN \
-             body (\"Sally\"), and there is no integer stand-in. Point this command's checkpoint \
-             flag or {CHECKPOINT_ENV} at a trained checkpoint dir (deploy/rl-update must set it, \
-             and EVERY device needs the IDENTICAL brain + crab model), then relaunch.",
-            dir.display()
-        ),
-        Err(CheckpointUnusable::Refused(why)) => anyhow::bail!(
-            "checkpoint under {} was REFUSED — {why}. Fix the checkpoint, then relaunch.",
-            dir.display()
-        ),
-        Err(CheckpointUnusable::Mismatch(RigDims { obs, action })) => {
-            let RigDims {
-                obs: rig_obs,
-                action: rig_act,
-            } = crab_world::play::rig_dims();
-            anyhow::bail!(
-                "rl#199: checkpoint under {} was built for a DIFFERENT rig — its brain wants \
-                 {obs} obs / {action} act but this binary's crab rig is {rig_obs} obs / \
-                 {rig_act} act. Sally would launch as an inert rest-pose statue, so refusing to \
-                 launch instead. Retrain/redeploy a checkpoint for this rig, or run a binary \
-                 whose rig matches the checkpoint.",
-                dir.display()
-            )
-        }
-    }
-}
-
-/// [`nn_crab_policy`] over every `--nn-crab-checkpoint` binding (default binding when
-/// none given) — the armed policies, one per crab.
-pub(crate) fn nn_crab_policies(
-    flags: Vec<std::path::PathBuf>,
-) -> Result<Vec<crab_world::policy::Policy>> {
-    if flags.is_empty() {
-        return Ok(vec![nn_crab_policy(None)?.1]);
-    }
-    flags
-        .into_iter()
-        .enumerate()
-        .map(|(idx, dir)| {
-            nn_crab_policy(Some(dir))
-                .map(|(_, policy)| policy)
-                .with_context(|| format!("crab {idx}'s brain binding is unusable (rl#200)"))
-        })
-        .collect()
 }
 
 /// One determinism-log line, `<tick> <hash>` (zero-padded 16-hex) — the format two
