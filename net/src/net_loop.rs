@@ -1,8 +1,8 @@
 //! The per-round network coordination layer: [`Coordinator`] (solo/host server vs remote
-//! client) and [`NetDriver`], the sync façade a windowed frame drives over the async
-//! [`Session`]. A remote client ships inputs UP and adopts the host's authoritative
-//! snapshots DOWN ([`ClientSim::adopt_snapshots`]) — it never re-steps the sim; that
-//! contract is stated once, here, and every arm below leans on it.
+//! client) and [`NetDriver`], the roster bookkeeping a windowed frame drives over the
+//! poll-driven [`Session`]. A remote client ships inputs UP and adopts the host's
+//! authoritative snapshots DOWN ([`ClientSim::adopt_snapshots`]) — it never re-steps the
+//! sim; that contract is stated once, here, and every arm below leans on it.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use iroh::EndpointId;
 
 use crate::articulation::CrabArticulation;
 use crate::client::{ClientSim, PeerMsg, TickMsg};
-use crate::formation::{Formation, LobbyControl, early_peer_msgs, form_match};
+use crate::formation::{Formation, FormationDriver, Frozen, early_peer_msgs};
 use crate::server::{JoinRequest, Refusal, Server, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
@@ -70,13 +70,11 @@ impl JoinBudget {
     }
 }
 
-/// One peer's transport-side round state: the tokio runtime the sync façade blocks on,
-/// the live [`Session`], and the roster bookkeeping (endpoint↔player map, departures,
-/// telemetry, the formation sync verdict). Built only by [`connect_and_form_dialing`] /
-/// [`connect_and_form_lobby`] / [`connect_and_join`]; driven only through
-/// [`Coordinator`].
+/// One peer's transport-side round state: the live [`Session`] (which owns its own
+/// runtime) and the roster bookkeeping (endpoint↔player map, departures, telemetry,
+/// the formation sync verdict). Built only by [`connect_and_form_dialing`] /
+/// [`joined_from_frozen`] / [`connect_and_join`]; driven only through [`Coordinator`].
 pub struct NetDriver {
-    rt: tokio::runtime::Runtime,
     session: Session,
     me: PlayerId,
     server_eid: EndpointId,
@@ -126,23 +124,10 @@ impl std::fmt::Display for ServerDown {
 
 impl Drop for NetDriver {
     fn drop(&mut self) {
-        // Close both iroh endpoints (telemetry sender's + session's) before `rt` — the FIRST
-        // field, so it drops before them — shuts down and aborts their tasks: an endpoint
-        // dropped unclosed makes iroh log "Endpoint dropped without calling `Endpoint::close`"
-        // at ERROR on every round teardown (fleet-error 2026-08-01).
-        let telemetry = self.telemetry.take();
-        let session = &self.session;
-        self.rt.block_on(close_session(session, telemetry));
+        // Graceful close (telemetry drained, then the endpoint) — Session's own Drop only
+        // backstops the endpoint half.
+        self.session.close(self.telemetry.take());
     }
-}
-
-/// The one graceful teardown for a bound session and its optional telemetry stream — every
-/// pre-round exit path and [`NetDriver`]'s `Drop` end through here.
-pub async fn close_session(session: &Session, telemetry: Option<TelemetrySender>) {
-    if let Some(t) = telemetry {
-        t.close().await;
-    }
-    session.shutdown().await;
 }
 
 impl NetDriver {
@@ -513,81 +498,50 @@ pub struct DialTargets {
     pub collector: Option<EndpointId>,
 }
 
+/// The cadence at which BLOCKING callers (CLI forming/joining, with no frame loop of
+/// their own) pump the poll-driven session.
+const FORM_POLL: Duration = Duration::from_millis(10);
+
+/// Form a match over timed LAN discovery, blocking until it resolves — the scripted/CLI
+/// path. The windowed lobby drives the same [`FormationDriver`] from the frame loop
+/// instead ([`crate::menu`]).
 pub fn connect_and_form_dialing(
     seed: u64,
     discover_secs: u64,
     expect: usize,
     targets: DialTargets,
-    on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     stamp: crate::SyncStamp,
 ) -> Result<MatchResult> {
-    connect_and_form_inner(seed, discover_secs, expect, targets, on_bound, None, stamp)
-}
-
-pub fn connect_and_form_lobby(
-    seed: u64,
-    expect: usize,
-    targets: DialTargets,
-    on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
-    control: LobbyControl,
-    stamp: crate::SyncStamp,
-) -> Result<MatchResult> {
-    connect_and_form_inner(seed, 0, expect, targets, on_bound, Some(control), stamp)
-}
-
-fn net_runtime() -> Result<tokio::runtime::Runtime> {
-    Ok(tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?)
-}
-
-fn connect_and_form_inner(
-    seed: u64,
-    discover_secs: u64,
-    expect: usize,
-    targets: DialTargets,
-    on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
-    lobby: Option<LobbyControl>,
-    stamp: crate::SyncStamp,
-) -> Result<MatchResult> {
-    let rt = net_runtime()?;
-
-    let (session, formation, telemetry, dial_failed) = rt.block_on(async {
-        let mut session = transport::start_session().await?;
-        let my_eid = session.endpoint_id();
-        println!("fp client endpoint id: {my_eid}");
-        if let Some(tx) = &on_bound {
-            let _ = tx.send(my_eid);
+    let mut session = transport::start_session()?;
+    let my_eid = session.endpoint_id();
+    println!("fp client endpoint id: {my_eid}");
+    let mut dial_verdict = None;
+    if let Some(host) = targets.host {
+        if host == my_eid {
+            tracing::warn!("join code is our own endpoint id — ignoring the self-dial");
+        } else {
+            dial_verdict = Some(session.dial(host));
         }
-        let mut dial_failed: Option<anyhow::Error> = None;
-        if let Some(host) = targets.host {
-            if host == my_eid {
-                tracing::warn!("join code is our own endpoint id — ignoring the self-dial");
-            } else if let Err(e) = session.connect_direct(host).await {
-                // Not yet fatal: discovery may still find the host on the LAN. If it
-                // doesn't, the Alone arm below turns this into a hard error rather than
-                // silently starting a solo round the player didn't ask for.
-                tracing::warn!("dialing host {} failed: {e:#}", host.fmt_short());
-                dial_failed = Some(e);
-            }
+    }
+    let telemetry = connect_telemetry(&session, targets.collector);
+    let mut driver = FormationDriver::discovering(&session, discover_secs, expect, stamp);
+    let formed = loop {
+        if let Some(outcome) = driver.pump(&mut session, telemetry.as_ref()) {
+            break outcome;
         }
-        let telemetry = connect_telemetry(targets.collector, my_eid).await;
-        let formation = form_match(
-            &mut session,
-            discover_secs,
-            expect,
-            telemetry.as_ref(),
-            lobby.as_ref(),
-            stamp,
-        )
-        .await?;
-        anyhow::Ok((session, formation, telemetry, dial_failed))
-    })?;
-
-    let frozen = match formation {
-        Formation::Agreed(frozen) => frozen,
-        Formation::Alone => {
-            rt.block_on(close_session(&session, telemetry));
+        std::thread::sleep(FORM_POLL);
+    };
+    // An explicit dial's failure is not yet fatal while discovery may still find the
+    // host on the LAN; only the Alone arm below turns it into a hard error rather than
+    // silently starting a solo round the player didn't ask for.
+    let dial_failed = dial_verdict.and_then(|rx| match rx.try_recv() {
+        Ok(Err(e)) => Some(e),
+        _ => None,
+    });
+    let frozen = match formed {
+        Ok(Formation::Agreed(frozen)) => frozen,
+        Ok(Formation::Alone) => {
+            session.close(telemetry);
             if let Some(e) = dial_failed {
                 return Err(e.context(
                     "could not reach the host you asked to join, and LAN discovery found no one",
@@ -595,12 +549,25 @@ fn connect_and_form_inner(
             }
             return Ok(MatchResult::Alone);
         }
-        Formation::Cancelled => {
-            rt.block_on(close_session(&session, telemetry));
-            return Ok(MatchResult::Cancelled);
+        Err(e) => {
+            session.close(telemetry);
+            return Err(e);
         }
     };
+    Ok(MatchResult::Joined(joined_from_frozen(
+        session, telemetry, frozen, seed, stamp,
+    )))
+}
 
+/// Build the round driver for a freshly-agreed formation — the ONE constructor both the
+/// CLI path above and the menu lobby end through.
+pub(crate) fn joined_from_frozen(
+    session: Session,
+    telemetry: Option<TelemetrySender>,
+    frozen: Frozen,
+    seed: u64,
+    stamp: crate::SyncStamp,
+) -> Box<(ClientSim, NetDriver)> {
     let all_ids: Vec<PlayerId> = frozen.id_map.values().copied().collect();
     println!(
         "starting round: {} player(s), I am {:?}",
@@ -616,7 +583,6 @@ fn connect_and_form_inner(
     let server_eid = server_endpoint(&frozen.id_map);
     let early = early_peer_msgs(&frozen);
     let driver = NetDriver {
-        rt,
         session,
         me: frozen.me,
         server_eid,
@@ -629,7 +595,7 @@ fn connect_and_form_inner(
         sync: frozen.sync,
         stamp,
     };
-    Ok(MatchResult::Joined(Box::new((client, driver))))
+    Box::new((client, driver))
 }
 
 const JOIN_WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
@@ -646,12 +612,10 @@ enum AdmissionVerdict {
     Timeout,
 }
 
-async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVerdict {
-    let deadline = tokio::time::timeout(JOIN_WELCOME_TIMEOUT, async {
-        loop {
-            let Some(from) = session.recv().await else {
-                return AdmissionVerdict::Timeout;
-            };
+fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVerdict {
+    let deadline = std::time::Instant::now() + JOIN_WELCOME_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        while let Some(from) = session.try_recv() {
             if from.from != host {
                 continue;
             }
@@ -661,9 +625,9 @@ async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVe
                 _ => continue,
             }
         }
-    })
-    .await;
-    deadline.unwrap_or(AdmissionVerdict::Timeout)
+        std::thread::sleep(FORM_POLL);
+    }
+    AdmissionVerdict::Timeout
 }
 
 /// Dial INTO a live match as a host-authoritative mid-game joiner — the mid-game analogue of
@@ -679,38 +643,35 @@ pub fn connect_and_join(
     collector: Option<EndpointId>,
     stamp: crate::SyncStamp,
 ) -> Result<JoinResult> {
-    let rt = net_runtime()?;
-
-    let (session, verdict, telemetry) = rt.block_on(async {
-        let mut session = transport::start_session().await?;
-        let my_eid = session.endpoint_id();
-        println!("joining as endpoint id: {my_eid}");
-        anyhow::ensure!(host != my_eid, "cannot join our own endpoint id");
-        match tokio::time::timeout(JOIN_WELCOME_TIMEOUT, session.connect_direct(host)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!("dialing host {} failed: {e:#}", host.fmt_short());
-                return anyhow::Ok((session, AdmissionVerdict::Timeout, None));
-            }
-            Err(_) => {
-                tracing::warn!("dialing host {} timed out", host.fmt_short());
-                return anyhow::Ok((session, AdmissionVerdict::Timeout, None));
-            }
+    let mut session = transport::start_session()?;
+    let my_eid = session.endpoint_id();
+    println!("joining as endpoint id: {my_eid}");
+    anyhow::ensure!(host != my_eid, "cannot join our own endpoint id");
+    let dialed = match session.dial(host).recv_timeout(JOIN_WELCOME_TIMEOUT) {
+        Ok(verdict) => verdict,
+        Err(_) => {
+            tracing::warn!("dialing host {} timed out", host.fmt_short());
+            session.close(None);
+            return Ok(JoinResult::Unreachable);
         }
-        let telemetry = connect_telemetry(collector, my_eid).await;
-        session.send(host, &JoinRequest { stamp });
-        let verdict = await_admission(&mut session, host).await;
-        anyhow::Ok((session, verdict, telemetry))
-    })?;
+    };
+    if let Err(e) = dialed {
+        tracing::warn!("dialing host {} failed: {e:#}", host.fmt_short());
+        session.close(None);
+        return Ok(JoinResult::Unreachable);
+    }
+    let telemetry = connect_telemetry(&session, collector);
+    session.send(host, &JoinRequest { stamp });
+    let verdict = await_admission(&mut session, host);
 
     match verdict {
         AdmissionVerdict::Refused(verdict) => {
             tracing::error!("host refused our join: {verdict}");
-            rt.block_on(close_session(&session, telemetry));
+            session.close(telemetry);
             Ok(JoinResult::Refused(verdict))
         }
         AdmissionVerdict::Timeout => {
-            rt.block_on(close_session(&session, telemetry));
+            session.close(telemetry);
             Ok(JoinResult::Unreachable)
         }
         AdmissionVerdict::Admitted(adm) => {
@@ -744,7 +705,6 @@ pub fn connect_and_join(
             // assumed.
             let sync = crate::SyncVerdict::between(adm.host_stamp, stamp);
             let driver = NetDriver {
-                rt,
                 session,
                 me,
                 server_eid: host,
@@ -762,12 +722,18 @@ pub fn connect_and_join(
     }
 }
 
-pub async fn connect_telemetry(
+pub fn connect_telemetry(
+    session: &Session,
     collector: Option<iroh::EndpointId>,
-    my_eid: iroh::EndpointId,
 ) -> Option<TelemetrySender> {
     let collector = collector?;
-    match TelemetrySender::connect(collector, *my_eid.as_bytes()).await {
+    let my_eid = session.endpoint_id();
+    // Connect-time async on the session's runtime — quick (a local endpoint bind; the
+    // collector dial happens inside the sender's own I/O task).
+    match session
+        .rt()
+        .block_on(TelemetrySender::connect(collector, *my_eid.as_bytes()))
+    {
         Ok(t) => Some(t),
         Err(e) => {
             tracing::warn!("telemetry disabled (endpoint bind failed): {e:#}");

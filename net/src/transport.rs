@@ -144,6 +144,10 @@ struct PeerLink {
     dialer: EndpointId,
 }
 
+/// The native link: a poll-driven sync surface over iroh, with the tokio runtime an
+/// OWNED internal (rl#411 stage 2) — nothing above this line is async. The frame loop
+/// calls send/broadcast/try_recv/connected_peers directly; dials run on the internal
+/// runtime and report through pollable channels.
 pub struct Session {
     endpoint: Endpoint,
     _router: Router,
@@ -151,11 +155,16 @@ pub struct Session {
     inbox_tx: mpsc::Sender<FromPeer>,
     links: Links,
     discovery: tokio::task::JoinHandle<()>,
+    rt: tokio::runtime::Runtime,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
         self.discovery.abort();
+        // Idempotent with an explicit `close` — the graceful paths close first (draining
+        // telemetry etc.); this guarantees the endpoint never drops unclosed (iroh logs
+        // that at ERROR — fleet-error 2026-08-01) even on early-exit paths.
+        self.rt.block_on(self.endpoint.close());
     }
 }
 
@@ -183,20 +192,27 @@ impl Session {
         }
     }
 
-    pub async fn connect_direct(&self, addr: impl Into<iroh::EndpointAddr>) -> Result<()> {
-        let conn = self
-            .endpoint
-            .connect(addr, ALPN)
-            .await
-            .context("direct-dialing peer")?;
-        wire_connection(
-            self.endpoint.id(),
-            conn,
-            self.inbox_tx.clone(),
-            self.links.clone(),
-            true,
-        )
-        .await
+    /// Dial a peer by explicit address (a join code). Non-blocking: the dial runs on the
+    /// internal runtime; poll the returned channel for the verdict (callers use it for
+    /// diagnostics — a failed dial is non-fatal while discovery may still find the peer).
+    pub fn dial(&self, addr: impl Into<iroh::EndpointAddr>) -> std::sync::mpsc::Receiver<Result<()>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let endpoint = self.endpoint.clone();
+        let inbox = self.inbox_tx.clone();
+        let links = self.links.clone();
+        let addr = addr.into();
+        self.rt.spawn(async move {
+            let dialed = async {
+                let conn = endpoint
+                    .connect(addr, ALPN)
+                    .await
+                    .context("direct-dialing peer")?;
+                wire_connection(endpoint.id(), conn, inbox, links, true).await
+            }
+            .await;
+            let _ = tx.send(dialed);
+        });
+        rx
     }
 
     pub fn send<M: Codec>(&self, peer: EndpointId, msg: &M) {
@@ -301,17 +317,32 @@ impl Session {
         self.inbox.try_recv().ok()
     }
 
-    pub async fn recv(&mut self) -> Option<FromPeer> {
-        self.inbox.recv().await
+    /// Graceful teardown: drain + close the optional telemetry stream, then the endpoint —
+    /// every pre-round exit path and [`crate::net_loop::NetDriver`]'s `Drop` end through
+    /// here (`Drop` above backstops the endpoint half for paths that never call it).
+    pub fn close(&self, telemetry: Option<crate::telemetry::TelemetrySender>) {
+        self.rt.block_on(async {
+            if let Some(t) = telemetry {
+                t.close().await;
+            }
+            self.endpoint.close().await;
+        });
     }
 
-    pub async fn shutdown(&self) {
-        self.endpoint.close().await;
+    /// The internal runtime, for the native driver layer's CONNECT-TIME async work
+    /// (telemetry connect, admission await). Never a frame-path affordance — the
+    /// per-frame surface above is sync by design.
+    pub(crate) fn rt(&self) -> &tokio::runtime::Runtime {
+        &self.rt
     }
 }
 
-pub async fn start_session() -> Result<Session> {
-    let (endpoint, mdns) = bind_endpoint().await?;
+pub fn start_session() -> Result<Session> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let (endpoint, mdns) = rt.block_on(bind_endpoint())?;
+    let guard = rt.enter();
     let my_id = endpoint.id();
 
     let (inbox_tx, inbox_rx) = mpsc::channel(256);
@@ -361,6 +392,7 @@ pub async fn start_session() -> Result<Session> {
             }
         })
     };
+    drop(guard);
 
     Ok(Session {
         endpoint,
@@ -369,6 +401,7 @@ pub async fn start_session() -> Result<Session> {
         inbox_tx: inbox_tx_for_session,
         links,
         discovery,
+        rt,
     })
 }
 

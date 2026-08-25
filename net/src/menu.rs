@@ -1,13 +1,11 @@
-use std::sync::mpsc;
-use std::thread;
-
 use anyhow::Result;
 pub use iroh::EndpointId;
 
 use crate::client::ClientSim;
-use crate::formation::{self, LobbyControl};
+use crate::formation::{self, FormationDriver};
 use crate::membership::Role;
 use crate::net_loop::{self, MatchResult, NetDriver};
+use crate::transport::Session;
 
 #[derive(Debug, Clone)]
 pub enum StartChoice {
@@ -17,38 +15,59 @@ pub enum StartChoice {
 
 const NET_EXPECT: usize = 2;
 
+/// A lobby formation the render loop PUMPS — no thread, no channels (rl#411 stage 2):
+/// the session and the formation core live right here, and every accessor reads them
+/// directly. The frame loop's `poll` drives beats, roster, and agreement.
 pub struct Formation {
-    rx: mpsc::Receiver<Result<MatchResult>>,
+    /// Consumed into the [`NetDriver`] when the match forms; `None` after resolution.
+    session: Option<Session>,
+    driver: FormationDriver,
+    telemetry: Option<crate::telemetry::TelemetrySender>,
     dial_code: Option<EndpointId>,
-    bound_rx: mpsc::Receiver<EndpointId>,
-    bound: std::cell::Cell<Option<EndpointId>>,
-    start_tx: std::cell::Cell<Option<mpsc::Sender<()>>>,
-    cancel_tx: mpsc::Sender<()>,
-    roster_rx: mpsc::Receiver<Vec<EndpointId>>,
-    roster: std::cell::RefCell<Vec<EndpointId>>,
+    cancelled: bool,
+    seed: u64,
+    stamp: crate::SyncStamp,
     pub hosting: bool,
 }
 
 impl Formation {
-    pub fn poll(&self) -> Option<Result<MatchResult>> {
-        match self.rx.try_recv() {
-            Ok(result) => Some(result),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Some(Err(anyhow::anyhow!("formation thread ended unexpectedly")))
-            }
+    /// One frame's pump. `None` while the lobby is still forming.
+    pub fn poll(&mut self) -> Option<Result<MatchResult>> {
+        let session = self.session.as_mut()?;
+        if self.cancelled {
+            println!("lobby cancelled by the player");
+            let session = self.session.take().expect("checked live above");
+            session.close(self.telemetry.take());
+            return Some(Ok(MatchResult::Cancelled));
         }
+        let outcome = self.driver.pump(session, self.telemetry.as_ref())?;
+        let session = self.session.take().expect("checked live above");
+        Some(match outcome {
+            Ok(formation::Formation::Agreed(frozen)) => {
+                Ok(MatchResult::Joined(net_loop::joined_from_frozen(
+                    session,
+                    self.telemetry.take(),
+                    frozen,
+                    self.seed,
+                    self.stamp,
+                )))
+            }
+            Ok(formation::Formation::Alone) => {
+                session.close(self.telemetry.take());
+                Ok(MatchResult::Alone)
+            }
+            Err(e) => {
+                session.close(self.telemetry.take());
+                Err(e)
+            }
+        })
     }
 
-    /// This peer's own endpoint id, once its session has bound — available in either
-    /// role (the wire sends it unconditionally).
+    /// This peer's own endpoint id — the session binds in [`begin`], so it always
+    /// exists; the Option shape is kept for the UI's "still connecting" rendering of
+    /// a formation that failed to even bind.
     pub fn my_id(&self) -> Option<EndpointId> {
-        if self.bound.get().is_none()
-            && let Ok(id) = self.bound_rx.try_recv()
-        {
-            self.bound.set(Some(id));
-        }
-        self.bound.get()
+        self.session.as_ref().map(Session::endpoint_id)
     }
 
     pub fn display_code(&self) -> Option<EndpointId> {
@@ -60,73 +79,33 @@ impl Formation {
     }
 
     pub fn roster(&self) -> Vec<EndpointId> {
-        while let Ok(r) = self.roster_rx.try_recv() {
-            *self.roster.borrow_mut() = r;
-        }
-        self.roster.borrow().clone()
+        self.driver.roster().to_vec()
     }
 
     pub fn lobby_len(&self) -> usize {
-        self.roster().len()
+        self.driver.roster().len()
     }
 
-    pub fn request_start(&self) {
-        if let Some(tx) = self.start_tx.take() {
-            let _ = tx.send(());
+    pub fn request_start(&mut self) {
+        // Only the host holds the start trigger (rl#94 liveness) — a joiner's press
+        // must stay inert.
+        if self.hosting {
+            self.driver.set_starting();
         }
     }
 
-    pub fn cancel(&self) {
-        let _ = self.cancel_tx.send(());
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
     }
 }
 
-fn spawn_formation(
-    seed: u64,
-    join: Option<EndpointId>,
-    hosting: bool,
-    telemetry: Option<EndpointId>,
-    stamp: crate::SyncStamp,
-) -> Formation {
-    let (tx, rx) = mpsc::channel();
-    let (bound_tx, bound_rx) = mpsc::channel();
-    let (roster_tx, roster_rx) = mpsc::channel();
-    let (start_tx, start_rx) = mpsc::channel();
-    let (cancel_tx, cancel_rx) = mpsc::channel();
-    let (role, host_start_tx) = if hosting {
-        (Role::Host, Some(start_tx))
-    } else {
-        (Role::Joiner, None)
-    };
-    thread::spawn(move || {
-        let result = net_loop::connect_and_form_lobby(
-            seed,
-            NET_EXPECT,
-            net_loop::DialTargets {
-                host: join,
-                collector: telemetry,
-            },
-            Some(bound_tx),
-            LobbyControl {
-                role,
-                start_rx,
-                cancel_rx,
-                roster_tx,
-            },
-            stamp,
-        );
-        let _ = tx.send(result);
-    });
-    Formation {
-        rx,
-        dial_code: join,
-        bound_rx,
-        bound: std::cell::Cell::new(None),
-        start_tx: std::cell::Cell::new(host_start_tx),
-        cancel_tx,
-        roster_rx,
-        roster: std::cell::RefCell::new(Vec::new()),
-        hosting,
+impl Drop for Formation {
+    fn drop(&mut self) {
+        // A formation abandoned mid-lobby (the menu drops it on cancel without another
+        // poll) still tears down gracefully — telemetry drained, endpoint closed.
+        if let Some(session) = self.session.take() {
+            session.close(self.telemetry.take());
+        }
     }
 }
 
@@ -135,11 +114,30 @@ pub fn begin(
     seed: u64,
     telemetry: Option<EndpointId>,
     stamp: crate::SyncStamp,
-) -> Formation {
-    match choice {
-        StartChoice::Host => spawn_formation(seed, None, true, telemetry, stamp),
-        StartChoice::Join(host) => spawn_formation(seed, *host, false, telemetry, stamp),
+) -> Result<Formation> {
+    let (role, join) = match choice {
+        StartChoice::Host => (Role::Host, None),
+        StartChoice::Join(host) => (Role::Joiner, *host),
+    };
+    let hosting = matches!(role, Role::Host);
+    let session = crate::transport::start_session()?;
+    if let Some(host) = join {
+        // Fire-and-forget: a failed dial surfaces as a lobby that never fills (the
+        // joiner cancels out), matching the discovery-may-still-find-them semantics.
+        let _ = session.dial(host);
     }
+    let telemetry = net_loop::connect_telemetry(&session, telemetry);
+    let driver = FormationDriver::lobby(&session, role, NET_EXPECT, stamp);
+    Ok(Formation {
+        session: Some(session),
+        driver,
+        telemetry,
+        dial_code: join,
+        cancelled: false,
+        seed,
+        stamp,
+        hosting,
+    })
 }
 
 pub struct ReadyMatch {
@@ -391,18 +389,21 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "timed out after {secs}s waiting for {what}"
             );
-            thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
     /// Share the host's code, join by it, and wait for both rosters to see 2 peers —
     /// the lobby state every scenario below starts from.
     fn two_peer_lobby() -> (Formation, Formation) {
-        let host = begin(&StartChoice::Host, 7, None, SyncStamp::ZERO);
+        let mut host = begin(&StartChoice::Host, 7, None, SyncStamp::ZERO).expect("host binds");
         assert!(host.hosting, "Host formation is flagged hosting");
-        let code = wait_for(15, "the host's shareable join code", || host.display_code());
+        let code = host
+            .display_code()
+            .expect("the session binds in begin, so the join code exists immediately");
 
-        let join = begin(&StartChoice::Join(Some(code)), 7, None, SyncStamp::ZERO);
+        let mut join =
+            begin(&StartChoice::Join(Some(code)), 7, None, SyncStamp::ZERO).expect("joiner binds");
         assert!(!join.hosting, "Join formation is not hosting");
         assert_eq!(
             join.display_code(),
@@ -410,16 +411,15 @@ mod tests {
             "the joiner's lobby shows the code it is dialing"
         );
 
-        // A dead formation thread would otherwise strand this wait in a blind timeout —
-        // resolving (either way) before the host presses Start is itself a failure.
-        let unresolved = |f: &Formation, who: &str| match f.poll() {
-            None => (),
-            Some(Ok(_)) => panic!("{who} formation resolved before Start"),
-            Some(Err(e)) => panic!("{who} formation failed: {e:#}"),
-        };
+        // Resolving (either way) before the host presses Start is itself a failure.
         wait_for(30, "both rosters to reach 2 peers", || {
-            unresolved(&host, "host");
-            unresolved(&join, "joiner");
+            for (f, who) in [(&mut host, "host"), (&mut join, "joiner")] {
+                match f.poll() {
+                    None => (),
+                    Some(Ok(_)) => panic!("{who} formation resolved before Start"),
+                    Some(Err(e)) => panic!("{who} formation failed: {e:#}"),
+                }
+            }
             (host.roster().len() == 2 && join.roster().len() == 2).then_some(())
         });
         (host, join)
@@ -432,23 +432,19 @@ mod tests {
     #[ignore = "binds real iroh UDP endpoints via begin(); run explicitly with --ignored"]
     fn two_peer_lobby_forms_one_match_on_host_start() {
         let _serial = crate::real_net_serial();
-        let (host, join) = two_peer_lobby();
+        let (mut host, mut join) = two_peer_lobby();
 
         for (f, who) in [(&host, "host"), (&join, "joiner")] {
-            let id = wait_for(15, "this peer's own endpoint id", || f.my_id());
+            let id = f.my_id().expect("bound at begin");
             assert!(
                 f.roster().contains(&id),
                 "the {who} finds itself in its roster (the \"(you)\" tag)"
             );
         }
 
-        // Only the host holds the start command — structural: a joiner formation never
-        // carries a start sender, so its request_start is inert by construction (an
-        // immediate poll() couldn't falsify this; the barrier takes wall-clock time).
-        assert!(
-            join.start_tx.take().is_none(),
-            "a joiner holds no start command"
-        );
+        // Only the host holds the start trigger (the `hosting` guard in request_start) —
+        // a joiner's press must arm nothing (an immediate poll() couldn't falsify this;
+        // the barrier takes wall-clock time).
         join.request_start();
         assert!(
             host.poll().is_none() && join.poll().is_none(),
@@ -488,7 +484,7 @@ mod tests {
     #[ignore = "binds real iroh UDP endpoints via begin(); run explicitly with --ignored"]
     fn cancel_leaves_the_lobby_cleanly() {
         let _serial = crate::real_net_serial();
-        let (host, join) = two_peer_lobby();
+        let (mut host, mut join) = two_peer_lobby();
 
         join.cancel();
         let result = wait_for(15, "the joiner's formation to resolve", || join.poll());

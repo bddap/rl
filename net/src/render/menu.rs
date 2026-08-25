@@ -317,13 +317,13 @@ fn apply_action(
             true
         }
         MenuAction::StartNetworked => {
-            if let Some(f) = &state.forming {
+            if let Some(f) = &mut state.forming {
                 f.request_start();
             }
             false
         }
         MenuAction::StartSolo => {
-            if let Some(f) = &state.forming {
+            if let Some(f) = &mut state.forming {
                 f.cancel();
             }
             state.forming = None;
@@ -335,7 +335,7 @@ fn apply_action(
             true
         }
         MenuAction::Cancel => {
-            if let Some(f) = &state.forming {
+            if let Some(f) = &mut state.forming {
                 f.cancel();
             }
             state.forming = None;
@@ -374,7 +374,7 @@ fn poll_formation(
     pending: &mut PendingRound,
     next: &mut NextState<AppPhase>,
 ) -> bool {
-    let Some(result) = state.forming.as_ref().and_then(|f| f.poll()) else {
+    let Some(result) = state.forming.as_mut().and_then(|f| f.poll()) else {
         return false;
     };
     state.forming = None;
@@ -467,13 +467,16 @@ fn arm_and_play(
 
 fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextState<AppPhase>) {
     state.error = None;
-    state.forming = Some(menu::begin(
-        choice,
-        state.seed,
-        state.telemetry,
-        state.stamp,
-    ));
-    next.set(AppPhase::Connecting);
+    match menu::begin(choice, state.seed, state.telemetry, state.stamp) {
+        Ok(forming) => {
+            state.forming = Some(forming);
+            next.set(AppPhase::Connecting);
+        }
+        Err(e) => {
+            state.error = Some(format!("Couldn't open the lobby: {e:#}"));
+            next.set(AppPhase::Menu);
+        }
+    }
 }
 
 fn draw_chooser(ctx: &egui::Context, state: &mut MenuState) -> Option<ChooserItem> {

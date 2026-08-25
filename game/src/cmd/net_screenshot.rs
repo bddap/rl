@@ -68,7 +68,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
             host: dial,
             collector: None,
         },
-        None,
         net::SyncStamp::local(1),
     )?;
 

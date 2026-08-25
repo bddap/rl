@@ -50,7 +50,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
                 host: dial,
                 collector: args.telemetry,
             },
-            None,
             net::SyncStamp::local(nn_crabs.len() as u8),
         )?;
         match result {

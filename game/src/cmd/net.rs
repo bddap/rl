@@ -26,34 +26,32 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    tokio::runtime::Runtime::new()?.block_on(run_net(args))
-}
-
-async fn run_net(args: Args) -> Result<()> {
-    let mut session = transport::start_session().await?;
+    let mut session = transport::start_session()?;
     let my_eid = session.endpoint_id();
     info!("game endpoint id: {my_eid}");
 
-    let tel = net_loop::connect_telemetry(args.telemetry, my_eid).await;
+    let tel = net_loop::connect_telemetry(&session, args.telemetry);
 
-    let frozen = match formation::form_match(
-        &mut session,
+    // Crabless STAMP (a rest-pose statue serves the poses, not a bound brain):
+    // windowed peers refuse this harness on the crabs axis (rl#114/rl#286).
+    let mut driver = formation::FormationDriver::discovering(
+        &session,
         args.discover_secs,
         args.expect,
-        tel.as_ref(),
-        None,
-        // Crabless STAMP (a rest-pose statue serves the poses, not a bound brain):
-        // windowed peers refuse this harness on the crabs axis (rl#114/rl#286).
         net::SyncStamp::local(0),
-    )
-    .await?
-    {
+    );
+    let formed = loop {
+        if let Some(outcome) = driver.pump(&mut session, tel.as_ref()) {
+            break outcome;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let frozen = match formed? {
         formation::Formation::Agreed(frozen) => frozen,
         formation::Formation::Alone => {
-            net_loop::close_session(&session, tel).await;
+            session.close(tel);
             return run_solo_round(args.run_secs);
         }
-        formation::Formation::Cancelled => unreachable!("headless net has no lobby to cancel"),
     };
     let me = frozen.me;
     // Mutable: a departed peer (link gone, rl#198) is removed so its stale entry can't tag
@@ -88,7 +86,8 @@ async fn run_net(args: Args) -> Result<()> {
         (s, world)
     });
 
-    let mut ticker = tokio::time::interval(Duration::from_secs_f64(TICK_DT));
+    let tick_dt = Duration::from_secs_f64(TICK_DT);
+    let mut next_tick_at = Instant::now();
     let end = Instant::now() + Duration::from_secs(args.run_secs);
     let mut snapshots_io = 0usize;
     let mut next_report_tick = TICK_HZ;
@@ -105,7 +104,8 @@ async fn run_net(args: Args) -> Result<()> {
         .transpose()?;
 
     while Instant::now() < end {
-        ticker.tick().await;
+        std::thread::sleep(next_tick_at.saturating_duration_since(Instant::now()));
+        next_tick_at += tick_dt;
 
         let mut server_down: Option<net_loop::ServerDown> = None;
 
@@ -260,7 +260,7 @@ async fn run_net(args: Args) -> Result<()> {
         use std::io::Write as _;
         w.flush().context("flushing hash log")?;
     }
-    // close_session drains queued telemetry before closing — no flush-sleep needed.
-    net_loop::close_session(&session, tel).await;
+    // close drains queued telemetry before the endpoint — no flush-sleep needed.
+    session.close(tel);
     Ok(())
 }
