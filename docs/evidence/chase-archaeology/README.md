@@ -35,3 +35,17 @@ Bisect probes (rl#351, post-shortlist):
   render (patched `rl-demo-3ddcf6f-mlp512x3`, era flat floor): policy armed
   (mean|drive| 0.869) but no chase. Verdict on the issue: DEGRADED — convicts
   `56754c32` (mlp256 → mlp512x3) for cold-start learning at this rev.
+
+- `probe-i-2760e243-endofbound.*`, `probe-i-2760e243-reach-curve.png` — Probe I
+  (2026-08-25): bisect at the 07-17 collider-regen boundary, pin `2760e243`
+  (post-collider-regen; pre-terrain-ground/band128/obs117/env-swap — flat arena +
+  band ≤9 m are the rev's defaults, mlp512x3, REACH 0.2 native). Cold, 24 h +
+  the ONE extension (upward trend, no cross) = 73.3M ticks / 23.5k iters.
+  Train-side reach (0.2 m criterion, like-for-like vs A's trendless 0.01–0.05):
+  climbed 0.02 → flat ~0.045 → 0.07 → late surge to 0.14–0.15, still rising at
+  the bound — see the curve. End-of-bound render (the pin's own `rl-demo`, flat
+  native = in-distribution, seed 351): **she chases** — closes from a distant
+  spawn and stays at the ball for the rest of the clip (mean|drive| 0.890).
+  Verdict on the issue: NOT-FLOOR (D/F-like slow learning) — acquits everything
+  ≤07-17 incl. the collider regen; with Probe C's floor on `4cdf934c` (07-27)
+  the breaker narrows to `2760e243..4cdf934c` (07-18..07-27).
