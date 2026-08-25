@@ -991,6 +991,33 @@ mod tests {
         assert_eq!(rh, sorted(&[idh, idj]));
     }
 
+    /// The "only the host commands the start" rule is structural ([`LobbyMode`]): a
+    /// joiner-mode press is a no-op, so a rogue/miswired joiner UI can never arm the
+    /// barrier — the guarantee the drivers above the core lean on instead of carrying
+    /// their own role checks.
+    #[test]
+    fn joiner_start_press_is_inert() {
+        let t0 = 0u64;
+        let (idh, idj) = (eid(1), eid(2));
+        let mut h = Membership::host_triggered(Role::Host, idh, 2, t0);
+        let mut j = Membership::host_triggered(Role::Joiner, idj, 2, t0);
+
+        j.set_starting();
+        let mut t = 0u64;
+        while t <= STABLE_FOR_MS + 4000 {
+            let now = at(t0, t);
+            let (bh, bj) = (h.beat(), j.beat());
+            h.on_beat(idj, &bj, now);
+            j.on_beat(idh, &bh, now);
+            assert!(
+                !matches!(h.poll(now), Status::Agreed { .. })
+                    && !matches!(j.poll(now), Status::Agreed { .. }),
+                "a joiner's Start press must never close the barrier"
+            );
+            t += 250;
+        }
+    }
+
     #[test]
     fn host_go_on_a_mismatched_roster_does_not_close_a_joiner() {
         let t0 = 0u64;

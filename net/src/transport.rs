@@ -22,7 +22,7 @@ use net_proto::codec::{
 };
 pub use net_proto::codec::PeerWire;
 
-pub const SERVICE_NAME: &str = "bddap-rl-game";
+const SERVICE_NAME: &str = "bddap-rl-game";
 
 #[derive(Debug, Clone)]
 pub struct FromPeer {
@@ -34,7 +34,7 @@ const ADDR_WAIT: Duration = Duration::from_secs(10);
 
 const PUBLISH_SETTLE: Duration = Duration::from_millis(300);
 
-pub async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
+async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
     let transport = QuicTransportConfig::builder()
         .keep_alive_interval(Duration::from_secs(1))
         .max_idle_timeout(Some(
@@ -57,9 +57,9 @@ pub async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
         .add(mdns.clone());
 
     // Publish our LAN address once a direct addr exists — in the background, so "is
-    // networking up?" is a discovery property, never a boot gate (rl#411 stage 2): a
-    // session binds instantly and solo play needs no network at all. Peers can't
-    // mDNS-find us until this lands, which is exactly discovery's own timeline.
+    // networking up?" is a discovery property, never a boot gate: a session binds
+    // instantly and solo play needs no network at all. Peers can't mDNS-find us until
+    // this lands, which is exactly discovery's own timeline.
     let ep = endpoint.clone();
     tokio::spawn(async move {
         if let Err(e) = publish_lan_addr(&ep, SERVICE_NAME).await {
@@ -123,11 +123,16 @@ const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 // A std (not tokio) mutex: every critical section is a plain map touch with no await
 // inside, and the sync lock is what lets the whole send/poll surface below be called
-// straight from the frame loop — no runtime, no block_on (rl#411 stage 2).
+// straight from the frame loop — no runtime, no block_on.
 type Links = Arc<std::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>;
 
 fn locked(links: &Links) -> std::sync::MutexGuard<'_, BTreeMap<EndpointId, PeerLink>> {
-    links.lock().expect("links critical sections don't panic")
+    // Poison-proof: the critical sections are map ops that don't panic, but if one ever
+    // does, degrading to the map as-left (a dropped link at worst) beats poisoning every
+    // later frame-loop send into a panic cascade.
+    links
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Clone, Debug)]

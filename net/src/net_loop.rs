@@ -498,9 +498,10 @@ pub struct DialTargets {
     pub collector: Option<EndpointId>,
 }
 
-/// The cadence at which BLOCKING callers (CLI forming/joining, with no frame loop of
-/// their own) pump the poll-driven session.
-const FORM_POLL: Duration = Duration::from_millis(10);
+/// How long the Alone arm waits for a still-pending dial verdict before erroring
+/// generically — covers the QUIC handshake/idle timeout outliving a short discovery
+/// window.
+const DIAL_VERDICT_GRACE: Duration = Duration::from_secs(6);
 
 /// Form a match over timed LAN discovery, blocking until it resolves — the scripted/CLI
 /// path. The windowed lobby drives the same [`FormationDriver`] from the frame loop
@@ -524,28 +525,33 @@ pub fn connect_and_form_dialing(
         }
     }
     let telemetry = connect_telemetry(&session, targets.collector);
-    let mut driver = FormationDriver::discovering(&session, discover_secs, expect, stamp);
-    let formed = loop {
-        if let Some(outcome) = driver.pump(&mut session, telemetry.as_ref()) {
-            break outcome;
-        }
-        std::thread::sleep(FORM_POLL);
-    };
-    // An explicit dial's failure is not yet fatal while discovery may still find the
-    // host on the LAN; only the Alone arm below turns it into a hard error rather than
-    // silently starting a solo round the player didn't ask for.
-    let dial_failed = dial_verdict.and_then(|rx| match rx.try_recv() {
-        Ok(Err(e)) => Some(e),
-        _ => None,
-    });
+    let formed = FormationDriver::discovering(&session, discover_secs, expect, stamp)
+        .pump_blocking(&mut session, telemetry.as_ref());
     let frozen = match formed {
         Ok(Formation::Agreed(frozen)) => frozen,
         Ok(Formation::Alone) => {
             session.close(telemetry);
-            if let Some(e) = dial_failed {
-                return Err(e.context(
-                    "could not reach the host you asked to join, and LAN discovery found no one",
-                ));
+            // An explicit dial's failure is not fatal while discovery may still find the
+            // host on the LAN — but ending up ALONE after one means the join failed, and
+            // must be a hard error, never a silent solo round the player didn't ask for.
+            // Ok(Ok(())) is the pre-formation link that went silent — same as before the
+            // seam, that stays Alone. A dial still pending here (the QUIC timeout can
+            // outlive a short discovery window) gets a bounded wait so the error carries
+            // the real cause.
+            if let Some(rx) = dial_verdict {
+                match rx.recv_timeout(DIAL_VERDICT_GRACE) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        return Err(e.context(
+                            "could not reach the host you asked to join, and LAN discovery \
+                             found no one",
+                        ));
+                    }
+                    Err(_) => anyhow::bail!(
+                        "the host you asked to join never answered the dial, and LAN \
+                         discovery found no one"
+                    ),
+                }
             }
             return Ok(MatchResult::Alone);
         }
@@ -625,7 +631,7 @@ fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVerdict 
                 _ => continue,
             }
         }
-        std::thread::sleep(FORM_POLL);
+        std::thread::sleep(crate::formation::FORM_POLL);
     }
     AdmissionVerdict::Timeout
 }

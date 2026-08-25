@@ -15,8 +15,8 @@ pub mod voice_reply;
 // construction — no tokio/iroh, wasm32-checked). Re-exported under the same paths
 // so `net::sim` etc. stay stable for every consumer.
 pub use net_proto::{
-    SyncStamp, SyncVerdict, articulation, cadence, client, codec, cordic, may_arm_crabs,
-    membership, roster, server, sim, snapshot, wire,
+    SyncStamp, SyncVerdict, articulation, cadence, client, cordic, may_arm_crabs, membership,
+    roster, server, sim, snapshot, wire,
 };
 
 // Render-free since rl#298 stage 4: only the label publisher inside stays

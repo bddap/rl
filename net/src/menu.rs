@@ -15,9 +15,9 @@ pub enum StartChoice {
 
 const NET_EXPECT: usize = 2;
 
-/// A lobby formation the render loop PUMPS — no thread, no channels (rl#411 stage 2):
-/// the session and the formation core live right here, and every accessor reads them
-/// directly. The frame loop's `poll` drives beats, roster, and agreement.
+/// A lobby formation the render loop PUMPS: the session and the formation core live
+/// right here, every accessor reads them directly, and the frame loop's `poll` drives
+/// beats, roster, and agreement.
 pub struct Formation {
     /// Consumed into the [`NetDriver`] when the match forms; `None` after resolution.
     session: Option<Session>,
@@ -63,9 +63,9 @@ impl Formation {
         })
     }
 
-    /// This peer's own endpoint id — the session binds in [`begin`], so it always
-    /// exists; the Option shape is kept for the UI's "still connecting" rendering of
-    /// a formation that failed to even bind.
+    /// This peer's own endpoint id — the session binds in [`begin`], so this is `None`
+    /// only after resolution consumed the session (a state the UI never shows: it drops
+    /// the formation on resolve).
     pub fn my_id(&self) -> Option<EndpointId> {
         self.session.as_ref().map(Session::endpoint_id)
     }
@@ -87,11 +87,9 @@ impl Formation {
     }
 
     pub fn request_start(&mut self) {
-        // Only the host holds the start trigger (rl#94 liveness) — a joiner's press
-        // must stay inert.
-        if self.hosting {
-            self.driver.set_starting();
-        }
+        // A joiner's press is inert in the CORE (`Membership::set_starting` no-ops
+        // outside host mode, rl#94 liveness) — no second guard here.
+        self.driver.set_starting();
     }
 
     pub fn cancel(&mut self) {
@@ -122,9 +120,13 @@ pub fn begin(
     let hosting = matches!(role, Role::Host);
     let session = crate::transport::start_session()?;
     if let Some(host) = join {
-        // Fire-and-forget: a failed dial surfaces as a lobby that never fills (the
-        // joiner cancels out), matching the discovery-may-still-find-them semantics.
-        let _ = session.dial(host);
+        if host == session.endpoint_id() {
+            tracing::warn!("join code is our own endpoint id — ignoring the self-dial");
+        } else {
+            // Fire-and-forget: a failed dial surfaces as a lobby that never fills (the
+            // joiner cancels out), matching the discovery-may-still-find-them semantics.
+            let _ = session.dial(host);
+        }
     }
     let telemetry = net_loop::connect_telemetry(&session, telemetry);
     let driver = FormationDriver::lobby(&session, role, NET_EXPECT, stamp);
@@ -442,8 +444,9 @@ mod tests {
             );
         }
 
-        // Only the host holds the start trigger (the `hosting` guard in request_start) —
-        // a joiner's press must arm nothing (an immediate poll() couldn't falsify this;
+        // A joiner's Start press must arm nothing — the structural guard lives in the
+        // core (`Membership::set_starting` no-ops outside host mode, unit-tested there);
+        // this presses it end-to-end (an immediate poll() couldn't falsify it alone —
         // the barrier takes wall-clock time).
         join.request_start();
         assert!(

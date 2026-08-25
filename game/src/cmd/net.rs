@@ -34,18 +34,13 @@ pub(crate) fn run(args: Args) -> Result<()> {
 
     // Crabless STAMP (a rest-pose statue serves the poses, not a bound brain):
     // windowed peers refuse this harness on the crabs axis (rl#114/rl#286).
-    let mut driver = formation::FormationDriver::discovering(
+    let formed = formation::FormationDriver::discovering(
         &session,
         args.discover_secs,
         args.expect,
         net::SyncStamp::local(0),
-    );
-    let formed = loop {
-        if let Some(outcome) = driver.pump(&mut session, tel.as_ref()) {
-            break outcome;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    )
+    .pump_blocking(&mut session, tel.as_ref());
     let frozen = match formed? {
         formation::Formation::Agreed(frozen) => frozen,
         formation::Formation::Alone => {

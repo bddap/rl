@@ -17,6 +17,10 @@ use crate::transport::{self, PeerWire};
 use net_proto::formation::{FormationCore, Outcome};
 pub use net_proto::formation::{Frozen, assign_player_ids, early_peer_msgs, solo_client_for};
 
+/// The cadence at which BLOCKING callers (CLI forming/joining, with no frame loop of
+/// their own) pump the poll-driven session.
+pub(crate) const FORM_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
 pub enum Formation {
     Agreed(Frozen),
     /// Formation ended with only us live — play solo. Fires only in the genuinely-alone
@@ -57,8 +61,8 @@ impl FormationDriver {
     }
 
     /// A lobby (the menu path): no discovery timeout; the HOST's explicit
-    /// [`Self::set_starting`] arms agreement (rl#94 liveness — a joiner's is inert,
-    /// guarded by the caller's role).
+    /// [`Self::set_starting`] arms agreement (rl#94 liveness — a joiner-role core's is
+    /// inert by construction, see `Membership::set_starting`).
     pub fn lobby(session: &transport::Session, role: Role, expect: usize, stamp: crate::SyncStamp) -> Self {
         Self {
             core: FormationCore::host_triggered(role, session.endpoint_id(), expect, stamp, 0),
@@ -71,6 +75,22 @@ impl FormationDriver {
 
     pub fn set_starting(&mut self) {
         self.core.set_starting();
+    }
+
+    /// Pump to completion on the calling thread — the pacer for callers with no frame
+    /// loop of their own (the CLI paths). The windowed lobby polls [`Self::pump`] per
+    /// frame instead: one driver, two pacers.
+    pub fn pump_blocking(
+        mut self,
+        session: &mut transport::Session,
+        tel: Option<&TelemetrySender>,
+    ) -> Result<Formation> {
+        loop {
+            if let Some(outcome) = self.pump(session, tel) {
+                return outcome;
+            }
+            std::thread::sleep(FORM_POLL);
+        }
     }
 
     pub fn roster(&self) -> &[EndpointId] {
@@ -236,10 +256,12 @@ mod tests {
 
         let mut d0 = FormationDriver::discovering(&s0, 1, 3, SyncStamp::ZERO);
         let mut d1 = FormationDriver::discovering(&s1, 1, 3, SyncStamp::ZERO);
-        // s2 joins late, by explicit dial, like a code-join straggler.
+        // s2 joins late, by explicit dial, like a code-join straggler — its discovery
+        // window is wider so the 600ms-late dial can't race its own solo fallback on a
+        // loaded runner.
         let late_at = std::time::Instant::now() + std::time::Duration::from_millis(600);
         let mut s2_dialed = false;
-        let mut d2 = FormationDriver::discovering(&s2, 1, 3, SyncStamp::ZERO);
+        let mut d2 = FormationDriver::discovering(&s2, 2, 3, SyncStamp::ZERO);
 
         // Round-robin pump all three from one thread — the poll-driven interface needs
         // no per-peer runtime or thread, which is the point of the seam.
