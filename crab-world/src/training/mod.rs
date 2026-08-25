@@ -120,37 +120,40 @@ pub(crate) fn replace_dir_atomically(
 /// rename-aside fallback (through the caller's `aside` path, so the caller's crash
 /// sweep can recover it) where the filesystem lacks `RENAME_EXCHANGE`.
 fn exchange_paths(a: &Path, b: &Path, aside: &Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let ac = std::ffi::CString::new(a.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let bc = std::ffi::CString::new(b.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let rc = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            ac.as_ptr(),
-            libc::AT_FDCWD,
-            bc.as_ptr(),
-            libc::RENAME_EXCHANGE,
-        )
-    };
-    if rc == 0 {
-        return Ok(());
-    }
-    let err = std::io::Error::last_os_error();
-    match err.raw_os_error() {
-        // Kernel or filesystem without EXCHANGE — the documented lesser-evil fallback:
-        // a reader can see `b` absent between the two renames (and a crash there
-        // leaves `b` absent until the next call's aside sweep restores it), but a
-        // torn set is still impossible.
-        Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::ENOTSUP) => {
-            std::fs::rename(b, aside)?;
-            std::fs::rename(a, b)?;
-            std::fs::rename(aside, a)?;
-            Ok(())
+    // renameat2 is a Linux-only syscall; elsewhere (macOS) the rename-aside
+    // fallback below is simply the only path.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let ac = std::ffi::CString::new(a.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let bc = std::ffi::CString::new(b.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let rc = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                ac.as_ptr(),
+                libc::AT_FDCWD,
+                bc.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
         }
-        _ => Err(err),
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            // Kernel or filesystem without EXCHANGE — fall through to the fallback.
+            Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::ENOTSUP) => {}
+            _ => return Err(err),
+        }
     }
+    // The documented lesser-evil fallback: a reader can see `b` absent between the
+    // two renames (and a crash there leaves `b` absent until the next call's aside
+    // sweep restores it), but a torn set is still impossible.
+    std::fs::rename(b, aside)?;
+    std::fs::rename(a, b)?;
+    std::fs::rename(aside, a)
 }
 
 /// Hardlink every entry of `from` that `to` lacks, recursing into subdirectories —

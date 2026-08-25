@@ -23,13 +23,13 @@ fn apply_nice(nice: i32) {
     if nice == 0 {
         return;
     }
-    unsafe {
-        *libc::__errno_location() = 0;
-        let rc = libc::setpriority(libc::PRIO_PROCESS, 0, nice);
-        if rc == -1 && *libc::__errno_location() != 0 {
-            let err = std::io::Error::last_os_error();
-            eprintln!("[nice] setpriority({nice}) failed: {err} — running at normal priority");
-        }
+    // No errno pre-clear: unlike getpriority, setpriority returns -1 ONLY on error,
+    // so the bare return code is the whole verdict (and errno access is per-OS libc
+    // surface — __errno_location is glibc-only, which broke the macOS build).
+    let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
+    if rc == -1 {
+        let err = std::io::Error::last_os_error();
+        eprintln!("[nice] setpriority({nice}) failed: {err} — running at normal priority");
     }
 }
 
