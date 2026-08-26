@@ -356,7 +356,7 @@ fn apply_action(
             };
             state.error = None;
             // Poll-driven: begin binds and fires the dial, poll_rejoin pumps it per
-            // frame — no thread (rl#411 stage-2 residual (a)).
+            // frame — no thread (rl#411).
             match net_loop::JoinDriver::begin(state.seed, host, state.telemetry, state.stamp) {
                 Ok(driver) => {
                     state.rejoining = Some(driver);

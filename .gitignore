@@ -37,3 +37,5 @@ shots/
 
 # wasm-bindgen output of the web-echo probe (examples/web-echo/run.sh)
 net-link/examples/web-echo/pkg/
+# runtime pid scratch (echo probe et al)
+*.pid

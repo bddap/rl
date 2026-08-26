@@ -20,19 +20,22 @@ cd "$(dirname "$0")/../.."   # net-link/
 CLANG_UNWRAPPED=$(nix-build '<nixpkgs>' -A llvmPackages.clang-unwrapped --no-out-link)/bin/clang
 LLVM_AR=$(nix-build '<nixpkgs>' -A llvm --no-out-link)/bin/llvm-ar
 TARGET_DIR=${CARGO_TARGET_DIR:-../target}
+WB_LOCK=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = |"/,""); print; exit}' ../Cargo.lock)
 
 nix-shell -p lld --run "
   export CC_wasm32_unknown_unknown=$CLANG_UNWRAPPED AR_wasm32_unknown_unknown=$LLVM_AR
   nix-shell ../shell.nix --run 'cargo build --target wasm32-unknown-unknown --release --example echo_web && cargo build --release --example echo_native'
 "
 nix-shell -p wasm-bindgen-cli --run "
+  [ \"\$(wasm-bindgen --version)\" = 'wasm-bindgen $WB_LOCK' ] || {
+    echo \"wasm-bindgen CLI (\$(wasm-bindgen --version)) != workspace lock ($WB_LOCK) — use a nixpkgs (or cargo install --version $WB_LOCK) that matches\"; exit 1; }
   wasm-bindgen --target web --out-dir examples/web-echo/pkg \
     $TARGET_DIR/wasm32-unknown-unknown/release/examples/echo_web.wasm
 "
 
 "$TARGET_DIR/release/examples/echo_native" > /tmp/echo-native.log &
 NATIVE_PID=$!
-trap 'kill $NATIVE_PID 2>/dev/null || true; kill ${SERVER_PID:-0} 2>/dev/null || true' EXIT
+trap '[ -n "${NATIVE_PID:-}" ] && kill "$NATIVE_PID" 2>/dev/null; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; true' EXIT
 until grep -q PROBE_RELAY /tmp/echo-native.log; do sleep 0.5; done
 ID=$(grep -oP 'PROBE_ID=\K.*' /tmp/echo-native.log)
 RELAY=$(grep -oP 'PROBE_RELAY=\K.*' /tmp/echo-native.log)

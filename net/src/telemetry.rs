@@ -237,6 +237,10 @@ const QUEUE_DEPTH: usize = 256;
 /// in-flight write plus the endpoint close, both themselves bounded in [`sender_task`].
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// `Clone` hands out extra sender handles (the render driver clones one per frame to
+/// escape a `World` borrow). [`close`](Self::close) is best called on the LAST live
+/// handle: a surviving clone keeps the channels open, so the close-wait runs its full
+/// [`CLOSE_TIMEOUT`] and the drain completes only when that clone drops.
 #[derive(Clone)]
 pub struct TelemetrySender {
     shed_tx: mpsc::Sender<Envelope>,
@@ -290,9 +294,10 @@ impl TelemetrySender {
         }
     }
 
-    /// THE way to end a sender. Drops this handle's channels (closing them once no clone
-    /// survives) and bounded-waits for the I/O thread, which drains queued envelopes and
-    /// `Endpoint::close`s. A wedged link can't hang teardown past [`CLOSE_TIMEOUT`].
+    /// THE way to end a sender. Drops this handle's channels (closing them once no
+    /// clone survives) and bounded-waits for the I/O thread, which drains queued
+    /// envelopes and `Endpoint::close`s. A wedged link can't hang teardown past
+    /// [`CLOSE_TIMEOUT`].
     pub fn close(self) {
         let done = self.done.lock().unwrap().take();
         drop(self);
@@ -355,7 +360,7 @@ async fn sender_task(
     mut shed_rx: mpsc::Receiver<Envelope>,
     mut crit_rx: mpsc::UnboundedReceiver<Envelope>,
 ) {
-    let conn = match dial_collector(&endpoint, collector).await {
+    let conn = match dial_collector(&endpoint, collector, &shed_rx, &crit_rx).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -417,11 +422,22 @@ async fn drain(
     }
 }
 
-async fn dial_collector(endpoint: &Endpoint, collector: EndpointId) -> Result<Connection> {
+async fn dial_collector(
+    endpoint: &Endpoint,
+    collector: EndpointId,
+    shed_rx: &mpsc::Receiver<Envelope>,
+    crit_rx: &mpsc::UnboundedReceiver<Envelope>,
+) -> Result<Connection> {
     const ATTEMPTS: u32 = 10;
     const BACKOFF: Duration = Duration::from_millis(500);
     let mut last_err = None;
     for attempt in 0..ATTEMPTS {
+        // The retry window (~5 s+) outlasts CLOSE_TIMEOUT, so a sender closed while we
+        // still dial must end the attempt loop — otherwise `close()` gives up and the
+        // process can exit with this thread mid-dial, dropping the endpoint unclosed.
+        if shed_rx.is_closed() && crit_rx.is_closed() {
+            anyhow::bail!("sender closed while dialing");
+        }
         match endpoint.connect(collector, TELEMETRY_ALPN).await {
             Ok(conn) => return Ok(conn),
             Err(e) => {

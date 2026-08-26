@@ -6,9 +6,8 @@
 
 use anyhow::{Context, Result};
 use iroh::endpoint::presets;
-use tokio::sync::mpsc;
 
-use crate::{Links, Session, spawn_router, transport_config};
+use crate::{Session, spawn_router, transport_config};
 
 /// The web platform state a [`Session`] carries: just the accept router — tasks ride
 /// the JS event loop, so there is no runtime to own.
@@ -28,12 +27,8 @@ impl Guts {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // No blocking on the JS event loop — hand the close to it. Idempotent with an
-        // explicit `close`, same contract as native.
-        let ep = self.endpoint.clone();
-        n0_future::task::spawn(async move {
-            ep.close().await;
-        });
+        // Idempotent with an explicit `close`, same contract as native.
+        self.close();
     }
 }
 
@@ -57,17 +52,7 @@ pub async fn start_session() -> Result<Session> {
         .bind()
         .await
         .context("binding iroh endpoint (browser)")?;
-
-    let (inbox_tx, inbox_rx) = mpsc::channel(256);
-    let links: Links = Default::default();
-    let router = spawn_router(&endpoint, inbox_tx.clone(), links.clone());
-
-    Ok(Session {
-        endpoint,
-        inbox: inbox_rx,
-        inbox_tx,
-        links,
-        epoch: n0_future::time::Instant::now(),
-        guts: Guts { _router: router },
-    })
+    Ok(crate::assemble(endpoint, |endpoint, inbox, links| Guts {
+        _router: spawn_router(endpoint, inbox, links),
+    }))
 }

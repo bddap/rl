@@ -2,9 +2,7 @@
   "about": "Touched-path → test-suite map (bothouse#236), read by `botq test-map`. The acceptance gate derives every landed job's touched paths from its own diff and requires the commands mapped here green — independent of the job's brief. First matching rule wins: specific rules above broad ones. `tests: []` means CONSCIOUSLY untested and must carry its why. An unmapped path fails the resolver loud. Commands run from the repo root; lint completeness with `botq test-map --check`.",
   "rules": [
     {
-      "paths": [
-        "test-map.json"
-      ],
+      "paths": ["test-map.json"],
       "tests": [
         "botq test-map --check",
         "nix-shell --run 'cargo test -q -p crab-world --test test_map_guard -- --test-threads=2'"
@@ -12,55 +10,34 @@
       "why": "editing the map re-lints its own completeness over every tracked file, and the guard test pins the landing-matrix commands so a config cannot be silently dropped from the rule below (--check lints completeness, not content)"
     },
     {
-      "paths": [
-        "**/*.md",
-        "**/.gitignore",
-        "LICENSE-*",
-        "NOTICE",
-        "docs/**"
-      ],
+      "paths": ["**/*.md", "**/.gitignore", "LICENSE-*", "NOTICE", "docs/**"],
       "tests": [],
       "why": "prose, licenses, and evidence artifacts (screenshots/logs recorded under docs/evidence)"
     },
     {
-      "paths": [
-        ".github/**"
-      ],
+      "paths": [".github/**"],
       "tests": [],
       "why": "CI workflow definitions — exercised only by dispatching them on GitHub Actions; no local runner exists, and a broken workflow fails loudly at dispatch"
     },
     {
-      "paths": [
-        "scripts/**",
-        "otel/proof-rl-otel.sh"
-      ],
+      "paths": ["scripts/**", "otel/proof-rl-otel.sh"],
       "tests": [],
       "why": "operator tooling (profiling, terrain bake, asset fetch) and live proof scripts — exercised by use against a running system, no offline harness"
     },
     {
-      "paths": [
-        "net-link/examples/web-echo/**"
-      ],
+      "paths": ["net-link/examples/web-echo/**"],
       "tests": [
-        "nix-shell -p shellcheck --run \"shellcheck net-link/examples/web-echo/run.sh\""
+        "nix-shell -p shellcheck --run 'shellcheck net-link/examples/web-echo/run.sh'"
       ],
       "why": "the browser↔native relay echo probe (rl#411 stage 4) — a live-network canary exercised by RUNNING run.sh against the n0 relays (no offline harness; its .rs halves ride the general rust rule from net-link/examples/); shellcheck keeps the runner mechanically sound"
     },
     {
-      "paths": [
-        "shell.nix"
-      ],
+      "paths": ["shell.nix"],
       "tests": [],
       "why": "the pinned dev environment — every mapped suite below runs inside it, so a break fails those commands loudly"
     },
     {
-      "paths": [
-        "crab-world/src/eval.rs",
-        "crab-world/src/eval/**",
-        "crab-world/src/training/best.rs",
-        "crab-world/src/bot/headless.rs",
-        "crab-world/src/terrain.rs"
-      ],
+      "paths": ["crab-world/src/eval.rs", "crab-world/src/eval/**", "crab-world/src/training/best.rs", "crab-world/src/bot/headless.rs", "crab-world/src/terrain.rs"],
       "tests": [
         "nix-shell --run 'cargo fmt --check'",
         "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
@@ -73,15 +50,7 @@
       "why": "the chase-eval measurement seam (rl#341 S2-5): the physical path — run_eval through real batched bevy+rapier worlds, the fold, every guard — had ZERO executed coverage because its only end-to-end test is #[ignore]d (too heavy for every workspace change). First-match-wins shadows the general rust rule, so this rule carries the full landing matrix PLUS the --ignored end-to-end run (release, ~1 min after kache-warm compile); a regression in the settle/active split, the running min, the rescue forfeit, or the batched env wiring now fails a landing that touches the seam"
     },
     {
-      "paths": [
-        "**/*.rs",
-        "**/Cargo.toml",
-        "Cargo.lock",
-        ".cargo/config.toml",
-        "**/*.wgsl",
-        "crab-world/assets/**",
-        "crab-world/tests/data/**"
-      ],
+      "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".cargo/config.toml", "**/*.wgsl", "crab-world/assets/**", "crab-world/tests/data/**"],
       "tests": [
         "nix-shell --run 'cargo fmt --check'",
         "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",

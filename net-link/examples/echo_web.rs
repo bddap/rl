@@ -52,7 +52,10 @@ mod wasm {
             conn.send_datagram(payload.clone().into_bytes().into())?;
             let d = conn.read_datagram().await?;
             let rtt = js_sys::Date::now() - t0;
-            anyhow::ensure!(d.as_ref() == payload.as_bytes(), "echo mismatch on round {i}");
+            anyhow::ensure!(
+                d.as_ref() == payload.as_bytes(),
+                "echo mismatch on round {i}"
+            );
             log(&format!("PROBE_RTT_MS={rtt:.1}"));
             rtts.push(rtt);
         }

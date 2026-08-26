@@ -2,7 +2,9 @@
 //! impl per target. Everything protocol — frame kinds, codecs, fragmentation — is
 //! `net_proto::codec`; this layer moves those bytes. Everything platform — runtime,
 //! discovery, relay posture, clock source — lives in the platform module below the
-//! [`Session`] surface; nothing above this crate carries a `cfg(target_*)`.
+//! [`Session`] surface: the per-frame surface is identical on both targets, so code
+//! above this crate stays cfg-free. Construction is the one platform entry point
+//! (native `start_session` is sync, web's is async on the JS event loop).
 //!
 //! - **native** ([`native`], non-wasm): tokio runtime OWNED by the session, direct
 //!   LAN addressing + mDNS discovery, relay off.
@@ -335,6 +337,29 @@ fn spawn_router(endpoint: &Endpoint, inbox: mpsc::Sender<FromPeer>, links: Links
     Router::builder(endpoint.clone())
         .accept(ALPN, handler)
         .spawn()
+}
+
+const INBOX_DEPTH: usize = 256;
+
+/// The one session assembly both platform constructors share — inbox, links, epoch —
+/// so a capacity change or a new field can't land in one platform and drift the other.
+/// `make_guts` runs with the shared parts in hand (its router + any discovery tasks
+/// consume them) inside whatever executor context the platform set up.
+fn assemble(
+    endpoint: Endpoint,
+    make_guts: impl FnOnce(&Endpoint, mpsc::Sender<FromPeer>, Links) -> platform::Guts,
+) -> Session {
+    let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_DEPTH);
+    let links: Links = Default::default();
+    let guts = make_guts(&endpoint, inbox_tx.clone(), links.clone());
+    Session {
+        endpoint,
+        inbox: inbox_rx,
+        inbox_tx,
+        links,
+        epoch: time::Instant::now(),
+        guts,
+    }
 }
 
 fn send_state_datagram(conn: &Connection, frag: bytes::Bytes) {

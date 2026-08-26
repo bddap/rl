@@ -62,61 +62,53 @@ pub fn start_session() -> Result<Session> {
         .enable_all()
         .build()?;
     let (endpoint, mdns) = rt.block_on(bind_endpoint())?;
-    let guard = rt.enter();
-    let my_id = endpoint.id();
-
-    let (inbox_tx, inbox_rx) = mpsc::channel(256);
-    let links: Links = Default::default();
-
-    let router = spawn_router(&endpoint, inbox_tx.clone(), links.clone());
-
-    let discovery = {
-        let endpoint = endpoint.clone();
-        let inbox = inbox_tx.clone();
-        let links = links.clone();
-        tokio::spawn(async move {
-            let mut events = mdns.subscribe().await;
-            while let Some(ev) = events.next().await {
-                if let DiscoveryEvent::Discovered { endpoint_info, .. } = ev {
-                    let peer = endpoint_info.endpoint_id;
-                    if peer == my_id {
-                        continue;
-                    }
-                    if my_id.as_bytes() >= peer.as_bytes() {
-                        continue;
-                    }
-                    if locked(&links).contains_key(&peer) {
-                        continue;
-                    }
-                    match endpoint.connect(peer, crate::ALPN).await {
-                        Ok(conn) => {
-                            if let Err(e) =
-                                wire_connection(my_id, conn, inbox.clone(), links.clone(), true)
-                                    .await
-                            {
-                                tracing::warn!(%peer, "dialing peer failed: {e:#}");
-                            }
-                        }
-                        Err(e) => tracing::warn!(%peer, "connect to discovered peer failed: {e:#}"),
-                    }
-                }
-            }
-        })
-    };
-    drop(guard);
-
-    Ok(Session {
-        endpoint,
-        inbox: inbox_rx,
-        inbox_tx,
-        links,
-        epoch: n0_future::time::Instant::now(),
-        guts: Guts {
+    Ok(crate::assemble(endpoint, move |endpoint, inbox, links| {
+        let guard = rt.enter();
+        let router = spawn_router(endpoint, inbox.clone(), links.clone());
+        let discovery = tokio::spawn(discovery_task(mdns, endpoint.clone(), inbox, links));
+        drop(guard);
+        Guts {
             _router: router,
             discovery,
             rt,
-        },
-    })
+        }
+    }))
+}
+
+/// mDNS auto-dial: connect to every discovered game peer, lower endpoint id dialing —
+/// a rule both sides compute identically, so exactly one of a pair dials.
+async fn discovery_task(
+    mdns: MdnsAddressLookup,
+    endpoint: Endpoint,
+    inbox: mpsc::Sender<crate::FromPeer>,
+    links: Links,
+) {
+    let my_id = endpoint.id();
+    let mut events = mdns.subscribe().await;
+    while let Some(ev) = events.next().await {
+        if let DiscoveryEvent::Discovered { endpoint_info, .. } = ev {
+            let peer = endpoint_info.endpoint_id;
+            if peer == my_id {
+                continue;
+            }
+            if my_id.as_bytes() >= peer.as_bytes() {
+                continue;
+            }
+            if locked(&links).contains_key(&peer) {
+                continue;
+            }
+            match endpoint.connect(peer, crate::ALPN).await {
+                Ok(conn) => {
+                    if let Err(e) =
+                        wire_connection(my_id, conn, inbox.clone(), links.clone(), true).await
+                    {
+                        tracing::warn!(%peer, "dialing peer failed: {e:#}");
+                    }
+                }
+                Err(e) => tracing::warn!(%peer, "connect to discovered peer failed: {e:#}"),
+            }
+        }
+    }
 }
 
 async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {

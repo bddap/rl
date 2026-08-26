@@ -623,8 +623,7 @@ pub enum JoinResult {
 pub struct JoinDriver {
     /// Consumed on resolution: into the [`NetDriver`] when admitted, closed otherwise.
     session: Option<Session>,
-    /// `None` until the dial lands — telemetry only spins up for a host we reached,
-    /// matching the blocking path this driver replaced.
+    /// `None` until the dial lands — telemetry only spins up for a host we reached.
     telemetry: Option<TelemetrySender>,
     collector: Option<EndpointId>,
     host: EndpointId,
