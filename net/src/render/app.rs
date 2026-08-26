@@ -38,7 +38,7 @@ pub fn build_windowed_app(
     // Single-thread pinning lives where reproducibility is actually consumed: the trainer,
     // eval, and the headless probe ([`crab_world::bot::headless::pin_single_thread_pools`]).
     let mut app = App::new();
-    app.add_plugins(crab_world::app_boot::base_plugins(Some(Window {
+    let window = Window {
         title: "Giant Crab Rescue".into(),
         // Fullscreen is the single source of truth for every GCR launch target. The Deck
         // shows fullscreen only because gamescope forces it; on a plain desktop/TV (bothouse)
@@ -46,7 +46,20 @@ pub fn build_windowed_app(
         // policy, so bothouse matches the Deck with no separate per-host window-config path.
         mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
         ..default()
-    })));
+    };
+    // The browser's "fullscreen" is the canvas filling its parent — real fullscreen
+    // needs a user gesture the boot path doesn't have. The page owns the layout; the
+    // game binds to the one canvas the web entry ships (game-web/index.html).
+    #[cfg(target_family = "wasm")]
+    let window = Window {
+        mode: WindowMode::Windowed,
+        canvas: Some("#gcr-canvas".into()),
+        fit_canvas_to_parent: true,
+        // Keep browser shortcuts (F5, devtools) working; the game reads game keys fine.
+        prevent_default_event_handling: false,
+        ..window
+    };
+    app.add_plugins(crab_world::app_boot::base_plugins(Some(window)));
     app.add_plugins(crab_world::sky::NightSkyPlugin { moon: view.moon });
     super::audio::install(&mut app);
     super::ambience::install(&mut app);
@@ -65,8 +78,10 @@ pub fn build_windowed_app(
     // The d-pad combo map (rl#358): discovered-only, persisted per save.
     super::chord_map::install(&mut app, super::chord_map::default_save_path());
     // Voice notes (rl#378): record / review / confirm, wav to disk.
+    #[cfg(not(target_family = "wasm"))]
     super::voice::install(&mut app);
     // In-game screenshot (rl#405): L3+R3 chord / F12, PNG + OTLP line.
+    #[cfg(not(target_family = "wasm"))]
     super::live_screenshot::install(&mut app);
     // Outside Playing every chord dispatcher is gated off, so a capture there could
     // only pop the full-screen combo map and promise commands whose release does

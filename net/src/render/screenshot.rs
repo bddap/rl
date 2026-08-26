@@ -10,6 +10,7 @@ use super::scene::{
 };
 use super::*;
 use crate::net_loop::NetDriver;
+use std::time::Duration;
 use crab_world::controls::ControlsOverrides;
 use crab_world::screenshot::{self, ShotProgress, ShotTarget};
 

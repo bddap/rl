@@ -12,12 +12,16 @@ use iroh::EndpointId;
 
 use crate::articulation::CrabArticulation;
 use crate::client::{ClientSim, PeerMsg, TickMsg};
-use crate::formation::{Formation, FormationDriver, Frozen, early_peer_msgs};
+use crate::formation::{Frozen, early_peer_msgs};
+#[cfg(not(target_family = "wasm"))]
+use crate::formation::{Formation, FormationDriver};
 use crate::server::{JoinRequest, Refusal, Server, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
 use crate::telemetry::{TelemetryEvent, TelemetrySender};
-use crate::transport::{self, PeerWire, Session};
+use crate::transport::{PeerWire, Session};
+#[cfg(not(target_family = "wasm"))]
+use crate::transport;
 
 /// Most departed-endpoint ids remembered for the courtesy [`Refusal::Departed`] reply
 /// (rl#350): under join/depart churn the set would otherwise grow one endpoint id per
@@ -501,11 +505,13 @@ pub struct DialTargets {
 /// How long the Alone arm waits for a still-pending dial verdict before erroring
 /// generically — covers the QUIC handshake/idle timeout outliving a short discovery
 /// window.
+#[cfg(not(target_family = "wasm"))]
 const DIAL_VERDICT_GRACE: Duration = Duration::from_secs(6);
 
 /// Form a match over timed LAN discovery, blocking until it resolves — the scripted/CLI
 /// path. The windowed lobby drives the same [`FormationDriver`] from the frame loop
-/// instead ([`crate::menu`]).
+/// instead ([`crate::menu`]). Native-only: it blocks a real thread on a sync bind.
+#[cfg(not(target_family = "wasm"))]
 pub fn connect_and_form_dialing(
     seed: u64,
     discover_secs: u64,
@@ -632,6 +638,9 @@ pub struct JoinDriver {
     state: JoinState,
 }
 
+// On wasm `begin` (the only constructor path) is compiled out; `pump` still
+// matches every variant, so the states read as unconstructed there.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 enum JoinState {
     /// The dial is in flight on the platform executor; its verdict channel resolves it.
     Dialing {
@@ -644,7 +653,9 @@ enum JoinState {
 
 impl JoinDriver {
     /// Bind a session and fire the dial — non-blocking; pump for the outcome. `seed` is
-    /// the shared [`crate::sim`] match constant every peer holds.
+    /// the shared [`crate::sim`] match constant every peer holds. Native-only until
+    /// the web-MP stage: the sync bind has no browser equivalent yet.
+    #[cfg(not(target_family = "wasm"))]
     pub fn begin(
         seed: u64,
         host: EndpointId,
@@ -794,6 +805,7 @@ impl Drop for JoinDriver {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// [`JoinDriver`] pumped to completion on the calling thread — the pacer for callers
 /// with no frame loop of their own (the CLI join path).
 pub fn connect_and_join(
@@ -811,6 +823,7 @@ pub fn connect_and_join(
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn connect_telemetry(
     session: &Session,
     collector: Option<iroh::EndpointId>,
@@ -820,6 +833,21 @@ pub fn connect_telemetry(
     // Non-blocking: the sender is self-contained (its own I/O thread + runtime), so
     // wiring telemetry costs the frame path nothing (rl#411 stage 4).
     Some(TelemetrySender::start(collector, *my_eid.as_bytes()))
+}
+
+/// [`connect_telemetry`] on a platform whose [`TelemetrySender`] is uninhabited:
+/// statically `None`. Compiled (not cfg'd at the call sites) so the poll-driven
+/// drivers stay platform-free; a collector id reaching a browser is a wiring bug the
+/// warn makes visible.
+#[cfg(target_family = "wasm")]
+pub fn connect_telemetry(
+    _session: &Session,
+    collector: Option<iroh::EndpointId>,
+) -> Option<TelemetrySender> {
+    if collector.is_some() {
+        tracing::warn!("telemetry collector ignored — the sender is native-only");
+    }
+    None
 }
 
 /// End a round's I/O pair in order — telemetry drained first, then the link closed.

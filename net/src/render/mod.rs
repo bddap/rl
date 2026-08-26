@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use bevy::app::AppExit;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -91,6 +90,7 @@ pub mod chord_map;
 mod controls_sync;
 mod driver;
 mod input;
+#[cfg(not(target_family = "wasm"))]
 mod live_screenshot;
 mod menu;
 mod net_track;
@@ -99,10 +99,14 @@ mod pose;
 mod render_mode;
 mod run_game;
 mod scene;
+// Offscreen evidence app (fp/net screenshot CLIs): fs PNG output, native tooling.
+#[cfg(not(target_family = "wasm"))]
 mod screenshot;
 #[cfg(test)]
 mod tests;
 mod vehicle_view;
+// Voice notes: cpal mic capture + bothouse delivery — native operator tooling.
+#[cfg(not(target_family = "wasm"))]
 mod voice;
 
 /// The windowed client's per-save data dir: `$XDG_DATA_HOME|~/.local/share` +
@@ -123,6 +127,7 @@ pub use run_game::{
 // The game CLI wires script resources onto built apps without its own bevy dep.
 pub use bevy::app::App;
 pub use render_mode::RenderMode;
+#[cfg(not(target_family = "wasm"))]
 pub use screenshot::{
     ChordScript, FrameDtModel, PilotScript, ScreenshotConfig, build_net_screenshot_app,
     build_screenshot_app,

@@ -3,6 +3,7 @@ pub use iroh::EndpointId;
 
 use crate::client::ClientSim;
 use crate::formation::{self, FormationDriver};
+#[cfg(not(target_family = "wasm"))]
 use crate::membership::Role;
 use crate::net_loop::{self, MatchResult, NetDriver};
 use crate::transport::Session;
@@ -13,6 +14,7 @@ pub enum StartChoice {
     Join(Option<EndpointId>),
 }
 
+#[cfg(not(target_family = "wasm"))]
 const NET_EXPECT: usize = 2;
 
 /// A lobby formation the render loop PUMPS: the session and the formation core live
@@ -107,6 +109,9 @@ impl Drop for Formation {
     }
 }
 
+// Native-only until the web-MP stage: `start_session` is a sync bind here; the
+// browser's bind is async and lands behind a pollable seam with the web lobby work.
+#[cfg(not(target_family = "wasm"))]
 pub fn begin(
     choice: &StartChoice,
     seed: u64,
@@ -171,6 +176,9 @@ pub fn solo_round(seed: u64) -> ReadyMatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChooserItem {
     Host,
+    /// Straight into a solo round — no session, no lobby, ZERO network. The one
+    /// entry a browser build can take today, and an instant offline start on native.
+    Solo,
     Join,
     Quit,
 }
@@ -250,14 +258,16 @@ impl MenuNav {
                 MenuInput::Up => {
                     *focus = match focus {
                         ChooserItem::Host => ChooserItem::Quit,
-                        ChooserItem::Join => ChooserItem::Host,
+                        ChooserItem::Solo => ChooserItem::Host,
+                        ChooserItem::Join => ChooserItem::Solo,
                         ChooserItem::Quit => ChooserItem::Join,
                     };
                     MenuAction::None
                 }
                 MenuInput::Down => {
                     *focus = match focus {
-                        ChooserItem::Host => ChooserItem::Join,
+                        ChooserItem::Host => ChooserItem::Solo,
+                        ChooserItem::Solo => ChooserItem::Join,
                         ChooserItem::Join => ChooserItem::Quit,
                         ChooserItem::Quit => ChooserItem::Host,
                     };
@@ -267,6 +277,10 @@ impl MenuNav {
                     ChooserItem::Host => {
                         *self = MenuNav::lobby(true);
                         MenuAction::Host
+                    }
+                    ChooserItem::Solo => {
+                        *self = MenuNav::new();
+                        MenuAction::StartSolo
                     }
                     ChooserItem::Join => {
                         *self = MenuNav::lobby(false);

@@ -1,12 +1,27 @@
+use iroh::EndpointId;
+use serde::{Deserialize, Serialize};
+
+// The I/O half — sender thread, tokio runtime, mDNS, key files — is native-only;
+// wasm compiles only the pure event/envelope surface (rl#411 stage 5). A
+// TelemetrySender cannot even be CONSTRUCTED on wasm (uninhabited field), so every
+// `Option<TelemetrySender>` threaded through the netcode is statically `None` there
+// — no cfg in the consumers, nothing to shed at runtime.
+#[cfg(not(target_family = "wasm"))]
 use std::path::{Path, PathBuf};
+#[cfg(not(target_family = "wasm"))]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(not(target_family = "wasm"))]
 use anyhow::{Context, Result};
+#[cfg(not(target_family = "wasm"))]
 use iroh::endpoint::{Connection, RecvStream, SendStream, presets};
+#[cfg(not(target_family = "wasm"))]
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointId, SecretKey};
+#[cfg(not(target_family = "wasm"))]
+use iroh::{Endpoint, SecretKey};
+#[cfg(not(target_family = "wasm"))]
 use iroh_mdns_address_lookup::MdnsAddressLookup;
-use serde::{Deserialize, Serialize};
+#[cfg(not(target_family = "wasm"))]
 use tokio::sync::mpsc;
 
 use crate::sim::{Input, Outcome, Sim};
@@ -148,6 +163,7 @@ impl TelemetryEvent {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn is_sheddable(&self) -> bool {
         matches!(
             self,
@@ -155,6 +171,7 @@ impl TelemetryEvent {
         )
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn render(&self) -> String {
         match self {
             TelemetryEvent::RosterForming { live, expect } => {
@@ -214,6 +231,7 @@ impl TelemetryEvent {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn outcome_str(o: Outcome) -> &'static str {
     match o {
         Outcome::Ongoing => "Ongoing",
@@ -229,18 +247,22 @@ pub struct Envelope {
     pub event: TelemetryEvent,
 }
 
+#[cfg(not(target_family = "wasm"))]
 const MAX_FRAME_LEN: usize = 64 * 1024;
 
+#[cfg(not(target_family = "wasm"))]
 const QUEUE_DEPTH: usize = 256;
 
 /// Longest teardown waits on the I/O thread after the channels close — covers the
 /// in-flight write plus the endpoint close, both themselves bounded in [`sender_task`].
+#[cfg(not(target_family = "wasm"))]
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// `Clone` hands out extra sender handles (the render driver clones one per frame to
 /// escape a `World` borrow). [`close`](Self::close) is best called on the LAST live
 /// handle: a surviving clone keeps the channels open, so the close-wait runs its full
 /// [`CLOSE_TIMEOUT`] and the drain completes only when that clone drops.
+#[cfg(not(target_family = "wasm"))]
 #[derive(Clone)]
 pub struct TelemetrySender {
     shed_tx: mpsc::Sender<Envelope>,
@@ -252,6 +274,7 @@ pub struct TelemetrySender {
     done: std::sync::Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl TelemetrySender {
     /// Non-blocking: the channels are live immediately; binding and dialing happen on the
     /// sender's OWN I/O thread with its own runtime — telemetry is self-contained, the
@@ -324,6 +347,27 @@ impl TelemetrySender {
     }
 }
 
+/// The wasm face of [`TelemetrySender`]: same name, same method surface, but
+/// UNINHABITED — there is no `start` and the field type has no values, so a browser
+/// build threads `Option<TelemetrySender>` everywhere (statically `None`) and a
+/// call path that would dial a collector from wasm fails to COMPILE, not at runtime.
+#[cfg(target_family = "wasm")]
+#[derive(Clone)]
+pub struct TelemetrySender {
+    inhabitant: std::convert::Infallible,
+}
+
+#[cfg(target_family = "wasm")]
+impl TelemetrySender {
+    pub fn close(self) {
+        match self.inhabitant {}
+    }
+
+    pub fn send(&self, _event: TelemetryEvent) {
+        match self.inhabitant {}
+    }
+}
+
 /// Drain + surface the server's chronic input-starvation reports (rl#213): one local `warn!`
 /// per report, mirrored as a [`Fault`](TelemetryEvent::Fault) when a collector is wired. The
 /// ONE drain policy every server driver (windowed + headless host) shares, so log-and-mirror
@@ -344,6 +388,7 @@ pub fn surface_starvation(
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn bind_telemetry_endpoint() -> Result<Endpoint> {
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
@@ -354,6 +399,7 @@ async fn bind_telemetry_endpoint() -> Result<Endpoint> {
     Ok(endpoint)
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn sender_task(
     endpoint: Endpoint,
     collector: EndpointId,
@@ -409,6 +455,7 @@ async fn sender_task(
     let _ = tokio::time::timeout(CLOSE_TIMEOUT, endpoint.close()).await;
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn drain(
     shed_rx: &mut mpsc::Receiver<Envelope>,
     crit_rx: &mut mpsc::UnboundedReceiver<Envelope>,
@@ -422,6 +469,7 @@ async fn drain(
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn dial_collector(
     endpoint: &Endpoint,
     collector: EndpointId,
@@ -450,6 +498,7 @@ async fn dial_collector(
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no dial attempts")))
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub async fn run_collector(key_path: &Path) -> Result<()> {
     let secret = load_or_create_key(key_path)?;
     let endpoint = Endpoint::builder(presets::Minimal)
@@ -479,9 +528,11 @@ pub async fn run_collector(key_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_family = "wasm"))]
 #[derive(Clone, Debug)]
 struct CollectorProto;
 
+#[cfg(not(target_family = "wasm"))]
 impl ProtocolHandler for CollectorProto {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let peer = connection.remote_id();
@@ -499,6 +550,7 @@ impl ProtocolHandler for CollectorProto {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn collector_read_loop(mut recv: RecvStream) -> Result<()> {
     loop {
         let mut lenb = [0u8; 4];
@@ -516,6 +568,7 @@ async fn collector_read_loop(mut recv: RecvStream) -> Result<()> {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn print_event(env: &Envelope) {
     let src = EndpointId::from_bytes(&env.game_id)
         .map(|id| id.fmt_short().to_string())
@@ -525,6 +578,7 @@ fn print_event(env: &Envelope) {
     let _ = std::io::stdout().flush();
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn clock(wall_ms: u64) -> String {
     let secs = wall_ms / 1000;
     let ms = wall_ms % 1000;
@@ -534,10 +588,12 @@ fn clock(wall_ms: u64) -> String {
     format!("{h:02}:{m:02}:{s:02}.{ms:03}")
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn hex8(id: &[u8; 32]) -> String {
     id[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn attach_lan_mdns(endpoint: &Endpoint) -> Result<()> {
     let mdns = MdnsAddressLookup::builder()
         .service_name(TELEMETRY_SERVICE_NAME)
@@ -556,6 +612,7 @@ fn attach_lan_mdns(endpoint: &Endpoint) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn write_frame(send: &mut SendStream, env: &Envelope) -> Result<()> {
     let body = bincode::serialize(env).context("encoding telemetry envelope")?;
     anyhow::ensure!(body.len() <= MAX_FRAME_LEN, "telemetry frame too large");
@@ -565,6 +622,7 @@ async fn write_frame(send: &mut SendStream, env: &Envelope) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn load_or_create_key(path: &Path) -> Result<SecretKey> {
     let path = expand_tilde(path);
     if let Ok(text) = std::fs::read_to_string(&path) {
@@ -588,6 +646,7 @@ pub fn load_or_create_key(path: &Path) -> Result<SecretKey> {
     Ok(secret)
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn decode_key_hex(s: &str) -> Result<[u8; 32]> {
     anyhow::ensure!(s.len() == 64, "key must be 64 hex chars, got {}", s.len());
     let mut out = [0u8; 32];
@@ -598,14 +657,15 @@ fn decode_key_hex(s: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_family = "wasm")))]
 fn set_key_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(target_family = "wasm")))]
 fn set_key_permissions(_path: &Path) {}
 
+#[cfg(not(target_family = "wasm"))]
 fn expand_tilde(path: &Path) -> PathBuf {
     if let Ok(stripped) = path.strip_prefix("~")
         && let Some(home) = std::env::var_os("HOME")
@@ -615,6 +675,7 @@ fn expand_tilde(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use iroh::EndpointId;
 
 use super::app::{Boot, build_windowed_app};
+#[cfg(not(target_family = "wasm"))]
 use crate::{formation, net_loop};
 
 /// The checkpoint-dir env fallback the deploy scripts export (deploy/rl-update sets
@@ -37,6 +38,8 @@ pub enum Launch {
     Menu,
     /// Scripted formation, no menu: form a match now — dialing an explicit host, or
     /// discovering — and boot straight into the round (solo when nobody shows).
+    /// A CLI affordance — native-only (it blocks on the sync formation pacer).
+    #[cfg(not(target_family = "wasm"))]
     Lobby {
         dial: Option<EndpointId>,
         /// LAN-discovery window.
@@ -59,6 +62,7 @@ pub fn run_game(config: GameConfig) -> Result<()> {
             seed,
             telemetry: config.telemetry,
         },
+        #[cfg(not(target_family = "wasm"))]
         Launch::Lobby {
             dial,
             discover_secs,

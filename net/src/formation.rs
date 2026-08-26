@@ -17,6 +17,7 @@ pub use net_proto::formation::{Frozen, assign_player_ids, early_peer_msgs, solo_
 
 /// The cadence at which BLOCKING callers (CLI forming/joining, with no frame loop of
 /// their own) pump the poll-driven session.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) const FORM_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
 pub enum Formation {
@@ -87,6 +88,7 @@ impl FormationDriver {
     /// Pump to completion on the calling thread — the pacer for callers with no frame
     /// loop of their own (the CLI paths). The windowed lobby polls [`Self::pump`] per
     /// frame instead: one driver, two pacers.
+    #[cfg(not(target_family = "wasm"))]
     pub fn pump_blocking(
         mut self,
         session: &mut transport::Session,

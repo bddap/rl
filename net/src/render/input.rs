@@ -42,7 +42,7 @@ pub(super) fn gather_input(
     time: Res<Time>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     chords: Res<crab_world::chord::Chords<controls::GcrControls>>,
-    voice: Res<super::voice::VoiceUx>,
+    #[cfg(not(target_family = "wasm"))] voice: Res<super::voice::VoiceUx>,
     mut pending: ResMut<PendingInput>,
     mut flight: ResMut<FlightInput>,
     mut pitch: ResMut<CameraPitch>,
@@ -78,7 +78,11 @@ pub(super) fn gather_input(
     // held — confirm/discard own their inputs on BOTH devices (MenuConfirm rides
     // Space as well as Enter), so jump/slide/brake go quiet — same shape as the
     // chord-typing gate above.
+    #[cfg(not(target_family = "wasm"))]
     let reviewing = voice.gameplay_gated();
+    // No voice module on wasm (native operator tooling) — nothing gates gameplay.
+    #[cfg(target_family = "wasm")]
+    let reviewing = false;
     let mut sprint = held_any(Action::Sprint);
     let mut jump = !reviewing && held_any(Action::Jump);
     let mut slide = !reviewing && held_any(Action::Slide);
