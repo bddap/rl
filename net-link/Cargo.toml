@@ -1,0 +1,22 @@
+[package]
+name = "net-link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+net-proto = { path = "../net-proto" }
+iroh.workspace = true
+bytes.workspace = true
+n0-future.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio.workspace = true
+iroh-mdns-address-lookup.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# The sync primitives only — the one tokio slice that exists on wasm32. There is no
+# runtime there: tasks ride the JS event loop via n0-future's spawn.
+tokio = { version = "1", default-features = false, features = ["sync"] }

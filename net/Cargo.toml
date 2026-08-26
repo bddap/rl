@@ -20,6 +20,7 @@ render = [
 
 [dependencies]
 crab-world = { path = "../crab-world" }
+net-link = { path = "../net-link" }
 net-proto = { path = "../net-proto" }
 bevy = { workspace = true, features = [
     "std",

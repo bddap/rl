@@ -5,8 +5,6 @@
 //! [`FormationDriver`] pumps it from its own loop (the render frame, or a paced CLI
 //! loop) until it yields.
 
-use std::time::Instant;
-
 use anyhow::Result;
 use iroh::EndpointId;
 
@@ -28,11 +26,13 @@ pub enum Formation {
     Alone,
 }
 
-/// One formation attempt, pump-to-completion. The core's clock is injected millis;
-/// this driver anchors the axis at construction.
+/// One formation attempt, pump-to-completion. The core's clock is injected millis —
+/// the SESSION's axis ([`Session::now_ms`](transport::Session::now_ms)), so the same
+/// driver runs wherever the link does (native tokio clock, browser performance.now).
 pub struct FormationDriver {
     core: FormationCore,
-    start: Instant,
+    /// Session-axis ms at construction — for the human-facing "agreed in N s" print.
+    born_ms: u64,
     expect: usize,
     stamp: crate::SyncStamp,
     /// Roster as of the last change the core reported — for lobby UI polling.
@@ -51,9 +51,10 @@ impl FormationDriver {
         println!(
             "forming match on the LAN (need {expect} player(s), solo if alone after {discover_secs}s)…"
         );
+        let now_ms = session.now_ms();
         Self {
-            core: FormationCore::new(session.endpoint_id(), expect, discover_secs, stamp, 0),
-            start: Instant::now(),
+            core: FormationCore::new(session.endpoint_id(), expect, discover_secs, stamp, now_ms),
+            born_ms: now_ms,
             expect,
             stamp,
             roster: Vec::new(),
@@ -69,9 +70,10 @@ impl FormationDriver {
         expect: usize,
         stamp: crate::SyncStamp,
     ) -> Self {
+        let now_ms = session.now_ms();
         Self {
-            core: FormationCore::host_triggered(role, session.endpoint_id(), expect, stamp, 0),
-            start: Instant::now(),
+            core: FormationCore::host_triggered(role, session.endpoint_id(), expect, stamp, now_ms),
+            born_ms: now_ms,
             expect,
             stamp,
             roster: Vec::new(),
@@ -110,7 +112,7 @@ impl FormationDriver {
         session: &mut transport::Session,
         tel: Option<&TelemetrySender>,
     ) -> Option<Result<Formation>> {
-        let now_ms = self.start.elapsed().as_millis() as u64;
+        let now_ms = session.now_ms();
 
         while let Some(from) = session.try_recv() {
             match from.msg {
@@ -151,7 +153,7 @@ impl FormationDriver {
             }
         }
         match step.outcome {
-            Some(Outcome::Agreed(a)) => Some(self.agreed(session.endpoint_id(), a, tel)),
+            Some(Outcome::Agreed(a)) => Some(self.agreed(session.endpoint_id(), a, tel, now_ms)),
             Some(Outcome::Alone) => {
                 println!("no other peer found — starting a solo round");
                 Some(Ok(Formation::Alone))
@@ -178,13 +180,14 @@ impl FormationDriver {
         my_eid: EndpointId,
         agreement: net_proto::formation::Agreement,
         tel: Option<&TelemetrySender>,
+        now_ms: u64,
     ) -> Result<Formation> {
         let id_map = assign_player_ids(my_eid, &agreement.roster)?;
         let me = id_map[&my_eid];
         println!(
             "match formed: {} participant(s), barrier agreed in {:.1}s",
             id_map.len(),
-            self.start.elapsed().as_secs_f64()
+            now_ms.saturating_sub(self.born_ms) as f64 / 1000.0
         );
         if let Some(t) = tel {
             t.send(TelemetryEvent::RosterAgreed {
@@ -323,8 +326,8 @@ mod tests {
         assert_eq!(r1.me, expected[&e1]);
         assert_eq!(r2.me, expected[&e2]);
 
-        s0.close(None);
-        s1.close(None);
-        s2.close(None);
+        s0.close();
+        s1.close();
+        s2.close();
     }
 }

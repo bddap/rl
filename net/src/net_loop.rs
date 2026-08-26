@@ -126,7 +126,7 @@ impl Drop for NetDriver {
     fn drop(&mut self) {
         // Graceful close (telemetry drained, then the endpoint) — Session's own Drop only
         // backstops the endpoint half.
-        self.session.close(self.telemetry.take());
+        shutdown(&self.session, self.telemetry.take());
     }
 }
 
@@ -530,7 +530,7 @@ pub fn connect_and_form_dialing(
     let frozen = match formed {
         Ok(Formation::Agreed(frozen)) => frozen,
         Ok(Formation::Alone) => {
-            session.close(telemetry);
+            shutdown(&session, telemetry);
             // An explicit dial's failure is not fatal while discovery may still find the
             // host on the LAN — but ending up ALONE after one means the join failed, and
             // must be a hard error, never a silent solo round the player didn't ask for.
@@ -556,7 +556,7 @@ pub fn connect_and_form_dialing(
             return Ok(MatchResult::Alone);
         }
         Err(e) => {
-            session.close(telemetry);
+            shutdown(&session, telemetry);
             return Err(e);
         }
     };
@@ -657,13 +657,13 @@ pub fn connect_and_join(
         Ok(verdict) => verdict,
         Err(_) => {
             tracing::warn!("dialing host {} timed out", host.fmt_short());
-            session.close(None);
+            session.close();
             return Ok(JoinResult::Unreachable);
         }
     };
     if let Err(e) = dialed {
         tracing::warn!("dialing host {} failed: {e:#}", host.fmt_short());
-        session.close(None);
+        session.close();
         return Ok(JoinResult::Unreachable);
     }
     let telemetry = connect_telemetry(&session, collector);
@@ -673,11 +673,11 @@ pub fn connect_and_join(
     match verdict {
         AdmissionVerdict::Refused(verdict) => {
             tracing::error!("host refused our join: {verdict}");
-            session.close(telemetry);
+            shutdown(&session, telemetry);
             Ok(JoinResult::Refused(verdict))
         }
         AdmissionVerdict::Timeout => {
-            session.close(telemetry);
+            shutdown(&session, telemetry);
             Ok(JoinResult::Unreachable)
         }
         AdmissionVerdict::Admitted(adm) => {
@@ -734,18 +734,18 @@ pub fn connect_telemetry(
 ) -> Option<TelemetrySender> {
     let collector = collector?;
     let my_eid = session.endpoint_id();
-    // Connect-time async on the session's runtime — quick (a local endpoint bind; the
-    // collector dial happens inside the sender's own I/O task).
-    match session
-        .rt()
-        .block_on(TelemetrySender::connect(collector, *my_eid.as_bytes()))
-    {
-        Ok(t) => Some(t),
-        Err(e) => {
-            tracing::warn!("telemetry disabled (endpoint bind failed): {e:#}");
-            None
-        }
+    // Non-blocking: the sender is self-contained (its own I/O thread + runtime), so
+    // wiring telemetry costs the frame path nothing (rl#411 stage 4).
+    Some(TelemetrySender::start(collector, *my_eid.as_bytes()))
+}
+
+/// End a round's I/O pair in order — telemetry drained first, then the link closed.
+/// Session's own `Drop` only backstops the endpoint half.
+pub fn shutdown(session: &Session, telemetry: Option<TelemetrySender>) {
+    if let Some(t) = telemetry {
+        t.close();
     }
+    session.close();
 }
 
 fn server_endpoint(id_map: &BTreeMap<EndpointId, PlayerId>) -> EndpointId {

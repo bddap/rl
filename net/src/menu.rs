@@ -37,7 +37,7 @@ impl Formation {
         if self.cancelled {
             println!("lobby cancelled by the player");
             let session = self.session.take().expect("checked live above");
-            session.close(self.telemetry.take());
+            net_loop::shutdown(&session, self.telemetry.take());
             return Some(Ok(MatchResult::Cancelled));
         }
         let outcome = self.driver.pump(session, self.telemetry.as_ref())?;
@@ -53,11 +53,11 @@ impl Formation {
                 )))
             }
             Ok(formation::Formation::Alone) => {
-                session.close(self.telemetry.take());
+                net_loop::shutdown(&session, self.telemetry.take());
                 Ok(MatchResult::Alone)
             }
             Err(e) => {
-                session.close(self.telemetry.take());
+                net_loop::shutdown(&session, self.telemetry.take());
                 Err(e)
             }
         })
@@ -102,7 +102,7 @@ impl Drop for Formation {
         // A formation abandoned mid-lobby (the menu drops it on cancel without another
         // poll) still tears down gracefully — telemetry drained, endpoint closed.
         if let Some(session) = self.session.take() {
-            session.close(self.telemetry.take());
+            net_loop::shutdown(&session, self.telemetry.take());
         }
     }
 }

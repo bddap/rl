@@ -1,19 +1,27 @@
-//! The native iroh link: endpoint binding, mDNS discovery, per-peer QUIC links, and the
-//! reliable-stream + datagram receive paths. Everything protocol — frame kinds, codecs,
-//! fragmentation — is `net_proto::codec`; this layer moves those bytes.
+//! The link layer (rl#411): one poll-driven sync surface over iroh, one thin platform
+//! impl per target. Everything protocol — frame kinds, codecs, fragmentation — is
+//! `net_proto::codec`; this layer moves those bytes. Everything platform — runtime,
+//! discovery, relay posture, clock source — lives in the platform module below the
+//! [`Session`] surface; nothing above this crate carries a `cfg(target_*)`.
+//!
+//! - **native** ([`native`], non-wasm): tokio runtime OWNED by the session, direct
+//!   LAN addressing + mDNS discovery, relay off.
+//! - **web** ([`web`], wasm32): the JS event loop, relay-mode transport (browsers have
+//!   no direct path — "in browsers, there will never be any direct addresses"),
+//!   discovery = explicit dial from a URL/join code.
+//!
+//! Both speak the same ALPN and datagram semantics, so a browser peer and a native
+//! peer interoperate in one match.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use iroh::endpoint::{
-    Connection, IdleTimeout, QuicTransportConfig, RecvStream, SendStream, presets,
-};
+use iroh::endpoint::{Connection, IdleTimeout, QuicTransportConfig, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId};
-use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
-use n0_future::StreamExt;
+use n0_future::time;
 use tokio::sync::mpsc;
 
 pub use net_proto::codec::PeerWire;
@@ -22,7 +30,19 @@ use net_proto::codec::{
     parse_state_datagram, state_datagrams,
 };
 
-const SERVICE_NAME: &str = "bddap-rl-game";
+#[cfg(not(target_family = "wasm"))]
+mod native;
+#[cfg(not(target_family = "wasm"))]
+use native as platform;
+#[cfg(not(target_family = "wasm"))]
+pub use native::{publish_lan_addr, start_session};
+
+#[cfg(target_family = "wasm")]
+mod web;
+#[cfg(target_family = "wasm")]
+use web as platform;
+#[cfg(target_family = "wasm")]
+pub use web::start_session;
 
 #[derive(Debug, Clone)]
 pub struct FromPeer {
@@ -30,68 +50,13 @@ pub struct FromPeer {
     pub msg: PeerWire,
 }
 
-const ADDR_WAIT: Duration = Duration::from_secs(10);
-
-const PUBLISH_SETTLE: Duration = Duration::from_millis(300);
-
-async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
-    let transport = QuicTransportConfig::builder()
+fn transport_config() -> QuicTransportConfig {
+    QuicTransportConfig::builder()
         .keep_alive_interval(Duration::from_secs(1))
         .max_idle_timeout(Some(
             IdleTimeout::try_from(Duration::from_secs(5)).expect("constant timeout fits"),
         ))
-        .build();
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .relay_mode(iroh::RelayMode::Disabled)
-        .transport_config(transport)
-        .bind()
-        .await
-        .context("binding iroh endpoint")?;
-    let mdns = MdnsAddressLookup::builder()
-        .service_name(SERVICE_NAME)
-        .build(endpoint.id())
-        .context("starting mDNS discovery")?;
-    endpoint
-        .address_lookup()
-        .context("endpoint has no address lookup registry")?
-        .add(mdns.clone());
-
-    // Publish our LAN address once a direct addr exists — in the background, so "is
-    // networking up?" is a discovery property, never a boot gate: a session binds
-    // instantly and solo play needs no network at all. Peers can't mDNS-find us until
-    // this lands, which is exactly discovery's own timeline.
-    let ep = endpoint.clone();
-    tokio::spawn(async move {
-        if let Err(e) = publish_lan_addr(&ep, SERVICE_NAME).await {
-            tracing::warn!("LAN address publish failed (undiscoverable until retry): {e:#}");
-        }
-    });
-    Ok((endpoint, mdns))
-}
-
-pub(crate) async fn publish_lan_addr(endpoint: &Endpoint, service_name: &str) -> Result<()> {
-    wait_for_direct_addr(endpoint).await?;
-    tokio::time::sleep(PUBLISH_SETTLE).await;
-    let ud = iroh::endpoint_info::UserData::try_from(service_name.to_string())
-        .context("building discovery user data")?;
-    endpoint.set_user_data_for_address_lookup(Some(ud));
-    Ok(())
-}
-
-async fn wait_for_direct_addr(endpoint: &Endpoint) -> Result<()> {
-    use iroh::Watcher;
-    let mut addrs = endpoint.watch_addr();
-    let deadline = tokio::time::Instant::now() + ADDR_WAIT;
-    loop {
-        if addrs.get().ip_addrs().next().is_some() {
-            return Ok(());
-        }
-        match tokio::time::timeout_at(deadline, addrs.updated()).await {
-            Ok(Ok(_)) => continue,
-            Ok(Err(_)) => anyhow::bail!("endpoint address watcher closed"),
-            Err(_) => anyhow::bail!("no local IP address after {ADDR_WAIT:?} — is networking up?"),
-        }
-    }
+        .build()
 }
 
 struct OutFrame {
@@ -106,11 +71,12 @@ type LinkId = std::sync::Weak<mpsc::Sender<OutFrame>>;
 const OUT_QUEUE_FRAMES: usize = 256;
 
 /// Most concurrent peer links a session holds against INBOUND dials (rl#350). The roster
-/// caps at [`crate::membership::MAX_MEMBERS`] players (≤ MAX_MEMBERS − 1 remote links),
-/// so this leaves headroom for a pending joiner while denying a sybil dialer — each
-/// accepted link costs three tasks plus an [`OUT_QUEUE_FRAMES`] out-queue — unbounded
-/// growth. Our own dials are never refused: we choose them, so they're already bounded.
-const MAX_LINKS: usize = crate::membership::MAX_MEMBERS;
+/// caps at [`net_proto::membership::MAX_MEMBERS`] players (≤ MAX_MEMBERS − 1 remote
+/// links), so this leaves headroom for a pending joiner while denying a sybil dialer —
+/// each accepted link costs three tasks plus an [`OUT_QUEUE_FRAMES`] out-queue —
+/// unbounded growth. Our own dials are never refused: we choose them, so they're
+/// already bounded.
+const MAX_LINKS: usize = net_proto::membership::MAX_MEMBERS;
 
 /// Longest an INBOUND connection may take to finish the bi-stream/HELLO handshake
 /// (rl#350). Without a deadline the gate above is bypassable: `wire_connection` parks in
@@ -149,28 +115,21 @@ struct PeerLink {
     dialer: EndpointId,
 }
 
-/// The native link: a poll-driven sync surface over iroh, with the tokio runtime an
-/// OWNED internal (rl#411 stage 2) — nothing above this line is async. The frame loop
-/// calls send/broadcast/try_recv/connected_peers directly; dials run on the internal
-/// runtime and report through pollable channels.
+/// One link session: a poll-driven sync surface over iroh (rl#411 stage 2). The frame
+/// loop calls send/broadcast/try_recv/connected_peers directly; dials run on the
+/// platform executor and report through pollable channels. The platform half —
+/// runtime/executor, discovery, relay posture — is [`platform::Guts`]; nothing here
+/// is async-facing.
 pub struct Session {
     endpoint: Endpoint,
-    _router: Router,
     inbox: mpsc::Receiver<FromPeer>,
     inbox_tx: mpsc::Sender<FromPeer>,
     links: Links,
-    discovery: tokio::task::JoinHandle<()>,
-    rt: tokio::runtime::Runtime,
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        self.discovery.abort();
-        // Idempotent with an explicit `close` — the graceful paths close first (draining
-        // telemetry etc.); this guarantees the endpoint never drops unclosed (iroh logs
-        // that at ERROR — fleet-error 2026-08-01) even on early-exit paths.
-        self.rt.block_on(self.endpoint.close());
-    }
+    /// The session clock's zero point. [`Session::now_ms`] is the one time axis the
+    /// protocol drivers above see — `time::Instant` is tokio's on native and
+    /// `performance.now`-backed web_time in browsers, monotonic on both.
+    epoch: time::Instant,
+    guts: platform::Guts,
 }
 
 impl Session {
@@ -186,6 +145,12 @@ impl Session {
         self.endpoint.addr()
     }
 
+    /// Monotonic milliseconds since the session bound — the injected `now_ms` axis every
+    /// protocol-core driver (formation, join, membership timeouts) reads.
+    pub fn now_ms(&self) -> u64 {
+        self.epoch.elapsed().as_millis() as u64
+    }
+
     /// Drop a peer's link NOW — remove it and close the connection. The host uses this to
     /// reclaim a [`MAX_LINKS`] slot from a connected-but-never-rostered endpoint (rl#350);
     /// the link's tasks end on the closed connection, and their own `drop_if_same` cleanup
@@ -198,7 +163,7 @@ impl Session {
     }
 
     /// Dial a peer by explicit address (a join code). Non-blocking: the dial runs on the
-    /// internal runtime; poll the returned channel for the verdict (callers use it for
+    /// platform executor; poll the returned channel for the verdict (callers use it for
     /// diagnostics — a failed dial is non-fatal while discovery may still find the peer).
     pub fn dial(
         &self,
@@ -209,7 +174,7 @@ impl Session {
         let inbox = self.inbox_tx.clone();
         let links = self.links.clone();
         let addr = addr.into();
-        self.rt.spawn(async move {
+        self.guts.spawn(async move {
             let dialed = async {
                 let conn = endpoint
                     .connect(addr, ALPN)
@@ -324,93 +289,6 @@ impl Session {
     pub fn try_recv(&mut self) -> Option<FromPeer> {
         self.inbox.try_recv().ok()
     }
-
-    /// Graceful teardown: drain + close the optional telemetry stream, then the endpoint —
-    /// every pre-round exit path and [`crate::net_loop::NetDriver`]'s `Drop` end through
-    /// here (`Drop` above backstops the endpoint half for paths that never call it).
-    pub fn close(&self, telemetry: Option<crate::telemetry::TelemetrySender>) {
-        self.rt.block_on(async {
-            if let Some(t) = telemetry {
-                t.close().await;
-            }
-            self.endpoint.close().await;
-        });
-    }
-
-    /// The internal runtime, for the native driver layer's CONNECT-TIME async work
-    /// (telemetry connect, admission await). Never a frame-path affordance — the
-    /// per-frame surface above is sync by design.
-    pub(crate) fn rt(&self) -> &tokio::runtime::Runtime {
-        &self.rt
-    }
-}
-
-pub fn start_session() -> Result<Session> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let (endpoint, mdns) = rt.block_on(bind_endpoint())?;
-    let guard = rt.enter();
-    let my_id = endpoint.id();
-
-    let (inbox_tx, inbox_rx) = mpsc::channel(256);
-    let links: Links = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
-
-    let handler = GameProto {
-        my_id,
-        inbox: inbox_tx.clone(),
-        links: links.clone(),
-    };
-    let router = Router::builder(endpoint.clone())
-        .accept(ALPN, handler)
-        .spawn();
-
-    let inbox_tx_for_session = inbox_tx.clone();
-
-    let discovery = {
-        let endpoint = endpoint.clone();
-        let inbox = inbox_tx;
-        let links = links.clone();
-        tokio::spawn(async move {
-            let mut events = mdns.subscribe().await;
-            while let Some(ev) = events.next().await {
-                if let DiscoveryEvent::Discovered { endpoint_info, .. } = ev {
-                    let peer = endpoint_info.endpoint_id;
-                    if peer == my_id {
-                        continue;
-                    }
-                    if my_id.as_bytes() >= peer.as_bytes() {
-                        continue;
-                    }
-                    if locked(&links).contains_key(&peer) {
-                        continue;
-                    }
-                    match endpoint.connect(peer, ALPN).await {
-                        Ok(conn) => {
-                            if let Err(e) =
-                                wire_connection(my_id, conn, inbox.clone(), links.clone(), true)
-                                    .await
-                            {
-                                tracing::warn!(%peer, "dialing peer failed: {e:#}");
-                            }
-                        }
-                        Err(e) => tracing::warn!(%peer, "connect to discovered peer failed: {e:#}"),
-                    }
-                }
-            }
-        })
-    };
-    drop(guard);
-
-    Ok(Session {
-        endpoint,
-        _router: router,
-        inbox: inbox_rx,
-        inbox_tx: inbox_tx_for_session,
-        links,
-        discovery,
-        rt,
-    })
 }
 
 #[derive(Clone, Debug)]
@@ -423,7 +301,7 @@ struct GameProto {
 impl ProtocolHandler for GameProto {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let conn = connection.clone();
-        match tokio::time::timeout(
+        match time::timeout(
             ACCEPT_HANDSHAKE_TIMEOUT,
             wire_connection(
                 self.my_id,
@@ -444,6 +322,19 @@ impl ProtocolHandler for GameProto {
         }
         Ok(())
     }
+}
+
+/// The accept half both platforms share: route inbound ALPN connections through
+/// [`wire_connection`], same as our own dials.
+fn spawn_router(endpoint: &Endpoint, inbox: mpsc::Sender<FromPeer>, links: Links) -> Router {
+    let handler = GameProto {
+        my_id: endpoint.id(),
+        inbox,
+        links,
+    };
+    Router::builder(endpoint.clone())
+        .accept(ALPN, handler)
+        .spawn()
 }
 
 fn send_state_datagram(conn: &Connection, frag: bytes::Bytes) {
@@ -529,10 +420,9 @@ async fn wire_connection(
 
     let links_for_writer = links.clone();
     let writer_id = link_id.clone();
-    tokio::spawn(async move {
+    n0_future::task::spawn(async move {
         while let Some(f) = rx.recv().await {
-            match tokio::time::timeout(WRITE_STALL_TIMEOUT, write_frame(&mut send, f.kind, &f.body))
-                .await
+            match time::timeout(WRITE_STALL_TIMEOUT, write_frame(&mut send, f.kind, &f.body)).await
             {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
@@ -554,7 +444,7 @@ async fn wire_connection(
     let links_for_reader = links.clone();
     let reader_id = link_id.clone();
     let reader_inbox = inbox.clone();
-    tokio::spawn(async move {
+    n0_future::task::spawn(async move {
         // WARN, not debug: read_loop returns Ok on every normal ending (clean EOF, session drop),
         // so an Err here is a real protocol violation — a mis-framed/unknown/truncated frame (e.g.
         // an ALPN-matched build with a drifted codec) — and must be visible, not a silent link
@@ -566,7 +456,7 @@ async fn wire_connection(
     });
 
     let links_for_dgram = links.clone();
-    tokio::spawn(async move {
+    n0_future::task::spawn(async move {
         // Same loudness contract as the stream reader: Ok is every normal ending (the
         // connection closed), Err is a protocol violation. Dropping the link on either keeps
         // the failure mode LOUD — a peer whose state stopped flowing must read as departed,

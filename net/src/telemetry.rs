@@ -233,42 +233,72 @@ const MAX_FRAME_LEN: usize = 64 * 1024;
 
 const QUEUE_DEPTH: usize = 256;
 
+/// Longest teardown waits on the I/O thread after the channels close — covers the
+/// in-flight write plus the endpoint close, both themselves bounded in [`sender_task`].
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+
 #[derive(Clone)]
 pub struct TelemetrySender {
     shed_tx: mpsc::Sender<Envelope>,
     crit_tx: mpsc::UnboundedSender<Envelope>,
     game_id: [u8; 32],
-    /// The spawned [`sender_task`], awaited by [`close`](Self::close) so its iroh endpoint
-    /// closes before the runtime dies — an abort mid-await drops the endpoint without
-    /// `Endpoint::close` and iroh logs it at ERROR.
-    task: std::sync::Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Disconnects when the I/O thread ends — [`close`](Self::close) bounded-waits on it
+    /// so the thread's iroh endpoint closes before the process moves on (a bare-dropped
+    /// endpoint makes iroh log at ERROR).
+    done: std::sync::Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
 }
 
 impl TelemetrySender {
-    pub async fn connect(collector: EndpointId, game_id: [u8; 32]) -> Result<Self> {
-        let endpoint = bind_telemetry_endpoint()
-            .await
-            .context("binding telemetry endpoint")?;
-        let (shed_tx, shed_rx) = mpsc::channel(QUEUE_DEPTH);
-        let (crit_tx, crit_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(sender_task(endpoint, collector, shed_rx, crit_rx));
-        Ok(Self {
+    /// Non-blocking: the channels are live immediately; binding and dialing happen on the
+    /// sender's OWN I/O thread with its own runtime — telemetry is self-contained, the
+    /// game link's runtime is not its concern (rl#411 stage 4). Failure to bind or reach
+    /// the collector degrades to shedding envelopes, logged from the thread.
+    pub fn start(collector: EndpointId, game_id: [u8; 32]) -> Self {
+        let (shed_tx, mut shed_rx) = mpsc::channel(QUEUE_DEPTH);
+        let (crit_tx, mut crit_rx) = mpsc::unbounded_channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            // Moved in so its drop (thread end, any path) disconnects `done`.
+            let _done_tx = done_tx;
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::warn!("telemetry disabled (runtime build failed): {e:#}");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let endpoint = match bind_telemetry_endpoint().await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!("telemetry disabled (endpoint bind failed): {e:#}");
+                        drain(&mut shed_rx, &mut crit_rx).await;
+                        return;
+                    }
+                };
+                sender_task(endpoint, collector, shed_rx, crit_rx).await;
+            });
+        });
+        Self {
             shed_tx,
             crit_tx,
             game_id,
-            task: std::sync::Arc::new(std::sync::Mutex::new(Some(task))),
-        })
+            done: std::sync::Arc::new(std::sync::Mutex::new(Some(done_rx))),
+        }
     }
 
-    /// THE way to end a sender — never bare-drop one on a runtime about to die. Drops this
-    /// handle's channels (closing them once no clone survives) and awaits the I/O task, which
-    /// drains queued envelopes and `Endpoint::close`s. Bounded: a wedged link can't hang
-    /// teardown past the timeout.
-    pub async fn close(self) {
-        let task = self.task.lock().unwrap().take();
+    /// THE way to end a sender. Drops this handle's channels (closing them once no clone
+    /// survives) and bounded-waits for the I/O thread, which drains queued envelopes and
+    /// `Endpoint::close`s. A wedged link can't hang teardown past [`CLOSE_TIMEOUT`].
+    pub fn close(self) {
+        let done = self.done.lock().unwrap().take();
         drop(self);
-        if let Some(task) = task {
-            let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+        if let Some(done) = done {
+            // Disconnected = the thread ended (the success path); Timeout = give up.
+            let _ = done.recv_timeout(CLOSE_TIMEOUT);
         }
     }
 
@@ -332,6 +362,7 @@ async fn sender_task(
                 "telemetry: could not reach collector {collector}: {e:#} — running without telemetry"
             );
             drain(&mut shed_rx, &mut crit_rx).await;
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, endpoint.close()).await;
             return;
         }
     };
@@ -340,6 +371,7 @@ async fn sender_task(
         Err(e) => {
             tracing::warn!("telemetry: opening stream failed: {e:#}");
             drain(&mut shed_rx, &mut crit_rx).await;
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, endpoint.close()).await;
             return;
         }
     };
@@ -354,13 +386,22 @@ async fn sender_task(
             Some(env) = shed_rx.recv() => env,
             else => break,
         };
-        if let Err(e) = write_frame(&mut send, &env).await {
-            tracing::warn!("telemetry: send failed, stopping stream: {e:#}");
-            break;
+        // Bounded: a collector that stops reading would otherwise wedge this write
+        // forever — and with it the close-time thread join.
+        match tokio::time::timeout(CLOSE_TIMEOUT, write_frame(&mut send, &env)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("telemetry: send failed, stopping stream: {e:#}");
+                break;
+            }
+            Err(_) => {
+                tracing::warn!("telemetry: send stalled >{CLOSE_TIMEOUT:?}, stopping stream");
+                break;
+            }
         }
     }
     let _ = send.finish();
-    endpoint.close().await;
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, endpoint.close()).await;
 }
 
 async fn drain(
@@ -585,7 +626,7 @@ mod tests {
                 shed_tx,
                 crit_tx,
                 game_id: [0u8; 32],
-                task: Default::default(),
+                done: Default::default(),
             },
             shed_rx,
             crit_rx,

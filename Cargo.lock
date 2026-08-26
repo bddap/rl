@@ -7841,6 +7841,7 @@ dependencies = [
  "iroh",
  "iroh-mdns-address-lookup",
  "n0-future",
+ "net-link",
  "net-proto",
  "otel",
  "rand 0.8.5",
@@ -7848,6 +7849,20 @@ dependencies = [
  "rapier3d",
  "serde",
  "test-watchdog",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "net-link"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "iroh",
+ "iroh-mdns-address-lookup",
+ "n0-future",
+ "net-proto",
  "tokio",
  "tracing",
 ]

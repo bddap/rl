@@ -7,9 +7,13 @@ pub mod controls;
 pub mod formation;
 pub mod net_loop;
 pub mod telemetry;
-pub mod transport;
 pub mod voice_delivery;
 pub mod voice_reply;
+
+// The link layer lives in `net-link` (rl#411 stage 4: one poll-driven Session
+// surface, native + web platform impls behind it, wasm32-checked). Re-exported under
+// the same path so `net::transport::Session` etc. stay stable for every consumer.
+pub use net_link as transport;
 
 // The protocol core lives in `net-proto` (rl#411 stage 2: platform-free by
 // construction — no tokio/iroh, wasm32-checked). Re-exported under the same paths

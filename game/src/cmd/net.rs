@@ -44,7 +44,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let frozen = match formed? {
         formation::Formation::Agreed(frozen) => frozen,
         formation::Formation::Alone => {
-            session.close(tel);
+            net::net_loop::shutdown(&session, tel);
             return run_solo_round(args.run_secs);
         }
     };
@@ -256,6 +256,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
         w.flush().context("flushing hash log")?;
     }
     // close drains queued telemetry before the endpoint — no flush-sleep needed.
-    session.close(tel);
+    net::net_loop::shutdown(&session, tel);
     Ok(())
 }

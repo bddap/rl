@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crab-world",
     "net",
+    "net-link",
     "net-proto",
     "rl-train",
     "rl-demo",
