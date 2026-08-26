@@ -612,119 +612,203 @@ pub enum JoinResult {
     Unreachable,
 }
 
-enum AdmissionVerdict {
-    Admitted(crate::server::Admission),
-    Refused(Refusal),
-    Timeout,
+/// A mid-game join as a poll-driven state machine — the mid-game analogue of
+/// [`crate::formation::FormationDriver`]: dial the host, send our [`crate::SyncStamp`]
+/// as a [`JoinRequest`], and await the host's verdict — admitted (become a remote-adopt
+/// client booting from the host's next authoritative snapshot — the host spawns us into
+/// its LIVE round at `effective_tick`), refused (the host's [`Refusal`] relayed LOUDLY —
+/// never a silent wrong/fake-crab), or unreachable. No thread, no blocking: the windowed
+/// menu pumps it per frame (Rejoin), the CLI pumps it paced ([`connect_and_join`]) —
+/// one driver, two pacers. Deadlines ride the session's own [`Session::now_ms`] axis.
+pub struct JoinDriver {
+    /// Consumed on resolution: into the [`NetDriver`] when admitted, closed otherwise.
+    session: Option<Session>,
+    /// `None` until the dial lands — telemetry only spins up for a host we reached,
+    /// matching the blocking path this driver replaced.
+    telemetry: Option<TelemetrySender>,
+    collector: Option<EndpointId>,
+    host: EndpointId,
+    seed: u64,
+    stamp: crate::SyncStamp,
+    state: JoinState,
 }
 
-fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVerdict {
-    let deadline = std::time::Instant::now() + JOIN_WELCOME_TIMEOUT;
-    while std::time::Instant::now() < deadline {
-        while let Some(from) = session.try_recv() {
-            if from.from != host {
-                continue;
-            }
-            match from.msg {
-                PeerWire::Welcome(adm) => return AdmissionVerdict::Admitted(adm),
-                PeerWire::Refuse(verdict) => return AdmissionVerdict::Refused(verdict),
-                _ => continue,
+enum JoinState {
+    /// The dial is in flight on the platform executor; its verdict channel resolves it.
+    Dialing {
+        verdict: std::sync::mpsc::Receiver<Result<()>>,
+        deadline_ms: u64,
+    },
+    /// [`JoinRequest`] sent; the host's Welcome/Refuse decides.
+    AwaitingWelcome { deadline_ms: u64 },
+}
+
+impl JoinDriver {
+    /// Bind a session and fire the dial — non-blocking; pump for the outcome. `seed` is
+    /// the shared [`crate::sim`] match constant every peer holds.
+    pub fn begin(
+        seed: u64,
+        host: EndpointId,
+        collector: Option<EndpointId>,
+        stamp: crate::SyncStamp,
+    ) -> Result<Self> {
+        let session = transport::start_session()?;
+        let my_eid = session.endpoint_id();
+        println!("joining as endpoint id: {my_eid}");
+        anyhow::ensure!(host != my_eid, "cannot join our own endpoint id");
+        let verdict = session.dial(host);
+        let deadline_ms = session.now_ms() + JOIN_WELCOME_TIMEOUT.as_millis() as u64;
+        Ok(Self {
+            session: Some(session),
+            telemetry: None,
+            collector,
+            host,
+            seed,
+            stamp,
+            state: JoinState::Dialing {
+                verdict,
+                deadline_ms,
+            },
+        })
+    }
+
+    /// One frame's pump. `None` while the join is still in flight; the resolving call
+    /// consumes the session (into the match, or closed).
+    pub fn pump(&mut self) -> Option<Result<JoinResult>> {
+        let session = self.session.as_mut()?;
+        let now_ms = session.now_ms();
+        match &mut self.state {
+            JoinState::Dialing {
+                verdict,
+                deadline_ms,
+            } => match verdict.try_recv() {
+                Ok(Ok(())) => {
+                    self.telemetry = connect_telemetry(session, self.collector);
+                    session.send(self.host, &JoinRequest { stamp: self.stamp });
+                    self.state = JoinState::AwaitingWelcome {
+                        deadline_ms: now_ms + JOIN_WELCOME_TIMEOUT.as_millis() as u64,
+                    };
+                    None
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("dialing host {} failed: {e:#}", self.host.fmt_short());
+                    Some(Ok(self.resolve_unreachable()))
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    tracing::warn!("dial task for host {} vanished", self.host.fmt_short());
+                    Some(Ok(self.resolve_unreachable()))
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) if now_ms >= *deadline_ms => {
+                    tracing::warn!("dialing host {} timed out", self.host.fmt_short());
+                    Some(Ok(self.resolve_unreachable()))
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            },
+            JoinState::AwaitingWelcome { deadline_ms } => {
+                let deadline_ms = *deadline_ms;
+                while let Some(from) = session.try_recv() {
+                    if from.from != self.host {
+                        continue;
+                    }
+                    match from.msg {
+                        PeerWire::Welcome(adm) => return Some(self.resolve_admitted(adm)),
+                        PeerWire::Refuse(verdict) => {
+                            tracing::error!("host refused our join: {verdict}");
+                            let (session, telemetry) = self.take_resolved();
+                            shutdown(&session, telemetry);
+                            return Some(Ok(JoinResult::Refused(verdict)));
+                        }
+                        _ => continue,
+                    }
+                }
+                (now_ms >= deadline_ms).then(|| Ok(self.resolve_unreachable()))
             }
         }
-        std::thread::sleep(crate::formation::FORM_POLL);
     }
-    AdmissionVerdict::Timeout
+
+    fn take_resolved(&mut self) -> (Session, Option<TelemetrySender>) {
+        let session = self.session.take().expect("checked live in pump");
+        (session, self.telemetry.take())
+    }
+
+    fn resolve_unreachable(&mut self) -> JoinResult {
+        let (session, telemetry) = self.take_resolved();
+        shutdown(&session, telemetry);
+        JoinResult::Unreachable
+    }
+
+    fn resolve_admitted(&mut self, adm: crate::server::Admission) -> Result<JoinResult> {
+        let (session, telemetry) = self.take_resolved();
+        let me = adm.pid;
+        println!(
+            "admitted as {me:?}; joining at tick {} over roster {:?}",
+            adm.effective_tick, adm.roster
+        );
+        // This `client` is only a placeholder the remote-adopt client boots from — the
+        // host spawns us into its LIVE round at `effective_tick` (`Server::step_next` →
+        // `Sim::spawn_joining_player`); the adopted snapshot supersedes (module doc).
+        let client = ClientSim::join_at(self.seed, &adm.roster, me, adm.effective_tick);
+        let my_eid = session.endpoint_id();
+        // Hard checks, not debug_asserts: the Admission came off the WIRE, so a
+        // malicious/buggy host could otherwise hand us pid 0 and flip this joiner
+        // into hosting the round it meant to join (NetDriver::is_host keys on it).
+        anyhow::ensure!(
+            me != PlayerId(0),
+            "host admitted us as PlayerId(0) — refusing to become the host of a round we joined"
+        );
+        anyhow::ensure!(
+            adm.roster.contains(&PlayerId(0)),
+            "the host (PlayerId 0) must be in the roster we were admitted into"
+        );
+        let mut id_map = BTreeMap::new();
+        id_map.insert(self.host, PlayerId(0));
+        id_map.insert(my_eid, me);
+        // The ONE arbiter judges our round verdict, from the host stamp the Welcome
+        // carried — the same comparison the host's admission gate just passed, so an
+        // admitted joiner's verdict is all-true by construction, computed rather than
+        // assumed.
+        let sync = crate::SyncVerdict::between(adm.host_stamp, self.stamp);
+        let driver = NetDriver {
+            session,
+            me,
+            server_eid: self.host,
+            early: Vec::new(),
+            id_map,
+            departed: Default::default(),
+            join_budget: Default::default(),
+            unrostered_since: Default::default(),
+            telemetry,
+            sync,
+            stamp: self.stamp,
+        };
+        Ok(JoinResult::Joined(Box::new((client, driver))))
+    }
 }
 
-/// Dial INTO a live match as a host-authoritative mid-game joiner — the mid-game analogue of
-/// forming via [`connect_and_form_dialing`]. Connect to `host`, send our [`crate::SyncStamp`]
-/// as a [`JoinRequest`], and await the host's verdict: admitted (become a remote-adopt client
-/// booting from the host's next authoritative snapshot — the host spawns us into its LIVE
-/// round at `effective_tick`), refused (the host's [`Refusal`] relayed LOUDLY — never a
-/// silent wrong/fake-crab), or unreachable. `seed` is the shared [`crate::sim`] match
-/// constant every peer holds.
+impl Drop for JoinDriver {
+    fn drop(&mut self) {
+        // A join abandoned mid-flight (the menu cancels without another pump) still
+        // tears down gracefully — telemetry drained, endpoint closed.
+        if let Some(session) = self.session.take() {
+            shutdown(&session, self.telemetry.take());
+        }
+    }
+}
+
+/// [`JoinDriver`] pumped to completion on the calling thread — the pacer for callers
+/// with no frame loop of their own (the CLI join path).
 pub fn connect_and_join(
     seed: u64,
     host: EndpointId,
     collector: Option<EndpointId>,
     stamp: crate::SyncStamp,
 ) -> Result<JoinResult> {
-    let mut session = transport::start_session()?;
-    let my_eid = session.endpoint_id();
-    println!("joining as endpoint id: {my_eid}");
-    anyhow::ensure!(host != my_eid, "cannot join our own endpoint id");
-    let dialed = match session.dial(host).recv_timeout(JOIN_WELCOME_TIMEOUT) {
-        Ok(verdict) => verdict,
-        Err(_) => {
-            tracing::warn!("dialing host {} timed out", host.fmt_short());
-            session.close();
-            return Ok(JoinResult::Unreachable);
+    let mut driver = JoinDriver::begin(seed, host, collector, stamp)?;
+    loop {
+        if let Some(outcome) = driver.pump() {
+            return outcome;
         }
-    };
-    if let Err(e) = dialed {
-        tracing::warn!("dialing host {} failed: {e:#}", host.fmt_short());
-        session.close();
-        return Ok(JoinResult::Unreachable);
-    }
-    let telemetry = connect_telemetry(&session, collector);
-    session.send(host, &JoinRequest { stamp });
-    let verdict = await_admission(&mut session, host);
-
-    match verdict {
-        AdmissionVerdict::Refused(verdict) => {
-            tracing::error!("host refused our join: {verdict}");
-            shutdown(&session, telemetry);
-            Ok(JoinResult::Refused(verdict))
-        }
-        AdmissionVerdict::Timeout => {
-            shutdown(&session, telemetry);
-            Ok(JoinResult::Unreachable)
-        }
-        AdmissionVerdict::Admitted(adm) => {
-            let me = adm.pid;
-            println!(
-                "admitted as {me:?}; joining at tick {} over roster {:?}",
-                adm.effective_tick, adm.roster
-            );
-            // This `client` is only a placeholder the remote-adopt client boots from — the
-            // host spawns us into its LIVE round at `effective_tick` (`Server::step_next` →
-            // `Sim::spawn_joining_player`); the adopted snapshot supersedes (module doc).
-            let client = ClientSim::join_at(seed, &adm.roster, me, adm.effective_tick);
-            let my_eid = session.endpoint_id();
-            // Hard checks, not debug_asserts: the Admission came off the WIRE, so a
-            // malicious/buggy host could otherwise hand us pid 0 and flip this joiner
-            // into hosting the round it meant to join (NetDriver::is_host keys on it).
-            anyhow::ensure!(
-                me != PlayerId(0),
-                "host admitted us as PlayerId(0) — refusing to become the host of a round we joined"
-            );
-            anyhow::ensure!(
-                adm.roster.contains(&PlayerId(0)),
-                "the host (PlayerId 0) must be in the roster we were admitted into"
-            );
-            let mut id_map = BTreeMap::new();
-            id_map.insert(host, PlayerId(0));
-            id_map.insert(my_eid, me);
-            // The ONE arbiter judges our round verdict, from the host stamp the Welcome
-            // carried — the same comparison the host's admission gate just passed, so an
-            // admitted joiner's verdict is all-true by construction, computed rather than
-            // assumed.
-            let sync = crate::SyncVerdict::between(adm.host_stamp, stamp);
-            let driver = NetDriver {
-                session,
-                me,
-                server_eid: host,
-                early: Vec::new(),
-                id_map,
-                departed: Default::default(),
-                join_budget: Default::default(),
-                unrostered_since: Default::default(),
-                telemetry,
-                sync,
-                stamp,
-            };
-            Ok(JoinResult::Joined(Box::new((client, driver))))
-        }
+        std::thread::sleep(crate::formation::FORM_POLL);
     }
 }
 

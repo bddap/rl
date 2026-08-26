@@ -1,5 +1,3 @@
-use std::sync::mpsc;
-
 use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy_egui::{
@@ -102,7 +100,7 @@ struct MenuState {
     forming: Option<Formation>,
     error: Option<String>,
     last_host: Option<EndpointId>,
-    rejoining: Option<mpsc::Receiver<anyhow::Result<JoinResult>>>,
+    rejoining: Option<net_loop::JoinDriver>,
 }
 
 impl MenuState {
@@ -357,13 +355,18 @@ fn apply_action(
                 return false;
             };
             state.error = None;
-            let (tx, rx) = mpsc::channel();
-            let (seed, telemetry, stamp) = (state.seed, state.telemetry, state.stamp);
-            std::thread::spawn(move || {
-                let _ = tx.send(net_loop::connect_and_join(seed, host, telemetry, stamp));
-            });
-            state.rejoining = Some(rx);
-            next.set(AppPhase::Connecting);
+            // Poll-driven: begin binds and fires the dial, poll_rejoin pumps it per
+            // frame — no thread (rl#411 stage-2 residual (a)).
+            match net_loop::JoinDriver::begin(state.seed, host, state.telemetry, state.stamp) {
+                Ok(driver) => {
+                    state.rejoining = Some(driver);
+                    next.set(AppPhase::Connecting);
+                }
+                Err(e) => {
+                    state.error = Some(format!("Couldn't rejoin: {e:#}"));
+                    state.nav = MenuNav::new();
+                }
+            }
             true
         }
     }
@@ -396,15 +399,11 @@ fn poll_rejoin(
     pending: &mut PendingRound,
     next: &mut NextState<AppPhase>,
 ) -> bool {
-    let Some(rx) = &state.rejoining else {
+    let Some(driver) = &mut state.rejoining else {
         return false;
     };
-    let result = match rx.try_recv() {
-        Ok(r) => r,
-        Err(mpsc::TryRecvError::Empty) => return false,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            Err(anyhow::anyhow!("rejoin thread ended unexpectedly"))
-        }
+    let Some(result) = driver.pump() else {
+        return false;
     };
     state.rejoining = None;
     match result {
