@@ -12,7 +12,6 @@
 //! the craft body itself is already the `"veh"` stream (one source per body, rl#401).
 
 use std::fmt::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
 
@@ -65,10 +64,7 @@ pub(super) fn sample(world: &mut World, is_host: bool, input: Input) {
         track.next_sample = (tick / SAMPLE_EVERY_TICKS + 1) * SAMPLE_EVERY_TICKS;
     }
 
-    let t_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let t_ms = crab_world::wall::unix_ms();
     let me = {
         let state = world.non_send::<GameState>();
         state.client.me().0

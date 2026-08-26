@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Giant Crab Rescue</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+    /* The one canvas the game binds to (net/src/render/app.rs pins this selector). */
+    #gcr-canvas { width: 100vw; height: 100vh; display: block; outline: none; }
+  </style>
+</head>
+<body>
+  <canvas id="gcr-canvas"></canvas>
+  <script type="module">
+    import init from './pkg/game_web.js';
+    init().catch((e) => console.error('GCR wasm init failed:', e));
+  </script>
+</body>
+</html>

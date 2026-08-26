@@ -19,14 +19,25 @@ pub fn set_asset_root(root: PathBuf) {
 /// The asset root of record: the pinned config value, else the native default —
 /// binaries without a config entrypoint (probes, trainers) resolve the same way the
 /// native adapter does.
+#[cfg(not(target_family = "wasm"))]
 pub fn asset_root() -> PathBuf {
     ROOT.get().cloned().unwrap_or_else(native_asset_root)
+}
+
+/// On the web there is no env and no manifest dir — the entry adapter's pin is the
+/// only source, and reaching here without one is a boot-order bug, not a fallback.
+#[cfg(target_family = "wasm")]
+pub fn asset_root() -> PathBuf {
+    ROOT.get()
+        .cloned()
+        .expect("web entry pins the asset root (set_asset_root) before anything loads")
 }
 
 /// How NATIVE launches find assets: the deploy env override, else the dev checkout
 /// (this crate's manifest dir, so a fresh clone's `cargo run` finds the committed
 /// glyphs regardless of cwd). Entry adapters resolve this into their config; only
 /// native code may call it — a web adapter supplies its own root.
+#[cfg(not(target_family = "wasm"))]
 pub fn native_asset_root() -> PathBuf {
     std::env::var_os("BEVY_ASSET_ROOT")
         .map(PathBuf::from)
@@ -48,8 +59,42 @@ pub fn bevy_asset_path() -> PathBuf {
 /// (`Path::join` semantics, same as bevy's own `FileAssetReader`) — that is the
 /// native-only dev affordance (`CRAB_MODEL_PATH`, explicit `--checkpoint` dirs,
 /// trainer run dirs) and fails naturally on a platform with no filesystem.
+#[cfg(not(target_family = "wasm"))]
 pub fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
     std::fs::read(asset_file_path(path))
+}
+
+/// The web body of the one byte path: a table the entry adapter fills BEFORE the game
+/// boots (fetched over HTTP today; the deploy stage may swap the fill for baked
+/// `include_bytes!` — consumers never know). Sync-by-construction: wasm has no
+/// blocking fetch, so the prefetch happens in the async entry and this stays the same
+/// sync signature every native consumer already has.
+#[cfg(target_family = "wasm")]
+pub fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
+    let table = WEB_ASSETS
+        .get()
+        .expect("web entry preloads the asset table (preload_web_assets) before the game boots");
+    table.get(path).cloned().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "{} is not in the web bundle's preloaded asset table",
+                path.display()
+            ),
+        )
+    })
+}
+
+#[cfg(target_family = "wasm")]
+static WEB_ASSETS: OnceLock<std::collections::HashMap<PathBuf, Vec<u8>>> = OnceLock::new();
+
+/// Fill the web byte table — once, from the entry adapter, before [`read_asset`] can
+/// run. Paths are asset-tree-relative, the same spelling native consumers use.
+#[cfg(target_family = "wasm")]
+pub fn preload_web_assets(entries: impl IntoIterator<Item = (PathBuf, Vec<u8>)>) {
+    if WEB_ASSETS.set(entries.into_iter().collect()).is_err() {
+        panic!("web asset table filled twice — one boot, one prefetch");
+    }
 }
 
 /// [`read_asset`]'s path resolution WITHOUT the read — for the NATIVE-ONLY fs

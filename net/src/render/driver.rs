@@ -1219,7 +1219,7 @@ fn record_tick_trace(world: &mut World) {
 /// that cross no tick pay one deferred physics step ([`step_pending_pump`]). Ends by
 /// writing the frame's [`RenderClock`] and perf stats.
 pub(super) fn drive_client_sim(world: &mut World) {
-    let sim_started = std::time::Instant::now();
+    let sim_started = bevy::platform::time::Instant::now();
     let armed = world
         .get_resource::<crate::crab_slot::NnCrabsArmed>()
         .is_some();

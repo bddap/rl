@@ -51,6 +51,7 @@ pub mod moon;
 pub mod play;
 #[cfg(feature = "render")]
 pub mod sally_track;
+pub mod wall;
 
 #[cfg(feature = "render")]
 pub mod scatter;

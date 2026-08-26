@@ -3631,6 +3631,7 @@ dependencies = [
  "clap",
  "frametime",
  "gltf",
+ "js-sys",
  "libc",
  "naga 26.0.0",
  "otel",
@@ -5374,6 +5375,23 @@ dependencies = [
  "test-watchdog",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "game-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "console_error_panic_hook",
+ "crab-world",
+ "frametime",
+ "js-sys",
+ "net",
+ "tracing",
+ "tracing-subscriber",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

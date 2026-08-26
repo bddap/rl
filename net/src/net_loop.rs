@@ -43,27 +43,26 @@ const JOIN_BURST: f64 = 8.0;
 /// admission is never cut. Without this the transport's link cap is a one-shot fuse: a
 /// burst of silent connections (our keep-alives hold them open) would pin the link table
 /// full for the life of the round, denying every later legitimate join.
-const UNROSTERED_GRACE: Duration = Duration::from_secs(30);
+const UNROSTERED_GRACE_MS: u64 = 30_000;
 
-/// Token bucket over wall-clock time for [`JOIN_RATE_PER_SEC`]/[`JOIN_BURST`].
+/// Token bucket over the link's injected clock ([`Session::now_ms`], rl#411: the
+/// netcode reads no platform clock) for [`JOIN_RATE_PER_SEC`]/[`JOIN_BURST`].
 struct JoinBudget {
     tokens: f64,
-    last: std::time::Instant,
-}
-
-impl Default for JoinBudget {
-    fn default() -> Self {
-        Self {
-            tokens: JOIN_BURST,
-            last: std::time::Instant::now(),
-        }
-    }
+    last_ms: u64,
 }
 
 impl JoinBudget {
-    fn allow(&mut self, now: std::time::Instant) -> bool {
-        let dt = now.saturating_duration_since(self.last).as_secs_f64();
-        self.last = now;
+    fn new(now_ms: u64) -> Self {
+        Self {
+            tokens: JOIN_BURST,
+            last_ms: now_ms,
+        }
+    }
+
+    fn allow(&mut self, now_ms: u64) -> bool {
+        let dt = now_ms.saturating_sub(self.last_ms) as f64 / 1000.0;
+        self.last_ms = now_ms;
         self.tokens = (self.tokens + dt * JOIN_RATE_PER_SEC).min(JOIN_BURST);
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
@@ -89,7 +88,7 @@ pub struct NetDriver {
     /// (Host) First-seen times of connected endpoints not (yet) in `id_map`, for the
     /// [`UNROSTERED_GRACE`] eviction. Keyed off the live connection set each pump, so it
     /// is bounded by the transport's link cap.
-    unrostered_since: BTreeMap<EndpointId, std::time::Instant>,
+    unrostered_since: BTreeMap<EndpointId, u64>,
     telemetry: Option<TelemetrySender>,
     /// The shared-asset verdict this round was formed (or admitted) under — computed by
     /// the ONE arbiter, [`crate::SyncVerdict::between`].
@@ -192,7 +191,7 @@ impl NetDriver {
             // Over-budget requests are dropped, not refused: a reply per attempt would hand
             // a flooder attacker-rate outbound work. A rate-limited legitimate joiner falls
             // into its JOIN_WELCOME_TIMEOUT and can retry.
-            if !self.join_budget.allow(std::time::Instant::now()) {
+            if !self.join_budget.allow(self.session.now_ms()) {
                 tracing::debug!(
                     "join budget exhausted — dropping join from {}",
                     eid.fmt_short()
@@ -228,7 +227,7 @@ impl NetDriver {
         // link past UNROSTERED_GRACE without becoming rostered — a sybil squatting a
         // capacity slot, or an evicted departee's zombie. A pending joiner is rostered at
         // admission, well inside the grace.
-        let now = std::time::Instant::now();
+        let now = self.session.now_ms();
         let id_map = &self.id_map;
         self.unrostered_since
             .retain(|eid, _| connected.contains(eid) && !id_map.contains_key(eid));
@@ -237,10 +236,11 @@ impl NetDriver {
                 continue;
             }
             let since = *self.unrostered_since.entry(eid).or_insert(now);
-            if now.duration_since(since) > UNROSTERED_GRACE {
+            if now.saturating_sub(since) > UNROSTERED_GRACE_MS {
                 tracing::info!(
-                    "closing link to {} — connected {UNROSTERED_GRACE:?} without joining",
-                    eid.fmt_short()
+                    "closing link to {} — connected {}s without joining",
+                    eid.fmt_short(),
+                    UNROSTERED_GRACE_MS / 1000,
                 );
                 self.session.disconnect(eid);
                 self.unrostered_since.remove(&eid);
@@ -594,6 +594,7 @@ pub(crate) fn joined_from_frozen(
     let client = ClientSim::new(seed, &all_ids, frozen.me);
     let server_eid = server_endpoint(&frozen.id_map);
     let early = early_peer_msgs(&frozen);
+    let join_budget = JoinBudget::new(session.now_ms());
     let driver = NetDriver {
         session,
         me: frozen.me,
@@ -601,7 +602,7 @@ pub(crate) fn joined_from_frozen(
         early,
         id_map: frozen.id_map,
         departed: Default::default(),
-        join_budget: Default::default(),
+        join_budget,
         unrostered_since: Default::default(),
         telemetry,
         sync: frozen.sync,
@@ -778,6 +779,7 @@ impl JoinDriver {
         // admitted joiner's verdict is all-true by construction, computed rather than
         // assumed.
         let sync = crate::SyncVerdict::between(adm.host_stamp, self.stamp);
+        let join_budget = JoinBudget::new(session.now_ms());
         let driver = NetDriver {
             session,
             me,
@@ -785,7 +787,7 @@ impl JoinDriver {
             early: Vec::new(),
             id_map,
             departed: Default::default(),
-            join_budget: Default::default(),
+            join_budget,
             unrostered_since: Default::default(),
             telemetry,
             sync,
@@ -873,36 +875,24 @@ mod tests {
 
     #[test]
     fn join_budget_allows_a_burst_then_refills_at_the_sustained_rate() {
-        let t0 = std::time::Instant::now();
-        let mut b = JoinBudget {
-            tokens: JOIN_BURST,
-            last: t0,
-        };
+        let t0 = 1_000_000;
+        let mut b = JoinBudget::new(t0);
         let burst = (0..20).filter(|_| b.allow(t0)).count();
         assert_eq!(
             burst as f64, JOIN_BURST,
             "a same-instant flood gets the burst, no more"
         );
-        assert!(
-            !b.allow(t0 + Duration::from_millis(100)),
-            "0.1s refills only 0.2 tokens"
-        );
+        assert!(!b.allow(t0 + 100), "0.1s refills only 0.2 tokens");
         // +0.5s refills another 1.0 token onto the 0.2: one allow, then dry again.
-        assert!(
-            b.allow(t0 + Duration::from_millis(600)),
-            "a whole token accrued"
-        );
-        assert!(!b.allow(t0 + Duration::from_millis(600)), "…exactly one");
+        assert!(b.allow(t0 + 600), "a whole token accrued");
+        assert!(!b.allow(t0 + 600), "…exactly one");
     }
 
     #[test]
     fn join_budget_caps_refill_at_the_burst() {
-        let t0 = std::time::Instant::now();
-        let mut b = JoinBudget {
-            tokens: JOIN_BURST,
-            last: t0,
-        };
-        let later = t0 + Duration::from_secs(3600);
+        let t0 = 1_000_000;
+        let mut b = JoinBudget::new(t0);
+        let later = t0 + 3_600_000;
         let allowed = (0..20).filter(|_| b.allow(later)).count();
         assert_eq!(
             allowed as f64, JOIN_BURST,

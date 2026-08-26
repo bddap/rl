@@ -15,7 +15,7 @@
 //! the SDK's background batch thread. No lock, no syscall beyond the 10 Hz clock read.
 
 use std::fmt::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
+
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::Velocity;
@@ -143,10 +143,7 @@ fn sample(
         st.riding = now;
     }
     if tick.is_multiple_of(SAMPLE_EVERY_TICKS) {
-        let t_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let t_ms = crate::wall::unix_ms();
         let terrain = terrain.as_deref();
         let buf = &mut st.buf;
         for (id, tf, vel) in &crabs {

@@ -24,6 +24,10 @@ fn manifest_carries_the_full_landing_matrix() {
         // test of run_eval's real worlds; dropping it re-opens the untested
         // measurement path.
         "cargo test -q -p crab-world --release --lib rest_pose_has_zero_torque_and_no_progress",
+        // The rl#411 platform-freedom check: game-web compiles the whole web leaf
+        // (net + crab-world, render on) for wasm32; dropping it re-opens silent
+        // web-build rot from dep-side edits.
+        "cargo check --target wasm32-unknown-unknown -p net-proto -p net-link -p game-web",
     ] {
         assert!(
             manifest.contains(cmd),

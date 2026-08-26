@@ -25,6 +25,15 @@
       "why": "operator tooling (profiling, terrain bake, asset fetch) and live proof scripts — exercised by use against a running system, no offline harness"
     },
     {
+      "paths": ["game-web/run.sh", "game-web/*.mjs", "game-web/index.html"],
+      "tests": [
+        "nix-shell -p shellcheck --run 'shellcheck game-web/run.sh'",
+        "node --check game-web/server.mjs",
+        "node --check game-web/verify.mjs"
+      ],
+      "why": "the browser build/serve/verify harness (rl#411 stage 5) — a live harness exercised by RUNNING run.sh (verify drives headless chromium; no offline harness); shellcheck + node syntax checks keep it mechanically sound, and game-web/src/ rides the general rust rule below"
+    },
+    {
       "paths": ["net-link/examples/web-echo/**"],
       "tests": [
         "nix-shell -p shellcheck --run 'shellcheck net-link/examples/web-echo/run.sh'"
@@ -45,7 +54,7 @@
         "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
         "nix-shell --run 'cargo test -q -- --test-threads=2'",
         "nix-shell --run 'cargo test -q -p crab-world --release --lib rest_pose_has_zero_torque_and_no_progress -- --ignored --exact eval::tests::rest_pose_has_zero_torque_and_no_progress --test-threads=1'",
-        "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto -p net-link'"
+        "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto -p net-link -p game-web'"
       ],
       "why": "the chase-eval measurement seam (rl#341 S2-5): the physical path — run_eval through real batched bevy+rapier worlds, the fold, every guard — had ZERO executed coverage because its only end-to-end test is #[ignore]d (too heavy for every workspace change). First-match-wins shadows the general rust rule, so this rule carries the full landing matrix PLUS the --ignored end-to-end run (release, ~1 min after kache-warm compile); a regression in the settle/active split, the running min, the rescue forfeit, or the batched env wiring now fails a landing that touches the seam"
     },
@@ -57,9 +66,9 @@
         "nix-shell --run 'cargo build --release -p rl-train'",
         "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
         "nix-shell --run 'cargo test -q -- --test-threads=2'",
-        "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto -p net-link'"
+        "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto -p net-link -p game-web'"
       ],
-      "why": "AGENTS.md's pre-submission contract, workspace-wide, plus the rl#411 platform-freedom check: net-proto (the protocol core) and net-link (the link layer, rl#411 stage 4 — its web half only compiles on wasm32) must stay wasm32-green, and its wasm build breaks from DEP-side edits too (crab-world, workspace Cargo.toml) — so the check rides the general rule for every rust touch, not a net-proto-scoped one; it is a seconds-cheap cargo check when warm. The crates interlock (net/game consume crab-world's sim seams), so per-crate scoping would miss cross-crate breakage; --test-threads=2 because the live trainer saturates the cores and the heavy physics tests hang at default parallelism; assets and golden data ride the same rule because the suite consumes them (terrain fixtures, golden-env data, controls-display images). The two ISOLATED --release builds are the literal configs rl-release.service ships, which workspace feature-unification MASKS (bothouse#79/#97, formerly botq's hardcoded rl build matrix): `-p rl-train` is the trainer/eval build — default features only (wgpu, no render), where rl#275's ungated `pub use` of render-gated code broke E0432 while every workspace-level build stayed green; `-p rl-demo -p game -p rl-update-ui` is the deck-bundle build — render on WITHOUT the trainer's wgpu, the symmetric unification gap"
+      "why": "AGENTS.md's pre-submission contract, workspace-wide, plus the rl#411 platform-freedom check: net-proto (the protocol core) and net-link (the link layer, rl#411 stage 4 — its web half only compiles on wasm32) and game-web (the browser entry, rl#411 stage 5 — checking it compiles the ENTIRE web leaf: net+crab-world with render on wasm32) must stay wasm32-green, and its wasm build breaks from DEP-side edits too (crab-world, workspace Cargo.toml) — so the check rides the general rule for every rust touch, not a net-proto-scoped one; it is a seconds-cheap cargo check when warm. The crates interlock (net/game consume crab-world's sim seams), so per-crate scoping would miss cross-crate breakage; --test-threads=2 because the live trainer saturates the cores and the heavy physics tests hang at default parallelism; assets and golden data ride the same rule because the suite consumes them (terrain fixtures, golden-env data, controls-display images). The two ISOLATED --release builds are the literal configs rl-release.service ships, which workspace feature-unification MASKS (bothouse#79/#97, formerly botq's hardcoded rl build matrix): `-p rl-train` is the trainer/eval build — default features only (wgpu, no render), where rl#275's ungated `pub use` of render-gated code broke E0432 while every workspace-level build stayed green; `-p rl-demo -p game -p rl-update-ui` is the deck-bundle build — render on WITHOUT the trainer's wgpu, the symmetric unification gap"
     }
   ]
 }

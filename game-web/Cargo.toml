@@ -1,0 +1,24 @@
+[package]
+name = "game-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The browser entry adapter (rl#411 stage 5): the web peer of `game`'s CLI adapter.
+# Everything inside is cfg'd wasm, so native workspace builds compile an empty crate.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+net = { path = "../net", features = ["render"] }
+crab-world = { path = "../crab-world", features = ["render"] }
+frametime = { path = "../frametime" }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console", "Window", "Response"] }
+console_error_panic_hook = "0.1"

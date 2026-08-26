@@ -55,3 +55,7 @@ otel = { path = "../otel" }
 # The runtime never parses the glb (colliders come from the baked table, bddap/rl#20);
 # only the skin-weight audit tests still read it directly.
 gltf.workspace = true
+
+# `wall::unix_ms`'s browser clock (Date.now). Already in the tree via wasm-bindgen.
+[target.'cfg(target_family = "wasm")'.dependencies]
+js-sys = "0.3"

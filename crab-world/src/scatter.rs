@@ -252,7 +252,17 @@ fn update_scatter(
     anchor: Res<crate::ground::GroundAnchor>,
     mut chunks: ResMut<Chunks>,
     cams: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    device: Option<Res<bevy::render::renderer::RenderDevice>>,
 ) {
+    // Dither-fade needs the visibility-ranges STORAGE buffer; on a downlevel
+    // adapter (WebGL2) bevy 0.19's uniform fallback mis-sizes the binding and the
+    // whole PBR pipeline fails validation, killing the app (rl#411 stage 5's
+    // headless probe caught it). Capability-gated, not platform-gated: WebGPU in a
+    // browser keeps the fade, WebGL2 degrades to a hard cutoff at the same range.
+    let dither = device.as_ref().is_none_or(|d| {
+        d.limits().max_storage_buffers_per_shader_stage
+            >= bevy::render::view::VISIBILITY_RANGES_STORAGE_BUFFER_COUNT
+    });
     // Asset presence IS the enabled flag: `setup_scatter_assets` inserts the
     // resource only on `Visuals(true)` surfaces.
     let Some(assets) = assets else { return };
@@ -308,17 +318,19 @@ fn update_scatter(
                         Kind::DryTuft => (&assets.tuft, &assets.dry),
                         Kind::Pebble => (&assets.pebble, &assets.stone),
                     };
-                    p.spawn((
+                    let mut e = p.spawn((
                         Mesh3d(mesh.clone()),
                         MeshMaterial3d(mat.clone()),
                         tf,
                         NotShadowCaster,
-                        VisibilityRange {
+                    ));
+                    if dither {
+                        e.insert(VisibilityRange {
                             start_margin: 0.0..0.0,
                             end_margin: FADE_M.0..FADE_M.1,
                             use_aabb: false,
-                        },
-                    ));
+                        });
+                    }
                 }
             })
             .id();

@@ -328,6 +328,9 @@ fn apply_action(
                 f.cancel();
             }
             state.forming = None;
+            // Machine-readable round-entry marker: the headless web verify (and any
+            // log reader) keys on this to know keyboard input drove menu → round.
+            info!("solo round armed (seed {})", state.seed);
             pending.0 = Some(
                 super::app::arm_round(menu::solo_round(state.seed))
                     .expect("a solo round always arms (net is None — nothing to desync)"),

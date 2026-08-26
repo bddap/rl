@@ -224,7 +224,15 @@ impl ArmedRound {
 }
 
 pub(super) fn arm_round(ready: crate::menu::ReadyMatch) -> Result<ArmedRound, String> {
-    check_armable(ready.net.as_ref().map(NetDriver::sync_verdict)).map(|()| ArmedRound(ready))
+    check_armable(ready.net.as_ref().map(NetDriver::sync_verdict)).map(|()| {
+        // tracing, not println: the one round-entry marker that reaches every
+        // platform's log sink (the web verify greps it from the browser console).
+        tracing::info!(
+            "ROUND_ARMED net={}",
+            if ready.net.is_some() { "peers" } else { "solo" }
+        );
+        ArmedRound(ready)
+    })
 }
 
 pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), String> {

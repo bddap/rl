@@ -5,6 +5,7 @@ members = [
     "net",
     "net-link",
     "net-proto",
+    "game-web",
     "rl-train",
     "rl-demo",
     "game",
