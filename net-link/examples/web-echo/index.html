@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>rl echo probe</title></head>
+<body>
+<pre id="out">echo probe</pre>
+<script type="module">
+  import init, { run_probe } from './pkg/echo_web.js';
+  const q = new URLSearchParams(location.search);
+  try {
+    await init();
+    await run_probe(q.get('id'), q.get('relay'), Number(q.get('rounds') || 10));
+    console.log('PROBE_DONE');
+  } catch (e) {
+    console.log('PROBE_PAGE_ERR=' + e);
+  }
+</script>
+</body>
+</html>

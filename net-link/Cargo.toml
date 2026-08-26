@@ -20,3 +20,16 @@ iroh-mdns-address-lookup.workspace = true
 # The sync primitives only — the one tokio slice that exists on wasm32. There is no
 # runtime there: tasks ride the JS event loop via n0-future's spawn.
 tokio = { version = "1", default-features = false, features = ["sync"] }
+
+# The browser↔native relay echo probe (examples/web-echo — the transport canary that
+# de-risked this crate's web half; keep it runnable for relay/stack changes).
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console"] }
+console_error_panic_hook = "0.1"
+
+[[example]]
+name = "echo_web"
+crate-type = ["cdylib"]

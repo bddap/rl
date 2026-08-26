@@ -34,3 +34,6 @@ __pycache__/
 # stray test/build output logs (do not commit)
 /*.log
 shots/
+
+# wasm-bindgen output of the web-echo probe (examples/web-echo/run.sh)
+net-link/examples/web-echo/pkg/
