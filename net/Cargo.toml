@@ -70,8 +70,25 @@ chrono = { version = "0.4", default-features = false, features = [
     "clock",
 ], optional = true }
 
+# The browser↔native cross-play verify probe (examples/web-form, rl#412) — the
+# formation-level sibling of net-link's echo probe; rerun it when touching the lobby
+# bind seam, relay posture, or bumping iroh.
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console"] }
+console_error_panic_hook = "0.1"
+
+[[example]]
+name = "form_web"
+crate-type = ["cdylib"]
+
 [dev-dependencies]
-test-watchdog = { path = "../test-watchdog" }
 crab-world = { path = "../crab-world" }
+
+# Native-only test plumbing: neither exists on wasm, and an unconditional dev-dep
+# would drag them into the wasm example build above.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+test-watchdog = { path = "../test-watchdog" }
 # The net_track targets must match otel's constants (tracing wants literal targets).
 otel = { path = "../otel" }

@@ -1,8 +1,8 @@
 //! The web platform half: the browser's JS event loop is the executor and the relay is
 //! the only path ("in browsers, there will never be any direct addresses" — iroh).
-//! Discovery is explicit dial from a URL/join code (the protocol's `DialTargets`
-//! shape); there is no mDNS and no background publish. Relay posture: iroh's default
-//! (n0-hosted) relays for now — self-hosting is an open owner question on rl#411.
+//! Discovery is explicit dial from a join code — a bare [`iroh::EndpointId`], resolved
+//! to the peer's relay through the n0 defaults' pkarr-over-HTTPS lookup (rl#412
+//! cross-play; relay hosting stays n0 by owner call). There is no mDNS here.
 
 use anyhow::{Context, Result};
 use iroh::endpoint::presets;
@@ -43,11 +43,10 @@ impl Session {
     }
 }
 
-/// Bind a browser session. Async — the caller is platform entry code (a wasm-bindgen
-/// future); everything above the [`Session`] surface stays sync.
-pub async fn start_session() -> Result<Session> {
-    let endpoint = iroh::Endpoint::builder(presets::Minimal)
-        .relay_mode(iroh::RelayMode::Default)
+/// Bind a browser session. Async — it runs on the JS event loop; the sync face the
+/// game drives is [`crate::bind_session`].
+async fn start_session() -> Result<Session> {
+    let endpoint = iroh::Endpoint::builder(presets::N0)
         .transport_config(transport_config())
         .bind()
         .await
@@ -55,4 +54,32 @@ pub async fn start_session() -> Result<Session> {
     Ok(crate::assemble(endpoint, |endpoint, inbox, links| Guts {
         _router: spawn_router(endpoint, inbox, links),
     }))
+}
+
+/// The web face of [`crate::bind_session`]: the async bind rides the JS event loop;
+/// its verdict comes back over a same-thread channel the poll drains.
+pub(crate) struct Pending(std::sync::mpsc::Receiver<Result<Session>>);
+
+pub(crate) fn begin_bind() -> Pending {
+    let (tx, rx) = std::sync::mpsc::channel();
+    n0_future::task::spawn(async move {
+        // A send after the receiver is dropped (bind abandoned) just drops the
+        // Session, whose own Drop closes the endpoint.
+        let _ = tx.send(start_session().await);
+    });
+    Pending(rx)
+}
+
+impl Pending {
+    pub(crate) fn poll(&mut self) -> Option<Result<Session>> {
+        match self.0.try_recv() {
+            Ok(v) => Some(v),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            // Only reachable if the bind task died without sending — a panic the
+            // console already screamed about; surface it on the caller's error path.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err(anyhow::anyhow!("session bind task died")))
+            }
+        }
+    }
 }

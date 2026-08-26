@@ -29,7 +29,6 @@ pub use net_proto::{
 // Render-free since rl#298 stage 4: only the label publisher inside stays
 // render-gated — it feeds UI.
 pub mod crab_slot;
-#[cfg(feature = "render")]
 pub mod menu;
 pub mod probe;
 #[cfg(feature = "render")]

@@ -356,18 +356,15 @@ fn apply_action(
                 return false;
             };
             state.error = None;
-            // Poll-driven: begin binds and fires the dial, poll_rejoin pumps it per
-            // frame — no thread (rl#411).
-            match net_loop::JoinDriver::begin(state.seed, host, state.telemetry, state.stamp) {
-                Ok(driver) => {
-                    state.rejoining = Some(driver);
-                    next.set(AppPhase::Connecting);
-                }
-                Err(e) => {
-                    state.error = Some(format!("Couldn't rejoin: {e:#}"));
-                    state.nav = MenuNav::new();
-                }
-            }
+            // Poll-driven: begin kicks off the bind, the dial fires when it lands,
+            // poll_rejoin pumps it per frame — no thread (rl#411/rl#412).
+            state.rejoining = Some(net_loop::JoinDriver::begin(
+                state.seed,
+                host,
+                state.telemetry,
+                state.stamp,
+            ));
+            next.set(AppPhase::Connecting);
             true
         }
     }
@@ -467,16 +464,10 @@ fn arm_and_play(
 
 fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextState<AppPhase>) {
     state.error = None;
-    match menu::begin(choice, state.seed, state.telemetry, state.stamp) {
-        Ok(forming) => {
-            state.forming = Some(forming);
-            next.set(AppPhase::Connecting);
-        }
-        Err(e) => {
-            state.error = Some(format!("Couldn't open the lobby: {e:#}"));
-            next.set(AppPhase::Menu);
-        }
-    }
+    // Infallible: the session bind is pollable (rl#412) — a bind failure surfaces
+    // through poll_formation's error arm.
+    state.forming = Some(menu::begin(choice, state.seed, state.telemetry, state.stamp));
+    next.set(AppPhase::Connecting);
 }
 
 fn draw_chooser(ctx: &egui::Context, state: &mut MenuState) -> Option<ChooserItem> {

@@ -1,7 +1,10 @@
 //! The native platform half: a tokio runtime OWNED by the session, direct LAN
-//! addressing + mDNS discovery, relay off. Today's LAN game posture — a session binds
-//! instantly, solo play needs zero network, peers find each other via mDNS or an
-//! explicit join code.
+//! addressing + mDNS discovery, plus the n0 defaults — relay on, pkarr publish/DNS
+//! lookup — so a BROWSER peer can dial us by bare join code through the relay
+//! (rl#412 cross-play). One posture, not an opt-in fork: LAN pairs still converge on
+//! direct paths (mDNS hands out direct addrs and QUIC prefers them once holepunched);
+//! the relay is the fallback lane browsers require. A session still binds instantly —
+//! relay home + pkarr publish are background tasks — and solo play binds nothing.
 
 use std::time::Duration;
 
@@ -54,6 +57,20 @@ impl Session {
     /// with its own teardown; the link knows nothing of it.
     pub fn close(&self) {
         self.guts.rt.block_on(self.endpoint.close());
+    }
+}
+
+/// The native face of [`crate::bind_session`]: the bind is sync here (a runtime we
+/// own, local socket ops), so the pending resolves on its first poll.
+pub(crate) struct Pending(Option<Result<Session>>);
+
+pub(crate) fn begin_bind() -> Pending {
+    Pending(Some(start_session()))
+}
+
+impl Pending {
+    pub(crate) fn poll(&mut self) -> Option<Result<Session>> {
+        self.0.take()
     }
 }
 
@@ -112,8 +129,7 @@ async fn discovery_task(
 }
 
 async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .relay_mode(iroh::RelayMode::Disabled)
+    let endpoint = Endpoint::builder(presets::N0)
         .transport_config(transport_config())
         .bind()
         .await

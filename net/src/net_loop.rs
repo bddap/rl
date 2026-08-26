@@ -19,7 +19,6 @@ use crate::server::{JoinRequest, Refusal, Server, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
 use crate::telemetry::{TelemetryEvent, TelemetrySender};
-#[cfg(not(target_family = "wasm"))]
 use crate::transport;
 use crate::transport::{PeerWire, Session};
 
@@ -639,10 +638,12 @@ pub struct JoinDriver {
     state: JoinState,
 }
 
-// On wasm `begin` (the only constructor path) is compiled out; `pump` still
-// matches every variant, so the states read as unconstructed there.
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
 enum JoinState {
+    /// The session bind is in flight ([`transport::bind_session`] — async on web,
+    /// resolved-on-first-poll native): one path, no wasm fork (rl#412).
+    Binding {
+        pending: transport::PendingSession,
+    },
     /// The dial is in flight on the platform executor; its verdict channel resolves it.
     Dialing {
         verdict: std::sync::mpsc::Receiver<Result<()>>,
@@ -653,53 +654,56 @@ enum JoinState {
 }
 
 impl JoinDriver {
-    /// Browser stub: rejoin re-dials a host, and the browser has no bind yet
-    /// (rl#411 web-MP) — Err surfaces on the menu's rejoin-failed arm.
-    #[cfg(target_family = "wasm")]
-    pub fn begin(
-        _seed: u64,
-        _host: EndpointId,
-        _collector: Option<EndpointId>,
-        _stamp: crate::SyncStamp,
-    ) -> Result<Self> {
-        Err(anyhow::anyhow!(crate::menu::WEB_MP_UNAVAILABLE))
-    }
-
-    /// Bind a session and fire the dial — non-blocking; pump for the outcome. `seed` is
-    /// the shared [`crate::sim`] match constant every peer holds.
-    #[cfg(not(target_family = "wasm"))]
+    /// Kick off the session bind — non-blocking and platform-free; pump for the
+    /// outcome (the dial fires once the bind lands). `seed` is the shared
+    /// [`crate::sim`] match constant every peer holds.
     pub fn begin(
         seed: u64,
         host: EndpointId,
         collector: Option<EndpointId>,
         stamp: crate::SyncStamp,
-    ) -> Result<Self> {
-        let session = transport::start_session()?;
-        let my_eid = session.endpoint_id();
-        println!("joining as endpoint id: {my_eid}");
-        anyhow::ensure!(host != my_eid, "cannot join our own endpoint id");
-        let verdict = session.dial(host);
-        let deadline_ms = session.now_ms() + JOIN_WELCOME_TIMEOUT.as_millis() as u64;
-        Ok(Self {
-            session: Some(session),
+    ) -> Self {
+        Self {
+            session: None,
             telemetry: None,
             collector,
             host,
             seed,
             stamp,
-            state: JoinState::Dialing {
-                verdict,
-                deadline_ms,
+            state: JoinState::Binding {
+                pending: transport::bind_session(),
             },
-        })
+        }
     }
 
     /// One frame's pump. `None` while the join is still in flight; the resolving call
     /// consumes the session (into the match, or closed).
     pub fn pump(&mut self) -> Option<Result<JoinResult>> {
+        if let JoinState::Binding { pending } = &mut self.state {
+            match pending.poll()? {
+                Ok(session) => {
+                    let my_eid = session.endpoint_id();
+                    println!("joining as endpoint id: {my_eid}");
+                    if self.host == my_eid {
+                        // The session drops unconsumed; its Drop closes the endpoint.
+                        return Some(Err(anyhow::anyhow!("cannot join our own endpoint id")));
+                    }
+                    let verdict = session.dial(self.host);
+                    let deadline_ms =
+                        session.now_ms() + JOIN_WELCOME_TIMEOUT.as_millis() as u64;
+                    self.session = Some(session);
+                    self.state = JoinState::Dialing {
+                        verdict,
+                        deadline_ms,
+                    };
+                }
+                Err(e) => return Some(Err(e.context("binding the session to join"))),
+            }
+        }
         let session = self.session.as_mut()?;
         let now_ms = session.now_ms();
         match &mut self.state {
+            JoinState::Binding { .. } => unreachable!("resolved above, or returned on None"),
             JoinState::Dialing {
                 verdict,
                 deadline_ms,
@@ -827,7 +831,7 @@ pub fn connect_and_join(
     collector: Option<EndpointId>,
     stamp: crate::SyncStamp,
 ) -> Result<JoinResult> {
-    let mut driver = JoinDriver::begin(seed, host, collector, stamp)?;
+    let mut driver = JoinDriver::begin(seed, host, collector, stamp);
     loop {
         if let Some(outcome) = driver.pump() {
             return outcome;

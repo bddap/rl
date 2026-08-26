@@ -3,14 +3,16 @@
 //! `net_proto::codec`; this layer moves those bytes. Everything platform — runtime,
 //! discovery, relay posture, clock source — lives in the platform module below the
 //! [`Session`] surface: the per-frame surface is identical on both targets, so code
-//! above this crate stays cfg-free. Construction is the one platform entry point
-//! (native `start_session` is sync, web's is async on the JS event loop).
+//! above this crate stays cfg-free. Construction is pollable on both targets
+//! ([`bind_session`]); native's blocking [`start_session`] serves callers with a
+//! thread to park (CLI paths, tests).
 //!
 //! - **native** ([`native`], non-wasm): tokio runtime OWNED by the session, direct
-//!   LAN addressing + mDNS discovery, relay off.
+//!   LAN addressing + mDNS discovery, plus the n0 defaults (relay + pkarr publish) so
+//!   browser peers can reach us (rl#412 cross-play).
 //! - **web** ([`web`], wasm32): the JS event loop, relay-mode transport (browsers have
 //!   no direct path — "in browsers, there will never be any direct addresses"),
-//!   discovery = explicit dial from a URL/join code.
+//!   discovery = explicit dial from a join code, pkarr-resolved to the peer's relay.
 //!
 //! Both speak the same ALPN and datagram semantics, so a browser peer and a native
 //! peer interoperate in one match.
@@ -43,8 +45,27 @@ pub use native::{publish_lan_addr, start_session};
 mod web;
 #[cfg(target_family = "wasm")]
 use web as platform;
-#[cfg(target_family = "wasm")]
-pub use web::start_session;
+
+/// An in-flight session bind — the ONE cross-platform constructor seam (rl#412):
+/// native's bind is sync (resolves on the first poll), web's is async on the JS event
+/// loop, and every caller above pumps this the same way it pumps the session itself.
+/// Callers consume it on resolution; the resolving poll returns the verdict once.
+pub struct PendingSession(platform::Pending);
+
+impl PendingSession {
+    /// `None` while the bind is in flight; the resolving call returns the session (or
+    /// the bind error) exactly once.
+    pub fn poll(&mut self) -> Option<Result<Session>> {
+        self.0.poll()
+    }
+}
+
+/// Begin binding a session, non-blocking on every platform — poll the returned
+/// [`PendingSession`] from the frame loop. Native callers with a thread to block
+/// (CLI paths) use [`start_session`] instead.
+pub fn bind_session() -> PendingSession {
+    PendingSession(platform::begin_bind())
+}
 
 #[derive(Debug, Clone)]
 pub struct FromPeer {

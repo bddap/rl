@@ -3,9 +3,9 @@ pub use iroh::EndpointId;
 
 use crate::client::ClientSim;
 use crate::formation::{self, FormationDriver};
-#[cfg(not(target_family = "wasm"))]
 use crate::membership::Role;
 use crate::net_loop::{self, MatchResult, NetDriver};
+use crate::telemetry::TelemetrySender;
 use crate::transport::Session;
 
 #[derive(Debug, Clone)]
@@ -14,17 +14,32 @@ pub enum StartChoice {
     Join(Option<EndpointId>),
 }
 
-#[cfg(not(target_family = "wasm"))]
 const NET_EXPECT: usize = 2;
+
+/// Where a [`Formation`] is in its life. The session bind is pollable — async on web,
+/// resolved-on-first-poll native ([`crate::transport::bind_session`]) — so the lobby
+/// has a pre-session phase on BOTH platforms: one path, no wasm fork (rl#412).
+enum FormState {
+    /// The session is still binding; everything the lobby needs once it lands.
+    Binding {
+        pending: crate::transport::PendingSession,
+        role: Role,
+        collector: Option<EndpointId>,
+    },
+    Live {
+        session: Session,
+        // Boxed for variant-size parity with Binding (clippy::large_enum_variant).
+        driver: Box<FormationDriver>,
+        telemetry: Option<TelemetrySender>,
+    },
+}
 
 /// A lobby formation the render loop PUMPS: the session and the formation core live
 /// right here, every accessor reads them directly, and the frame loop's `poll` drives
-/// beats, roster, and agreement.
+/// the bind, beats, roster, and agreement.
 pub struct Formation {
     /// Consumed into the [`NetDriver`] when the match forms; `None` after resolution.
-    session: Option<Session>,
-    driver: FormationDriver,
-    telemetry: Option<crate::telemetry::TelemetrySender>,
+    state: Option<FormState>,
     dial_code: Option<EndpointId>,
     cancelled: bool,
     seed: u64,
@@ -33,43 +48,97 @@ pub struct Formation {
 }
 
 impl Formation {
-    /// One frame's pump. `None` while the lobby is still forming.
+    /// One frame's pump. `None` while the lobby is still binding or forming.
     pub fn poll(&mut self) -> Option<Result<MatchResult>> {
-        let session = self.session.as_mut()?;
+        self.state.as_ref()?;
         if self.cancelled {
             println!("lobby cancelled by the player");
-            let session = self.session.take().expect("checked live above");
-            net_loop::shutdown(&session, self.telemetry.take());
+            if let Some(FormState::Live {
+                session, telemetry, ..
+            }) = self.state.take()
+            {
+                net_loop::shutdown(&session, telemetry);
+            }
+            // A cancelled Binding state needs no teardown call: dropping the pending
+            // drops its eventual Session, whose own Drop closes the endpoint.
             return Some(Ok(MatchResult::Cancelled));
         }
-        let outcome = self.driver.pump(session, self.telemetry.as_ref())?;
-        let session = self.session.take().expect("checked live above");
+        if let Some(FormState::Binding { pending, .. }) = self.state.as_mut() {
+            let bound = pending.poll()?;
+            let Some(FormState::Binding {
+                role, collector, ..
+            }) = self.state.take()
+            else {
+                unreachable!("matched Binding above")
+            };
+            match bound {
+                Ok(session) => {
+                    // Same frame: fall through and pump the fresh lobby below.
+                    self.state = Some(open_lobby(
+                        session,
+                        role,
+                        self.dial_code,
+                        collector,
+                        self.stamp,
+                    ));
+                }
+                Err(e) => return Some(Err(e.context("binding the lobby session"))),
+            }
+        }
+        let Some(FormState::Live {
+            session,
+            driver,
+            telemetry,
+        }) = self.state.as_mut()
+        else {
+            unreachable!("Binding resolved above, and an empty state returned early")
+        };
+        let outcome = driver.pump(session, telemetry.as_ref())?;
+        let Some(FormState::Live {
+            session, telemetry, ..
+        }) = self.state.take()
+        else {
+            unreachable!("matched Live above")
+        };
         Some(match outcome {
             Ok(formation::Formation::Agreed(frozen)) => {
                 Ok(MatchResult::Joined(net_loop::joined_from_frozen(
                     session,
-                    self.telemetry.take(),
+                    telemetry,
                     frozen,
                     self.seed,
                     self.stamp,
                 )))
             }
             Ok(formation::Formation::Alone) => {
-                net_loop::shutdown(&session, self.telemetry.take());
+                net_loop::shutdown(&session, telemetry);
                 Ok(MatchResult::Alone)
             }
             Err(e) => {
-                net_loop::shutdown(&session, self.telemetry.take());
+                net_loop::shutdown(&session, telemetry);
                 Err(e)
             }
         })
     }
 
-    /// This peer's own endpoint id — the session binds in [`begin`], so this is `None`
-    /// only after resolution consumed the session (a state the UI never shows: it drops
-    /// the formation on resolve).
+    fn live_session(&self) -> Option<&Session> {
+        match self.state.as_ref()? {
+            FormState::Binding { .. } => None,
+            FormState::Live { session, .. } => Some(session),
+        }
+    }
+
+    fn live_driver(&self) -> Option<&FormationDriver> {
+        match self.state.as_ref()? {
+            FormState::Binding { .. } => None,
+            FormState::Live { driver, .. } => Some(driver),
+        }
+    }
+
+    /// This peer's own endpoint id — `None` while the session is still binding (the
+    /// lobby UI shows the code once it lands) and after resolution consumed it.
     pub fn my_id(&self) -> Option<EndpointId> {
-        self.session.as_ref().map(Session::endpoint_id)
+        self.live_session().map(Session::endpoint_id)
     }
 
     pub fn display_code(&self) -> Option<EndpointId> {
@@ -81,17 +150,21 @@ impl Formation {
     }
 
     pub fn roster(&self) -> Vec<EndpointId> {
-        self.driver.roster().to_vec()
+        self.live_driver().map(|d| d.roster().to_vec()).unwrap_or_default()
     }
 
     pub fn lobby_len(&self) -> usize {
-        self.driver.roster().len()
+        self.live_driver().map(|d| d.roster().len()).unwrap_or(0)
     }
 
     pub fn request_start(&mut self) {
         // A joiner's press is inert in the CORE (`Membership::set_starting` no-ops
-        // outside host mode, rl#94 liveness) — no second guard here.
-        self.driver.set_starting();
+        // outside host mode, rl#94 liveness) — no second guard here. A press while
+        // still BINDING is inert too: the lobby UI can't render Start before the
+        // session lands (lobby_len is 0), so there is nothing to arm yet.
+        if let Some(FormState::Live { driver, .. }) = self.state.as_mut() {
+            driver.set_starting();
+        }
     }
 
     pub fn cancel(&mut self) {
@@ -102,46 +175,54 @@ impl Formation {
 impl Drop for Formation {
     fn drop(&mut self) {
         // A formation abandoned mid-lobby (the menu drops it on cancel without another
-        // poll) still tears down gracefully — telemetry drained, endpoint closed.
-        if let Some(session) = self.session.take() {
-            net_loop::shutdown(&session, self.telemetry.take());
+        // poll) still tears down gracefully — telemetry drained, endpoint closed. An
+        // abandoned Binding state tears itself down (see the cancel arm in poll).
+        if let Some(FormState::Live {
+            session, telemetry, ..
+        }) = self.state.take()
+        {
+            net_loop::shutdown(&session, telemetry);
         }
     }
 }
 
-/// What a browser build says wherever multiplayer entry is attempted — the web bind
-/// is async and lands behind a pollable seam with the web lobby work (rl#411); until
-/// then the stubs below surface this on the menu's existing error path.
-#[cfg(target_family = "wasm")]
-pub const WEB_MP_UNAVAILABLE: &str =
-    "Multiplayer isn't in the browser build yet — Play solo works today.";
-
-/// Browser stub: no lobby yet — the menu shows [`WEB_MP_UNAVAILABLE`] via its
-/// normal begin-failed arm. An Err, not a cfg'd-out symbol, so the render menu
-/// stays platform-free.
-#[cfg(target_family = "wasm")]
-pub fn begin(
-    _choice: &StartChoice,
-    _seed: u64,
-    _telemetry: Option<EndpointId>,
-    _stamp: crate::SyncStamp,
-) -> Result<Formation> {
-    Err(anyhow::anyhow!(WEB_MP_UNAVAILABLE))
-}
-
-#[cfg(not(target_family = "wasm"))]
+/// Begin a lobby: kick off the session bind and return the pollable formation —
+/// non-blocking and platform-free (the web bind rides the JS event loop; native's
+/// resolves on the first poll). Errors, including a failed bind, surface through
+/// [`Formation::poll`].
 pub fn begin(
     choice: &StartChoice,
     seed: u64,
     telemetry: Option<EndpointId>,
     stamp: crate::SyncStamp,
-) -> Result<Formation> {
+) -> Formation {
     let (role, join) = match choice {
         StartChoice::Host => (Role::Host, None),
         StartChoice::Join(host) => (Role::Joiner, *host),
     };
-    let hosting = matches!(role, Role::Host);
-    let session = crate::transport::start_session()?;
+    Formation {
+        state: Some(FormState::Binding {
+            pending: crate::transport::bind_session(),
+            role,
+            collector: telemetry,
+        }),
+        dial_code: join,
+        cancelled: false,
+        seed,
+        stamp,
+        hosting: matches!(role, Role::Host),
+    }
+}
+
+/// The bound-session half of [`begin`]: fire the join dial, wire telemetry, open the
+/// formation core.
+fn open_lobby(
+    session: Session,
+    role: Role,
+    join: Option<EndpointId>,
+    collector: Option<EndpointId>,
+    stamp: crate::SyncStamp,
+) -> FormState {
     if let Some(host) = join {
         if host == session.endpoint_id() {
             tracing::warn!("join code is our own endpoint id — ignoring the self-dial");
@@ -151,18 +232,13 @@ pub fn begin(
             let _ = session.dial(host);
         }
     }
-    let telemetry = net_loop::connect_telemetry(&session, telemetry);
-    let driver = FormationDriver::lobby(&session, role, NET_EXPECT, stamp);
-    Ok(Formation {
-        session: Some(session),
+    let telemetry = net_loop::connect_telemetry(&session, collector);
+    let driver = Box::new(FormationDriver::lobby(&session, role, NET_EXPECT, stamp));
+    FormState::Live {
+        session,
         driver,
         telemetry,
-        dial_code: join,
-        cancelled: false,
-        seed,
-        stamp,
-        hosting,
-    })
+    }
 }
 
 pub struct ReadyMatch {
@@ -430,14 +506,20 @@ mod tests {
     /// Share the host's code, join by it, and wait for both rosters to see 2 peers —
     /// the lobby state every scenario below starts from.
     fn two_peer_lobby() -> (Formation, Formation) {
-        let mut host = begin(&StartChoice::Host, 7, None, SyncStamp::ZERO).expect("host binds");
+        let mut host = begin(&StartChoice::Host, 7, None, SyncStamp::ZERO);
         assert!(host.hosting, "Host formation is flagged hosting");
-        let code = host
-            .display_code()
-            .expect("the session binds in begin, so the join code exists immediately");
+        // The bind is pollable (rl#412): the join code appears once the session lands —
+        // on native, the first poll.
+        let code = wait_for(15, "the host session to bind", || {
+            match host.poll() {
+                None => (),
+                Some(Ok(_)) => panic!("host formation resolved while binding"),
+                Some(Err(e)) => panic!("host bind failed: {e:#}"),
+            }
+            host.display_code()
+        });
 
-        let mut join =
-            begin(&StartChoice::Join(Some(code)), 7, None, SyncStamp::ZERO).expect("joiner binds");
+        let mut join = begin(&StartChoice::Join(Some(code)), 7, None, SyncStamp::ZERO);
         assert!(!join.hosting, "Join formation is not hosting");
         assert_eq!(
             join.display_code(),

@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>rl cross-play probe</title></head>
+<body>
+<pre id="out">cross-play probe</pre>
+<script type="module">
+  import init, { run_form } from './pkg/form_web.js';
+  const q = new URLSearchParams(location.search);
+  try {
+    await init();
+    await run_form(q.get('host'), Number(q.get('secs') || 15));
+    console.log('FORM_DONE');
+  } catch (e) {
+    console.log('FORM_PAGE_ERR=' + e);
+  }
+</script>
+</body>
+</html>
