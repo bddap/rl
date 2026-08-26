@@ -17,25 +17,24 @@ RUN_SECS=${RUN_SECS:-15}
 LOG_DIR=${LOG_DIR:-/tmp/xplay-verify}
 mkdir -p "$LOG_DIR"
 
-CLANG_UNWRAPPED=$(nix-build '<nixpkgs>' -A llvmPackages.clang-unwrapped --no-out-link)/bin/clang
-LLVM_AR=$(nix-build '<nixpkgs>' -A llvm --no-out-link)/bin/llvm-ar
 TARGET_DIR=${CARGO_TARGET_DIR:-../target}
 WB_LOCK=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = |"/,""); print; exit}' ../Cargo.lock)
 
-nix-shell -p lld --run "
-  export CC_wasm32_unknown_unknown=$CLANG_UNWRAPPED AR_wasm32_unknown_unknown=$LLVM_AR
-  nix-shell ../shell.nix --run 'cargo build --target wasm32-unknown-unknown --release --example form_web && cargo build --release -p game'
-"
-nix-shell -p wasm-bindgen-cli --run "
+# The whole wasm toolchain (lld, ring's unwrapped clang env, the wasm-bindgen CLI
+# matching the lock) rides in ../shell.nix — same as game-web/run.sh.
+nix-shell ../shell.nix --run "
+  set -e
   [ \"\$(wasm-bindgen --version)\" = 'wasm-bindgen $WB_LOCK' ] || {
     echo \"wasm-bindgen CLI (\$(wasm-bindgen --version)) != workspace lock ($WB_LOCK)\"; exit 1; }
+  cargo build --target wasm32-unknown-unknown --release --example form_web
+  cargo build --release -p game
   wasm-bindgen --target web --out-dir examples/web-form/pkg \
     $TARGET_DIR/wasm32-unknown-unknown/release/examples/form_web.wasm
 "
 
 HOST_LOG="$LOG_DIR/host.log"
 HOST_HASHES="$LOG_DIR/host-hashes.log"
-"$TARGET_DIR/release/game" net --expect 2 --discover-secs 120 \
+"$TARGET_DIR/release/game" net --lobby-host --expect 2 \
   --run-secs $((RUN_SECS + 10)) --hash-log "$HOST_HASHES" >"$HOST_LOG" 2>&1 &
 HOST_PID=$!
 trap '[ -z "${HOST_PID:-}" ] || kill "$HOST_PID" 2>/dev/null || true; [ -z "${SERVER_PID:-}" ] || kill "$SERVER_PID" 2>/dev/null || true' EXIT

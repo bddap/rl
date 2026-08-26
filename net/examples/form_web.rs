@@ -94,7 +94,10 @@ mod wasm {
             }
             n0_future::time::sleep(tick_dt).await;
         }
-        anyhow::ensure!(adopted > 0, "no snapshots adopted — state never flowed down");
+        anyhow::ensure!(
+            adopted > 0,
+            "no snapshots adopted — state never flowed down"
+        );
         log(&format!(
             "XPLAY_OK final_tick={} adopted={adopted}",
             client.sim().tick()

@@ -466,7 +466,12 @@ fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextSta
     state.error = None;
     // Infallible: the session bind is pollable (rl#412) — a bind failure surfaces
     // through poll_formation's error arm.
-    state.forming = Some(menu::begin(choice, state.seed, state.telemetry, state.stamp));
+    state.forming = Some(menu::begin(
+        choice,
+        state.seed,
+        state.telemetry,
+        state.stamp,
+    ));
     next.set(AppPhase::Connecting);
 }
 

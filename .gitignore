@@ -39,3 +39,5 @@ shots/
 net-link/examples/web-echo/pkg/
 # runtime pid scratch (echo probe et al)
 *.pid
+# wasm-bindgen output of the cross-play probe (net/examples/web-form/run.sh)
+net/examples/web-form/pkg/

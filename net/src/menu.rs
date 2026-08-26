@@ -101,15 +101,9 @@ impl Formation {
             unreachable!("matched Live above")
         };
         Some(match outcome {
-            Ok(formation::Formation::Agreed(frozen)) => {
-                Ok(MatchResult::Joined(net_loop::joined_from_frozen(
-                    session,
-                    telemetry,
-                    frozen,
-                    self.seed,
-                    self.stamp,
-                )))
-            }
+            Ok(formation::Formation::Agreed(frozen)) => Ok(MatchResult::Joined(
+                net_loop::joined_from_frozen(session, telemetry, frozen, self.seed, self.stamp),
+            )),
             Ok(formation::Formation::Alone) => {
                 net_loop::shutdown(&session, telemetry);
                 Ok(MatchResult::Alone)
@@ -150,7 +144,9 @@ impl Formation {
     }
 
     pub fn roster(&self) -> Vec<EndpointId> {
-        self.live_driver().map(|d| d.roster().to_vec()).unwrap_or_default()
+        self.live_driver()
+            .map(|d| d.roster().to_vec())
+            .unwrap_or_default()
     }
 
     pub fn lobby_len(&self) -> usize {

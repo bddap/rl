@@ -3,8 +3,8 @@
 //! [`net::render::run_game`]: a tracing subscriber to the JS console, the one
 //! `assets.pack` fetch that fills [`crab_world::assets`]' baked web store, a console
 //! frame-rate sink, and the asset-root pin. Solo play makes ZERO network contact
-//! beyond that same-origin pack fetch — no session binds until the (future) web-MP
-//! stage.
+//! beyond that same-origin pack fetch — a session binds only when the player enters
+//! Host/Join (rl#412 cross-play: the same lobby as native, relay-backed).
 #![cfg(target_family = "wasm")]
 
 use std::path::PathBuf;
@@ -49,9 +49,9 @@ async fn run() -> Result<()> {
     );
     install_console_frametime_sink();
 
-    // The web launch surface today: menu boot, solo play. No telemetry collector
-    // (TelemetrySender is uninhabited on wasm) and no scripted lobby; multiplayer
-    // options join the URL query with the web-MP stage.
+    // The web launch surface: menu boot — solo, host, and join all drive the same
+    // menu as native (rl#412). No telemetry collector (TelemetrySender is
+    // uninhabited on wasm) and no scripted lobby.
     net::render::run_game(net::render::GameConfig {
         launch: net::render::Launch::Menu,
         telemetry: None,

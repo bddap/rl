@@ -641,9 +641,7 @@ pub struct JoinDriver {
 enum JoinState {
     /// The session bind is in flight ([`transport::bind_session`] — async on web,
     /// resolved-on-first-poll native): one path, no wasm fork (rl#412).
-    Binding {
-        pending: transport::PendingSession,
-    },
+    Binding { pending: transport::PendingSession },
     /// The dial is in flight on the platform executor; its verdict channel resolves it.
     Dialing {
         verdict: std::sync::mpsc::Receiver<Result<()>>,
@@ -689,8 +687,7 @@ impl JoinDriver {
                         return Some(Err(anyhow::anyhow!("cannot join our own endpoint id")));
                     }
                     let verdict = session.dial(self.host);
-                    let deadline_ms =
-                        session.now_ms() + JOIN_WELCOME_TIMEOUT.as_millis() as u64;
+                    let deadline_ms = session.now_ms() + JOIN_WELCOME_TIMEOUT.as_millis() as u64;
                     self.session = Some(session);
                     self.state = JoinState::Dialing {
                         verdict,

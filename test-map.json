@@ -34,6 +34,13 @@
       "why": "the browser build/serve/verify/deploy harness (rl#411 stages 5-6) — a live harness exercised by RUNNING run.sh (verify drives headless chromium; deploy.sh pushes to live hosting; no offline harness); shellcheck + node syntax checks keep it mechanically sound, and game-web/src/ rides the general rust rule below"
     },
     {
+      "paths": ["net/examples/web-form/**"],
+      "tests": [
+        "nix-shell -p shellcheck --run 'shellcheck net/examples/web-form/run.sh'"
+      ],
+      "why": "the browser↔native cross-play formation probe (rl#412) — a live-network canary exercised by RUNNING run.sh against the n0 relays (no offline harness; form_web.rs rides the general rust rule from net/examples/); shellcheck keeps the runner mechanically sound"
+    },
+    {
       "paths": ["net-link/examples/web-echo/**"],
       "tests": [
         "nix-shell -p shellcheck --run 'shellcheck net-link/examples/web-echo/run.sh'"

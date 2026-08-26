@@ -23,6 +23,12 @@ pub(crate) struct Args {
     telemetry: Option<EndpointId>,
     #[arg(long, value_name = "FILE")]
     hash_log: Option<std::path::PathBuf>,
+    /// Form as an interactive-lobby HOST (auto-Start once `--expect` peers are in)
+    /// instead of timed LAN discovery. The native half of the browser cross-play
+    /// verify (net/examples/web-form): a menu JOINER completes only against a lobby
+    /// HOST's start signal — discovering-mode beats never carry one.
+    #[arg(long)]
+    lobby_host: bool,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -34,13 +40,30 @@ pub(crate) fn run(args: Args) -> Result<()> {
 
     // Crabless STAMP (a rest-pose statue serves the poses, not a bound brain):
     // windowed peers refuse this harness on the crabs axis (rl#114/rl#286).
-    let formed = formation::FormationDriver::discovering(
-        &session,
-        args.discover_secs,
-        args.expect,
-        net::SyncStamp::local(0),
-    )
-    .pump_blocking(&mut session, tel.as_ref());
+    let stamp = net::SyncStamp::local(0);
+    let formed = if args.lobby_host {
+        let mut driver = formation::FormationDriver::lobby(
+            &session,
+            net::membership::Role::Host,
+            args.expect,
+            stamp,
+        );
+        loop {
+            // The scripted stand-in for the windowed host's Start press: arm the
+            // barrier the moment the lobby fills. Idempotent, so re-pressing per
+            // pump is harmless.
+            if driver.roster().len() >= args.expect {
+                driver.set_starting();
+            }
+            if let Some(out) = driver.pump(&mut session, tel.as_ref()) {
+                break out;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    } else {
+        formation::FormationDriver::discovering(&session, args.discover_secs, args.expect, stamp)
+            .pump_blocking(&mut session, tel.as_ref())
+    };
     let frozen = match formed? {
         formation::Formation::Agreed(frozen) => frozen,
         formation::Formation::Alone => {
