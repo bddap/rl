@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The browser build, end to end (rl#411 stage 5): build the game-web wasm bundle,
+# The browser build, end to end (rl#411): build the game-web wasm bundle,
 # serve it (with the asset tree over HTTP), and — for CI/evidence — drive solo play
 # in headless chromium and assert ZERO non-local network contact.
 #
@@ -43,12 +43,17 @@ build() {
   "
 }
 
-# The read_asset prefetch manifest: every file in the asset tree except the wavs
-# (those stream through the AssetServer's own HTTP reader). Derived from the LIVE
-# tree at serve time so it can't drift from what the tree holds.
+# The read_asset prefetch manifest: exactly the byte-path consumer set — the
+# checkpoint set under weights/, the control-glyph probe's PNGs, and the model
+# digest gate's .glb — derived from the LIVE tree at serve time. Everything else
+# (wavs, textures) streams through the AssetServer's own HTTP reader on demand,
+# and terrain is compiled in (include_bytes).
 gen_manifest() {
   [ -d "$ASSETS_DIR" ] || { echo "no asset tree at $ASSETS_DIR (set BEVY_ASSET_ROOT)"; exit 1; }
-  (cd "$ASSETS_DIR" && find . -type f ! -name '*.wav' | sed 's|^\./||' | sort) > web-assets.txt
+  (cd "$ASSETS_DIR" && {
+    find weights controls -type f 2>/dev/null
+    find . -maxdepth 1 -name '*.glb' | sed 's|^\./||'
+  } | sort) > web-assets.txt
   echo "manifest: $(wc -l < web-assets.txt) files from $ASSETS_DIR"
 }
 
@@ -65,10 +70,13 @@ case "$MODE" in
     ASSETS_DIR="$ASSETS_DIR" PORT="$PORT" node server.mjs & SERVER_PID=$!
     trap '[ -z "${SERVER_PID:-}" ] || kill "$SERVER_PID" 2>/dev/null || true' EXIT
     sleep 1
-    # SwiftShader renders the real WebGL2 pipeline in software; the resolver rule is
-    # the belt (any non-local lookup fails) and the netlog the braces (everything the
-    # network stack did, asserted in verify.mjs).
-    nix-shell -p chromium --run "
+    # This bevy build carries the webgl2 backend (bevy's webgpu feature is a
+    # build-time either/or), so the probe exercises WebGL2 on SwiftShader — software
+    # rasterization of the real pipeline. The resolver rule is the belt (any
+    # non-local lookup fails at the socket layer); verify.mjs asserts the page layer.
+    # setsid: $! would be the nix-shell wrapper, and killing only it on a failure
+    # path orphans chromium holding the debug port + profile lock — kill the group.
+    setsid nix-shell -p chromium --run "
       chromium --headless=new --no-sandbox --window-size=800,450 \
         --remote-debugging-port=9333 \
         --autoplay-policy=no-user-gesture-required \
@@ -78,12 +86,11 @@ case "$MODE" in
         --disable-sync --disable-default-apps --disable-domain-reliability \
         --disable-client-side-phishing-detection \
         --disable-features=DnsOverHttps,AsyncDns,OptimizationHints,Translate,MediaRouter \
-        --enable-unsafe-webgpu --use-webgpu-adapter=swiftshader \
         --host-resolver-rules='MAP * ~NOTFOUND, EXCLUDE 127.0.0.1' \
         --log-net-log=$OUT/netlog.json \
         about:blank
     " & CHROMIUM_PID=$!
-    trap '[ -z "${SERVER_PID:-}" ] || kill "$SERVER_PID" 2>/dev/null || true; [ -z "${CHROMIUM_PID:-}" ] || kill "$CHROMIUM_PID" 2>/dev/null || true' EXIT
+    trap '[ -z "${SERVER_PID:-}" ] || kill "$SERVER_PID" 2>/dev/null || true; [ -z "${CHROMIUM_PID:-}" ] || kill -- "-$CHROMIUM_PID" 2>/dev/null || true' EXIT
     for _ in $(seq 1 60); do
       curl -sf --max-time 2 http://127.0.0.1:9333/json/version >/dev/null && break
       sleep 0.5

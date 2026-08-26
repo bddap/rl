@@ -1,4 +1,4 @@
-// Headless-chromium solo-play probe (rl#411 stage 5). Drives the REAL menu with
+// Headless-chromium solo-play probe (rl#411). Drives the REAL menu with
 // REAL key events over CDP: boot → menu renders → keyboard-select "Play solo" →
 // round arms → frames flow → WASD held. Artifacts: screenshots + full console log.
 // Exit 0 only if every gate below passed.
@@ -46,10 +46,8 @@ async function screenshot(name) {
 }
 
 async function key(code, keyName, type) {
-  await send('Input.dispatchKeyEvent', {
-    type, code, key: keyName,
-    windowsVirtualKeyCode: keyName === 'Enter' ? 13 : keyName.toUpperCase().charCodeAt(0),
-  });
+  // `code`/`key` are what winit's DOM listeners read; no legacy vkey needed.
+  await send('Input.dispatchKeyEvent', { type, code, key: keyName });
 }
 async function tap(code, keyName) {
   await key(code, keyName, 'keyDown');
@@ -64,6 +62,7 @@ const page = targets.find((t) => t.type === 'page');
 if (!page) throw new Error('no page target');
 ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+const pageRequests = [];
 ws.onmessage = (ev) => {
   const msg = JSON.parse(ev.data);
   if (msg.id && pending.has(msg.id)) {
@@ -75,15 +74,12 @@ ws.onmessage = (ev) => {
     consoleLines.push(line);
   } else if (msg.method === 'Runtime.exceptionThrown') {
     consoleLines.push('EXCEPTION ' + JSON.stringify(msg.params.exceptionDetails?.exception?.description ?? msg.params));
+  } else if (msg.method === 'Network.requestWillBeSent') {
+    pageRequests.push(msg.params.request.url);
+  } else if (msg.method === 'Network.webSocketCreated') {
+    pageRequests.push('ws: ' + msg.params.url);
   }
 };
-
-const pageRequests = [];
-ws.addEventListener('message', (ev) => {
-  const msg = JSON.parse(ev.data);
-  if (msg.method === 'Network.requestWillBeSent') pageRequests.push(msg.params.request.url);
-  if (msg.method === 'Network.webSocketCreated') pageRequests.push('ws: ' + msg.params.url);
-});
 await send('Runtime.enable');
 await send('Network.enable');
 await send('Page.enable');
@@ -134,7 +130,7 @@ try {
   const nonLocal = pageRequests.filter(
     (u) => !/^(https?|ws):\/\/(127\.0\.0\.1|localhost)[:/]/.test(u) && !u.startsWith('data:'),
   );
-  const relayish = consoleLines.filter((l) => /relay|dial|iroh|endpoint bind/i.test(l));
+  const relayish = consoleLines.filter((l) => /\b(relay|relays|dial|dialing|iroh)\b|endpoint bind/i.test(l));
   if (nonLocal.length) throw new Error('page made non-local requests:\n  ' + nonLocal.join('\n  '));
   if (relayish.length) throw new Error('console shows link activity in solo:\n  ' + relayish.join('\n  '));
   process.stderr.write(`NETCHECK_OK page made ${pageRequests.length} requests, all local; no link activity logged\n`);

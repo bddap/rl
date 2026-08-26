@@ -12,16 +12,16 @@ use iroh::EndpointId;
 
 use crate::articulation::CrabArticulation;
 use crate::client::{ClientSim, PeerMsg, TickMsg};
-use crate::formation::{Frozen, early_peer_msgs};
 #[cfg(not(target_family = "wasm"))]
 use crate::formation::{Formation, FormationDriver};
+use crate::formation::{Frozen, early_peer_msgs};
 use crate::server::{JoinRequest, Refusal, Server, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
 use crate::telemetry::{TelemetryEvent, TelemetrySender};
-use crate::transport::{PeerWire, Session};
 #[cfg(not(target_family = "wasm"))]
 use crate::transport;
+use crate::transport::{PeerWire, Session};
 
 /// Most departed-endpoint ids remembered for the courtesy [`Refusal::Departed`] reply
 /// (rl#350): under join/depart churn the set would otherwise grow one endpoint id per
@@ -86,7 +86,7 @@ pub struct NetDriver {
     departed: std::collections::BTreeSet<EndpointId>,
     join_budget: JoinBudget,
     /// (Host) First-seen times of connected endpoints not (yet) in `id_map`, for the
-    /// [`UNROSTERED_GRACE`] eviction. Keyed off the live connection set each pump, so it
+    /// [`UNROSTERED_GRACE_MS`] eviction. Keyed off the live connection set each pump, so it
     /// is bounded by the transport's link cap.
     unrostered_since: BTreeMap<EndpointId, u64>,
     telemetry: Option<TelemetrySender>,
@@ -224,7 +224,7 @@ impl NetDriver {
             self.departed.clear();
         }
         // Unrostered-link liveness (rl#350): close any connected endpoint that has held a
-        // link past UNROSTERED_GRACE without becoming rostered — a sybil squatting a
+        // link past UNROSTERED_GRACE_MS without becoming rostered — a sybil squatting a
         // capacity slot, or an evicted departee's zombie. A pending joiner is rostered at
         // admission, well inside the grace.
         let now = self.session.now_ms();
@@ -653,9 +653,20 @@ enum JoinState {
 }
 
 impl JoinDriver {
+    /// Browser stub: rejoin re-dials a host, and the browser has no bind yet
+    /// (rl#411 web-MP) — Err surfaces on the menu's rejoin-failed arm.
+    #[cfg(target_family = "wasm")]
+    pub fn begin(
+        _seed: u64,
+        _host: EndpointId,
+        _collector: Option<EndpointId>,
+        _stamp: crate::SyncStamp,
+    ) -> Result<Self> {
+        Err(anyhow::anyhow!(crate::menu::WEB_MP_UNAVAILABLE))
+    }
+
     /// Bind a session and fire the dial — non-blocking; pump for the outcome. `seed` is
-    /// the shared [`crate::sim`] match constant every peer holds. Native-only until
-    /// the web-MP stage: the sync bind has no browser equivalent yet.
+    /// the shared [`crate::sim`] match constant every peer holds.
     #[cfg(not(target_family = "wasm"))]
     pub fn begin(
         seed: u64,

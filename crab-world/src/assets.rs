@@ -64,11 +64,10 @@ pub fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
     std::fs::read(asset_file_path(path))
 }
 
-/// The web body of the one byte path: a table the entry adapter fills BEFORE the game
-/// boots (fetched over HTTP today; the deploy stage may swap the fill for baked
-/// `include_bytes!` — consumers never know). Sync-by-construction: wasm has no
-/// blocking fetch, so the prefetch happens in the async entry and this stays the same
-/// sync signature every native consumer already has.
+/// The web body of the one byte path: a table the entry adapter fills BEFORE the
+/// game boots. Sync-by-construction: wasm has no blocking fetch, so the (HTTP or
+/// baked) fill happens in the async entry and this keeps the same sync signature
+/// every native consumer already has.
 #[cfg(target_family = "wasm")]
 pub fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
     let table = WEB_ASSETS

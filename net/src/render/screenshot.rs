@@ -10,9 +10,9 @@ use super::scene::{
 };
 use super::*;
 use crate::net_loop::NetDriver;
-use std::time::Duration;
 use crab_world::controls::ControlsOverrides;
 use crab_world::screenshot::{self, ShotProgress, ShotTarget};
+use std::time::Duration;
 
 pub fn build_screenshot_app(
     mut client: ClientSim,

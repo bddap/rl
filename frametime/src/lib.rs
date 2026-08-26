@@ -85,6 +85,26 @@ pub fn install_sink(sink: impl Fn(SnapshotRx) + Send + Sync + 'static) {
     }
 }
 
+/// The p-quantile frame time of one snapshot, in ms: cumulative count over the
+/// fixed buckets, resolved to the winning bucket's midpoint (the same replay
+/// convention as [`midpoint_ms`]). `None` on an empty snapshot. Lives here so
+/// every sink shares ONE quantile-from-buckets formula.
+pub fn percentile_ms(snapshot: &Snapshot, p: f64) -> Option<f64> {
+    let frames: u32 = snapshot.iter().sum();
+    if frames == 0 {
+        return None;
+    }
+    let target = ((frames as f64) * p).ceil() as u32;
+    let mut seen = 0u32;
+    for (i, n) in snapshot.iter().enumerate() {
+        seen += n;
+        if seen >= target {
+            return Some(midpoint_ms(i));
+        }
+    }
+    Some(midpoint_ms(BUCKETS - 1))
+}
+
 /// The render-thread half: owns the fixed buckets, pushes a snapshot every
 /// [`FLUSH_EVERY_SECS`] of accumulated frame time. Create once via [`start`].
 pub struct FrameTelemetry {
@@ -134,6 +154,18 @@ mod tests {
     /// is at least it (last bucket open-ended). The replay midpoints must
     /// round-trip: sink bucket of midpoint(i) == i, and our own frame-path index
     /// agrees.
+    #[test]
+    fn percentile_walks_the_cumulative_counts() {
+        let mut snap: Snapshot = [0; BUCKETS];
+        snap[10] = 6;
+        snap[20] = 3;
+        snap[30] = 1;
+        assert_eq!(percentile_ms(&snap, 0.5), Some(midpoint_ms(10)));
+        assert_eq!(percentile_ms(&snap, 0.9), Some(midpoint_ms(20)));
+        assert_eq!(percentile_ms(&snap, 1.0), Some(midpoint_ms(30)));
+        assert_eq!(percentile_ms(&[0; BUCKETS], 0.5), None);
+    }
+
     #[test]
     fn midpoints_rebucket_to_their_own_bucket() {
         let bounds = boundaries_ms();

@@ -109,8 +109,26 @@ impl Drop for Formation {
     }
 }
 
-// Native-only until the web-MP stage: `start_session` is a sync bind here; the
-// browser's bind is async and lands behind a pollable seam with the web lobby work.
+/// What a browser build says wherever multiplayer entry is attempted — the web bind
+/// is async and lands behind a pollable seam with the web lobby work (rl#411); until
+/// then the stubs below surface this on the menu's existing error path.
+#[cfg(target_family = "wasm")]
+pub const WEB_MP_UNAVAILABLE: &str =
+    "Multiplayer isn't in the browser build yet — Play solo works today.";
+
+/// Browser stub: no lobby yet — the menu shows [`WEB_MP_UNAVAILABLE`] via its
+/// normal begin-failed arm. An Err, not a cfg'd-out symbol, so the render menu
+/// stays platform-free.
+#[cfg(target_family = "wasm")]
+pub fn begin(
+    _choice: &StartChoice,
+    _seed: u64,
+    _telemetry: Option<EndpointId>,
+    _stamp: crate::SyncStamp,
+) -> Result<Formation> {
+    Err(anyhow::anyhow!(WEB_MP_UNAVAILABLE))
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub fn begin(
     choice: &StartChoice,
@@ -545,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn chooser_navigates_between_host_and_join() {
+    fn chooser_cycles_host_solo_join_quit() {
         let mut nav = MenuNav::new();
         assert_eq!(
             nav,
@@ -553,27 +571,34 @@ mod tests {
                 focus: ChooserItem::Host
             }
         );
-        assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
-        assert_eq!(
-            nav,
-            MenuNav::Chooser {
-                focus: ChooserItem::Join
-            }
-        );
-        assert_eq!(nav.step(MenuInput::Up, 0), MenuAction::None);
-        assert_eq!(
-            nav,
-            MenuNav::Chooser {
-                focus: ChooserItem::Host
-            }
-        );
-        assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
-        assert_eq!(
-            nav,
-            MenuNav::Chooser {
-                focus: ChooserItem::Join
-            }
-        );
+        for expected in [
+            ChooserItem::Solo,
+            ChooserItem::Join,
+            ChooserItem::Quit,
+            ChooserItem::Host,
+        ] {
+            assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
+            assert_eq!(nav, MenuNav::Chooser { focus: expected });
+        }
+        for expected in [
+            ChooserItem::Quit,
+            ChooserItem::Join,
+            ChooserItem::Solo,
+            ChooserItem::Host,
+        ] {
+            assert_eq!(nav.step(MenuInput::Up, 0), MenuAction::None);
+            assert_eq!(nav, MenuNav::Chooser { focus: expected });
+        }
+    }
+
+    #[test]
+    fn chooser_solo_starts_a_round_with_no_lobby() {
+        // Down once from boot: Solo. Confirm arms straight away — no lobby screen,
+        // no session — and the nav resets for the post-round menu return.
+        let mut nav = MenuNav::new();
+        nav.step(MenuInput::Down, 0);
+        assert_eq!(nav.step(MenuInput::Confirm, 0), MenuAction::StartSolo);
+        assert_eq!(nav, MenuNav::new());
     }
 
     #[test]
@@ -596,8 +621,9 @@ mod tests {
             "Quit doesn't change screens — the app is exiting"
         );
 
-        // Down past Join reaches it too.
+        // Down past Solo and Join reaches it too.
         let mut nav = MenuNav::new();
+        nav.step(MenuInput::Down, 0);
         nav.step(MenuInput::Down, 0);
         nav.step(MenuInput::Down, 0);
         assert_eq!(nav.step(MenuInput::Confirm, 0), MenuAction::Quit);
@@ -626,7 +652,8 @@ mod tests {
         );
 
         let mut join = MenuNav::new();
-        join.step(MenuInput::Down, 0);
+        join.step(MenuInput::Down, 0); // Solo
+        join.step(MenuInput::Down, 0); // Join
         assert_eq!(join.step(MenuInput::Confirm, 0), MenuAction::Join);
         assert_eq!(join, MenuNav::JoinLobby);
     }

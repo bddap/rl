@@ -54,7 +54,7 @@ n0-future.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 
-# The native-only slice (rl#411 stage 5): the telemetry sender/collector own a tokio
+# The native-only slice (rl#411): the telemetry sender/collector own a tokio
 # runtime + mDNS discovery, voice capture speaks cpal, screenshot filenames stamp via
 # chrono. None of these exist on wasm — the modules that use them are cfg'd native,
 # and scoping the deps here is what keeps the wasm build honest (a new native-only

@@ -255,10 +255,13 @@ fn update_scatter(
     device: Option<Res<bevy::render::renderer::RenderDevice>>,
 ) {
     // Dither-fade needs the visibility-ranges STORAGE buffer; on a downlevel
-    // adapter (WebGL2) bevy 0.19's uniform fallback mis-sizes the binding and the
-    // whole PBR pipeline fails validation, killing the app (rl#411 stage 5's
-    // headless probe caught it). Capability-gated, not platform-gated: WebGPU in a
-    // browser keeps the fade, WebGL2 degrades to a hard cutoff at the same range.
+    // adapter (WebGL2) bevy 0.19's uniform fallback mis-sizes the binding
+    // (visibility_ranges wants 1024 B, the layout offers Vec4::min_size) and the
+    // whole PBR pipeline fails validation, KILLING the app (rl#411). Capability-
+    // gated, not platform-gated: WebGPU in a browser keeps the fade; WebGL2 skips
+    // the component, so tufts stay visible to chunk despawn and pop at the
+    // SPAWN_RADIUS_M edge — visible pop-in, accepted over no game at all. Re-test
+    // on a bevy upgrade; delete the gate when upstream sizes the fallback binding.
     let dither = device.as_ref().is_none_or(|d| {
         d.limits().max_storage_buffers_per_shader_stage
             >= bevy::render::view::VISIBILITY_RANGES_STORAGE_BUFFER_COUNT

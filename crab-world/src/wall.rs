@@ -1,7 +1,7 @@
 //! Wall-clock unix millis, platform-safe: the track schemas (sally_track,
 //! net_track) stamp samples with epoch time, and `std::time::SystemTime` panics on
 //! wasm — the browser's clock is `Date.now()`. One helper so no sample path reads a
-//! platform clock directly (rl#411 stage 5).
+//! platform clock directly (rl#411).
 
 #[cfg(not(target_family = "wasm"))]
 pub fn unix_ms() -> u64 {

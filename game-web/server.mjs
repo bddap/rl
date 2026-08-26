@@ -22,7 +22,7 @@ http.createServer((req, res) => {
   const root = p.startsWith('/assets/') ? ASSETS_DIR : process.cwd();
   const rel = p.startsWith('/assets/') ? p.slice('/assets/'.length) : p.slice(1);
   const file = path.resolve(root, rel);
-  if (!file.startsWith(path.resolve(root) + path.sep) && file !== path.resolve(root, 'index.html')) {
+  if (!file.startsWith(path.resolve(root) + path.sep)) {
     res.writeHead(403); res.end(); return;
   }
   fs.readFile(file, (err, data) => {

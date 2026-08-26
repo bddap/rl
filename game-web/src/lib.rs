@@ -1,4 +1,4 @@
-//! The browser entry adapter (rl#411 stage 5) — the web peer of `game`'s CLI adapter.
+//! The browser entry adapter (rl#411) — the web peer of `game`'s CLI adapter.
 //! Owns exactly the platform inputs, then calls the one shared entry
 //! [`net::render::run_game`]: a tracing subscriber to the JS console, the HTTP
 //! prefetch that fills [`crab_world::assets`]' web byte table, a console frame-rate
@@ -36,13 +36,21 @@ async fn run() -> Result<()> {
         "fetching the web asset manifest — serve the bundle via game-web/run.sh, \
          which generates web-assets.txt from the asset tree",
     )?;
-    let mut entries = Vec::new();
-    for line in manifest.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let bytes = fetch_bytes(&format!("assets/{line}"))
-            .await
-            .with_context(|| format!("prefetching asset {line}"))?;
-        entries.push((PathBuf::from(line), bytes));
-    }
+    // Concurrent: each fetch is one HTTP round-trip; serializing them would put
+    // files x RTT straight into boot latency.
+    let entries = futures::future::try_join_all(
+        manifest
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|line| async move {
+                let bytes = fetch_bytes(&format!("assets/{line}"))
+                    .await
+                    .with_context(|| format!("prefetching asset {line}"))?;
+                Ok::<_, anyhow::Error>((PathBuf::from(line), bytes))
+            }),
+    )
+    .await?;
     tracing::info!("WEB_ASSETS_PRELOADED count={}", entries.len());
     crab_world::assets::preload_web_assets(entries);
     install_console_frametime_sink();
@@ -139,21 +147,11 @@ fn install_console_frametime_sink() {
                 if frames == 0 {
                     continue;
                 }
-                let percentile = |p: f64| {
-                    let target = (frames as f64 * p).ceil() as u32;
-                    let mut seen = 0;
-                    for (i, n) in snapshot.iter().enumerate() {
-                        seen += n;
-                        if seen >= target {
-                            return frametime::midpoint_ms(i);
-                        }
-                    }
-                    frametime::midpoint_ms(frametime::BUCKETS - 1)
-                };
+                let q = |p| frametime::percentile_ms(&snapshot, p).unwrap_or(f64::NAN);
                 tracing::info!(
                     "WEB_FRAMETIME frames={frames} median_ms={:.1} p90_ms={:.1}",
-                    percentile(0.5),
-                    percentile(0.9),
+                    q(0.5),
+                    q(0.9),
                 );
             }
         });

@@ -92,10 +92,7 @@ pub(super) fn despawn_menu_camera(mut commands: Commands, cams: Query<Entity, Wi
 
 struct MenuState {
     seed: u64,
-    // Read by the cfg'd-native forming/rejoin arms only — wasm carries them unread.
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     telemetry: Option<EndpointId>,
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     stamp: crate::SyncStamp,
     nav: MenuNav,
     stick_latched: bool,
@@ -328,9 +325,7 @@ fn apply_action(
                 f.cancel();
             }
             state.forming = None;
-            // Machine-readable round-entry marker: the headless web verify (and any
-            // log reader) keys on this to know keyboard input drove menu → round.
-            info!("solo round armed (seed {})", state.seed);
+            state.error = None;
             pending.0 = Some(
                 super::app::arm_round(menu::solo_round(state.seed))
                     .expect("a solo round always arms (net is None — nothing to desync)"),
@@ -361,19 +356,8 @@ fn apply_action(
                 return false;
             };
             state.error = None;
-            // Rejoin re-dials a native host — native-only until the web-MP stage
-            // (unreachable from a browser solo round, which has no host to lose).
-            #[cfg(target_family = "wasm")]
-            {
-                let _ = host;
-                state.error = Some(
-                    "Multiplayer isn't in the browser build yet — Play solo works today.".into(),
-                );
-                state.nav = MenuNav::new();
-            }
             // Poll-driven: begin binds and fires the dial, poll_rejoin pumps it per
             // frame — no thread (rl#411).
-            #[cfg(not(target_family = "wasm"))]
             match net_loop::JoinDriver::begin(state.seed, host, state.telemetry, state.stamp) {
                 Ok(driver) => {
                     state.rejoining = Some(driver);
@@ -483,19 +467,6 @@ fn arm_and_play(
 
 fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextState<AppPhase>) {
     state.error = None;
-    // The browser can't bind a lobby yet — that is the web-MP stage of rl#411 (the
-    // bind is async there and wants a pollable seam). Solo is the web path today;
-    // say so on the menu instead of half-wiring a session.
-    #[cfg(target_family = "wasm")]
-    {
-        let _ = choice;
-        state.nav = MenuNav::new();
-        state.error = Some(
-            "Multiplayer isn't in the browser build yet — Play solo works today.".into(),
-        );
-        next.set(AppPhase::Menu);
-    }
-    #[cfg(not(target_family = "wasm"))]
     match menu::begin(choice, state.seed, state.telemetry, state.stamp) {
         Ok(forming) => {
             state.forming = Some(forming);

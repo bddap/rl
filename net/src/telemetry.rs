@@ -2,7 +2,7 @@ use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
 
 // The I/O half — sender thread, tokio runtime, mDNS, key files — is native-only;
-// wasm compiles only the pure event/envelope surface (rl#411 stage 5). A
+// wasm compiles only the pure event/envelope surface (rl#411). A
 // TelemetrySender cannot even be CONSTRUCTED on wasm (uninhabited field), so every
 // `Option<TelemetrySender>` threaded through the netcode is statically `None` there
 // — no cfg in the consumers, nothing to shed at runtime.
@@ -353,18 +353,16 @@ impl TelemetrySender {
 /// call path that would dial a collector from wasm fails to COMPILE, not at runtime.
 #[cfg(target_family = "wasm")]
 #[derive(Clone)]
-pub struct TelemetrySender {
-    inhabitant: std::convert::Infallible,
-}
+pub enum TelemetrySender {}
 
 #[cfg(target_family = "wasm")]
 impl TelemetrySender {
     pub fn close(self) {
-        match self.inhabitant {}
+        match self {}
     }
 
     pub fn send(&self, _event: TelemetryEvent) {
-        match self.inhabitant {}
+        match *self {}
     }
 }
 
