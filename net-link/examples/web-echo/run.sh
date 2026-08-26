@@ -35,7 +35,9 @@ nix-shell -p wasm-bindgen-cli --run "
 
 "$TARGET_DIR/release/examples/echo_native" > /tmp/echo-native.log &
 NATIVE_PID=$!
-trap '[ -n "${NATIVE_PID:-}" ] && kill "$NATIVE_PID" 2>/dev/null; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; true' EXIT
+# Each kill ||-terminated: errexit applies inside traps, and a kill of an
+# already-dead pid must not abort the remaining cleanup or clobber the exit code.
+trap '[ -z "${NATIVE_PID:-}" ] || kill "$NATIVE_PID" 2>/dev/null || true; [ -z "${SERVER_PID:-}" ] || kill "$SERVER_PID" 2>/dev/null || true' EXIT
 until grep -q PROBE_RELAY /tmp/echo-native.log; do sleep 0.5; done
 ID=$(grep -oP 'PROBE_ID=\K.*' /tmp/echo-native.log)
 RELAY=$(grep -oP 'PROBE_RELAY=\K.*' /tmp/echo-native.log)
