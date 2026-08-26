@@ -64,35 +64,73 @@ pub fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
     std::fs::read(asset_file_path(path))
 }
 
-/// The web body of the one byte path: a table the entry adapter fills BEFORE the
-/// game boots. Sync-by-construction: wasm has no blocking fetch, so the (HTTP or
-/// baked) fill happens in the async entry and this keeps the same sync signature
+/// The web body of the one byte path: the baked asset tree the entry adapter fills
+/// BEFORE the game boots. Sync-by-construction: wasm has no blocking fetch, so the
+/// pack fill happens in the async entry and this keeps the same sync signature
 /// every native consumer already has.
 #[cfg(target_family = "wasm")]
 pub fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
-    let table = WEB_ASSETS
-        .get()
-        .expect("web entry preloads the asset table (preload_web_assets) before the game boots");
-    table.get(path).cloned().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "{} is not in the web bundle's preloaded asset table",
-                path.display()
-            ),
-        )
-    })
+    web_asset_dir()
+        .get_asset(path)
+        .map(|d| d.value().to_vec())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "{} is not in the web bundle's baked asset pack",
+                    path.display()
+                ),
+            )
+        })
 }
 
+/// The ONE web asset store (rl#411 stage 6): a bevy in-memory tree holding the whole
+/// baked pack. Both byte paths read it — [`read_asset`] directly, the `AssetServer`
+/// through a `MemoryAssetReader` registered as the default source (see
+/// `net::render`'s app build) — so the bundle bakes every asset once, and a hosted
+/// build serves no loose asset files at all.
 #[cfg(target_family = "wasm")]
-static WEB_ASSETS: OnceLock<std::collections::HashMap<PathBuf, Vec<u8>>> = OnceLock::new();
+static WEB_ASSETS: OnceLock<bevy::asset::io::memory::Dir> = OnceLock::new();
 
-/// Fill the web byte table — once, from the entry adapter, before [`read_asset`] can
-/// run. Paths are asset-tree-relative, the same spelling native consumers use.
+/// The baked tree, for wiring the `AssetServer`'s reader ([`Dir`] is Arc'd — this is
+/// a handle, not a copy). Same boot-order contract as [`read_asset`].
+#[cfg(target_family = "wasm")]
+pub fn web_asset_dir() -> bevy::asset::io::memory::Dir {
+    WEB_ASSETS
+        .get()
+        .expect("web entry preloads the asset pack (preload_web_assets) before the game boots")
+        .clone()
+}
+
+/// Wire the `AssetServer`'s default source to the baked tree. Lives HERE so the
+/// store and its wiring can't drift apart — a wasm surface that filled the store but
+/// skipped this would silently fall back to bevy's HTTP reader, the exact
+/// loose-file serving the baked pack exists to kill. MUST run before `AssetPlugin`
+/// is added (bevy builds sources at that point); the app build calls it first.
+#[cfg(target_family = "wasm")]
+pub fn register_web_asset_source(app: &mut bevy::app::App) {
+    use bevy::asset::AssetApp;
+    use bevy::asset::io::{AssetSourceBuilder, AssetSourceId, memory::MemoryAssetReader};
+    app.register_asset_source(
+        AssetSourceId::Default,
+        AssetSourceBuilder::new(|| {
+            Box::new(MemoryAssetReader {
+                root: web_asset_dir(),
+            })
+        }),
+    );
+}
+
+/// Fill the web store — once, from the entry adapter, before anything loads.
+/// Paths are asset-tree-relative, the same spelling native consumers use.
 #[cfg(target_family = "wasm")]
 pub fn preload_web_assets(entries: impl IntoIterator<Item = (PathBuf, Vec<u8>)>) {
-    if WEB_ASSETS.set(entries.into_iter().collect()).is_err() {
-        panic!("web asset table filled twice — one boot, one prefetch");
+    let dir = bevy::asset::io::memory::Dir::default();
+    for (path, bytes) in entries {
+        dir.insert_asset(&path, bytes);
+    }
+    if WEB_ASSETS.set(dir).is_err() {
+        panic!("web asset store filled twice — one boot, one pack");
     }
 }
 

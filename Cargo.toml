@@ -67,5 +67,16 @@ opt-level = 3
 [profile.release]
 strip = true
 
+# The shipped web bundle (rl#411 stage 6): the wasm is fetched whole on page load, so
+# trade link time for size. Thin LTO roughly halves the code section; native builds
+# keep the plain release profile (mold + no LTO = fast iteration).
+[profile.web-release]
+inherits = "release"
+lto = "thin"
+# "s" over 3: ~a third off the code section, and the wasm must stay well clear of
+# the host's 100 MB per-file ceiling as the game grows. Sim cost is a few percent;
+# the web build's bottleneck is the renderer, not the sim (stage-5 numbers).
+opt-level = "s"
+
 [patch.crates-io]
 rapier3d = { git = "https://github.com/bddap-bot/rapier", rev = "8a5d9859edbcd3fca6eeb6bd53bd6acb32cf00c5" }

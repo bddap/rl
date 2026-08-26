@@ -25,13 +25,13 @@
       "why": "operator tooling (profiling, terrain bake, asset fetch) and live proof scripts — exercised by use against a running system, no offline harness"
     },
     {
-      "paths": ["game-web/run.sh", "game-web/*.mjs", "game-web/index.html"],
+      "paths": ["game-web/run.sh", "game-web/deploy.sh", "game-web/*.mjs", "game-web/index.html"],
       "tests": [
-        "nix-shell -p shellcheck --run 'shellcheck game-web/run.sh'",
+        "nix-shell -p shellcheck --run 'shellcheck game-web/run.sh game-web/deploy.sh'",
         "node --check game-web/server.mjs",
         "node --check game-web/verify.mjs"
       ],
-      "why": "the browser build/serve/verify harness (rl#411 stage 5) — a live harness exercised by RUNNING run.sh (verify drives headless chromium; no offline harness); shellcheck + node syntax checks keep it mechanically sound, and game-web/src/ rides the general rust rule below"
+      "why": "the browser build/serve/verify/deploy harness (rl#411 stages 5-6) — a live harness exercised by RUNNING run.sh (verify drives headless chromium; deploy.sh pushes to live hosting; no offline harness); shellcheck + node syntax checks keep it mechanically sound, and game-web/src/ rides the general rust rule below"
     },
     {
       "paths": ["net-link/examples/web-echo/**"],

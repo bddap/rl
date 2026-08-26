@@ -36,6 +36,8 @@ burn.workspace = true
 naga = { workspace = true, features = ["termcolor"] }
 clap.workspace = true
 bincode.workspace = true
+# asset_pack's deflate (rl#411 stage 6): pure-rust miniz backend, wasm-clean.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 libc.workspace = true
 rayon.workspace = true
 tracing.workspace = true

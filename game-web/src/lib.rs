@@ -1,9 +1,10 @@
 //! The browser entry adapter (rl#411) — the web peer of `game`'s CLI adapter.
 //! Owns exactly the platform inputs, then calls the one shared entry
-//! [`net::render::run_game`]: a tracing subscriber to the JS console, the HTTP
-//! prefetch that fills [`crab_world::assets`]' web byte table, a console frame-rate
-//! sink, and the asset-root pin. Solo play makes ZERO network contact beyond these
-//! same-origin asset fetches — no session binds until the (future) web-MP stage.
+//! [`net::render::run_game`]: a tracing subscriber to the JS console, the one
+//! `assets.pack` fetch that fills [`crab_world::assets`]' baked web store, a console
+//! frame-rate sink, and the asset-root pin. Solo play makes ZERO network contact
+//! beyond that same-origin pack fetch — no session binds until the (future) web-MP
+//! stage.
 #![cfg(target_family = "wasm")]
 
 use std::path::PathBuf;
@@ -12,11 +13,10 @@ use anyhow::{Context, Result, anyhow};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-/// Everything the game reads through [`crab_world::assets::read_asset`] (the
-/// non-`AssetServer` byte path), prefetched relative to the page before boot. The
-/// serve script derives it from the live asset tree, so the list can't drift from
-/// what the tree actually holds.
-const MANIFEST_URL: &str = "web-assets.txt";
+/// The whole baked asset tree, one blob relative to the page (rl#411 stage 6): the
+/// dist step bakes every asset — weights, model, ambience, glyphs — so a hosted
+/// build serves compiled artifacts only, never loose asset files.
+const PACK_URL: &str = "assets.pack";
 
 #[wasm_bindgen(start)]
 pub fn boot() {
@@ -32,27 +32,21 @@ pub fn boot() {
 }
 
 async fn run() -> Result<()> {
-    let manifest = fetch_text(MANIFEST_URL).await.context(
-        "fetching the web asset manifest — serve the bundle via game-web/run.sh, \
-         which generates web-assets.txt from the asset tree",
-    )?;
-    // Concurrent: each fetch is one HTTP round-trip; serializing them would put
-    // files x RTT straight into boot latency.
-    let entries = futures::future::try_join_all(
-        manifest
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(|line| async move {
-                let bytes = fetch_bytes(&format!("assets/{line}"))
-                    .await
-                    .with_context(|| format!("prefetching asset {line}"))?;
-                Ok::<_, anyhow::Error>((PathBuf::from(line), bytes))
-            }),
-    )
-    .await?;
-    tracing::info!("WEB_ASSETS_PRELOADED count={}", entries.len());
-    crab_world::assets::preload_web_assets(entries);
+    let pack = fetch_bytes(PACK_URL)
+        .await
+        .context("fetching the baked asset pack — build the bundle via game-web/run.sh dist")?;
+    let entries = crab_world::asset_pack::read_pack(&pack)
+        .context("parsing assets.pack — a torn pack refuses to boot (rl#375)")?;
+    tracing::info!(
+        "WEB_ASSETS_PRELOADED count={} pack_bytes={}",
+        entries.len(),
+        pack.len()
+    );
+    crab_world::assets::preload_web_assets(
+        entries
+            .into_iter()
+            .map(|(path, bytes)| (PathBuf::from(path), bytes)),
+    );
     install_console_frametime_sink();
 
     // The web launch surface today: menu boot, solo play. No telemetry collector
@@ -90,10 +84,6 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
         .await
         .map_err(|e| anyhow!("reading {url}: {e:?}"))?;
     Ok(js_sys::Uint8Array::new(&buf).to_vec())
-}
-
-async fn fetch_text(url: &str) -> Result<String> {
-    String::from_utf8(fetch_bytes(url).await?).map_err(|e| anyhow!("{url} not UTF-8: {e}"))
 }
 
 /// A tracing subscriber that writes each event to the JS console. `without_time`:

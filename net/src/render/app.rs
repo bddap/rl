@@ -59,6 +59,10 @@ pub fn build_windowed_app(
         prevent_default_event_handling: false,
         ..window
     };
+    // Web assets are baked (rl#411 stage 6): point the AssetServer at the pack's
+    // in-memory tree instead of bevy's HTTP reader.
+    #[cfg(target_family = "wasm")]
+    crab_world::assets::register_web_asset_source(&mut app);
     app.add_plugins(crab_world::app_boot::base_plugins(Some(window)));
     app.add_plugins(crab_world::sky::NightSkyPlugin { moon: view.moon });
     super::audio::install(&mut app);

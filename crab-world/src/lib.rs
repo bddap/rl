@@ -10,6 +10,7 @@ use clap::Parser;
 #[cfg(test)]
 test_watchdog::arm!();
 
+pub mod asset_pack;
 pub mod assets;
 pub mod bot;
 pub mod chord;

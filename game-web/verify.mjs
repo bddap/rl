@@ -4,11 +4,12 @@
 // Exit 0 only if every gate below passed.
 //
 // Zero-network assert lives HERE, at the page layer (CDP Network domain): every
-// request the PAGE makes — fetch, XHR, WebSocket (an iroh relay dial would be one) —
-// must target the local bundle server. Chromium's own service phone-homes
-// (accounts/GCM/network-time) are browser plumbing outside the page and are further
-// neutered by run.sh's flags + the ~NOTFOUND resolver rule, which blocks any real
-// non-local contact at the socket layer.
+// request the PAGE makes — fetch, XHR — must target the bundle's own origin (the
+// local dev server or the live host), and a WebSocket (an iroh relay dial would be
+// one) is a violation outright — solo play has no business opening any. Chromium's
+// own service phone-homes (accounts/GCM/network-time) are browser plumbing outside
+// the page and are further neutered by run.sh's flags + the ~NOTFOUND resolver rule,
+// which blocks any real off-host contact at the socket layer.
 import fs from 'node:fs';
 
 const [url, outdir] = process.argv.slice(2);
@@ -127,13 +128,14 @@ try {
   const panic = consoleLines.find((l) => l.includes('panicked at'));
   if (panic) throw new Error(`page panicked: ${panic}`);
 
+  const origin = new URL(url).origin;
   const nonLocal = pageRequests.filter(
-    (u) => !/^(https?|ws):\/\/(127\.0\.0\.1|localhost)[:/]/.test(u) && !u.startsWith('data:'),
+    (u) => u.startsWith('ws: ') || (!u.startsWith(origin + '/') && !u.startsWith('data:')),
   );
   const relayish = consoleLines.filter((l) => /\b(relay|relays|dial|dialing|iroh)\b|endpoint bind/i.test(l));
   if (nonLocal.length) throw new Error('page made non-local requests:\n  ' + nonLocal.join('\n  '));
   if (relayish.length) throw new Error('console shows link activity in solo:\n  ' + relayish.join('\n  '));
-  process.stderr.write(`NETCHECK_OK page made ${pageRequests.length} requests, all local; no link activity logged\n`);
+  process.stderr.write(`NETCHECK_OK page made ${pageRequests.length} requests, all same-origin (${origin}); no link activity logged\n`);
   process.stderr.write('VERIFY_PLAY_OK\n');
 } finally {
   fs.writeFileSync(`${outdir}/console.log`, consoleLines.join('\n') + '\n');
