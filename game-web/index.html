@@ -7,13 +7,52 @@
     html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
     /* The one canvas the game binds to (net/src/render/app.rs pins this selector). */
     #gcr-canvas { width: 100vw; height: 100vh; display: block; outline: none; }
+    /* Boot feedback (rl#413): a ~150 MB cold load is minutes on residential
+       bandwidth; without this the page is a black screen with a blank console.
+       The wasm removes it on the first rendered frames. */
+    #gcr-loading {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: #9a9a9a; font: 16px system-ui, sans-serif; pointer-events: none;
+    }
   </style>
 </head>
 <body>
   <canvas id="gcr-canvas"></canvas>
+  <div id="gcr-loading">loading…</div>
   <script type="module">
-    import init from './pkg/game_web.js';
-    init().catch((e) => console.error('GCR wasm init failed:', e));
+    import init, { boot } from './pkg/game_web.js';
+    const status = document.getElementById('gcr-loading');
+    // Counts DECOMPRESSED bytes (the streams inflate in-flight; Pages gzips both
+    // files) with no "of N" total — the on-wire total isn't knowable from headers,
+    // and a counting-up number already answers "is it doing anything?".
+    let got = 0;
+    const counted = async (url) => {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
+      const counter = new TransformStream({
+        transform(chunk, ctrl) {
+          got += chunk.byteLength;
+          status.textContent = `downloading… ${(got / 1e6).toFixed(0)} MB`;
+          ctrl.enqueue(chunk);
+        },
+      });
+      // Re-wrap with the original headers: init() streams-compiles the wasm only
+      // when the Response's content-type says application/wasm.
+      return new Response(resp.body.pipeThrough(counter), { headers: resp.headers });
+    };
+    try {
+      // Both downloads in parallel; wasm compiles while assets.pack still streams.
+      const [, pack] = await Promise.all([
+        init({ module_or_path: counted('./pkg/game_web_bg.wasm') }),
+        counted('assets.pack').then((r) => r.arrayBuffer()),
+      ]);
+      status.textContent = 'starting…';
+      boot(new Uint8Array(pack));
+    } catch (e) {
+      status.textContent = `failed to load: ${e}`;
+      console.error('GCR boot failed:', e);
+      throw e;
+    }
   </script>
 </body>
 </html>

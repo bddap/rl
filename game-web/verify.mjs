@@ -86,10 +86,30 @@ await send('Network.enable');
 await send('Page.enable');
 await send('Page.navigate', { url });
 
+async function loadingOverlayPresent() {
+  const { result } = await send('Runtime.evaluate', {
+    expression: "!!document.getElementById('gcr-loading')",
+    returnByValue: true,
+  });
+  return result.value;
+}
+
 try {
+  // rl#413: the loading overlay is the page's only boot feedback — it must exist
+  // while the bundle downloads and be gone once real frames flow. Poll: navigation
+  // may not have committed yet, but removal can't beat the poll (it waits on wasm
+  // boot + first frames, seconds away).
+  {
+    const until = Date.now() + 10_000;
+    while (!(await loadingOverlayPresent())) {
+      if (Date.now() > until) throw new Error('no #gcr-loading overlay during load (rl#413 regression)');
+      await sleep(100);
+    }
+  }
   await waitForLine('WEB_ASSETS_PRELOADED', 'asset prefetch');
   await waitForLine('WEB_FRAMETIME', 'first frame-rate snapshot (menu rendering)');
   await sleep(1500);
+  if (await loadingOverlayPresent()) throw new Error('#gcr-loading overlay still up after frames flow (rl#413 regression)');
   await screenshot('menu.png');
 
   // Chooser: focus starts on Host; one Down lands on "Play solo (offline)".

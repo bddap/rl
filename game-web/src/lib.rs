@@ -1,29 +1,30 @@
 //! The browser entry adapter (rl#411) — the web peer of `game`'s CLI adapter.
 //! Owns exactly the platform inputs, then calls the one shared entry
-//! [`net::render::run_game`]: a tracing subscriber to the JS console, the one
-//! `assets.pack` fetch that fills [`crab_world::assets`]' baked web store, a console
-//! frame-rate sink, and the asset-root pin. Solo play makes ZERO network contact
-//! beyond that same-origin pack fetch — a session binds only when the player enters
-//! Host/Join (rl#412 cross-play: the same lobby as native, relay-backed).
+//! [`net::render::run_game`]: a tracing subscriber to the JS console, the baked
+//! asset pack (fetched by the PAGE — index.html owns every network byte so it can
+//! show download progress, rl#413), a console frame-rate sink, and the asset-root
+//! pin. Solo play makes ZERO network contact beyond the page's same-origin fetches
+//! — a session binds only when the player enters Host/Join (rl#412 cross-play: the
+//! same lobby as native, relay-backed).
 #![cfg(target_family = "wasm")]
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
 
-/// The whole baked asset tree, one blob relative to the page (rl#411 stage 6): the
-/// dist step bakes every asset — weights, model, ambience, glyphs — so a hosted
-/// build serves compiled artifacts only, never loose asset files.
-const PACK_URL: &str = "assets.pack";
-
-#[wasm_bindgen(start)]
-pub fn boot() {
+/// The page's entry point, called with the fetched `assets.pack` bytes once both
+/// downloads finish (index.html shows progress until then; a ~150 MB cold load is
+/// minutes of otherwise-black screen on residential bandwidth — rl#413).
+#[wasm_bindgen]
+pub fn boot(pack: Vec<u8>) {
     console_error_panic_hook::set_once();
     init_console_tracing();
-    wasm_bindgen_futures::spawn_local(async {
-        if let Err(e) = run().await {
+    // spawn_local, though nothing awaits: winit's wasm event loop exits `app.run()`
+    // by throwing a control-flow JS exception, and from a plain exported fn that
+    // throw would surface at the page's `boot()` callsite as a bogus error.
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = run(pack) {
             // The panic hook routes this to the console loudly; a broken bundle
             // must refuse to run, not degrade (rl#375).
             panic!("web boot failed: {e:#}");
@@ -31,10 +32,7 @@ pub fn boot() {
     });
 }
 
-async fn run() -> Result<()> {
-    let pack = fetch_bytes(PACK_URL)
-        .await
-        .context("fetching the baked asset pack — build the bundle via game-web/run.sh dist")?;
+fn run(pack: Vec<u8>) -> Result<()> {
     let entries = crab_world::asset_pack::read_pack(&pack)
         .context("parsing assets.pack — a torn pack refuses to boot (rl#375)")?;
     tracing::info!(
@@ -57,33 +55,10 @@ async fn run() -> Result<()> {
         telemetry: None,
         nn_crab_checkpoints: Vec::new(),
         view: crab_world::RenderArgs::default(),
-        // Page-relative: bevy's wasm reader and the prefetch above both resolve
+        // Page-relative: bevy's wasm reader and the page's prefetch both resolve
         // `assets/…` against the page URL, one tree for both byte paths.
         asset_root: PathBuf::new(),
     })
-}
-
-fn window() -> Result<web_sys::Window> {
-    web_sys::window().ok_or_else(|| anyhow!("no JS window"))
-}
-
-async fn fetch_response(url: &str) -> Result<web_sys::Response> {
-    let resp = JsFuture::from(window()?.fetch_with_str(url))
-        .await
-        .map_err(|e| anyhow!("fetch {url}: {e:?}"))?;
-    let resp: web_sys::Response = resp
-        .dyn_into()
-        .map_err(|_| anyhow!("fetch {url}: not a Response"))?;
-    anyhow::ensure!(resp.ok(), "fetch {url}: HTTP {}", resp.status());
-    Ok(resp)
-}
-
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    let resp = fetch_response(url).await?;
-    let buf = JsFuture::from(resp.array_buffer().map_err(|e| anyhow!("{e:?}"))?)
-        .await
-        .map_err(|e| anyhow!("reading {url}: {e:?}"))?;
-    Ok(js_sys::Uint8Array::new(&buf).to_vec())
 }
 
 /// A tracing subscriber that writes each event to the JS console. `without_time`:
@@ -129,6 +104,11 @@ fn init_console_tracing() {
 /// The web frametime sink: stash the recorder's queue and drain it on a JS interval,
 /// logging one `WEB_FRAMETIME` line per snapshot — the machine-readable steady-rate
 /// evidence the headless verify greps (and a human reads in devtools).
+///
+/// The first nonzero snapshot also retires the page's loading overlay (rl#413):
+/// real frames are the one signal the game is actually presenting — removing the
+/// overlay any earlier (e.g. at `boot()`) would re-open a silent black gap while
+/// shaders compile.
 fn install_console_frametime_sink() {
     frametime::install_sink(|rx| {
         let tick = Closure::<dyn FnMut()>::new(move || {
@@ -137,6 +117,7 @@ fn install_console_frametime_sink() {
                 if frames == 0 {
                     continue;
                 }
+                remove_loading_overlay();
                 let q = |p| frametime::percentile_ms(&snapshot, p).unwrap_or(f64::NAN);
                 tracing::info!(
                     "WEB_FRAMETIME frames={frames} median_ms={:.1} p90_ms={:.1}",
@@ -154,4 +135,13 @@ fn install_console_frametime_sink() {
         // The interval owns the closure for the page's lifetime.
         tick.forget();
     });
+}
+
+fn remove_loading_overlay() {
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("gcr-loading"))
+    {
+        el.remove();
+    }
 }

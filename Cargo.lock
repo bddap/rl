@@ -5386,7 +5386,6 @@ dependencies = [
  "console_error_panic_hook",
  "crab-world",
  "frametime",
- "js-sys",
  "net",
  "tracing",
  "tracing-subscriber",
