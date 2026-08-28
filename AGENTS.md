@@ -53,3 +53,8 @@ trainer or other jobs to profile, and blocking for exclusivity risks deadlocking
 against them. `--pid`-attach the running target or pin to the build-free cores, profile
 *under* contention, and note loadavg as context — a profile taken under load (that GCR
 read was at ~31) still localizes the bottleneck. When in doubt, just profile anyway.
+
+## Comments
+
+Standing directive: endeavor to remove code comments — removing comments is good in
+itself. The rare survivor states a why the code cannot show, never what the code does.
