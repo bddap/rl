@@ -9,8 +9,6 @@ Question designs. Treat the structure of this project as mutable — don't assum
 code is right. Large refactors are welcome; there's no stable API to maintain. Unit-test what
 you can. Delete freely.
 
-Avoid unnecessary code comments. Delete them, even.
-
 See something wrong, fix it.
 
 Your human is knowledgeable, but not infinitely so. Question him, teach him — this project is
