@@ -28,10 +28,10 @@ pub(crate) struct Args {
     /// actuator-sourced energy.
     #[arg(long)]
     zero_drive_after: Option<u64>,
-    /// rl#332 T1: write the whole rapier state after this tick (plus the drives the
-    /// next tick applied) to `<out>/state-<tick>.bin`, for `game sally-replay`.
-    #[arg(long)]
-    dump_state_at: Option<u64>,
+    /// rl#332 T1: write the whole rapier state after each of these ticks (plus the
+    /// drives the next tick applied) to `<out>/state-<tick>.bin`, for `game sally-replay`.
+    #[arg(long, value_delimiter = ',')]
+    dump_state_at: Vec<u64>,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -52,7 +52,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         &args.out,
         args.progress_every,
         args.zero_drive_after,
-        args.dump_state_at,
+        &args.dump_state_at,
     )?;
 
     println!(

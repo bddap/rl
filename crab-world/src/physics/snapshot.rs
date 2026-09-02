@@ -15,7 +15,11 @@ use bevy_rapier3d::rapier::dynamics::{
     CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
     RigidBodyHandle, RigidBodySet,
 };
-use bevy_rapier3d::rapier::geometry::{ColliderSet, DefaultBroadPhase, NarrowPhase};
+use bevy_rapier3d::rapier::geometry::{
+    ColliderHandle, ColliderSet, DefaultBroadPhase, NarrowPhase, Shape, SharedShape,
+};
+use bevy_rapier3d::rapier::math::Pose;
+use bevy_rapier3d::rapier::parry::shape::Capsule;
 use bevy_rapier3d::rapier::pipeline::PhysicsPipeline;
 use serde::{Deserialize, Serialize};
 
@@ -208,9 +212,31 @@ impl PlantSnapshot {
             }
         }
 
+        let link_colliders: Vec<(ColliderHandle, usize)> = s
+            .colliders
+            .iter()
+            .filter_map(|(h, co)| {
+                let part = s.parts.iter().position(|p| Some(*p) == co.parent())?;
+                (part > 0).then_some((h, part))
+            })
+            .collect();
+        for (h, _) in &link_colliders {
+            let co = s.colliders.get_mut(*h).expect("link collider");
+            if let Some(shape) = cfg.shape.apply(co.shape()) {
+                let mprops = co.mass_properties();
+                co.set_shape(shape);
+                co.set_mass_properties(mprops);
+            }
+            if !cfg.self_contacts {
+                let mut groups = co.collision_groups();
+                groups.filter = groups.filter.difference(groups.memberships);
+                co.set_collision_groups(groups);
+            }
+        }
+
         let mut torque: std::collections::HashMap<RigidBodyHandle, Vec3> =
             std::collections::HashMap::new();
-        if !cfg.zero_drives {
+        if cfg.drive_scale != 0.0 {
             for j in &s.joints {
                 let parent_rot = s
                     .bodies
@@ -219,7 +245,8 @@ impl PlantSnapshot {
                     .position()
                     .rotation;
                 let world_axis = parent_rot * Vec3::from(j.axis_local);
-                let wrench = world_axis * applied_torque(j.id, s.actions[j.id.index()]);
+                let wrench =
+                    world_axis * applied_torque(j.id, s.actions[j.id.index()] * cfg.drive_scale);
                 *torque.entry(j.child).or_default() += wrench;
                 *torque.entry(j.parent).or_default() -= wrench;
             }
@@ -283,6 +310,7 @@ impl PlantSnapshot {
             kicks: 0,
             worst_kick: (0, 0.0, 0.0),
             max_dev_from_original: 0.0,
+            worst_kick_contacts: Vec::new(),
         };
         for (i, ((v0, w0), (v1, w1))) in before.iter().zip(&after).enumerate() {
             let (s0, s1) = (v0.length(), v1.length());
@@ -305,20 +333,155 @@ impl PlantSnapshot {
                 out.max_dev_from_original = out.max_dev_from_original.max(dev);
             }
         }
+        if out.kicks > 0 {
+            let kicked = s.parts[out.worst_kick.0];
+            for (h, _) in link_colliders
+                .iter()
+                .filter(|(_, p)| *p == out.worst_kick.0)
+            {
+                for pair in s.narrow_phase.contact_pairs_with(*h) {
+                    let other_h = if pair.collider1 == *h {
+                        pair.collider2
+                    } else {
+                        pair.collider1
+                    };
+                    let other = s
+                        .colliders
+                        .get(other_h)
+                        .and_then(|co| co.parent())
+                        .and_then(|b| s.parts.iter().position(|p| *p == b));
+                    for m in &pair.manifolds {
+                        let points: Vec<&_> = m.points.iter().collect();
+                        if points.is_empty() {
+                            continue;
+                        }
+                        let n = m.data.normal;
+                        let n = if m.data.rigid_body1 == Some(kicked) {
+                            -n
+                        } else {
+                            n
+                        };
+                        out.worst_kick_contacts.push(ContactInfo {
+                            other,
+                            points: points.len(),
+                            penetration: points.iter().map(|p| -p.dist).fold(0.0, f32::max),
+                            normal_on_kicked: n,
+                            impulse: points.iter().map(|p| p.data.impulse).fold(0.0, f32::max),
+                        });
+                    }
+                }
+            }
+        }
         out
+    }
+
+    /// The joint a part index belongs to (`None` = the carapace).
+    pub fn part_joint(&self, part: usize) -> Option<CrabJointId> {
+        let h = self.parts[part];
+        self.joints.iter().find(|j| j.child == h).map(|j| j.id)
+    }
+}
+
+/// Collider-shape substitution for every LINK (the carapace keeps its cuboid),
+/// mass properties pinned to the original so only geometry moves (rl#332).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShapeVariant {
+    AsIs,
+    /// Capsule radius × factor; cuboids untouched.
+    CapsuleRadius(f32),
+    /// Every oriented cuboid becomes the capsule along its longest axis.
+    CuboidsToCapsules,
+    /// Every link becomes a ball at its centre: radius = its capsule radius / the
+    /// cuboid's smallest half extent (`fat` = the bounding ball instead).
+    Balls {
+        fat: bool,
+    },
+}
+
+impl ShapeVariant {
+    fn apply(self, shape: &dyn Shape) -> Option<SharedShape> {
+        let capsule_of = |c: &Capsule| (c.segment.a, c.segment.b, c.radius);
+        let cuboid_of = |shape: &dyn Shape| -> Option<(Pose, Vec3)> {
+            let (pose, sub) = shape.as_compound()?.shapes().first()?;
+            Some((*pose, sub.as_cuboid()?.half_extents))
+        };
+        match self {
+            Self::AsIs => None,
+            Self::CapsuleRadius(k) => {
+                let (a, b, r) = capsule_of(shape.as_capsule()?);
+                Some(SharedShape::capsule(a, b, r * k))
+            }
+            Self::CuboidsToCapsules => {
+                let (pose, half) = cuboid_of(shape)?;
+                let k = if half.x >= half.y && half.x >= half.z {
+                    0
+                } else if half.y >= half.z {
+                    1
+                } else {
+                    2
+                };
+                let mut axis = Vec3::ZERO;
+                axis[k] = half[k];
+                let r = (half.x + half.y + half.z - half[k]) * 0.5;
+                let axis = pose.rotation * axis;
+                Some(SharedShape::capsule(
+                    pose.translation - axis,
+                    pose.translation + axis,
+                    r,
+                ))
+            }
+            Self::Balls { fat } => {
+                if let Some(c) = shape.as_capsule() {
+                    let (a, b, r) = capsule_of(c);
+                    let half_len = (b - a).length() * 0.5;
+                    let radius = if fat { half_len + r } else { r };
+                    Some(SharedShape::compound(vec![(
+                        Pose::from_translation((a + b) * 0.5),
+                        SharedShape::ball(radius),
+                    )]))
+                } else {
+                    let (pose, half) = cuboid_of(shape)?;
+                    let radius = if fat {
+                        half.length()
+                    } else {
+                        half.min_element()
+                    };
+                    Some(SharedShape::compound(vec![(
+                        Pose::from_translation(pose.translation),
+                        SharedShape::ball(radius),
+                    )]))
+                }
+            }
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct ReplayConfig {
-    pub zero_drives: bool,
+    /// Multiplies the recorded drive row: 0 = zeroed, 1 = as recorded.
+    pub drive_scale: f32,
     pub iterations: (usize, usize, usize),
     pub substeps: usize,
     /// Joint limit spring override; `None` keeps the snapshot's springs.
     pub limit_softness: Option<SpringCoefficients<f32>>,
+    pub shape: ShapeVariant,
+    /// `false` drops every same-crab link–link and link–carapace contact pair.
+    pub self_contacts: bool,
 }
 
+/// One contact manifold on the worst-kicked link after the replayed tick.
 #[derive(Clone, Copy, Debug)]
+pub struct ContactInfo {
+    /// Part index of the other body; `None` = the terrain.
+    pub other: Option<usize>,
+    pub points: usize,
+    pub penetration: f32,
+    /// World-space manifold normal, pointing INTO the kicked link.
+    pub normal_on_kicked: Vec3,
+    pub impulse: f32,
+}
+
+#[derive(Clone, Debug)]
 pub struct ReplayOutcome {
     pub energy_before: f32,
     pub energy_after: f32,
@@ -331,6 +494,8 @@ pub struct ReplayOutcome {
     pub worst_kick: (usize, f32, f32),
     /// Largest |Δv| or |Δω| between this replay and the original run's tick.
     pub max_dev_from_original: f32,
+    /// Contact manifolds on the worst-kicked link after the tick.
+    pub worst_kick_contacts: Vec<ContactInfo>,
 }
 
 /// A part below this speed is not a kick source: a 0.1→0.5 m/s solver-noise

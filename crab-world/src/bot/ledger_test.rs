@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::context::{
-    RapierContextJoints, RapierContextSimulation, RapierRigidBodySet,
+    RapierContextColliders, RapierContextJoints, RapierContextSimulation, RapierRigidBodySet,
 };
 use bevy_rapier3d::prelude::{MultibodyJoint, RapierRigidBodyHandle, Velocity};
 
@@ -56,6 +56,32 @@ fn gross_power(app: &mut App, row: &[f32; ACTION_SIZE]) -> f32 {
         .sum()
 }
 
+/// Active contact pairs whose BOTH colliders belong to env 0.s crab this tick.
+fn same_crab_contacts(app: &mut App) -> usize {
+    let crab: std::collections::HashSet<Entity> = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(Entity, &CrabEnvId), With<CrabBodyPart>>();
+        q.iter(app.world())
+            .filter(|(_, env)| env.0 == 0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    let mut q = app
+        .world_mut()
+        .query::<(&RapierContextColliders, &RapierContextSimulation)>();
+    let (cols, sim) = q.single(app.world()).expect("rapier context");
+    sim.narrow_phase
+        .contact_pairs()
+        .filter(|p| p.has_any_active_contact())
+        .filter(|p| {
+            [p.collider1, p.collider2]
+                .iter()
+                .all(|h| cols.collider_entity(*h).is_some_and(|e| crab.contains(&e)))
+        })
+        .count()
+}
+
 /// Largest excursion of any joint past its stop, rad.
 fn max_stop_sag(app: &mut App) -> f32 {
     let mut q = app
@@ -95,6 +121,7 @@ const SHIPPED: Variant = Variant {
 struct Audit {
     worst_over_budget: (f32, usize),
     kicks: Vec<(usize, usize, f32, f32)>,
+    self_contacts: usize,
     max_speed: f32,
     max_sag: f32,
 }
@@ -150,6 +177,7 @@ fn drive_and_audit(v: Variant) -> Audit {
     let mut audit = Audit {
         worst_over_budget: (f32::MIN, 0),
         kicks: Vec::new(),
+        self_contacts: 0,
         max_speed: 0.0,
         max_sag: 0.0,
     };
@@ -173,6 +201,7 @@ fn drive_and_audit(v: Variant) -> Audit {
         powers.push(gross_power(&mut app, &row));
         energies.push(crab_mech_energy(&mut app));
         audit.max_sag = audit.max_sag.max(max_stop_sag(&mut app));
+        audit.self_contacts += same_crab_contacts(&mut app);
         let now = part_speeds(&mut app);
         for (i, (s0, s1)) in prev.iter().zip(&now).enumerate() {
             audit.max_speed = audit.max_speed.max(*s1);
@@ -191,12 +220,13 @@ fn drive_and_audit(v: Variant) -> Audit {
         }
     }
     println!(
-        "driven ledger {:?}: worst window {:+.1} J vs budget (ending tick {}), max part speed {:.2} m/s, max stop sag {:.3} rad, kicks {}{}",
+        "driven ledger {:?}: worst window {:+.1} J vs budget (ending tick {}), max part speed {:.2} m/s, max stop sag {:.3} rad, same-crab contacts {}, kicks {}{}",
         v,
         audit.worst_over_budget.0,
         audit.worst_over_budget.1,
         audit.max_speed,
         audit.max_sag,
+        audit.self_contacts,
         audit.kicks.len(),
         audit
             .kicks

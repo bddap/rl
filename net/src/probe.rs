@@ -421,7 +421,7 @@ pub fn run_flight_soak(
     out_dir: &std::path::Path,
     progress_every: u64,
     zero_drive_after: Option<u64>,
-    dump_state_at: Option<u64>,
+    dump_state_at: &[u64],
 ) -> std::io::Result<SoakReport> {
     use bevy_rapier3d::plugin::context::RapierContextSimulation;
     use crab_world::physics::snapshot::{LEDGER_SLACK_J, LEDGER_WINDOW, PlantSnapshot, is_kick};
@@ -575,7 +575,7 @@ pub fn run_flight_soak(
                     if report.first_kick.is_none() {
                         report.first_kick = Some((tick, i, s0, s1));
                     }
-                    if report.kicks <= 20 {
+                    if report.kicks <= 100 {
                         println!(
                             "sally-soak: KICK tick {tick} part {i} speed {s0:.2}→{s1:.2} m/s \
                              (carapace {:.2} m/s, above {above:.2} m, contacts {contacts}, E {energy:.0} J)",
@@ -614,7 +614,7 @@ pub fn run_flight_soak(
         } else {
             ledger.clear();
         }
-        if dump_state_at == Some(tick) {
+        if dump_state_at.contains(&tick) {
             pending_snapshot = Some(PlantSnapshot::capture(world, tick));
         } else if let Some(mut snap) = pending_snapshot.take() {
             snap.finish(world);
