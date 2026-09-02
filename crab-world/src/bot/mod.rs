@@ -8,6 +8,8 @@ pub mod collider_check;
 #[cfg(test)]
 mod fling_test;
 pub mod headless;
+#[cfg(test)]
+mod ledger_test;
 pub mod physics_digest;
 pub mod pose_sentinel;
 #[cfg(test)]
@@ -273,6 +275,7 @@ impl Plugin for BotPlugin {
         );
 
         app.init_resource::<actuator::CrabActions>()
+            .init_resource::<actuator::SettleExtraIterations>()
             .init_resource::<sensor::CrabObservation>()
             .init_resource::<sensor::CrabTargets>()
             .init_resource::<CrabSpawns>()

@@ -1,3 +1,4 @@
+pub mod snapshot;
 pub mod world;
 
 pub use world::PhysicsWorldPlugin;
@@ -50,8 +51,25 @@ pub const fn brake_coeff_max(mass: f32) -> f32 {
 pub const PHYSICS_SUBSTEPS: usize = 2;
 
 /// (outer, internal-PGS, internal-stabilization) solver iterations — the other
-/// half of the [`PHYSICS_SUBSTEPS`] driven budget (rationale there). The
-/// internal counts at 2 are load-bearing for DRIVEN momentum honesty, not rest
+/// half of the [`PHYSICS_SUBSTEPS`] driven budget (rationale there).
+///
+/// Internal PGS at 12 (rl#332): the velocity rows of a stop-railed, saturated-drive
+/// light link (drive + limit + contacts on a 2–50 g body under a 0.72 kg carapace)
+/// do not converge in 2 PGS passes, and the residual leaves the solve as a
+/// one-tick kick — a part going 0.2→8 m/s while the carapace walks at 0.3 m/s,
+/// the rl#332 F3 onset shape. One-tick state replays (`game sally-replay`, same
+/// state and drives, only the counts varied) put the kicked link at 8.1 m/s for
+/// PGS 2, 1.9–4.8 for 8, 1.2–2.4 for 12–16, ~1 for 32 and for (32,8,8)×8 — the
+/// converged answer; the 768-tick driven audit (`solver_variant_matrix`) counted
+/// 14/4/1/0/0/0 kicks for PGS 2/4/6/8/12/16 at outer 2, while outer 3–4 at PGS 2
+/// still kicked (11, 7) and softening the limit springs instead made it WORSE
+/// (76 kicks, 0.16–0.74 rad stop sag). PGS passes are cheap: `game step-profile`
+/// measured +0.1–0.2 ms/substep for 2→8 and a further ~+0.15 for 8→12 (p10,
+/// vel-resolution), under 1 ms/step total against a 16.7 ms frame. 12 is where
+/// every observed kick state converged below the detector; 8 left one at 4.8 m/s.
+/// `driven_crab_energy_ledger_holds_on_shipped_solver` pins it.
+///
+/// The internal counts were at 2 for DRIVEN momentum honesty, not rest
 /// quiet: at 1/1 the airborne self-contact thrash leaks 0.31–0.58 m/s² of
 /// phantom COM force across realization draws — straddling the rl#321 0.5
 /// ceiling and approaching the pre-fix 0.64 scale — while 2/2 measures
@@ -83,7 +101,7 @@ pub const PHYSICS_SUBSTEPS: usize = 2;
 /// total, the floor was set against 16); sleep engagement is pinned by
 /// `resting_crab_falls_asleep` (headless graph) and the flat-ground armed
 /// smoke's sleep bound (render graph, rl#406).
-pub const SOLVER_ITERATIONS: (usize, usize, usize) = (2, 2, 3);
+pub const SOLVER_ITERATIONS: (usize, usize, usize) = (2, 12, 3);
 
 fn fixed_timestep() -> TimestepMode {
     TimestepMode::Fixed {

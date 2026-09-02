@@ -85,6 +85,22 @@ impl CarapaceDrag {
 /// escaped-crab rescue is the flight-time bound, this is the no-new-energy bound.
 const CARAPACE_BRAKE_WEIGHT_MAX: f32 = 20.0;
 
+/// The drag law as one pure function: `-c·|v|·v`, force-capped at
+/// [`CARAPACE_BRAKE_WEIGHT_MAX`] body weights. Exactly zero under the sleep noise
+/// floor: there the velocity is solver noise, and a not-quite-equal force written
+/// each tick would force-wake the body and pin its sleep timer at zero (rl#392).
+/// Coefficient form keeps the in-band expression bit-identical to the uncapped
+/// original (the 300-tick flail pin is bit-sensitive); `mass = 0` on the
+/// pre-writeback tick makes the cap arm win with 0, dropping drag for that tick.
+pub fn drag_force(coeff: f32, mass: f32, v: Vec3) -> Vec3 {
+    let speed = v.length();
+    if speed < super::body::CRAB_SLEEP_NOISE_FLOOR {
+        return Vec3::ZERO;
+    }
+    let f_max = CARAPACE_BRAKE_WEIGHT_MAX * mass * -crate::physics::PHYSICS_GRAVITY.y;
+    -(coeff * speed).min(f_max / speed) * v
+}
+
 /// Ordered after [`super::BotSet::Act`] (whose `apply_actions` zeroes
 /// `ExternalForce.force` every tick) and before the rapier sync — the same seam
 /// the training shoves use.
@@ -121,29 +137,7 @@ pub(crate) fn apply_air_drag(
         "a physics carapace has no CarapaceDrag — spawned outside spawn_crab?"
     );
     for (vel, mass, drag, mut force) in carapaces.iter_mut() {
-        let speed = vel.linear.length();
-        let f_max = CARAPACE_BRAKE_WEIGHT_MAX * mass.mass * -crate::physics::PHYSICS_GRAVITY.y;
-        // Coefficient form so the in-band expression is BIT-identical to the uncapped
-        // original — the 300-tick flail pin in net is sensitive to bit-level physics
-        // drift. speed = 0 ⇒ f_max/speed = +inf ⇒ the cap arm never wins; mass = 0
-        // (pre-writeback tick) with speed > 0 ⇒ f_max/speed = 0 wins ⇒ the drag is
-        // dropped for that one tick (at speed = 0 the zero drag arm wins — `min`
-        // returns the non-NaN arm even against the cap's 0/0).
-        let coeff = (drag.coeff() * speed).min(f_max / speed);
-        // A resting crab must be allowed to SLEEP (rl#392, the rl#377 pattern):
-        // bevy_rapier force-wakes on any Changed ExternalForce, and at rest this
-        // drag feeds on the contact solver's own noise velocity, re-deriving a
-        // not-quite-equal force each tick — a wake loop that pins the sleep timer
-        // at zero forever. Below the sleep band the velocity is noise by
-        // definition and the drag on it is sub-milli-Newton; snap it to exactly
-        // zero and skip the write so sleep can engage. Dissipative drag can never
-        // sustain motion, so nothing physical is lost; in-band the expression and
-        // the write are bit-identical to before (the 300-tick flail pin).
-        let add = if speed < super::body::CRAB_SLEEP_NOISE_FLOOR {
-            Vec3::ZERO
-        } else {
-            -coeff * vel.linear
-        };
+        let add = drag_force(drag.coeff(), mass.mass, vel.linear);
         if add != Vec3::ZERO {
             force.force += add;
         }

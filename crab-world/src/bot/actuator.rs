@@ -121,8 +121,22 @@ pub fn total_drive_torque_ceiling() -> f32 {
         .sum()
 }
 
+/// Extra solver iterations a ZERO-DRIVE crab island runs (rl#392 rest convergence +
+/// sleep). A resource, not a bare constant, so an ablation that zeroes drives can
+/// pin it to 0 and change ONE thing (rl#332 F5: the soak's `--zero-drive-after`
+/// used to swap the solver regime along with the drives).
+#[derive(Resource, Clone, Copy)]
+pub struct SettleExtraIterations(pub usize);
+
+impl Default for SettleExtraIterations {
+    fn default() -> Self {
+        Self(super::body::CRAB_SETTLE_EXTRA_ITERATIONS)
+    }
+}
+
 pub fn apply_actions(
     actions: Res<CrabActions>,
+    settle: Res<SettleExtraIterations>,
     joints: Query<(Entity, &CrabJoint, &CrabEnvId, &MultibodyJoint)>,
     transforms: Query<&Transform>,
     mut forces: Query<(Entity, &mut ExternalForce), With<CrabBodyPart>>,
@@ -183,11 +197,7 @@ pub fn apply_actions(
             .envs
             .get(env.0)
             .is_none_or(|values| values.iter().all(|v| *v == 0.0));
-        let want = if zero_drive {
-            super::body::CRAB_SETTLE_EXTRA_ITERATIONS
-        } else {
-            0
-        };
+        let want = if zero_drive { settle.0 } else { 0 };
         if iters.0 != want {
             iters.0 = want;
         }

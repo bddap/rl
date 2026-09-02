@@ -21,11 +21,17 @@ pub(crate) struct Args {
     out: std::path::PathBuf,
     #[arg(long, default_value_t = 50_000)]
     progress_every: u64,
-    /// rl#332 ablation: force every actuator drive to zero from this tick on. A
-    /// passive body that keeps accelerating indicts the solver; one that tumbles
-    /// to rest indicts actuator-sourced energy.
+    /// rl#332 ablation: force every actuator drive to zero from this tick on, with
+    /// the zero-drive settle regime's extra solver iterations pinned to 0 so the
+    /// solver is the ONE thing that does not change. A passive body that keeps
+    /// accelerating indicts the solver; one that tumbles to rest indicts
+    /// actuator-sourced energy.
     #[arg(long)]
     zero_drive_after: Option<u64>,
+    /// rl#332 T1: write the whole rapier state after this tick (plus the drives the
+    /// next tick applied) to `<out>/state-<tick>.bin`, for `game sally-replay`.
+    #[arg(long)]
+    dump_state_at: Option<u64>,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -46,6 +52,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         &args.out,
         args.progress_every,
         args.zero_drive_after,
+        args.dump_state_at,
     )?;
 
     println!(
@@ -61,6 +68,15 @@ pub(crate) fn run(args: Args) -> Result<()> {
         report.max_up_vy,
         report.airborne_stretches,
         report.longest_airborne_ticks as f64 / 64.0
+    );
+    println!(
+        "sally-soak: kicks={} (first {:?}), ledger breaches={} (worst {:.0} J over budget, first tick {:?}), max actuator power {:.0} W",
+        report.kicks,
+        report.first_kick,
+        report.ledger_breaches,
+        report.worst_breach_j,
+        report.first_breach_tick,
+        report.max_power_w
     );
     for (i, e) in report.events.iter().enumerate() {
         println!(

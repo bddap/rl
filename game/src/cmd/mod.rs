@@ -9,6 +9,7 @@ mod net_screenshot;
 mod nn_crab_probe;
 mod nn_crab_vehicle_stability;
 mod play;
+mod sally_replay;
 mod sally_soak;
 mod shared;
 mod solo;
@@ -41,6 +42,7 @@ pub(crate) enum Command {
     /// rl#332: long headless soak hunting Sally's illegitimate "flight", with a
     /// JSONL state-window dump per detected event.
     SallySoak(sally_soak::Args),
+    SallyReplay(sally_replay::Args),
     /// rl#396: on-target cost profile of one driven physics step in an active-hunt
     /// scene — wall time vs rapier-internal split, production 64:30 cadence.
     StepProfile(step_profile::Args),
@@ -63,6 +65,7 @@ pub(crate) fn dispatch(command: Command) -> Result<()> {
         Command::CheckpointCheck(args) => checkpoint_check::run(args),
         Command::NnCrabVehicleStability(args) => nn_crab_vehicle_stability::run(args),
         Command::SallySoak(args) => sally_soak::run(args),
+        Command::SallyReplay(args) => sally_replay::run(args),
         Command::StepProfile(args) => step_profile::run(args),
     }
 }

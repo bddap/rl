@@ -390,6 +390,15 @@ pub struct SoakReport {
     /// stretch is gravity-legit downhill ballistics.
     pub airborne_stretches: u64,
     pub longest_airborne_ticks: u64,
+    /// Ticks where some part's speed multiplied >4× in one tick
+    /// ([`crab_world::physics::snapshot::is_kick`]) — the rl#332 F3 shape.
+    pub kicks: u64,
+    /// (tick, part index, speed before, speed after) of the first kick.
+    pub first_kick: Option<(u64, usize, f32, f32)>,
+    /// Windows where ΔE exceeded Σ actuator power·dt + slack (`crab_world::physics::snapshot::LEDGER_SLACK_J`).
+    pub ledger_breaches: u64,
+    pub worst_breach_j: f32,
+    pub first_breach_tick: Option<u64>,
 }
 
 /// rl#332: soak the live-policy world for `ticks` and detect "flight" — sustained
@@ -412,8 +421,10 @@ pub fn run_flight_soak(
     out_dir: &std::path::Path,
     progress_every: u64,
     zero_drive_after: Option<u64>,
+    dump_state_at: Option<u64>,
 ) -> std::io::Result<SoakReport> {
     use bevy_rapier3d::plugin::context::RapierContextSimulation;
+    use crab_world::physics::snapshot::{LEDGER_SLACK_J, LEDGER_WINDOW, PlantSnapshot, is_kick};
     use std::collections::VecDeque;
     use std::io::Write;
 
@@ -454,8 +465,16 @@ pub fn run_flight_soak(
         teleports: 0,
         airborne_stretches: 0,
         longest_airborne_ticks: 0,
+        kicks: 0,
+        first_kick: None,
+        ledger_breaches: 0,
+        worst_breach_j: 0.0,
+        first_breach_tick: None,
     };
     let mut airborne_run: u64 = 0;
+    let mut prev_parts: Vec<(Vec3, Vec3)> = Vec::new();
+    let mut ledger: VecDeque<(f32, f32)> = VecDeque::with_capacity(LEDGER_WINDOW + 1);
+    let mut pending_snapshot: Option<PlantSnapshot> = None;
     let mut high_streak: u32 = 0;
     let mut cooldown_until: u64 = 0;
     // (file, ticks left, event index) while dumping a post-onset tail.
@@ -471,6 +490,9 @@ pub fn run_flight_soak(
     for _ in 0..ticks {
         if zero_drive_after == Some(report.ticks_run) {
             probe.app.insert_resource(ZeroDriveAfter(zero_drive_after));
+            probe
+                .app
+                .insert_resource(crab_world::bot::actuator::SettleExtraIterations(0));
             println!(
                 "sally-soak: zero-drive engaged at tick {}",
                 report.ticks_run
@@ -544,6 +566,67 @@ pub fn run_flight_soak(
             }
         };
         report.max_power_w = report.max_power_w.max(power_w);
+
+        if prev_parts.len() == parts.len() {
+            for (i, ((_, v0), (_, v1))) in prev_parts.iter().zip(&parts).enumerate() {
+                let (s0, s1) = (v0.length(), v1.length());
+                if is_kick(s0, s1) {
+                    report.kicks += 1;
+                    if report.first_kick.is_none() {
+                        report.first_kick = Some((tick, i, s0, s1));
+                    }
+                    if report.kicks <= 20 {
+                        println!(
+                            "sally-soak: KICK tick {tick} part {i} speed {s0:.2}→{s1:.2} m/s \
+                             (carapace {:.2} m/s, above {above:.2} m, contacts {contacts}, E {energy:.0} J)",
+                            linvel.length()
+                        );
+                    }
+                }
+            }
+        }
+        prev_parts.clone_from(&parts);
+        if power_w.is_finite() {
+            ledger.push_back((energy, power_w));
+            if ledger.len() > LEDGER_WINDOW + 1 {
+                ledger.pop_front();
+            }
+            if ledger.len() == LEDGER_WINDOW + 1 {
+                let budget: f32 = ledger.iter().skip(1).map(|(_, p)| p).sum::<f32>()
+                    / crab_world::physics::PHYSICS_HZ as f32
+                    + LEDGER_SLACK_J;
+                let de = energy - ledger.front().unwrap().0;
+                if de > budget {
+                    report.ledger_breaches += 1;
+                    report.worst_breach_j = report.worst_breach_j.max(de - budget);
+                    if report.first_breach_tick.is_none() {
+                        report.first_breach_tick = Some(tick);
+                    }
+                    if report.ledger_breaches <= 20 {
+                        println!(
+                            "sally-soak: LEDGER breach tick {tick} ΔE {de:.0} J over 32 ticks vs budget {budget:.0} J \
+                             (carapace {:.2} m/s, above {above:.2} m, contacts {contacts})",
+                            linvel.length()
+                        );
+                    }
+                }
+            }
+        } else {
+            ledger.clear();
+        }
+        if dump_state_at == Some(tick) {
+            pending_snapshot = Some(PlantSnapshot::capture(world, tick));
+        } else if let Some(mut snap) = pending_snapshot.take() {
+            snap.finish(world);
+            let path = out_dir.join(format!("state-{}.bin", snap.tick));
+            snap.save(&path)?;
+            println!(
+                "sally-soak: state after tick {} + tick {} drives → {}",
+                snap.tick,
+                tick,
+                path.display()
+            );
+        }
 
         report.max_above_ground = report.max_above_ground.max(above);
         report.max_abs_vy = report.max_abs_vy.max(linvel.y.abs());
@@ -687,23 +770,7 @@ fn crab_mech_energy(world: &mut World) -> f32 {
     let Ok(set) = set_q.single(world) else {
         return f32::NAN;
     };
-    let g = 9.81f32;
-    handles
-        .iter()
-        .filter_map(|h| set.bodies.get(*h))
-        .map(|rb| {
-            let m = rb.mass();
-            let v: Vec3 = rb.linvel();
-            let w: Vec3 = rb.angvel();
-            let rmat = Mat3::from_quat(rb.position().rotation);
-            let i_world = rmat
-                * rb.mass_properties()
-                    .local_mprops
-                    .reconstruct_inertia_matrix()
-                * rmat.transpose();
-            0.5 * m * v.length_squared() + 0.5 * w.dot(i_world * w) + m * g * rb.center_of_mass().y
-        })
-        .sum()
+    crab_world::physics::snapshot::mech_energy(&set.bodies, &handles)
 }
 
 /// One pumped fixed step's cost (rl#396): `wall_ms` is the whole `FixedMain` pass —
