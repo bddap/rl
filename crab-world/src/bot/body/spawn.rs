@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use super::collision::{NESTED_COLLISION, crab_collision, no_adjacent_contacts};
+use super::collision::{CRAB_COLLISION, no_adjacent_contacts};
 use super::components::{
     CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint, CrabRestPose,
 };
@@ -198,7 +198,7 @@ pub fn spawn_crab(
             crab_sleep(),
             AdditionalSolverIterations(CRAB_SETTLE_EXTRA_ITERATIONS),
             carapace_collider,
-            crab_collision(env),
+            CRAB_COLLISION,
             ColliderMassProperties::Density(recipe.carapace_density),
             // Live mass mirror for the drag brake's momentum-cancel cap
             // (`aero::apply_air_drag`) — the collider density is the one mass source.
@@ -211,12 +211,6 @@ pub fn spawn_crab(
         .id();
 
     let mut ents: Vec<Entity> = Vec::with_capacity(recipe.links.len());
-    let inside_carapace = |p: Vec3| {
-        (p - origin - recipe.carapace_offset)
-            .abs()
-            .cmple(recipe.carapace_half)
-            .all()
-    };
     for (i, link) in recipe.links.iter().enumerate() {
         if link.actuated.is_none() {
             ents.push(carapace);
@@ -237,11 +231,6 @@ pub fn spawn_crab(
                 Collider::cuboid(half.x, half.y, half.z),
             )]),
         };
-        let groups = if inside_carapace(here + link.center) {
-            NESTED_COLLISION
-        } else {
-            crab_collision(env)
-        };
         total_mass += collider.raw.mass_properties(link.density).mass();
         let id = link
             .actuated
@@ -255,7 +244,7 @@ pub fn spawn_crab(
             crab_sleep(),
             AdditionalSolverIterations(CRAB_SETTLE_EXTRA_ITERATIONS),
             collider,
-            groups,
+            CRAB_COLLISION,
             ColliderMassProperties::Density(link.density),
             MultibodyJoint::new(parent_ent, joint),
             place(here),
