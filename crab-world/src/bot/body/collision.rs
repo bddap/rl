@@ -5,49 +5,30 @@ pub const ARENA_COLLISION: CollisionGroups =
 
 pub const MAX_ENVS: usize = 16;
 
-const VEHICLE_GROUP: Group = Group::GROUP_19;
+const CRAB_GROUP: Group = Group::GROUP_2;
+const VEHICLE_GROUP: Group = Group::GROUP_3;
 
-const _: () = assert!(MAX_ENVS + 2 < 32);
-const _: () = assert!(VEHICLE_GROUP.bits() == 1 << (MAX_ENVS + 2));
+/// Every crab part, one group: solid to the arena and to vehicles, never to a crab —
+/// not another crab, and not its own links. A same-crab link–link contact is a
+/// constraint row inside ONE multibody whose two sides can barely separate along
+/// the contact normal (the relative Jacobian nearly cancels, rl#332), so the PGS
+/// pass moves both links together instead: the 4–9 m/s one-tick kicks on the feet.
+pub const CRAB_COLLISION: CollisionGroups =
+    CollisionGroups::new(CRAB_GROUP, Group::GROUP_1.union(VEHICLE_GROUP));
 
-/// Links tucked inside the carapace (the coxae) skip crab-vs-crab contacts but must
-/// still be solid to the arena AND to vehicles — without VEHICLE_GROUP here a low ram
-/// ghosts through a hip capsule under the shell edge (rl#235).
-pub const NESTED_COLLISION: CollisionGroups =
-    CollisionGroups::new(Group::GROUP_2, Group::GROUP_1.union(VEHICLE_GROUP));
-
-pub const VEHICLE_COLLISION: CollisionGroups = {
-    let mut env_bits = Group::empty();
-    let mut e = 0;
-    while e < MAX_ENVS {
-        env_bits = env_bits.union(Group::from_bits_truncate(1 << (e + 2)));
-        e += 1;
-    }
-    CollisionGroups::new(
-        VEHICLE_GROUP,
-        Group::GROUP_1.union(Group::GROUP_2).union(env_bits),
-    )
-};
+pub const VEHICLE_COLLISION: CollisionGroups =
+    CollisionGroups::new(VEHICLE_GROUP, Group::GROUP_1.union(CRAB_GROUP));
 
 // Rapier activates a pair only when EACH side's filter names the other's membership —
 // one direction alone is silent non-contact (rl#235).
 const _: () = assert!(
     VEHICLE_COLLISION
         .filters
-        .intersects(NESTED_COLLISION.memberships)
-        && NESTED_COLLISION
+        .intersects(CRAB_COLLISION.memberships)
+        && CRAB_COLLISION
             .filters
             .intersects(VEHICLE_COLLISION.memberships)
 );
-
-pub fn crab_collision(env: usize) -> CollisionGroups {
-    debug_assert!(
-        env < MAX_ENVS,
-        "env {env} exceeds the {MAX_ENVS}-env bit budget"
-    );
-    let bit = Group::from_bits_truncate(1 << (env + 2));
-    CollisionGroups::new(bit, Group::GROUP_1.union(bit).union(VEHICLE_GROUP))
-}
 
 pub(super) fn no_adjacent_contacts(joint: impl Into<TypedJoint>) -> TypedJoint {
     let mut joint = joint.into();
