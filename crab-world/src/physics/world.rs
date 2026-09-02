@@ -98,9 +98,7 @@ impl Plugin for ArenaVisualsPlugin {
 /// the solver's two-tangent cone approximation — Sally tobogganed down everything
 /// steeper (70 m/10 s on a 40° ramp, `slope_hold_test`). 2.5 pairs feet to 2.0
 /// (claw tips dig in — interlock, not bare material friction) and the whole body to
-/// ≥1.5, and zero-input drift stays under a body length through 55°. The ground
-/// side is the right seam: a foot-side raise (μ or `Max` combine) also stiffens
-/// foot↔leg self-contacts and jams adjacent legs (`collider_check` catches it).
+/// ≥1.5, and zero-input drift stays under a body length through 55°.
 /// Crafts opt back OUT to the old pairing (`vehicle::VEHICLE_FRICTION`) — their
 /// ground feel was tuned before this existed.
 const GROUND_FRICTION: Friction = Friction::coefficient(2.5);

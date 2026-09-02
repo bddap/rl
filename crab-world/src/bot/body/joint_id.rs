@@ -23,8 +23,7 @@ const CLAW_FRICTION_CAP: f32 = 0.04;
 /// integration can bound within-tick acceleration of a light link. Legs: 10
 /// rad/s keeps headroom over a 2 Hz full-range carpus stride (~7 rad/s peak)
 /// while a coordinated whole-chain whip (joint rates COMPOSE at the tip) stays
-/// near what the contact solver can catch — measured by the `collider_check`
-/// actuator-load test, which gates every build (bddap/rl#315).
+/// near what the contact solver can catch (bddap/rl#315).
 /// Claws: strong slow vises — the highest ceilings on the tiniest ranges
 /// (wrist ±0.24 rad) — whose cross-body slams stayed the worst offenders at 10.
 const LEG_FREE_RATE: f32 = 10.0;

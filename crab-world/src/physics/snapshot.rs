@@ -25,9 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bot::actuator::{CrabActions, applied_torque};
 use crate::bot::aero::{CarapaceDrag, drag_force};
-use crate::bot::body::{
-    CRAB_COLLISION, CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId,
-};
+use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
 use crate::physics::{PHYSICS_DT, PHYSICS_GRAVITY};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -214,18 +212,16 @@ impl PlantSnapshot {
             }
         }
 
-        let mut link_colliders: Vec<(ColliderHandle, usize)> = Vec::new();
-        for (h, co) in s.colliders.iter_mut() {
-            let Some(part) = s.parts.iter().position(|p| Some(*p) == co.parent()) else {
-                continue;
-            };
-            if cfg.filter == ContactFilter::Shipped {
-                co.set_collision_groups(CRAB_COLLISION.into());
-            }
-            if part == 0 {
-                continue;
-            }
-            link_colliders.push((h, part));
+        let link_colliders: Vec<(ColliderHandle, usize)> = s
+            .colliders
+            .iter()
+            .filter_map(|(h, co)| {
+                let part = s.parts.iter().position(|p| Some(*p) == co.parent())?;
+                (part > 0).then_some((h, part))
+            })
+            .collect();
+        for (h, _) in &link_colliders {
+            let co = s.colliders.get_mut(*h).expect("link collider");
             if let Some(shape) = cfg.shape.apply(co.shape()) {
                 let mprops = co.mass_properties();
                 co.set_shape(shape);
@@ -464,17 +460,6 @@ pub struct ReplayConfig {
     /// Joint limit spring override; `None` keeps the snapshot's springs.
     pub limit_softness: Option<SpringCoefficients<f32>>,
     pub shape: ShapeVariant,
-    pub filter: ContactFilter,
-}
-
-/// Which collision groups the crab's colliders carry on the replayed tick.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContactFilter {
-    /// The groups the recording binary spawned — a pre-fix snapshot keeps its
-    /// same-crab link–link pairs (rl#332).
-    AsRecorded,
-    /// This build's [`CRAB_COLLISION`].
-    Shipped,
 }
 
 /// One contact manifold on the worst-kicked link after the replayed tick.

@@ -832,11 +832,9 @@ mod tests {
     /// 512 m fixture edge mid-measurement and be parked by `rescue_lost_crafts`.
     const FAR: Vec3 = Vec3::new(-300.0, 300.0, -300.0);
 
-    /// rl#235 regression: a vehicle overlapping a crab-grouped capsule must register a
-    /// narrow-phase contact (a low ram once ghosted through a hip capsule whose group
-    /// and the vehicle.s did not name each other).
+    /// rl#235: a vehicle overlapping a crab-grouped capsule registers a contact.
     #[test]
-    fn vehicle_contacts_nested_coxa() {
+    fn vehicle_contacts_crab_collider() {
         use crate::bot::body::CRAB_COLLISION;
         use crate::bot::headless::tick;
         use bevy_rapier3d::plugin::context::{RapierContextColliders, RapierContextSimulation};

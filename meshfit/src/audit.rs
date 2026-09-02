@@ -1,7 +1,7 @@
 //! The rig-geometry audits behind `meshfit verify-colliders` / `verify-pivots` —
 //! table-formatted reports over the canonical model, shaped like crab-world's
-//! `collider_check::run` (an [`AuditVerdict`] when the audit ran, `Err` when it
-//! couldn't) so the CLI stays thin dispatch. The pass/fail bars are pure predicates
+//! an [`AuditVerdict`] when the audit ran, `Err` when it couldn't, so the CLI stays
+//! thin dispatch. The pass/fail bars are pure predicates
 //! over the fit scores, unit-tested here without a model file.
 //!
 //! The audits judge the CURRENT fit of the CURRENT asset (`bake::fitted_recipe`), so

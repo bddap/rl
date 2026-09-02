@@ -4,15 +4,14 @@ use clap::Parser;
 use crab_world::bot::body::LIMIT_SOFTNESS;
 use crab_world::physics::CONTACT_SOFTNESS;
 use crab_world::physics::snapshot::{
-    ContactFilter, PlantSnapshot, ReplayConfig, ReplayOutcome, ShapeVariant, SpringCoefficients,
+    PlantSnapshot, ReplayConfig, ReplayOutcome, ShapeVariant, SpringCoefficients,
 };
 
 /// rl#332 T1: replay ONE tick from each `sally-soak --dump-state-at` snapshot,
 /// varying ONE lever at a time against the shipped configuration — drives, solver
-/// counts, joint limit spring, link collider shape, same-crab contact filter — and
-/// print whether the recorded kick survives. The first row is the self-check: the
-/// recorded contact filter with recorded drives — it must reproduce the original
-/// run; the second is this build's filter.
+/// counts, joint limit spring, link collider shape — and print whether the recorded
+/// kick survives. The first row is the self-check: shipped configuration, recorded
+/// drives — it must reproduce the original run.
 #[derive(Parser)]
 pub(crate) struct Args {
     #[arg(long, value_name = "FILE", required = true, num_args = 1..)]
@@ -31,7 +30,6 @@ fn rows() -> Vec<Row> {
         substeps: crab_world::physics::PHYSICS_SUBSTEPS,
         limit_softness: None,
         shape: ShapeVariant::AsIs,
-        filter: ContactFilter::Shipped,
     };
     let row = |label: &str, cfg: ReplayConfig| Row {
         label: label.to_string(),
@@ -43,16 +41,7 @@ fn rows() -> Vec<Row> {
             damping_ratio: zeta,
         })
     };
-    let mut rows = vec![
-        row(
-            "self-check (filter as recorded)",
-            ReplayConfig {
-                filter: ContactFilter::AsRecorded,
-                ..shipped
-            },
-        ),
-        row("shipped filter (no same-crab)", shipped),
-    ];
+    let mut rows = vec![row("self-check (shipped)", shipped)];
     for (label, scale) in [("drives zeroed", 0.0), ("drives ×0.5", 0.5)] {
         rows.push(row(
             label,
