@@ -9,9 +9,9 @@ use crab_world::physics::snapshot::{
 
 /// rl#332 T1: replay ONE tick from each `sally-soak --dump-state-at` snapshot,
 /// varying ONE lever at a time against the shipped configuration — drives, solver
-/// counts, joint limit spring, link collider shape — and print whether the recorded
-/// kick survives. The first row is the self-check: shipped configuration, recorded
-/// drives — it must reproduce the original run.
+/// counts, joint limit spring, link collider shape, same-crab contact filter — and
+/// print whether the recorded kick survives. The first row is the self-check:
+/// shipped configuration, recorded drives — it must reproduce the original run.
 #[derive(Parser)]
 pub(crate) struct Args {
     #[arg(long, value_name = "FILE", required = true, num_args = 1..)]
@@ -30,6 +30,7 @@ fn rows() -> Vec<Row> {
         substeps: crab_world::physics::PHYSICS_SUBSTEPS,
         limit_softness: None,
         shape: ShapeVariant::AsIs,
+        self_contacts: true,
     };
     let row = |label: &str, cfg: ReplayConfig| Row {
         label: label.to_string(),
@@ -95,6 +96,13 @@ fn rows() -> Vec<Row> {
     ] {
         rows.push(row(label, ReplayConfig { shape, ..shipped }));
     }
+    rows.push(row(
+        "same-crab contacts off",
+        ReplayConfig {
+            self_contacts: false,
+            ..shipped
+        },
+    ));
     rows
 }
 

@@ -4,15 +4,6 @@ use super::actuator::CrabActions;
 use super::body::{CrabJoint, CrabJointId, Side, joint_angle};
 use super::headless::{assert_transforms_match_rapier, flat_headless_app, headless_app, tick};
 
-/// Rest-quiet ceilings. The angular one is sized to the CHAOS of the rest noise, not
-/// one draw of it: the worst-claw-link mean is solver convergence noise on
-/// near-massless links, and bit-level physics perturbations re-roll it — seven draws
-/// during rl#340 stage 3 measured 0.24–0.38 rad/s, so 0.6 clears the 7-draw max ~60%
-/// while still firing on the guarded diseases: removed rest support is 3-4x (rl#109)
-/// and the pre-rl#340-stage-2 convergence regression measured 2.43 rad/s.
-const QUIET_LIN_MPS: f32 = 0.2;
-const QUIET_ANG_RADPS: f32 = 0.6;
-
 fn joint_entity(app: &mut App, id: CrabJointId) -> Entity {
     let mut q = app.world_mut().query::<(Entity, &CrabJoint)>();
     q.iter(app.world())
@@ -335,10 +326,10 @@ fn crab_settles_quietly_at_rest() {
     );
 
     assert!(
-        ang_mean < QUIET_ANG_RADPS,
+        ang_mean < super::collider_check::QUIET_ANG_RADPS,
         "carapace still twitching at rest: angular speed mean {ang_mean:.3} rad/s \
          (want <{}; 12 Hz contact sits ~0.61, the 30 Hz / substeps=1 regressions ~1.5)",
-        QUIET_ANG_RADPS
+        super::collider_check::QUIET_ANG_RADPS
     );
     assert!(
         bounce < 0.024,
@@ -422,18 +413,18 @@ fn claws_quiet_at_rest() {
         "claws at rest: mean worst-link linear {lin_mean:.3} m/s, angular {ang_mean:.3} rad/s"
     );
     assert!(
-        lin_mean < QUIET_LIN_MPS,
+        lin_mean < super::collider_check::QUIET_LIN_MPS,
         "claw links shaking at rest: mean worst-link linear speed {lin_mean:.3} m/s \
          (want <{}) — the contact spring regressed stiffer",
-        QUIET_LIN_MPS
+        super::collider_check::QUIET_LIN_MPS
     );
     assert!(
-        ang_mean < QUIET_ANG_RADPS,
+        ang_mean < super::collider_check::QUIET_ANG_RADPS,
         "claw links shaking at rest: mean worst-link angular speed {ang_mean:.3} rad/s \
          (want <{}; the claws are HELD by load-bearing rest contacts — pincer on \
          shoulder, shell on leg bases; collision-group changes that remove that \
          support make this 3-4x worse, rl#109)",
-        QUIET_ANG_RADPS
+        super::collider_check::QUIET_ANG_RADPS
     );
 }
 
@@ -516,6 +507,21 @@ fn respawn_airborne(app: &mut App, y: f32) {
         .expect("airborne respawn");
 }
 
+/// Kill every crab-part collision filter so the airborne window is contact-free by
+/// construction — the momentum checks isolate motors + joints, not contact response.
+#[cfg(test)]
+fn disable_crab_collisions(app: &mut App) {
+    use super::body::CrabBodyPart;
+    use bevy_rapier3d::prelude::{CollisionGroups, Group};
+
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&mut CollisionGroups, With<CrabBodyPart>>();
+    for mut g in q.iter_mut(app.world_mut()) {
+        g.filters = Group::NONE;
+    }
+}
+
 /// Touching contact-point count across the whole narrow phase this tick.
 #[cfg(test)]
 fn contact_points(app: &mut App) -> usize {
@@ -549,6 +555,7 @@ fn airborne_crab_conserves_angular_momentum() {
     respawn_airborne(&mut app, 80.0);
     tick(&mut app, 4);
 
+    disable_crab_collisions(&mut app);
     tick(&mut app, 1);
 
     let l0 = crab_angular_momentum(&mut app).length();
@@ -679,11 +686,13 @@ const MOMENTUM_SPAWN_Y: f32 = 400.0;
 
 /// 4 s of full-amplitude airborne thrash (gravity ON), returning the COM momentum
 /// residual as an equivalent acceleration — |Δp − m·g·Δt| / (m·Δt) — plus the
-/// touching contact-point total across the window, asserted zero: airborne and with
-/// no crab–crab pairs the window exercises motors + joints alone.
+/// touching contact-point total across the window. `isolate` kills the collision
+/// filters first, so the window exercises motors + joints alone (asserted
+/// contact-free — the harness-validity precondition, not the property under test);
+/// without it the production groups stay and the limbs beat against each other.
 /// Deterministic: seeded drive, fixed-dt physics.
 #[cfg(test)]
-fn airborne_thrash_residual(kind: Thrash, seed: u64) -> (Vec3, usize) {
+fn airborne_thrash_residual(kind: Thrash, seed: u64, isolate: bool) -> (Vec3, usize) {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
@@ -693,6 +702,9 @@ fn airborne_thrash_residual(kind: Thrash, seed: u64) -> (Vec3, usize) {
     tick(&mut app, 1);
     respawn_airborne(&mut app, MOMENTUM_SPAWN_Y);
     tick(&mut app, 4);
+    if isolate {
+        disable_crab_collisions(&mut app);
+    }
     tick(&mut app, 1);
 
     let mut rng = StdRng::seed_from_u64(seed);
@@ -737,17 +749,19 @@ fn airborne_thrash_residual(kind: Thrash, seed: u64) -> (Vec3, usize) {
         "the crab's part entities changed mid-window — a rescue respawned her, so \
          the momentum window mixes two bodies"
     );
-    assert_eq!(
-        total_contacts, 0,
-        "airborne window had {total_contacts} contact-points — not contact-free, so \
-         the momentum check isn't isolating internal forces"
-    );
+    if isolate {
+        assert_eq!(
+            total_contacts, 0,
+            "isolated airborne window had {total_contacts} contact-points — not \
+             contact-free, so the momentum check isn't isolating internal forces"
+        );
+    }
 
     let dt_total = TICKS as f32 * crate::physics::PHYSICS_DT;
     let g: Vec3 = crate::physics::PHYSICS_GRAVITY;
     let resid = (p1 - p0 - m * g * dt_total - j_drag) / (m * dt_total);
     println!(
-        "airborne thrash ({kind:?} seed {seed}): m={m:.3} kg  \
+        "airborne thrash ({kind:?} seed {seed} isolate={isolate}): m={m:.3} kg  \
          resid={:.5} m/s² ({:.3}% of g)  dir={:?}  contacts={total_contacts}",
         resid.length(),
         100.0 * resid.length() / g.length(),
@@ -776,7 +790,7 @@ fn airborne_thrash_residual(kind: Thrash, seed: u64) -> (Vec3, usize) {
 #[test]
 fn airborne_crab_conserves_linear_momentum() {
     for (kind, seed) in MOMENTUM_GATE_DRIVES {
-        let (resid, _) = airborne_thrash_residual(kind, seed);
+        let (resid, _) = airborne_thrash_residual(kind, seed, true);
         assert!(
             resid.length() < 1e-2,
             "phantom COM force ({kind:?} seed {seed}): |Δp − m·g·Δt| ≡ {:.4} m/s² \
@@ -798,7 +812,7 @@ fn airborne_crab_conserves_linear_momentum() {
 #[test]
 fn airborne_contact_free_thrash_stays_below_known_leak() {
     for (kind, seed) in MOMENTUM_GATE_DRIVES {
-        let (resid, _) = airborne_thrash_residual(kind, seed);
+        let (resid, _) = airborne_thrash_residual(kind, seed, true);
         assert!(
             resid.length() < 0.05,
             "phantom COM force is back at pre-fix scale ({kind:?} seed \
@@ -808,6 +822,32 @@ fn airborne_contact_free_thrash_stays_below_known_leak() {
             resid.length(),
         );
     }
+}
+
+/// The self-collision half of bddap/rl#321: crab-part↔crab-part contacts are
+/// also internal, so momentum must still follow gravity when the airborne thrash
+/// runs WITH the production collision groups and the limbs beat against each
+/// other. Pre-fix this measured 0.64 m/s²; after the 2026-07-28 solver fix it
+/// measures 0.037 (contact impulses go through per-substep-fresh mass matrices,
+/// but contact-pair rounding under hundreds of contact points keeps it above the
+/// contact-free floor). The 0.5 ceiling is 13× above today's reality and under
+/// the pre-fix baseline — it catches a contact-solve change that starts
+/// injecting momentum wholesale.
+#[test]
+fn airborne_self_contact_thrash_stays_below_known_leak() {
+    let (resid, contacts) = airborne_thrash_residual(Thrash::Sinusoid, 21, false);
+    assert!(
+        contacts > 0,
+        "the thrash never produced a self-contact — this variant isn't exercising \
+         contact resolution; make the drive more violent"
+    );
+    assert!(
+        resid.length() < 0.5,
+        "phantom COM force UNDER SELF-CONTACT is back at pre-fix scale \
+         (bddap/rl#321): {:.4} m/s² (post-fix baseline 0.037) across {contacts} \
+         contact-points — self-collision resolution injects momentum",
+        resid.length(),
+    );
 }
 
 /// NOT a regression test — a measurement INSTRUMENT (rl#20 stage 2/3), `#[ignore]`d
@@ -896,6 +936,7 @@ fn phantom_force_instrument() {
         }
         respawn_airborne(&mut app, MOMENTUM_SPAWN_Y);
         tick(&mut app, 4);
+        disable_crab_collisions(&mut app);
         tick(&mut app, 1);
 
         let mut rng = StdRng::seed_from_u64(11);
@@ -1156,6 +1197,7 @@ fn airborne_crab_reaches_terminal_velocity() {
     tick(&mut app, 1);
     respawn_airborne(&mut app, MOMENTUM_SPAWN_Y);
     tick(&mut app, 4);
+    disable_crab_collisions(&mut app);
     tick(&mut app, TICKS);
 
     let (p, m) = crab_linear_momentum(&mut app);

@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use super::collision::CRAB_COLLISION;
+use super::collision::{NESTED_COLLISION, crab_collision, no_adjacent_contacts};
 use super::components::{
     CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint, CrabRestPose,
 };
@@ -17,7 +17,8 @@ const FRICTION_RAMP: f32 = 4.0;
 /// [`crate::physics::world::GROUND_FRICTION`] to the μ≈2.0 the rl#318 slope-hold
 /// acceptance is tuned against (`slope_hold_test`) — retune BOTH or the crab
 /// toboggans again. Deliberately NOT raised (nor `Max`-combined) to do the ground's
-/// job.
+/// job: feet also self-contact adjacent legs, and stiffer foot↔leg pairs jam them
+/// (`collider_check` catches it).
 const FOOT_FRICTION: Friction = Friction::coefficient(1.5);
 
 /// Soft-CCD lookahead on every crab part (bddap/rl#315): the narrow phase widens its
@@ -197,7 +198,7 @@ pub fn spawn_crab(
             crab_sleep(),
             AdditionalSolverIterations(CRAB_SETTLE_EXTRA_ITERATIONS),
             carapace_collider,
-            CRAB_COLLISION,
+            crab_collision(env),
             ColliderMassProperties::Density(recipe.carapace_density),
             // Live mass mirror for the drag brake's momentum-cancel cap
             // (`aero::apply_air_drag`) — the collider density is the one mass source.
@@ -210,6 +211,12 @@ pub fn spawn_crab(
         .id();
 
     let mut ents: Vec<Entity> = Vec::with_capacity(recipe.links.len());
+    let inside_carapace = |p: Vec3| {
+        (p - origin - recipe.carapace_offset)
+            .abs()
+            .cmple(recipe.carapace_half)
+            .all()
+    };
     for (i, link) in recipe.links.iter().enumerate() {
         if link.actuated.is_none() {
             ents.push(carapace);
@@ -230,6 +237,11 @@ pub fn spawn_crab(
                 Collider::cuboid(half.x, half.y, half.z),
             )]),
         };
+        let groups = if inside_carapace(here + link.center) {
+            NESTED_COLLISION
+        } else {
+            crab_collision(env)
+        };
         total_mass += collider.raw.mass_properties(link.density).mass();
         let id = link
             .actuated
@@ -243,7 +255,7 @@ pub fn spawn_crab(
             crab_sleep(),
             AdditionalSolverIterations(CRAB_SETTLE_EXTRA_ITERATIONS),
             collider,
-            CRAB_COLLISION,
+            groups,
             ColliderMassProperties::Density(link.density),
             MultibodyJoint::new(parent_ent, joint),
             place(here),
@@ -290,14 +302,15 @@ pub fn spawn_crab(
 /// energy.
 fn rig_joint(id: CrabJointId, axis: Vec3, anchor1: Vec3) -> TypedJoint {
     let [lo, hi] = id.limits();
-    let mut revolute: TypedJoint = RevoluteJointBuilder::new(axis)
-        .local_anchor1(anchor1)
-        .local_anchor2(Vec3::ZERO)
-        .limits([lo, hi])
-        .motor_velocity(0.0, FRICTION_RAMP)
-        .motor_max_force(id.friction_cap())
-        .motor_model(MotorModel::ForceBased)
-        .into();
+    let mut revolute = no_adjacent_contacts(
+        RevoluteJointBuilder::new(axis)
+            .local_anchor1(anchor1)
+            .local_anchor2(Vec3::ZERO)
+            .limits([lo, hi])
+            .motor_velocity(0.0, FRICTION_RAMP)
+            .motor_max_force(id.friction_cap())
+            .motor_model(MotorModel::ForceBased),
+    );
     let generic: &mut GenericJoint = revolute.as_mut();
     generic.raw.softness = LIMIT_SOFTNESS;
     revolute

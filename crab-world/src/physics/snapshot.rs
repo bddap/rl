@@ -227,6 +227,11 @@ impl PlantSnapshot {
                 co.set_shape(shape);
                 co.set_mass_properties(mprops);
             }
+            if !cfg.self_contacts {
+                let mut groups = co.collision_groups();
+                groups.filter = groups.filter.difference(groups.memberships);
+                co.set_collision_groups(groups);
+            }
         }
 
         let mut torque: std::collections::HashMap<RigidBodyHandle, Vec3> =
@@ -460,6 +465,8 @@ pub struct ReplayConfig {
     /// Joint limit spring override; `None` keeps the snapshot's springs.
     pub limit_softness: Option<SpringCoefficients<f32>>,
     pub shape: ShapeVariant,
+    /// `false` drops every same-crab link–link and link–carapace contact pair.
+    pub self_contacts: bool,
 }
 
 /// One contact manifold on the worst-kicked link after the replayed tick.
@@ -495,10 +502,10 @@ pub struct ReplayOutcome {
 /// twitch would otherwise read as a 5× jump.
 pub const KICK_FLOOR_M_S: f32 = 1.0;
 
-/// The rl#332 F3 shape: a part's speed multiplies >4× in ONE tick. A loaded link
-/// cannot do that under drive or impact; an UNLOADED distal link can (τ·dt/I on a
-/// 20 g carpus ≈ 39 rad/s per tick), so the count is a gait soak metric, not a gate
-/// on free-swinging drives.
+/// The rl#332 F3 shape: a part's speed multiplies >4× in ONE tick. No drive can
+/// do that to a link already moving — drives are rate-bounded at the joint —
+/// and no strike can either: an impact redistributes body KE, so the struck
+/// link's speed lands near the body's, not at several times its own.
 pub fn is_kick(speed_before: f32, speed_after: f32) -> bool {
     speed_after > 4.0 * speed_before.max(KICK_FLOOR_M_S)
 }

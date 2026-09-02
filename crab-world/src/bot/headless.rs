@@ -123,7 +123,9 @@ pub fn headless_server_world(
     app
 }
 
-/// The one-crab world on the canonical production ground (rl#293).
+/// The one-crab world on the canonical production ground — used by tests AND by the
+/// `rl-train collider-check` rest-pose audit, which must measure the crab on the
+/// ground it actually lives on (rl#293).
 pub fn headless_app() -> App {
     headless_stack(HeadlessStack {
         num_envs: 1,
@@ -136,7 +138,8 @@ pub fn headless_app() -> App {
 /// A GCR spot where zero-drive REST is reachable: the default spawn sits on a
 /// mountainside steep enough that a passive crab luges downhill indefinitely
 /// (measured: 50+ m of descent over a 576-tick settle, carapace 1–3 m airborne
-/// — rl#392). Rest-pose assertions (the reset-test grounded check) are trajectory lotteries on that luge; they belong on ground the crab
+/// — rl#392). Rest-pose assertions (`collider_check`, the reset-test grounded
+/// check) are trajectory lotteries on that luge; they belong on ground the crab
 /// can actually rest on. Scan outward from the origin on a coarse lattice and
 /// take the first point whose local 8-neighbour slope stays under ~5°, so the
 /// pick survives terrain re-bakes instead of pinning a coordinate that goes
