@@ -23,7 +23,7 @@ use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::physics::PHYSICS_HZ;
 
 /// Fling controller: while armed, add `force` to the carapace's `ExternalForce`
-/// AFTER `apply_actions` zeroed it (the rl#298 shove seam). `one_shot` disarms
+/// AFTER `apply_actions` zeroed it. `one_shot` disarms
 /// after a single tick; otherwise it holds — the sustained "rocket" that stands
 /// in for rl#332 policy-catapult storm power.
 #[derive(Resource, Default)]

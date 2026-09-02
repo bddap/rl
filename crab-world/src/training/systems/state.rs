@@ -117,8 +117,6 @@ pub(crate) struct WorkerMode {
     pub(super) log_effort: bool,
     /// Far edge of the target-band draw — `TrainConfig::band_max_m`.
     pub(super) band_max_m: f32,
-    /// Per-tick random-shove start probability — `TrainConfig::shove_prob`.
-    pub(super) shove_prob: f32,
     pub(super) tick_budget: u64,
     pub(super) total_steps: u64,
     pub(super) reported_episodes: usize,
@@ -544,7 +542,6 @@ impl WorkerState {
                 effort_weight: config.effort_weight,
                 log_effort: config.log_effort,
                 band_max_m: config.band_max_m,
-                shove_prob: config.shove_prob,
                 tick_budget: config.ticks,
                 total_steps: 0,
                 reported_episodes: 0,

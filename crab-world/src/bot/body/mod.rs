@@ -11,8 +11,8 @@ pub use collision::{
 };
 
 pub use components::{
-    CrabAssets, CrabBodyMass, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint,
-    CrabModelPath, CrabRestPose,
+    CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint, CrabModelPath,
+    CrabRestPose,
 };
 
 pub use joint_id::{

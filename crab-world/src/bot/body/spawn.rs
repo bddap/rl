@@ -3,8 +3,7 @@ use bevy_rapier3d::prelude::*;
 
 use super::collision::{NESTED_COLLISION, crab_collision, no_adjacent_contacts};
 use super::components::{
-    CrabAssets, CrabBodyMass, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint,
-    CrabRestPose,
+    CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint, CrabRestPose,
 };
 use super::joint_id::CrabJointId;
 use crate::bot::rig;
@@ -277,10 +276,9 @@ pub fn spawn_crab(
         ents.push(ec.id());
     }
 
-    commands.entity(carapace).insert((
-        crate::bot::aero::CarapaceDrag::for_total_mass(total_mass),
-        CrabBodyMass(total_mass),
-    ));
+    commands
+        .entity(carapace)
+        .insert(crate::bot::aero::CarapaceDrag::for_total_mass(total_mass));
 
     carapace
 }

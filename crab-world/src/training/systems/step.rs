@@ -469,7 +469,7 @@ mod tests {
 
     /// One-env training world built by the PRODUCTION env constructor
     /// ([`build_rollout_app`] — the headless server world plus the full training
-    /// system set, shove included), so these tests — the same-seed determinism
+    /// system set), so these tests — the same-seed determinism
     /// contract above all — certify the world rollouts actually run in.
     fn headless_training_app(checkpoint_dir: &std::path::Path, seed: u64) -> App {
         use crate::training::inproc::build_rollout_app;
@@ -497,9 +497,6 @@ mod tests {
             let dir = std::env::temp_dir()
                 .join(format!("rl_test_determinism_{seed}_{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
-            // The production wiring includes the shove system (rl#298 stage 4), which
-            // pins the shove draw stream — it consumes the training RNG every
-            // recording tick — into the same-seed contract.
             let mut app = headless_training_app(&dir, seed);
             app.world_mut()
                 .non_send_mut::<WorkerState>()

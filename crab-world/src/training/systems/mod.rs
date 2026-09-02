@@ -1,5 +1,4 @@
 mod lifecycle;
-mod shove;
 mod state;
 mod step;
 mod trace;
@@ -9,7 +8,6 @@ mod trace;
 /// constant directly.
 pub use lifecycle::MAX_EPISODE_TICKS;
 pub(crate) use lifecycle::reset_crab;
-pub(crate) use shove::shove_crabs;
 pub use state::STEPS_PER_ROLLOUT;
 pub(crate) use state::{HorizonOutput, HorizonRequest, LearnerState, StepTelemetry, WorkerState};
 pub(crate) use step::brain_step;

@@ -102,8 +102,7 @@ pub fn drag_force(coeff: f32, mass: f32, v: Vec3) -> Vec3 {
 }
 
 /// Ordered after [`super::BotSet::Act`] (whose `apply_actions` zeroes
-/// `ExternalForce.force` every tick) and before the rapier sync — the same seam
-/// the training shoves use.
+/// `ExternalForce.force` every tick) and before the rapier sync.
 ///
 /// The live rapier mass mirror reads zero until the first writeback, so the first
 /// tick's drag cap is zero and the drag is dropped — at gait speeds drag is a few

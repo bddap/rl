@@ -39,12 +39,6 @@ impl FromWorld for CrabAssets {
 #[derive(Component)]
 pub struct CrabCarapace;
 
-/// Whole-rig mass (kg) on the carapace, summed at spawn from the very colliders the
-/// solver integrates, so every body-weight-relative force reads one number that
-/// cannot drift from the rig actually spawned.
-#[derive(Component, Clone, Copy)]
-pub struct CrabBodyMass(pub f32);
-
 #[derive(Component)]
 pub struct CrabClawTip;
 

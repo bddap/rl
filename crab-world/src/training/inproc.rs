@@ -167,12 +167,6 @@ pub(crate) fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usi
             .chain()
             .in_set(crate::bot::BotSet::Think),
     );
-    app.add_systems(
-        FixedUpdate,
-        systems::shove_crabs
-            .after(crate::bot::BotSet::Act)
-            .before(bevy_rapier3d::plugin::PhysicsSet::SyncBackend),
-    );
 }
 
 /// Build one rollout worker's env — the trainer trains in the headless server world
