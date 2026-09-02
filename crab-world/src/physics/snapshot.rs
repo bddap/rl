@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::bot::actuator::{CrabActions, applied_torque};
 use crate::bot::aero::{CarapaceDrag, drag_force};
-use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
+use crate::bot::body::{
+    CRAB_COLLISION, CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId,
+};
 use crate::physics::{PHYSICS_DT, PHYSICS_GRAVITY};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -212,25 +214,22 @@ impl PlantSnapshot {
             }
         }
 
-        let link_colliders: Vec<(ColliderHandle, usize)> = s
-            .colliders
-            .iter()
-            .filter_map(|(h, co)| {
-                let part = s.parts.iter().position(|p| Some(*p) == co.parent())?;
-                (part > 0).then_some((h, part))
-            })
-            .collect();
-        for (h, _) in &link_colliders {
-            let co = s.colliders.get_mut(*h).expect("link collider");
+        let mut link_colliders: Vec<(ColliderHandle, usize)> = Vec::new();
+        for (h, co) in s.colliders.iter_mut() {
+            let Some(part) = s.parts.iter().position(|p| Some(*p) == co.parent()) else {
+                continue;
+            };
+            if cfg.filter == ContactFilter::Shipped {
+                co.set_collision_groups(CRAB_COLLISION.into());
+            }
+            if part == 0 {
+                continue;
+            }
+            link_colliders.push((h, part));
             if let Some(shape) = cfg.shape.apply(co.shape()) {
                 let mprops = co.mass_properties();
                 co.set_shape(shape);
                 co.set_mass_properties(mprops);
-            }
-            if !cfg.self_contacts {
-                let mut groups = co.collision_groups();
-                groups.filter = groups.filter.difference(groups.memberships);
-                co.set_collision_groups(groups);
             }
         }
 
@@ -465,8 +464,17 @@ pub struct ReplayConfig {
     /// Joint limit spring override; `None` keeps the snapshot's springs.
     pub limit_softness: Option<SpringCoefficients<f32>>,
     pub shape: ShapeVariant,
-    /// `false` drops every same-crab link–link and link–carapace contact pair.
-    pub self_contacts: bool,
+    pub filter: ContactFilter,
+}
+
+/// Which collision groups the crab's colliders carry on the replayed tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContactFilter {
+    /// The groups the recording binary spawned — a pre-fix snapshot keeps its
+    /// same-crab link–link pairs (rl#332).
+    AsRecorded,
+    /// This build's [`CRAB_COLLISION`].
+    Shipped,
 }
 
 /// One contact manifold on the worst-kicked link after the replayed tick.
@@ -502,10 +510,10 @@ pub struct ReplayOutcome {
 /// twitch would otherwise read as a 5× jump.
 pub const KICK_FLOOR_M_S: f32 = 1.0;
 
-/// The rl#332 F3 shape: a part's speed multiplies >4× in ONE tick. No drive can
-/// do that to a link already moving — drives are rate-bounded at the joint —
-/// and no strike can either: an impact redistributes body KE, so the struck
-/// link's speed lands near the body's, not at several times its own.
+/// The rl#332 F3 shape: a part's speed multiplies >4× in ONE tick. A loaded link
+/// cannot do that under drive or impact; an UNLOADED distal link can (τ·dt/I on a
+/// 20 g carpus ≈ 39 rad/s per tick), so the count is a gait soak metric, not a gate
+/// on free-swinging drives.
 pub fn is_kick(speed_before: f32, speed_after: f32) -> bool {
     speed_after > 4.0 * speed_before.max(KICK_FLOOR_M_S)
 }

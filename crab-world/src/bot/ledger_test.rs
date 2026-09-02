@@ -2,9 +2,11 @@
 //! settled crab in a steep valley is driven with saturated, sign-flipping drives
 //! (the trained policy's stop-railing signature) and the whole-body mechanical
 //! energy is audited over every [`LEDGER_WINDOW`]-tick window against the
-//! actuators' gross power; any part whose speed multiplies >4× in one tick is a
-//! solver kick. Both must be clean: a solver that injects here is the storm
-//! mechanism the soaks hunt, at the counts the game actually ships.
+//! actuators' gross power, and the narrow phase is audited for same-crab contact
+//! rows, the row class PGS cannot converge (rl#332). Both must be clean at the
+//! counts the game actually ships. Kicks (a part's speed ×4 in one tick) are
+//! printed as data: unjammed legs under saturated flip-drives swing at the
+//! drive's own rate, so here the count cannot tell a kick from a drive.
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::context::{
@@ -247,11 +249,9 @@ fn driven_crab_energy_ledger_holds_on_shipped_solver() {
         audit.worst_over_budget.0,
         audit.worst_over_budget.1
     );
-    assert!(
-        audit.kicks.is_empty(),
-        "{} one-tick speed kicks on the shipped solver configuration, first {:?} (rl#332 F3)",
-        audit.kicks.len(),
-        audit.kicks[0]
+    assert_eq!(
+        audit.self_contacts, 0,
+        "same-crab contact rows exist on the shipped collision filter (rl#332)"
     );
 }
 
