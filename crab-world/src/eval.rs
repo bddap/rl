@@ -84,6 +84,9 @@ fn bearing_progressable(
 /// [`EVAL_PAIRS`] scored (heading, start) pairs. Four starts per heading keeps the
 /// far sweep near the historical 3-locale × 8-bearing episode budget (32 vs 24
 /// episodes) while sampling 32 DISTINCT terrain starts instead of 3.
+/// Crabs per headless world in the batched far sweep.
+pub const MAX_ENVS: usize = 16;
+
 pub const EVAL_STARTS_PER_HEADING: usize = 4;
 
 /// The far sweep's (heading, start) pair count — the mean-progress headline's sample
@@ -123,8 +126,8 @@ pub struct EvalPair {
 /// (grid, far distance): same bake and amplitude ⇒ same pairs, so the instrument
 /// moves only when the ground does — which was already the re-baseline boundary.
 /// Distinct starts by construction (each candidate is consumed at most once);
-/// cross-env physics contamination is impossible regardless (envs are
-/// collision-isolated by group, `bot::body::collision`). Errs when the candidate
+/// cross-env physics contamination is impossible regardless (crabs never
+/// collide with crabs, `bot::body::collision`). Errs when the candidate
 /// budget exhausts — the loud high-amplitude refusal.
 fn eval_pairs(
     grid: &crate::terrain::TerrainGrid,
@@ -810,11 +813,11 @@ pub fn run_eval(
     // baselines were measured there and moving either instrument re-pins/re-baselines
     // it. Both are SIDECARS (never the headline); the close probe's readout is
     // reached_count, and the pace probe reads its BEST bearing — neither is floored
-    // by a dead one. The far pairs run batched, MAX_ENVS per world (envs are
-    // collision-isolated by group); the probes stay single-env — their pinned
+    // by a dead one. The far pairs run batched, MAX_ENVS per world (crabs never
+    // collide with crabs); the probes stay single-env — their pinned
     // baselines were measured in single-env worlds and the pace seams are env-0.
     let mut far_reports = Vec::with_capacity(pairs.len());
-    for chunk in pairs.chunks(crate::bot::body::MAX_ENVS) {
+    for chunk in pairs.chunks(MAX_ENVS) {
         far_reports.extend(run_pairs(
             &policy,
             active_ticks,
@@ -955,7 +958,7 @@ pub(crate) fn bearing_bin(theta_rad: f32) -> usize {
 /// surface-placed start (via the same
 /// [`InitialCrabLayout`](crate::bot::InitialCrabLayout) seam net's GCR restart uses,
 /// so eval starts ride the ONE spawn-layout path). All envs step in lockstep for the
-/// same settle + active budget; envs are collision-isolated by group, so pairs can
+/// same settle + active budget; crabs never collide with crabs, so pairs can
 /// never physically contaminate each other. Deterministic per brain — the worlds are
 /// single-threaded and the pair list is a pure function of the grid.
 fn run_pairs(
@@ -967,7 +970,7 @@ fn run_pairs(
     grid: &std::sync::Arc<crate::terrain::TerrainGrid>,
 ) -> Vec<BearingReport> {
     assert!(
-        !pairs.is_empty() && pairs.len() <= crate::bot::body::MAX_ENVS,
+        !pairs.is_empty() && pairs.len() <= MAX_ENVS,
         "run_pairs takes 1..=MAX_ENVS pairs, got {}",
         pairs.len()
     );

@@ -278,7 +278,7 @@ pub struct TrainConfig {
     #[arg(long, default_value_t = 0)]
     pub ticks: u64,
 
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=bot::body::MAX_ENVS as u64))]
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=eval::MAX_ENVS as u64))]
     pub envs: u64,
 
     #[arg(long)]

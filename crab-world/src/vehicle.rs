@@ -832,16 +832,10 @@ mod tests {
     /// 512 m fixture edge mid-measurement and be parked by `rescue_lost_crafts`.
     const FAR: Vec3 = Vec3::new(-300.0, 300.0, -300.0);
 
-    /// rl#235 regression: nested (coxa) links were vehicle-transparent — neither
-    /// NESTED_COLLISION's filter nor VEHICLE_COLLISION's carried the other side, so a
-    /// low ram ghosted through a hip capsule under the shell edge. A vehicle overlapping
-    /// a NESTED-grouped capsule must register a narrow-phase contact. The coxa is a
-    /// proxy capsule carrying the exact groups `spawn_crab` gives a shell-nested link,
-    /// because only the mesh-fitted Sally body nests links — the fallback body this test
-    /// env spawns nests none.
+    /// rl#235: a vehicle overlapping a crab-grouped capsule registers a contact.
     #[test]
-    fn vehicle_contacts_nested_coxa() {
-        use crate::bot::body::NESTED_COLLISION;
+    fn vehicle_contacts_crab_collider() {
+        use crate::bot::body::CRAB_COLLISION;
         use crate::bot::headless::tick;
         use bevy_rapier3d::plugin::context::{RapierContextColliders, RapierContextSimulation};
 
@@ -853,7 +847,7 @@ mod tests {
             .spawn((
                 RigidBody::Dynamic,
                 Collider::capsule_y(0.03, 0.02),
-                NESTED_COLLISION,
+                CRAB_COLLISION,
                 Transform::from_translation(FAR),
             ))
             .id();
@@ -877,7 +871,7 @@ mod tests {
             sim.narrow_phase
                 .contact_pair(handle(vehicle), handle(coxa))
                 .is_some_and(|p| p.has_any_active_contact()),
-            "vehicle overlapping a coxa produced no contact — NESTED_COLLISION and \
+            "vehicle overlapping a coxa produced no contact — CRAB_COLLISION and \
              VEHICLE_COLLISION must include each other's group (rl#235)"
         );
     }

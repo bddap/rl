@@ -6,9 +6,7 @@ mod spawn;
 #[cfg(feature = "render")]
 mod debug_gizmos;
 
-pub use collision::{
-    ARENA_COLLISION, MAX_ENVS, NESTED_COLLISION, VEHICLE_COLLISION, crab_collision,
-};
+pub use collision::{ARENA_COLLISION, CRAB_COLLISION, VEHICLE_COLLISION};
 
 pub use components::{
     CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint, CrabModelPath,

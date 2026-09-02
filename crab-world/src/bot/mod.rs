@@ -4,7 +4,7 @@ pub mod arch;
 pub mod body;
 #[cfg(test)]
 mod claw_whip_test;
-pub mod collider_check;
+pub mod contact_audit;
 #[cfg(test)]
 mod fling_test;
 pub mod headless;

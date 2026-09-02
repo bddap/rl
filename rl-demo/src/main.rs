@@ -273,7 +273,7 @@ fn boot(common: &Common, driver: Driver) -> (App, otel::OtelGuard) {
         .add_plugins(bot::BotPlugin);
 
     if common.contact_audit {
-        app.add_systems(FixedUpdate, bot::collider_check::live_contact_audit);
+        app.add_systems(FixedUpdate, bot::contact_audit::live_contact_audit);
     }
 
     (app, otel_guard)
