@@ -94,16 +94,36 @@ pub fn live_contact_audit(
     }
 }
 
-/// Deepest geometric interpenetration between two links of env 0's crab this tick —
-/// pairs that are not joint-adjacent and do not involve the carapace (nested coxae
-/// sit inside it by design). Same-crab pairs raise no contact since rl#332, so this
-/// is the only ruler left for leg–leg overlap.
+/// Deepest geometric interpenetration between two VISIBLE links of env 0's crab this
+/// tick — pairs that are not joint-adjacent, with neither link centred inside the
+/// carapace box (coxae, bases, and claw shoulders nest there by design). Same-crab
+/// pairs raise no contact since rl#332, so this is the only ruler left for leg–leg
+/// overlap.
 pub struct OverlapScan {
     pub depth: f32,
     pub a: String,
     pub b: String,
     /// Pairs deeper than `min_depth`.
     pub pairs_over: usize,
+}
+
+/// Is `link`'s centre inside `carapace`'s box (a one-cuboid compound)?
+pub fn inside_carapace(
+    carapace: &bevy_rapier3d::rapier::geometry::Collider,
+    link: &bevy_rapier3d::rapier::geometry::Collider,
+) -> bool {
+    let Some(comp) = carapace.shape().as_compound() else {
+        return false;
+    };
+    let Some((local, shell)) = comp.shapes().first() else {
+        return false;
+    };
+    let Some(cuboid) = shell.as_cuboid() else {
+        return false;
+    };
+    let pose = *carapace.position() * *local;
+    let p = pose.inverse_transform_point(link.position().translation);
+    p.abs().cmple(cuboid.half_extents).all()
 }
 
 pub fn same_crab_overlap(world: &mut World, min_depth: f32) -> OverlapScan {
@@ -120,9 +140,14 @@ pub fn same_crab_overlap(world: &mut World, min_depth: f32) -> OverlapScan {
         Has<CrabCarapace>,
     ), With<CrabBodyPart>>();
     let mut links: Vec<(Entity, ColliderHandle, String)> = Vec::new();
+    let mut carapace_handle = None;
     let mut adjacent: HashSet<(Entity, Entity)> = HashSet::new();
     for (e, env, h, joint, mj, carapace) in q.iter(world) {
-        if env.0 != 0 || carapace {
+        if env.0 != 0 {
+            continue;
+        }
+        if carapace {
+            carapace_handle = Some(h.0);
             continue;
         }
         let Some(joint) = joint else { continue };
@@ -136,17 +161,26 @@ pub fn same_crab_overlap(world: &mut World, min_depth: f32) -> OverlapScan {
         .query::<&RapierContextColliders>()
         .single(world)
         .expect("one rapier context");
+    let shell = carapace_handle.and_then(|h| cols.colliders.get(h));
+    let visible: Vec<&(Entity, ColliderHandle, String)> = links
+        .iter()
+        .filter(|(_, h, _)| {
+            cols.colliders
+                .get(*h)
+                .is_some_and(|co| !shell.is_some_and(|s| inside_carapace(s, co)))
+        })
+        .collect();
     let mut scan = OverlapScan {
         depth: 0.0,
         a: String::new(),
         b: String::new(),
         pairs_over: 0,
     };
-    for (i, (ea, ha, na)) in links.iter().enumerate() {
+    for (i, (ea, ha, na)) in visible.iter().enumerate() {
         let Some(ca) = cols.colliders.get(*ha) else {
             continue;
         };
-        for (eb, hb, nb) in links.iter().skip(i + 1) {
+        for (eb, hb, nb) in visible.iter().skip(i + 1) {
             if adjacent.contains(&(*ea, *eb)) {
                 continue;
             }

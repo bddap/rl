@@ -378,9 +378,10 @@ impl PlantSnapshot {
         self.joints.iter().find(|j| j.child == h).map(|j| j.id)
     }
 
-    /// Deepest geometric interpenetration (m) between two non-adjacent links, and
-    /// the pair's part indices.
+    /// Deepest geometric interpenetration (m) between two non-adjacent links outside
+    /// the carapace box, and the pair's part indices.
     pub fn deepest_same_crab_overlap(&self) -> (f32, Option<(usize, usize)>) {
+        use crate::bot::contact_audit::inside_carapace;
         use bevy_rapier3d::rapier::parry::query::contact;
         let adjacent = |a: usize, b: usize| {
             self.joints.iter().any(|j| {
@@ -394,10 +395,14 @@ impl PlantSnapshot {
                 .find(|(_, co)| co.parent() == Some(self.parts[part]))
                 .map(|(_, co)| co)
         };
+        let shell = collider_of(0);
+        let visible = |part: usize| {
+            collider_of(part).is_some_and(|co| !shell.is_some_and(|s| inside_carapace(s, co)))
+        };
         let mut worst = (0.0f32, None);
         for a in 1..self.parts.len() {
             for b in a + 1..self.parts.len() {
-                if adjacent(a, b) {
+                if adjacent(a, b) || !visible(a) || !visible(b) {
                     continue;
                 }
                 let (Some(ca), Some(cb)) = (collider_of(a), collider_of(b)) else {
