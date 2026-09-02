@@ -8,6 +8,7 @@ mod net_join;
 mod net_screenshot;
 mod nn_crab_probe;
 mod nn_crab_vehicle_stability;
+mod overlap_frame;
 mod play;
 mod sally_replay;
 mod sally_soak;
@@ -43,6 +44,9 @@ pub(crate) enum Command {
     /// JSONL state-window dump per detected event.
     SallySoak(sally_soak::Args),
     SallyReplay(sally_replay::Args),
+    /// rl#332: draw a dumped plant state's colliders (top + side view) as a PPM,
+    /// the deepest same-crab overlap pair in red.
+    OverlapFrame(overlap_frame::Args),
     /// rl#396: on-target cost profile of one driven physics step in an active-hunt
     /// scene — wall time vs rapier-internal split, production 64:30 cadence.
     StepProfile(step_profile::Args),
@@ -66,6 +70,7 @@ pub(crate) fn dispatch(command: Command) -> Result<()> {
         Command::NnCrabVehicleStability(args) => nn_crab_vehicle_stability::run(args),
         Command::SallySoak(args) => sally_soak::run(args),
         Command::SallyReplay(args) => sally_replay::run(args),
+        Command::OverlapFrame(args) => overlap_frame::run(args),
         Command::StepProfile(args) => step_profile::run(args),
     }
 }

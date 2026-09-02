@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use super::body::{CrabBodyPart, CrabCarapace, CrabJoint};
+use bevy_rapier3d::rapier::geometry::ColliderHandle;
+
+use super::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint};
 
 /// Sub-5 mm contact depth is arrival, not a fight: the crumple settles
 /// asymptotically, so some pair at the touching frontier always shows sub-mm depth
@@ -90,4 +92,84 @@ pub fn live_contact_audit(
     for (d, p) in terr.iter().take(6) {
         println!("  {:>4.0}mm {p} vs terrain", d * 1000.0);
     }
+}
+
+/// Deepest geometric interpenetration between two links of env 0's crab this tick —
+/// pairs that are not joint-adjacent and do not involve the carapace (nested coxae
+/// sit inside it by design). Same-crab pairs raise no contact since rl#332, so this
+/// is the only ruler left for leg–leg overlap.
+pub struct OverlapScan {
+    pub depth: f32,
+    pub a: String,
+    pub b: String,
+    /// Pairs deeper than `min_depth`.
+    pub pairs_over: usize,
+}
+
+pub fn same_crab_overlap(world: &mut World, min_depth: f32) -> OverlapScan {
+    use bevy_rapier3d::rapier::parry::bounding_volume::BoundingVolume;
+    use bevy_rapier3d::rapier::parry::query::contact;
+    use std::collections::HashSet;
+
+    let mut q = world.query_filtered::<(
+        Entity,
+        &CrabEnvId,
+        &RapierColliderHandle,
+        Option<&CrabJoint>,
+        Option<&MultibodyJoint>,
+        Has<CrabCarapace>,
+    ), With<CrabBodyPart>>();
+    let mut links: Vec<(Entity, ColliderHandle, String)> = Vec::new();
+    let mut adjacent: HashSet<(Entity, Entity)> = HashSet::new();
+    for (e, env, h, joint, mj, carapace) in q.iter(world) {
+        if env.0 != 0 || carapace {
+            continue;
+        }
+        let Some(joint) = joint else { continue };
+        if let Some(mj) = mj {
+            adjacent.insert((e, mj.parent));
+            adjacent.insert((mj.parent, e));
+        }
+        links.push((e, h.0, format!("{:?}", joint.id)));
+    }
+    let cols = world
+        .query::<&RapierContextColliders>()
+        .single(world)
+        .expect("one rapier context");
+    let mut scan = OverlapScan {
+        depth: 0.0,
+        a: String::new(),
+        b: String::new(),
+        pairs_over: 0,
+    };
+    for (i, (ea, ha, na)) in links.iter().enumerate() {
+        let Some(ca) = cols.colliders.get(*ha) else {
+            continue;
+        };
+        for (eb, hb, nb) in links.iter().skip(i + 1) {
+            if adjacent.contains(&(*ea, *eb)) {
+                continue;
+            }
+            let Some(cb) = cols.colliders.get(*hb) else {
+                continue;
+            };
+            if !ca.compute_aabb().intersects(&cb.compute_aabb()) {
+                continue;
+            }
+            let Ok(Some(c)) = contact(ca.position(), ca.shape(), cb.position(), cb.shape(), 0.0)
+            else {
+                continue;
+            };
+            let depth = -c.dist;
+            if depth > min_depth {
+                scan.pairs_over += 1;
+            }
+            if depth > scan.depth {
+                scan.depth = depth;
+                scan.a = na.clone();
+                scan.b = nb.clone();
+            }
+        }
+    }
+    scan
 }

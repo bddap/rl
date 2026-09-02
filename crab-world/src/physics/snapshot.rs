@@ -5,6 +5,7 @@
 //! sees; the replay owns no policy, no sensors, no schedule: drives are a row of
 //! numbers, so "zero the drives" and "change the solver" are independent levers.
 
+pub use bevy::math::Vec3;
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::context::{
     RapierContextColliders, RapierContextJoints, RapierContextSimulation, RapierRigidBodySet,
@@ -15,10 +16,11 @@ use bevy_rapier3d::rapier::dynamics::{
     CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
     RigidBodyHandle, RigidBodySet,
 };
+pub use bevy_rapier3d::rapier::geometry::Shape;
 use bevy_rapier3d::rapier::geometry::{
-    ColliderHandle, ColliderSet, DefaultBroadPhase, NarrowPhase, Shape, SharedShape,
+    ColliderHandle, ColliderSet, DefaultBroadPhase, NarrowPhase, SharedShape,
 };
-use bevy_rapier3d::rapier::math::Pose;
+pub use bevy_rapier3d::rapier::math::Pose;
 use bevy_rapier3d::rapier::parry::shape::Capsule;
 use bevy_rapier3d::rapier::pipeline::PhysicsPipeline;
 use serde::{Deserialize, Serialize};
@@ -374,6 +376,44 @@ impl PlantSnapshot {
     pub fn part_joint(&self, part: usize) -> Option<CrabJointId> {
         let h = self.parts[part];
         self.joints.iter().find(|j| j.child == h).map(|j| j.id)
+    }
+
+    /// Deepest geometric interpenetration (m) between two non-adjacent links, and
+    /// the pair's part indices.
+    pub fn deepest_same_crab_overlap(&self) -> (f32, Option<(usize, usize)>) {
+        use bevy_rapier3d::rapier::parry::query::contact;
+        let adjacent = |a: usize, b: usize| {
+            self.joints.iter().any(|j| {
+                (j.child == self.parts[a] && j.parent == self.parts[b])
+                    || (j.child == self.parts[b] && j.parent == self.parts[a])
+            })
+        };
+        let collider_of = |part: usize| {
+            self.colliders
+                .iter()
+                .find(|(_, co)| co.parent() == Some(self.parts[part]))
+                .map(|(_, co)| co)
+        };
+        let mut worst = (0.0f32, None);
+        for a in 1..self.parts.len() {
+            for b in a + 1..self.parts.len() {
+                if adjacent(a, b) {
+                    continue;
+                }
+                let (Some(ca), Some(cb)) = (collider_of(a), collider_of(b)) else {
+                    continue;
+                };
+                let Ok(Some(c)) =
+                    contact(ca.position(), ca.shape(), cb.position(), cb.shape(), 0.0)
+                else {
+                    continue;
+                };
+                if -c.dist > worst.0 {
+                    worst = (-c.dist, Some((a, b)));
+                }
+            }
+        }
+        worst
     }
 }
 

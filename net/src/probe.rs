@@ -399,6 +399,13 @@ pub struct SoakReport {
     pub ledger_breaches: u64,
     pub worst_breach_j: f32,
     pub first_breach_tick: Option<u64>,
+    /// Ticks with a same-crab non-adjacent link pair interpenetrating >5 mm / >20 mm
+    /// (geometric; those pairs raise no contact since rl#332).
+    pub overlap_ticks_5mm: u64,
+    pub overlap_ticks_20mm: u64,
+    /// (tick, depth m, link a, link b) of the deepest same-crab overlap; its state
+    /// is written to `<out>/overlap-worst.bin`.
+    pub worst_overlap: Option<(u64, f32, String, String)>,
 }
 
 /// rl#332: soak the live-policy world for `ticks` and detect "flight" — sustained
@@ -470,7 +477,11 @@ pub fn run_flight_soak(
         ledger_breaches: 0,
         worst_breach_j: 0.0,
         first_breach_tick: None,
+        overlap_ticks_5mm: 0,
+        overlap_ticks_20mm: 0,
+        worst_overlap: None,
     };
+    let mut worst_overlap_state: Option<PlantSnapshot> = None;
     let mut airborne_run: u64 = 0;
     let mut prev_parts: Vec<(Vec3, Vec3)> = Vec::new();
     let mut ledger: VecDeque<(f32, f32)> = VecDeque::with_capacity(LEDGER_WINDOW + 1);
@@ -586,6 +597,21 @@ pub fn run_flight_soak(
             }
         }
         prev_parts.clone_from(&parts);
+        let overlap = crab_world::bot::contact_audit::same_crab_overlap(world, 0.005);
+        if overlap.depth > 0.005 {
+            report.overlap_ticks_5mm += 1;
+        }
+        if overlap.depth > 0.02 {
+            report.overlap_ticks_20mm += 1;
+        }
+        if report
+            .worst_overlap
+            .as_ref()
+            .is_none_or(|w| overlap.depth > w.1)
+        {
+            report.worst_overlap = Some((tick, overlap.depth, overlap.a, overlap.b));
+            worst_overlap_state = Some(PlantSnapshot::capture(world, tick));
+        }
         if power_w.is_finite() {
             ledger.push_back((energy, power_w));
             if ledger.len() > LEDGER_WINDOW + 1 {
@@ -749,6 +775,9 @@ pub fn run_flight_soak(
                 report.teleports
             );
         }
+    }
+    if let Some(snap) = worst_overlap_state {
+        snap.save(&out_dir.join("overlap-worst.bin"))?;
     }
     Ok(report)
 }

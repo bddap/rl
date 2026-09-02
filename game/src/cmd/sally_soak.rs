@@ -78,6 +78,10 @@ pub(crate) fn run(args: Args) -> Result<()> {
         report.first_breach_tick,
         report.max_power_w
     );
+    println!(
+        "sally-soak: same-crab overlap ticks >5mm={} >20mm={} of {}; worst {:?}",
+        report.overlap_ticks_5mm, report.overlap_ticks_20mm, report.ticks_run, report.worst_overlap
+    );
     for (i, e) in report.events.iter().enumerate() {
         println!(
             "  event {i}: tick {} kind={} peak_above={:.2} m peak_vy={:.2} m/s — {}",
