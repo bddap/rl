@@ -167,7 +167,6 @@ pub(crate) fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usi
             .chain()
             .in_set(crate::bot::BotSet::Think),
     );
-    // Rollouts only — eval measures the policy unshoved (rl#298 stage 4).
     app.add_systems(
         FixedUpdate,
         systems::shove_crabs

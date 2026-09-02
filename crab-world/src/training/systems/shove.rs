@@ -1,15 +1,8 @@
-//! Random external shoves during training (rl#298 stage 4): in the one-world endgame
-//! anything can push Sally mid-chase — a craft ram, a falling body, terrain contact —
-//! and a policy trained unshoved meets that as out-of-distribution input. Registered
-//! only by the rollout worker (`wire_rollout_training`): eval measures the policy, so
-//! it stays unshoved.
-//!
-//! Scale is anchored to measured world contacts, not invented: the rl#298 stage-1 ram
-//! (a production craft at 8 m/s) measured ~0.2 m of carapace knockback (its pin
-//! asserts >0.02 m), and 70 N over the same 8-tick burst visibly displaces a settled
-//! crab (`external_force_shoves_a_multibody_root`). The force band brackets that
-//! datum on both sides so the policy sees nudges through hits harder than a ram, at
-//! ~2 shoves per max-length episode.
+//! Random external shoves during rollouts: in the one-world endgame anything can push
+//! Sally mid-chase — a craft ram, a falling body, terrain contact — and a policy
+//! trained unshoved meets that as out-of-distribution input. Registered only by the
+//! rollout worker (`wire_rollout_training`); eval measures the policy unshoved.
+//! `TrainConfig::shove_prob` (default 0) turns them on.
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::ExternalForce;
@@ -17,54 +10,72 @@ use rand::Rng;
 
 use super::lifecycle::EnvPhase;
 use super::state::WorkerState;
-use crate::bot::body::{CrabCarapace, CrabEnvId};
+use crate::bot::body::{CrabBodyMass, CrabCarapace, CrabEnvId};
+use crate::physics::{PHYSICS_DT, PHYSICS_GRAVITY};
 
-/// One burst = 8 physics ticks (0.125 s), the stage-1 ram-pin duration.
+/// One burst = 8 physics ticks (0.125 s), the rl#298 stage-1 ram-pin duration.
 const SHOVE_TICKS: u32 = 8;
-const SHOVE_FORCE_MIN_N: f32 = 40.0;
-const SHOVE_FORCE_MAX_N: f32 = 160.0;
-/// Per-tick start probability while recording — one shove per ~10 s per env.
-const SHOVE_START_PROB: f32 = 1.0 / 640.0;
+/// Burst magnitude as a fraction of body weight, so the scale rides the rig's baked
+/// mass: a fixed newton band was 2–8× the weight of the ~2 kg rig and launched her
+/// ~2 m per burst, a recession the progress term then charged (rl#415).
+const SHOVE_WEIGHT_FRAC: std::ops::Range<f32> = 0.1..0.4;
+/// Hard cap on the velocity one burst can impart, whatever the rig weighs.
+const SHOVE_DV_CAP_MPS: f32 = 0.5;
 
 /// A live burst on one env's carapace. Horizontal by design: world contacts push
 /// laterally; lift/drop dynamics already arise from terrain and the crab's own body.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ShoveState {
     remaining: u32,
-    force: Vec3,
+    direction: Vec3,
+    weight_frac: f32,
+}
+
+impl ShoveState {
+    fn armed(direction: Vec3, weight_frac: f32) -> Self {
+        Self {
+            remaining: SHOVE_TICKS,
+            direction,
+            weight_frac,
+        }
+    }
+
+    fn force(&self, body_mass: f32) -> Vec3 {
+        let weight = body_mass * -PHYSICS_GRAVITY.y;
+        let impulse_cap = SHOVE_DV_CAP_MPS * body_mass / (SHOVE_TICKS as f32 * PHYSICS_DT);
+        self.direction * (self.weight_frac * weight).min(impulse_cap)
+    }
 }
 
 /// Draw, apply, and age each env's shove. Ordered after [`crate::bot::BotSet::Act`]
 /// (whose `apply_actions` zeroes `ExternalForce.force` every tick) and before the
-/// rapier sync, exactly the seam the stage-1 shove test proves out. Draws come from
-/// the training RNG in env order, so a seeded run reproduces its shove schedule.
+/// rapier sync. Draws come from the training RNG in env order, so a seeded run
+/// reproduces its shove schedule.
 pub(crate) fn shove_crabs(
     mut training: NonSendMut<WorkerState>,
-    mut carapaces: Query<(&CrabEnvId, &mut ExternalForce), With<CrabCarapace>>,
+    mut carapaces: Query<(&CrabEnvId, &CrabBodyMass, &mut ExternalForce), With<CrabCarapace>>,
 ) {
     let WorkerState { rng, mode, .. } = &mut *training;
     let envs = &mut mode.envs;
+    // Episode end wholesale-replaces the `EnvEpisode` (`finalize_transitions`), so a
+    // burst cannot outlive its episode — the respawn settle always starts unshoved.
     for ep in envs.iter_mut() {
-        // Starts are gated on Recording; clearing needs no code here because episode
-        // end wholesale-replaces the `EnvEpisode` (`finalize_transitions`), so a burst
-        // cannot outlive its episode — the respawn settle always starts unshoved.
         if matches!(ep.phase, EnvPhase::Recording)
             && ep.shove.remaining == 0
-            && rng.gen_range(0.0..1.0) < SHOVE_START_PROB
+            && rng.gen_range(0.0..1.0) < mode.shove_prob
         {
             let angle = rng.gen_range(0.0..std::f32::consts::TAU);
-            let newtons = rng.gen_range(SHOVE_FORCE_MIN_N..SHOVE_FORCE_MAX_N);
-            ep.shove = ShoveState {
-                remaining: SHOVE_TICKS,
-                force: Vec3::new(angle.cos(), 0.0, angle.sin()) * newtons,
-            };
+            ep.shove = ShoveState::armed(
+                Vec3::new(angle.cos(), 0.0, angle.sin()),
+                rng.gen_range(SHOVE_WEIGHT_FRAC),
+            );
         }
     }
-    for (env, mut force) in carapaces.iter_mut() {
+    for (env, mass, mut force) in carapaces.iter_mut() {
         if let Some(ep) = envs.get(env.0)
             && ep.shove.remaining > 0
         {
-            force.force += ep.shove.force;
+            force.force += ep.shove.force(mass.0);
         }
     }
     for ep in envs.iter_mut() {
@@ -76,30 +87,23 @@ pub(crate) fn shove_crabs(
 mod tests {
     use super::*;
 
-    /// The apply path end-to-end in a real training world: a hand-armed burst on env 0
-    /// must survive `apply_actions`'s per-tick force zeroing and visibly displace the
-    /// settled crab, and the burst must age out. The env is parked in `Settling` so
-    /// the random draw gate stays cold — the assertions depend on the armed burst
-    /// alone, not on the seeded RNG stream. (Draws are covered by
-    /// `same_seed_reproduces_the_rollout_trajectory`, whose harness registers this
-    /// system.)
+    /// The apply path end-to-end in a real training world at the production scale: a
+    /// hand-armed maximum burst on env 0 must survive `apply_actions`'s per-tick force
+    /// zeroing and nudge the settled crab — but never launch or tip her (rl#415) —
+    /// and the burst must age out. The env is parked in `Settling` so the random draw
+    /// gate stays cold: the assertions depend on the armed burst alone.
     #[test]
-    fn armed_shove_displaces_the_crab_and_expires() {
+    fn max_shove_nudges_the_crab_without_launching_or_tipping() {
         use bevy_rapier3d::plugin::PhysicsSet;
 
         use crate::bot::BotSet;
         use crate::bot::headless::{flat_headless_app, tick};
 
-        // Flat grid so displacement attributes to the shove, not the GCR origin
-        // slope (the stage-1 shove test's finding). No brain/reset systems: the
-        // shove seam only needs the worker's envs + rng beside the bot stack.
         let dir = std::env::temp_dir().join(format!("rl_test_shove_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = crate::TrainConfig::scratch(&dir, 1, 0x5140);
         let mut app = flat_headless_app();
         let mut state = WorkerState::new_worker(&config, 0, crate::bot::arch::ArchId::DEFAULT);
-        // Park the env outside Recording for the whole test: the draw gate stays
-        // cold, so no spontaneous burst can contaminate the measured displacement.
         state.mode.envs[0].phase = EnvPhase::Settling { grace: u32::MAX };
         app.insert_non_send(state);
         app.add_systems(
@@ -108,34 +112,52 @@ mod tests {
                 .after(BotSet::Act)
                 .before(PhysicsSet::SyncBackend),
         );
-        // Settle fully before measuring so displacement attributes to the shove.
         tick(&mut app, 192);
 
-        let carapace_xz = |app: &mut App| {
+        let pose = |app: &mut App| {
             let mut q = app
                 .world_mut()
-                .query_filtered::<&Transform, With<CrabCarapace>>();
-            let t = q.single(app.world()).expect("carapace").translation;
-            Vec2::new(t.x, t.z)
+                .query_filtered::<(&Transform, &CrabBodyMass), With<CrabCarapace>>();
+            let (t, m) = q.single(app.world()).expect("carapace");
+            (
+                Vec2::new(t.translation.x, t.translation.z),
+                (t.rotation * Vec3::Y).y,
+                m.0,
+            )
         };
-        let p0 = carapace_xz(&mut app);
-
-        {
-            let mut st = app
-                .world_mut()
-                .get_non_send_mut::<WorkerState>()
-                .expect("training state");
-            st.mode.envs[0].shove = ShoveState {
-                remaining: SHOVE_TICKS,
-                force: Vec3::new(120.0, 0.0, 0.0),
-            };
-        }
-        tick(&mut app, SHOVE_TICKS + 16);
-
-        let moved = (carapace_xz(&mut app) - p0).length();
+        let (p0, up0, mass) = pose(&mut app);
+        let burst = ShoveState::armed(Vec3::X, SHOVE_WEIGHT_FRAC.end);
+        let dv = burst.force(mass).length() * SHOVE_TICKS as f32 * PHYSICS_DT / mass;
         assert!(
-            moved > 0.05,
-            "a 120 N / {SHOVE_TICKS}-tick shove must visibly move the crab, moved {moved:.3} m"
+            dv <= SHOVE_DV_CAP_MPS,
+            "a max burst on the {mass:.2} kg rig imparts {dv:.2} m/s, over the cap"
+        );
+        app.world_mut()
+            .get_non_send_mut::<WorkerState>()
+            .expect("training state")
+            .mode
+            .envs[0]
+            .shove = burst;
+
+        let mut min_up = up0;
+        let mut max_moved = 0.0f32;
+        for _ in 0..SHOVE_TICKS + 256 {
+            tick(&mut app, 1);
+            let (p, up, _) = pose(&mut app);
+            min_up = min_up.min(up);
+            max_moved = max_moved.max((p - p0).length());
+        }
+        assert!(
+            max_moved > 0.01,
+            "a max burst must still nudge the crab, moved {max_moved:.3} m"
+        );
+        assert!(
+            max_moved < 0.3,
+            "a max burst must not launch the crab, moved {max_moved:.3} m"
+        );
+        assert!(
+            min_up > up0 - 0.05,
+            "a max burst must not tip the crab: up·Y fell {up0:.3} -> {min_up:.3}"
         );
         let st = app
             .world()

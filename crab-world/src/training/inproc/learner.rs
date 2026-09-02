@@ -344,10 +344,11 @@ pub fn run_learner(
     // track the diagnostic terrain override (see `crate::TrainTerrain`), so this line
     // is a non-default run's only durable provenance.
     eprintln!(
-        "[learner] rollout world: terrain {:?}, band {}..{} m (--terrain/--band-max-m)",
+        "[learner] rollout world: terrain {:?}, band {}..{} m, shove-prob {} (--terrain/--band-max-m/--shove-prob)",
         config.terrain,
         crate::training::targets::BAND_START_MIN,
         config.band_max_m,
+        config.shove_prob,
     );
     // Loud so train.log proves which PLANT it trained under (rl#268 damping run), and
     // recorded beside the checkpoint so evals adopt it — abort a mismatched relaunch

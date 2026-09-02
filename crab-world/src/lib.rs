@@ -333,6 +333,12 @@ pub struct TrainConfig {
     #[arg(long, env = "RL_BAND_MAX_M", value_parser = parse_band_max,
           default_value_t = training::targets::BAND_MAX_M)]
     pub band_max_m: f32,
+
+    /// Per-tick start probability of a random shove on each recording env (0 = off).
+    /// A shove is a horizontal 8-tick burst of 0.1–0.4× body weight, Δv ≤ 0.5 m/s;
+    /// rollouts only — eval measures the policy unshoved. 1/640 ≈ one per 10 s.
+    #[arg(long, env = "RL_SHOVE_PROB", value_parser = parse_shove_prob, default_value_t = 0.0)]
+    pub shove_prob: f32,
 }
 
 /// [`TrainConfig::terrain`]'s values — the ONE production seam for non-canonical
@@ -397,6 +403,15 @@ fn parse_band_max(s: &str) -> Result<f32, String> {
             training::targets::BAND_START_MIN,
             training::targets::BAND_MAX_M
         ))
+    }
+}
+
+fn parse_shove_prob(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if v.is_finite() && (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("{v} is not a probability in [0, 1]"))
     }
 }
 

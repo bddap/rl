@@ -137,7 +137,7 @@ pub(crate) struct EnvEpisode {
     pub(crate) phase: EnvPhase,
     pub(crate) min_tip_dist: Option<f32>,
     pub(crate) pending: Option<Pending>,
-    /// This env's live random-shove burst, if any ([`super::shove`], rl#298 stage 4).
+    /// This env's live random-shove burst, if any ([`super::shove`]).
     pub(crate) shove: super::shove::ShoveState,
 }
 
