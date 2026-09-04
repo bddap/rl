@@ -81,9 +81,6 @@ pub fn build_windowed_app(
     crab_world::chord::install_chords::<GcrControls>(&mut app);
     // The d-pad combo map (rl#358): discovered-only, persisted per save.
     super::chord_map::install(&mut app, super::chord_map::default_save_path());
-    // Voice notes (rl#378): record / review / confirm, wav to disk.
-    #[cfg(not(target_family = "wasm"))]
-    super::voice::install(&mut app);
     // In-game screenshot (rl#405): L3+R3 chord / F12, PNG + OTLP line.
     #[cfg(not(target_family = "wasm"))]
     super::live_screenshot::install(&mut app);

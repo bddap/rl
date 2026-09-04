@@ -94,9 +94,6 @@ fn finish_offscreen_app(
     );
     app.insert_resource(cfg)
         .init_resource::<ShotProgress>()
-        // gather_input reads the voice modal gate (rl#378); without the resource
-        // the whole system fails param validation and the pilot script goes dead.
-        .init_resource::<super::voice::VoiceUx>()
         .add_systems(Startup, (spawn_world, spawn_offscreen_camera))
         .add_systems(
             Update,

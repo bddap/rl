@@ -105,9 +105,6 @@ mod screenshot;
 #[cfg(test)]
 mod tests;
 mod vehicle_view;
-// Voice notes: cpal mic capture + bothouse delivery — native operator tooling.
-#[cfg(not(target_family = "wasm"))]
-mod voice;
 
 /// The windowed client's per-save data dir: `$XDG_DATA_HOME|~/.local/share` +
 /// `giant-crab-rescue`. `None` (no HOME at all) means callers run unpersisted

@@ -7,11 +7,6 @@ pub mod controls;
 pub mod formation;
 pub mod net_loop;
 pub mod telemetry;
-// Voice notes ride bothouse-side HTTP + local files — native tooling, no web story.
-#[cfg(not(target_family = "wasm"))]
-pub mod voice_delivery;
-#[cfg(not(target_family = "wasm"))]
-pub mod voice_reply;
 
 // The link layer lives in `net-link` (rl#411 stage 4: one poll-driven Session
 // surface, native + web platform impls behind it, wasm32-checked). Re-exported under

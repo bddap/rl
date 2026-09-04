@@ -171,8 +171,7 @@ fn update_hud(
 }
 
 fn spawn_hud(mut commands: Commands) {
-    // Same chrome as the voice HUD: a full-width transparent absolute strip so the
-    // text centers itself — near the bottom, clear of the voice line at the top.
+    // A full-width transparent absolute strip so the text centers itself.
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,

@@ -293,9 +293,6 @@ pub enum Action {
     /// keyboard — the TV/couch slideshow-diagnosis affordance (rl#331).
     ToggleDebugOverlay,
     RevealControls,
-    /// Voice-note capture (rl#378): tap to record, tap to stop into review; the
-    /// review modal reuses MenuConfirm/MenuBack for keep/discard.
-    VoiceRecord,
 
     PlaneAttitude,
     PlaneThrottle,
@@ -475,7 +472,7 @@ impl ControlScheme for GcrControls {
 // second trigger route is a
 // well-formedness error. What remains is analog/held state plus menu nav and the
 // hold-to-reveal legend — reads the chord system's execute-on-release can't express.
-pub const BINDINGS: [Binding<GcrControls>; 23] = [
+pub const BINDINGS: [Binding<GcrControls>; 22] = [
     Binding {
         action: Action::MoveForward,
         keyboard: KbBinding::new(&[Key::W], &[]),
@@ -528,13 +525,6 @@ pub const BINDINGS: [Binding<GcrControls>; 23] = [
         action: Action::RevealControls,
         keyboard: KbBinding::hold(&[Key::Tab], &[]),
         pad: PadBinding::hold(&[PadButton::Back]),
-    },
-    // Not a chord: recording must start/stop with one tap, controller in hand, from
-    // any in-round context (rl#378) — Y and V are otherwise unassigned everywhere.
-    Binding {
-        action: Action::VoiceRecord,
-        keyboard: KbBinding::new(&[Key::V], &[]),
-        pad: PadBinding::new(&[PadButton::North]),
     },
     Binding {
         action: Action::PlaneAttitude,
@@ -604,7 +594,7 @@ pub const BINDINGS: [Binding<GcrControls>; 23] = [
 // The in-round row tables list only DIRECT-bound controls: the chorded command verbs'
 // legend rows come from [`GCR_CHORDS`] itself (labels live there, appended by
 // `crab_world::controls::legend`), so the two can't drift.
-pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
+pub const FOOT_ROWS: [ContextRow<GcrControls>; 10] = [
     ContextRow {
         action: Action::MoveForward,
         label: "Forward",
@@ -642,16 +632,12 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
         label: "Extract",
     },
     ContextRow {
-        action: Action::VoiceRecord,
-        label: "Voice note",
-    },
-    ContextRow {
         action: Action::RevealControls,
         label: "Controls",
     },
 ];
 
-pub const PLANE_ROWS: [ContextRow<GcrControls>; 5] = [
+pub const PLANE_ROWS: [ContextRow<GcrControls>; 4] = [
     ContextRow {
         action: Action::PlaneAttitude,
         label: "Pitch / roll",
@@ -665,16 +651,12 @@ pub const PLANE_ROWS: [ContextRow<GcrControls>; 5] = [
         label: "Rudder (yaw)",
     },
     ContextRow {
-        action: Action::VoiceRecord,
-        label: "Voice note",
-    },
-    ContextRow {
         action: Action::RevealControls,
         label: "Controls",
     },
 ];
 
-pub const SHIP_ROWS: [ContextRow<GcrControls>; 7] = [
+pub const SHIP_ROWS: [ContextRow<GcrControls>; 6] = [
     ContextRow {
         action: Action::ShipThrust,
         label: "Thrust: move / strafe",
@@ -694,10 +676,6 @@ pub const SHIP_ROWS: [ContextRow<GcrControls>; 7] = [
     ContextRow {
         action: Action::MatchVelocity,
         label: "Match velocity (brake)",
-    },
-    ContextRow {
-        action: Action::VoiceRecord,
-        label: "Voice note",
     },
     ContextRow {
         action: Action::RevealControls,
@@ -817,7 +795,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 59] = [
+    const ALL_ACTIONS: [Action; 58] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -876,7 +854,6 @@ mod tests {
         Action::MenuDown,
         Action::MenuConfirm,
         Action::MenuBack,
-        Action::VoiceRecord,
     ];
 
     const ALL_CONTEXTS: [GcrContext; 4] = [
@@ -1092,8 +1069,7 @@ mod tests {
                 | Action::MenuUp
                 | Action::MenuDown
                 | Action::MenuConfirm
-                | Action::MenuBack
-                | Action::VoiceRecord => true,
+                | Action::MenuBack => true,
             }
         }
         fn ctx_classified(c: GcrContext) -> bool {

@@ -14,7 +14,6 @@ render = [
     "bevy/default",
     "bevy_rapier3d/default",
     "dep:bevy_egui",
-    "dep:cpal",
     "dep:chrono",
 ]
 
@@ -55,16 +54,13 @@ anyhow.workspace = true
 tracing.workspace = true
 
 # The native-only slice (rl#411): the telemetry sender/collector own a tokio
-# runtime + mDNS discovery, voice capture speaks cpal, screenshot filenames stamp via
-# chrono. None of these exist on wasm — the modules that use them are cfg'd native,
-# and scoping the deps here is what keeps the wasm build honest (a new native-only
-# use in shared code fails to COMPILE instead of panicking in a browser).
+# runtime + mDNS discovery, screenshot filenames stamp via chrono. None of these
+# exist on wasm — the modules that use them are cfg'd native, and scoping the deps
+# here is what keeps the wasm build honest (a new native-only use in shared code
+# fails to COMPILE instead of panicking in a browser).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio.workspace = true
 iroh-mdns-address-lookup.workspace = true
-# Mic capture for voice notes (rl#378). Already in the tree transitively via
-# bevy_audio → rodio, so this adds no new crate to the build.
-cpal = { version = "0.15", optional = true }
 # Screenshot filenames (rl#405). Already in the tree via bevy's dep graph.
 chrono = { version = "0.4", default-features = false, features = [
     "clock",

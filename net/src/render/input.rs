@@ -42,7 +42,6 @@ pub(super) fn gather_input(
     time: Res<Time>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     chords: Res<crab_world::chord::Chords<controls::GcrControls>>,
-    #[cfg(not(target_family = "wasm"))] voice: Res<super::voice::VoiceUx>,
     mut pending: ResMut<PendingInput>,
     mut flight: ResMut<FlightInput>,
     mut pitch: ResMut<CameraPitch>,
@@ -74,18 +73,9 @@ pub(super) fn gather_input(
     // momentum); a held jump auto-hops by design. `key_codes_for`, not `held`: sprint
     // binds BOTH shifts and the first-key shorthand would drop the right one.
     let held_any = |a| controls::key_codes_for(a).any(|k| keys.pressed(k));
-    // While the voice-review modal is up (rl#378) — or its closing press is still
-    // held — confirm/discard own their inputs on BOTH devices (MenuConfirm rides
-    // Space as well as Enter), so jump/slide/brake go quiet — same shape as the
-    // chord-typing gate above.
-    #[cfg(not(target_family = "wasm"))]
-    let reviewing = voice.gameplay_gated();
-    // No voice module on wasm (native operator tooling) — nothing gates gameplay.
-    #[cfg(target_family = "wasm")]
-    let reviewing = false;
     let mut sprint = held_any(Action::Sprint);
-    let mut jump = !reviewing && held_any(Action::Jump);
-    let mut slide = !reviewing && held_any(Action::Slide);
+    let mut jump = held_any(Action::Jump);
+    let mut slide = held_any(Action::Slide);
     // Vehicle switching and restart are chords (rl#330): one code per vehicle plus an
     // exit code (X is de-overloaded — a bare tap does nothing), restart its own code —
     // no direct key or button remains for any of them.
@@ -131,10 +121,8 @@ pub(super) fn gather_input(
         }
         action |= controls::gamepad_buttons_for(Action::Extract).any(|b| gp.pressed(b));
         sprint |= controls::gamepad_buttons_for(Action::Sprint).any(|b| gp.pressed(b));
-        if !reviewing {
-            jump |= controls::gamepad_buttons_for(Action::Jump).any(|b| gp.pressed(b));
-            slide |= controls::gamepad_buttons_for(Action::Slide).any(|b| gp.pressed(b));
-        }
+        jump |= controls::gamepad_buttons_for(Action::Jump).any(|b| gp.pressed(b));
+        slide |= controls::gamepad_buttons_for(Action::Slide).any(|b| gp.pressed(b));
     }
     if let Some(mb) = controls::MouseInput::Left.mouse_button() {
         action |= mouse_buttons.pressed(mb);
@@ -168,9 +156,7 @@ pub(super) fn gather_input(
                     - nth_key(Action::PlaneThrottle, 1) as i32 as f32,
             )
         },
-        // Space is MenuConfirm's second key, so the modal gate covers the keyboard
-        // brake too, same as jump/slide above.
-        match_vel: !reviewing && nth_key(Action::MatchVelocity, 0),
+        match_vel: nth_key(Action::MatchVelocity, 0),
         ..default()
     };
     if grabbed {
@@ -194,8 +180,7 @@ pub(super) fn gather_input(
         }
         fi.lb |= nth_pad(Action::PlaneRudder, 0).is_some_and(|b| gp.pressed(b));
         fi.rb |= nth_pad(Action::PlaneRudder, 1).is_some_and(|b| gp.pressed(b));
-        fi.match_vel |=
-            !reviewing && nth_pad(Action::MatchVelocity, 0).is_some_and(|b| gp.pressed(b));
+        fi.match_vel |= nth_pad(Action::MatchVelocity, 0).is_some_and(|b| gp.pressed(b));
     }
     *flight = fi;
 }
