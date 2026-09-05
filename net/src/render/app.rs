@@ -55,8 +55,6 @@ pub fn build_windowed_app(
         mode: WindowMode::Windowed,
         canvas: Some("#gcr-canvas".into()),
         fit_canvas_to_parent: true,
-        // Keep browser shortcuts (F5, devtools) working; the game reads game keys fine.
-        prevent_default_event_handling: false,
         ..window
     };
     // Web assets are baked (rl#411 stage 6): point the AssetServer at the pack's

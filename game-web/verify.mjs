@@ -86,13 +86,14 @@ await send('Network.enable');
 await send('Page.enable');
 await send('Page.navigate', { url });
 
-async function loadingOverlayPresent() {
-  const { result } = await send('Runtime.evaluate', {
-    expression: "!!document.getElementById('gcr-loading')",
-    returnByValue: true,
-  });
+async function evaluate(expression) {
+  const { result } = await send('Runtime.evaluate', { expression, returnByValue: true });
   return result.value;
 }
+const loadingOverlayPresent = () => evaluate("!!document.getElementById('gcr-loading')");
+const focusedOnCanvas = () => evaluate("document.activeElement === document.getElementById('gcr-canvas')");
+const synthetic = (ctor, type, init) => evaluate(
+  `!document.getElementById('gcr-canvas').dispatchEvent(new ${ctor}(${JSON.stringify(type)}, ${JSON.stringify(init)}))`);
 
 try {
   // rl#413: the loading overlay is the page's only boot feedback — it must exist
@@ -111,6 +112,23 @@ try {
   await sleep(1500);
   if (await loadingOverlayPresent()) throw new Error('#gcr-loading overlay still up after frames flow (rl#413 regression)');
   await screenshot('menu.png');
+
+  // rl#418: winit owns canvas focus + preventDefault only while bevy's
+  // prevent_default_event_handling stays on; this is what catches it flipping off.
+  if (!(await focusedOnCanvas())) throw new Error('canvas not focused from the first frames (rl#418)');
+  await tap('Tab', 'Tab');
+  if (!(await focusedOnCanvas())) throw new Error('Tab moved focus off the canvas (rl#418)');
+  if (!(await synthetic('KeyboardEvent', 'keydown', { key: 'Tab', code: 'Tab', bubbles: true, cancelable: true })))
+    throw new Error('Tab keydown on the canvas not defaultPrevented (rl#418)');
+  if (!(await synthetic('MouseEvent', 'contextmenu', { button: 2, bubbles: true, cancelable: true })))
+    throw new Error('contextmenu on the canvas not defaultPrevented (rl#418)');
+  await evaluate("document.getElementById('gcr-canvas').blur()");
+  if (await focusedOnCanvas()) throw new Error('blur() left the canvas focused — the focus probe is vacuous');
+  for (const type of ['mousePressed', 'mouseReleased'])
+    await send('Input.dispatchMouseEvent', { type, x: 400, y: 225, button: 'left', clickCount: 1 });
+  await sleep(250);
+  if (!(await focusedOnCanvas())) throw new Error('click did not refocus the canvas (rl#418)');
+  process.stderr.write('FOCUS_OK canvas keeps focus across Tab and click; Tab + contextmenu defaultPrevented\n');
 
   // Chooser: focus starts on Host; one Down lands on "Play solo (offline)".
   await tap('ArrowDown', 'ArrowDown');
