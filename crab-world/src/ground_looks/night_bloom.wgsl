@@ -19,6 +19,10 @@
 #import rl::noise::{hash2, rand01, vnoise, footprint_fade, vein}
 #import rl::ground::art::{GroundCtx, GroundArt, default_art}
 
+const TAU: f32 = 6.283185307;
+// Peak-to-mean swing of the breathing bloom light: 1 ± this.
+const BREATH_DEPTH: f32 = 0.7;
+
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let p = ctx.p;
     let fw = ctx.fw;
@@ -78,15 +82,18 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let knot = vein(vnoise(p / 43.0, 77u), 0.12);
     let vein_col = mix(params[1].xyz, params[2].xyz, params[2].w * knot);
 
-    // The glow: emissive light the moon doesn't own. Levels are chosen against
-    // the pre-exposed night — arteries ~2× lit-ground luminance at their core,
-    // spores a quiet sparkle. Ground under the glow darkens (wet soil, by the
-    // variant's params[0].w), so the light reads as coming FROM the ground, not
-    // painted on it.
+    // Ground under the glow darkens (wet soil, by the variant's params[0].w), so
+    // the light reads as coming FROM the ground, not painted on it.
     let glow_total = artery_g + capil_g;
     rgb *= 1.0 - params[0].w * clamp(glow_total, 0.0, 1.0);
-    let emissive = vein_col * (params[1].w * artery_g + params[4].x * capil_g)
-        + params[3].xyz * params[3].w * spore_g;
+    // The bloom breathes on the params[5].w period. The wave's phase drifts with
+    // a coarse noise field so the web pulses in slow travelling swells across the
+    // ground rather than strobing in unison.
+    let phase = vnoise(p / 60.0, 78u);
+    let breath = 1.0 + BREATH_DEPTH * sin(TAU * (ctx.time / params[5].w + phase));
+    let emissive = breath
+        * (vein_col * (params[1].w * artery_g + params[4].x * capil_g)
+            + params[3].xyz * params[3].w * spore_g);
 
     var out = default_art(ctx);
     out.rgb = rgb;

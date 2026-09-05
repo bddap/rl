@@ -5301,6 +5301,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crab-world",
+ "image",
  "iroh",
  "net",
  "otel",

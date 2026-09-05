@@ -22,3 +22,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 test-watchdog = { path = "../test-watchdog" }
+image = { version = "0.25", default-features = false, features = ["png"] }

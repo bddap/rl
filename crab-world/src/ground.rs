@@ -232,6 +232,11 @@ ground_looks! {
         => "ground_looks/watershed.wgsl", "LOOK_WATERSHED";
 }
 
+/// Seconds per breath of the night-bloom glow (rl#420): slow enough to read as
+/// breathing in a standing shot, and a divisor of the hourly `globals.time` wrap
+/// so the wrap lands on a cycle boundary.
+pub const BLOOM_CYCLE_S: f32 = 8.0;
+
 impl GroundLook {
     /// The look's aesthetic parameter row for the `@binding(104)` uniform (the
     /// rl#333 params seam): a variant of a shared shader is a row here, not a
@@ -245,7 +250,8 @@ impl GroundLook {
     /// - `[3]` xyz spore color, w spore emissive intensity
     /// - `[4]` x capillary intensity, y spore rarity threshold (higher = sparser),
     ///   z artery spacing (m), w capillary spacing (m)
-    /// - `[5]` x artery width, y artery core width, z capillary width (noise-space)
+    /// - `[5]` x artery width, y artery core width, z capillary width (noise-space),
+    ///   w the breathing period, [`BLOOM_CYCLE_S`]
     ///
     /// watershed.wgsl lanes (`[0]` only — the rl#323 design axes):
     /// - `[0]` x bloom gain (fable-2's emissive web; 0 = no emissive anywhere),
@@ -267,7 +273,7 @@ impl GroundLook {
             p[2] = Vec4::from_array(knot);
             p[3] = Vec4::from_array(spore);
             p[4] = Vec4::from_array(field);
-            p[5] = Vec4::new(widths[0], widths[1], widths[2], 0.0);
+            p[5] = Vec4::new(widths[0], widths[1], widths[2], BLOOM_CYCLE_S);
             p
         };
         let wshed = |bloom: f32, cellular: f32, hue: f32| {
