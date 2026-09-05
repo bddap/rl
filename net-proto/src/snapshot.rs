@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crab_world::chord::ChordDir;
 
-use crate::sim::{Crab, Outcome, Player, PlayerId, PlayerStatus, Pos};
+use crate::sim::{Crab, JumpWindows, Outcome, Player, PlayerId, PlayerStatus, Pos};
 use crate::wire::{pos_bytes, pos_from_bytes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +85,8 @@ impl CoreSnapshot {
             out.extend_from_slice(&vel.y.to_le_bytes());
             out.extend_from_slice(&vel.z.to_le_bytes());
             out.push(player.sliding() as u8);
+            out.push(player.jump().coyote);
+            out.push(player.jump().buffer);
         }
 
         out.extend_from_slice(&(self.crabs.len() as u32).to_le_bytes());
@@ -141,7 +143,14 @@ impl CoreSnapshot {
                 1 => true,
                 _ => return Err(SnapshotDecodeError::BadTag),
             };
-            players.insert(id, Player::from_parts(pos, yaw, status, alt, vel, sliding));
+            let jump = JumpWindows {
+                coyote: r.byte()?,
+                buffer: r.byte()?,
+            };
+            players.insert(
+                id,
+                Player::from_parts(pos, yaw, status, alt, vel, sliding, jump),
+            );
         }
 
         let n_crabs = u32::from_le_bytes(r.take::<4>()?) as usize;
@@ -262,6 +271,10 @@ mod tests {
                 4321,
                 crate::sim::Vel { x: 9, y: -8, z: 7 },
                 true,
+                JumpWindows {
+                    coyote: 3,
+                    buffer: 2,
+                },
             ),
         );
         // Server-stamped watermarks (`Sim::core_snapshot` leaves them empty) — nonempty here so

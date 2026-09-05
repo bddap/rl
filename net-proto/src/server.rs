@@ -802,6 +802,7 @@ mod tests {
                 p.alt(),
                 p.vel(),
                 p.sliding(),
+                p.jump(),
             ),
         );
         sim.apply_core_snapshot(snap);
@@ -835,6 +836,7 @@ mod tests {
                 p.alt(),
                 p.vel(),
                 p.sliding(),
+                p.jump(),
             ),
         );
         s.sim.apply_core_snapshot(snap);
@@ -860,6 +862,7 @@ mod tests {
                 p.alt(),
                 p.vel(),
                 p.sliding(),
+                p.jump(),
             ),
         );
         s.sim.apply_core_snapshot(snap);

@@ -118,18 +118,24 @@ pub const SPRINT_SPEED: i64 = PLAYER_SPEED * 9 / 5;
 const GRAVITY_PER_TICK2: i64 = (-crab_world::physics::PHYSICS_GRAVITY.y as f64 * UNIT as f64
     / (TICK_HZ * TICK_HZ) as f64) as i64;
 
-/// Jump liftoff speed, grid units per tick: √(2·g·h) for a TAPPED apex of h ≈ 2.1
-/// player heights (0.107 m) under the shared gravity → 1.45 m/s. Feel knob (rl#367:
-/// up from 1.23 — the 1.5-height, 0.25 s hop read as weak).
-const JUMP_SPEED: i64 = (1.45 * UNIT as f64 / TICK_HZ as f64) as i64;
+/// The jump as a designer states it (rl#367): a full hold peaks this high, this many
+/// ticks after liftoff; the fall is the ONE shared gravity, ~2× the derived rise — the
+/// slow-up/fast-down asymmetry needs no third constant. Feel knobs, both.
+const JUMP_HEIGHT: i64 = player_heights(5.0);
+const JUMP_APEX_TICKS: i64 = 10;
 
-/// Hold-to-float (rl#367): while RISING with JUMP still held, gravity is divided by
-/// this — variable jump height (release early → the shared g reclaims the arc) plus
-/// a slow-rise/snap-fall asymmetry that reads as apex hang. At 2 a full hold doubles
-/// the tapped apex (~4.2 player heights, ~0.5 s airtime). The descent — and every
-/// airborne state without JUMP held, so the whole plane-exit handoff (rl#355) — stays
-/// under the ONE shared gravity: craft ballistics are untouched.
-const JUMP_FLOAT_GRAVITY_DIV: i64 = 2;
+const JUMP_RISE_GRAVITY: i64 = 2 * JUMP_HEIGHT / (JUMP_APEX_TICKS * JUMP_APEX_TICKS);
+
+/// The +g/2 is the semi-implicit-Euler correction: the integrator sums velocities
+/// AFTER each gravity step, so without it the discrete arc peaks at h·(1 − 1/t).
+const JUMP_SPEED: i64 = 2 * JUMP_HEIGHT / JUMP_APEX_TICKS + JUMP_RISE_GRAVITY / 2;
+
+/// Apex hang. Feel knob.
+const JUMP_HANG_SPEED: i64 = JUMP_SPEED / 4;
+
+const COYOTE_TICKS: u8 = 4;
+
+const JUMP_BUFFER_TICKS: u8 = 4;
 
 /// A slide sustains only above this pace — 1.5× walk, between the √2×-walk a diagonal
 /// step reaches (the axes are direct-drive, not normalized) and sprint, so neither
@@ -506,6 +512,17 @@ pub struct Player {
     /// re-boost — compounding boosts are an unbounded-speed exploit), and the
     /// render layer reads it for the first-person eye dip and avatar lean.
     sliding: bool,
+    jump: JumpWindows,
+}
+
+/// The two jump-forgiveness windows (rl#367), ticks left in each: `coyote` opens on
+/// every grounded tick so a JUMP shortly after the ground falls away still lifts
+/// off; `buffer` opens on an airborne JUMP so a press shortly before touchdown fires
+/// on the first grounded tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct JumpWindows {
+    pub coyote: u8,
+    pub buffer: u8,
 }
 
 impl Player {
@@ -516,6 +533,7 @@ impl Player {
         alt: i64,
         vel: Vel,
         sliding: bool,
+        jump: JumpWindows,
     ) -> Self {
         Self {
             pos,
@@ -524,12 +542,27 @@ impl Player {
             alt,
             vel,
             sliding,
+            jump,
         }
     }
 
     /// A grounded, motionless walker — every spawn starts here.
     pub(crate) fn standing(pos: Pos, yaw: i32, status: PlayerStatus) -> Self {
-        Self::from_parts(pos, yaw, status, 0, Vel::default(), false)
+        Self::from_parts(
+            pos,
+            yaw,
+            status,
+            0,
+            Vel::default(),
+            false,
+            JumpWindows::default(),
+        )
+    }
+
+    fn liftoff(&mut self) {
+        self.vel.y = JUMP_SPEED;
+        self.alt = self.alt.max(1);
+        self.jump = JumpWindows::default();
     }
 
     pub fn pos(self) -> Pos {
@@ -549,6 +582,9 @@ impl Player {
     }
     pub fn vel(self) -> Vel {
         self.vel
+    }
+    pub fn jump(self) -> JumpWindows {
+        self.jump
     }
 }
 
@@ -1011,6 +1047,7 @@ impl Sim {
                 // above takes over from EXACTLY the craft's last state — no seam.
                 p.alt = pp.alt.max(0);
                 p.vel = pp.vel;
+                p.jump = JumpWindows::default();
                 if p.alt == 0 {
                     // Grounded ⇒ no vertical motion — the one invariant every other
                     // grounded site (touchdown, walk, slide) also maintains; a craft
@@ -1065,6 +1102,16 @@ impl Sim {
             // Releasing SLIDE mid-air re-arms the entry boost; holding it through a
             // jump keeps the skid armed so touchdown re-entry is boost-free.
             p.sliding &= inp.pressed(buttons::SLIDE);
+            let jump = inp.pressed(buttons::JUMP);
+            p.jump.buffer = if jump {
+                JUMP_BUFFER_TICKS
+            } else {
+                p.jump.buffer.saturating_sub(1)
+            };
+            if jump && p.jump.coyote > 0 {
+                p.liftoff();
+            }
+            p.jump.coyote = p.jump.coyote.saturating_sub(1);
             // Airborne (rl#355): ballistic — the carried velocity IS the motion, no
             // air control (the spec: sail with the craft's velocity and fall). The
             // altitude is terrain-relative, so integrate in absolute height and
@@ -1072,11 +1119,12 @@ impl Sim {
             let ground_before = ground_at(p.pos);
             p.pos.x += p.vel.x;
             p.pos.z += p.vel.z;
-            // One carve-out from "no air control" (rl#367): holding JUMP through the
-            // rise floats the arc ([`JUMP_FLOAT_GRAVITY_DIV`]) — height modulation,
-            // never steering. The descent is always full-g.
-            p.vel.y -= if p.vel.y > 0 && inp.pressed(buttons::JUMP) {
-                GRAVITY_PER_TICK2 / JUMP_FLOAT_GRAVITY_DIV
+            // One carve-out from "no air control" (rl#367): holding JUMP shapes the
+            // arc's height and hang — never steering. Released, and every airborne
+            // state without JUMP (the whole plane-exit handoff, rl#355), falls under
+            // the ONE shared gravity.
+            p.vel.y -= if jump && p.vel.y > -JUMP_HANG_SPEED {
+                JUMP_RISE_GRAVITY
             } else {
                 GRAVITY_PER_TICK2
             };
@@ -1133,22 +1181,19 @@ impl Sim {
             p.pos.x += p.vel.x;
             p.pos.z += p.vel.z;
         }
-        if inp.pressed(buttons::JUMP) {
+        // A grounded step absorbs terrain drops up to [`STEP_DOWN_MAX`]; past that the
+        // ground fell away — go airborne from the old height instead of snapping down
+        // the face, the same regime the jump lands through.
+        let drop = ground_before - ground_at(p.pos);
+        if drop > STEP_DOWN_MAX {
+            p.alt = drop;
+        }
+        p.jump.coyote = COYOTE_TICKS;
+        if inp.pressed(buttons::JUMP) || p.jump.buffer > 0 {
             // Liftoff — from walk, sprint AND slide alike (rl#355; a slide-jump keeps
-            // the skid's decayed momentum). One grid unit (10 µm) of altitude flips
-            // the state machine to airborne; the real rise integrates next tick.
-            // Holding jump re-fires on every touchdown (auto-hop) — a feel choice,
-            // not an edge-detect omission.
-            p.vel.y = JUMP_SPEED;
-            p.alt = 1;
-        } else {
-            // A grounded step absorbs terrain drops up to [`STEP_DOWN_MAX`]; past
-            // that the ground fell away — go airborne from the old height instead of
-            // snapping down the face, the same regime the jump lands through.
-            let drop = ground_before - ground_at(p.pos);
-            if drop > STEP_DOWN_MAX {
-                p.alt = drop;
-            }
+            // the skid's decayed momentum). Holding jump re-fires on every touchdown
+            // (auto-hop) — a feel choice, not an edge-detect omission.
+            p.liftoff();
         }
     }
 
@@ -1236,6 +1281,7 @@ impl Sim {
                 alt,
                 vel,
                 sliding,
+                jump: JumpWindows { coyote, buffer },
             } = player;
             h.write(&[id.0]);
             h.write(&pos_bytes(*pos));
@@ -1246,7 +1292,7 @@ impl Sim {
             h.write(&x.to_le_bytes());
             h.write(&y.to_le_bytes());
             h.write(&z.to_le_bytes());
-            h.write(&[*sliding as u8]);
+            h.write(&[*sliding as u8, *coyote, *buffer]);
         }
         h.write(&(crabs.len() as u32).to_le_bytes());
         for crab in crabs {
@@ -1646,7 +1692,7 @@ mod tests {
             assert!(ticks < 300, "a jump must come back down");
         }
         let after = sim.player(PlayerId(0)).unwrap().pos();
-        // Flat-ground tapped apex is ~2.1 player heights; the half-height floor
+        // Flat-ground tapped apex is ~2.6 player heights; the half-height floor
         // leaves slack for the terrain slope the sprint carries the arc across (alt
         // is surface-relative).
         assert!(
@@ -1661,54 +1707,279 @@ mod tests {
         assert_eq!(sim.player(PlayerId(0)).unwrap().vel().y, 0, "landed clean");
     }
 
+    /// A standing jump's altitude per tick, tick 0 = liftoff, ending on touchdown.
+    /// `held(tick)` decides whether JUMP is down on that tick.
+    fn arc(held: impl Fn(u64) -> bool) -> Vec<i64> {
+        let mut sim = Sim::new(13, &players(1));
+        let mut jump = neutral_for(&sim);
+        jump.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::JUMP));
+        step_scenery(&mut sim, &jump);
+        let mut alts = vec![sim.player(PlayerId(0)).unwrap().alt()];
+        while *alts.last().unwrap() > 0 {
+            let tick = alts.len() as u64;
+            let mut inputs = neutral_for(&sim);
+            let b = if held(tick) { buttons::JUMP } else { 0 };
+            inputs.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, b));
+            step_scenery(&mut sim, &inputs);
+            alts.push(sim.player(PlayerId(0)).unwrap().alt());
+            assert!(alts.len() < 300, "a jump must come back down");
+        }
+        alts
+    }
+
     #[test]
-    fn held_jump_floats_higher_than_a_tap_and_falls_at_full_gravity() {
-        // rl#367 hold-to-float: same liftoff, but holding JUMP through the rise
-        // divides gravity — the held arc must peak clearly above the tapped one,
-        // while every descent tick pulls at the ONE shared gravity (the plane-exit
-        // handoff regime, rl#355 — no second fall rate).
-        let arc = |hold: bool| {
+    fn held_jump_peaks_at_the_configured_height_on_the_configured_tick() {
+        let alts = arc(|_| true);
+        let apex = JUMP_APEX_TICKS as usize;
+        assert!(
+            (alts[apex] - JUMP_HEIGHT).abs() <= JUMP_RISE_GRAVITY,
+            "the designed height on the designed tick, within one gravity step (got {})",
+            alts[apex]
+        );
+        assert_eq!(
+            alts.iter().max(),
+            Some(&alts[apex]),
+            "nothing later climbs above the designed apex"
+        );
+        let fall = alts.len() - 1 - apex;
+        assert!(
+            fall < apex,
+            "the shared gravity brings her down faster than the rise ({fall} < {apex} ticks)"
+        );
+        let rise: Vec<i64> = alts.windows(2).map(|w| w[1] - w[0]).collect();
+        let hang_ticks = rise[apex..]
+            .windows(2)
+            .take_while(|w| w[0] - w[1] == JUMP_RISE_GRAVITY)
+            .count();
+        assert_eq!(
+            hang_ticks, 3,
+            "the rise gravity carries past the apex until the fall passes JUMP_HANG_SPEED"
+        );
+        assert_eq!(
+            rise[apex + hang_ticks] - rise[apex + hang_ticks + 1],
+            GRAVITY_PER_TICK2,
+            "once the hang ends every fall tick pulls at the ONE shared gravity"
+        );
+    }
+
+    #[test]
+    fn tapped_jump_peaks_lower_under_the_shared_gravity() {
+        let alts = arc(|_| false);
+        let peak = *alts.iter().max().unwrap();
+        assert!(
+            peak > PLAYER_HEIGHT_FP && peak < JUMP_HEIGHT * 3 / 5,
+            "a tap clears a body but reaches nowhere near the held apex (got {peak})"
+        );
+        let steps: Vec<i64> = alts.windows(2).map(|w| w[1] - w[0]).collect();
+        for w in steps.windows(2).take(steps.len() - 2) {
+            assert_eq!(
+                w[0] - w[1],
+                GRAVITY_PER_TICK2,
+                "released: the shared gravity, every tick"
+            );
+        }
+    }
+
+    #[test]
+    fn early_release_shortens_the_jump() {
+        let full = *arc(|_| true).iter().max().unwrap();
+        let short = *arc(|t| t < 4).iter().max().unwrap();
+        let tap = *arc(|_| false).iter().max().unwrap();
+        assert!(
+            tap < short && short < full,
+            "height follows the hold ({tap} < {short} < {full})"
+        );
+    }
+
+    #[test]
+    fn buffered_jump_fires_on_landing() {
+        // Measured against the landing each press produces: a press near the apex
+        // re-engages the hang and stretches the arc.
+        let run = |press_at: u64| -> (u64, bool) {
             let mut sim = Sim::new(13, &players(1));
             let mut jump = neutral_for(&sim);
             jump.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::JUMP));
             step_scenery(&mut sim, &jump);
-            let mut peak = 0;
-            let mut ticks = 0;
-            while sim.player(PlayerId(0)).unwrap().alt() > 0 {
-                let held = if hold && sim.player(PlayerId(0)).unwrap().vel().y > 0 {
-                    buttons::JUMP
-                } else {
-                    0
-                };
-                let vy_before = sim.player(PlayerId(0)).unwrap().vel().y;
+            let mut tick = 0;
+            loop {
+                tick += 1;
+                let b = if tick == press_at { buttons::JUMP } else { 0 };
                 let mut inputs = neutral_for(&sim);
-                inputs.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, held));
+                inputs.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, b));
                 step_scenery(&mut sim, &inputs);
-                let p = sim.player(PlayerId(0)).unwrap();
-                if vy_before <= 0 && p.alt() > 0 {
-                    assert_eq!(
-                        p.vel().y,
-                        vy_before - GRAVITY_PER_TICK2,
-                        "descent is always full shared gravity"
-                    );
+                if sim.player(PlayerId(0)).unwrap().alt() == 0 {
+                    break;
                 }
-                peak = peak.max(p.alt());
-                ticks += 1;
-                assert!(ticks < 300, "a floated jump must come back down");
+                assert!(tick < 300, "a jump must come back down");
             }
-            peak
+            let n = neutral_for(&sim);
+            step_scenery(&mut sim, &n);
+            (tick, sim.player(PlayerId(0)).unwrap().vel().y == JUMP_SPEED)
         };
-        let (tapped, held) = (arc(false), arc(true));
+        let window = JUMP_BUFFER_TICKS as u64;
+        let (landing, _) = run(u64::MAX);
+        let mut in_window = 0;
+        for press_at in 1..=landing {
+            let (landed, fired) = run(press_at);
+            let buffered = press_at + window > landed;
+            assert_eq!(
+                fired, buffered,
+                "press on {press_at}, touchdown {landed}: fires iff within {window} ticks"
+            );
+            in_window += buffered as u64;
+        }
         assert!(
-            held > tapped * 3 / 2,
-            "the held arc peaks well above the tap (tap {tapped}, held {held})"
-        );
-        assert!(
-            tapped > PLAYER_HEIGHT_FP,
-            "even a tap clears a full player height (got {tapped})"
+            in_window > 0 && in_window < landing,
+            "the scan straddles the window edge ({in_window} of {landing} presses buffered)"
         );
     }
 
+    #[test]
+    fn coyote_time_lifts_off_after_the_ground_falls_away() {
+        // A plane-speed skid over a drop scanned off the shipped terrain.
+        let carried = meters_to_grid(20.0) / TICK_HZ as i64;
+        let skid = carried * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN;
+        let step_off = || {
+            let mut sim = Sim::new(13, &players(1));
+            let mut snap = sim.core_snapshot();
+            let p = snap.players[&PlayerId(0)];
+            let ledge = (0..20_000)
+                .map(|k| Pos {
+                    x: p.pos().x + k * skid,
+                    z: p.pos().z,
+                })
+                .find(|&at| {
+                    let next = Pos {
+                        x: at.x + skid,
+                        z: at.z,
+                    };
+                    ground_at(at) - ground_at(next) > STEP_DOWN_MAX
+                })
+                .expect("the shipped terrain has a drop-off within reach of the spawn");
+            snap.players.insert(
+                PlayerId(0),
+                Player::from_parts(
+                    ledge,
+                    p.yaw(),
+                    p.status(),
+                    0,
+                    Vel {
+                        x: carried,
+                        y: 0,
+                        z: 0,
+                    },
+                    true,
+                    JumpWindows::default(),
+                ),
+            );
+            sim.apply_core_snapshot(snap);
+            let mut slide = neutral_for(&sim);
+            slide.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::SLIDE));
+            step_scenery(&mut sim, &slide);
+            let p = sim.player(PlayerId(0)).unwrap();
+            assert!(p.alt() > 0, "the skid carries her off the drop");
+            assert_eq!(p.vel().y, 0, "stepped off, not jumped");
+            sim
+        };
+        let jump_after = |neutral_ticks: u8| -> Sim {
+            let mut sim = step_off();
+            for _ in 0..neutral_ticks {
+                let n = neutral_for(&sim);
+                step_scenery(&mut sim, &n);
+            }
+            let mut jump = neutral_for(&sim);
+            jump.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::JUMP));
+            step_scenery(&mut sim, &jump);
+            sim
+        };
+        let late = jump_after(COYOTE_TICKS - 1);
+        assert_eq!(
+            late.player(PlayerId(0)).unwrap().vel().y,
+            JUMP_SPEED - JUMP_RISE_GRAVITY,
+            "the last coyote tick still lifts off (then integrates)"
+        );
+        let too_late = jump_after(COYOTE_TICKS);
+        assert!(
+            too_late.player(PlayerId(0)).unwrap().vel().y < 0,
+            "one tick past the window there is no jump"
+        );
+    }
+
+    #[test]
+    fn jumping_off_a_ledge_keeps_the_drop_height() {
+        let carried = meters_to_grid(20.0) / TICK_HZ as i64;
+        let skid = carried * SLIDE_KEEP_NUM / SLIDE_KEEP_DEN;
+        let mut sim = Sim::new(13, &players(1));
+        let mut snap = sim.core_snapshot();
+        let p = snap.players[&PlayerId(0)];
+        let ledge = (0..20_000)
+            .map(|k| Pos {
+                x: p.pos().x + k * skid,
+                z: p.pos().z,
+            })
+            .find(|&at| {
+                let next = Pos {
+                    x: at.x + skid,
+                    z: at.z,
+                };
+                ground_at(at) - ground_at(next) > STEP_DOWN_MAX
+            })
+            .expect("the shipped terrain has a drop-off within reach of the spawn");
+        snap.players.insert(
+            PlayerId(0),
+            Player::from_parts(
+                ledge,
+                p.yaw(),
+                p.status(),
+                0,
+                Vel {
+                    x: carried,
+                    y: 0,
+                    z: 0,
+                },
+                true,
+                JumpWindows::default(),
+            ),
+        );
+        sim.apply_core_snapshot(snap);
+        let mut inputs = neutral_for(&sim);
+        inputs.insert(
+            PlayerId(0),
+            Input::new(0.0, 0.0, 0.0, buttons::SLIDE | buttons::JUMP),
+        );
+        step_scenery(&mut sim, &inputs);
+        let p = sim.player(PlayerId(0)).unwrap();
+        assert_eq!(p.vel().y, JUMP_SPEED, "lifted off");
+        assert!(
+            p.alt() > STEP_DOWN_MAX,
+            "…from the ledge, not from the bottom of the drop (alt {})",
+            p.alt()
+        );
+    }
+
+    #[test]
+    fn stepping_out_of_a_craft_never_jumps() {
+        // A craft parked on the ground mirrors alt 0 into its pilot for a few ticks
+        // (a grounded walker re-arms coyote every tick), then lifts and the pilot
+        // steps out holding JUMP: the exit is the craft's momentum, never a liftoff.
+        let mut sim = Sim::new(17, &players(1));
+        for _ in 0..3 {
+            step_piloted(&mut sim, 0, Vel::default());
+        }
+        let carried = Vel {
+            x: 2_000,
+            y: 0,
+            z: 1_000,
+        };
+        step_piloted(&mut sim, meters_to_grid(1.0), carried);
+        let mut inputs = neutral_for(&sim);
+        inputs.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::JUMP));
+        let poses = hold_poses(&sim);
+        sim.step(&inputs, Externals::crabs_only(&poses));
+        let p = sim.player(PlayerId(0)).unwrap();
+        assert!(p.vel().y < 0, "gravity, not a jump (vy {})", p.vel().y);
+        assert_eq!((p.vel().x, p.vel().z), (carried.x, carried.z));
+    }
     #[test]
     fn plane_exit_hands_off_the_craft_momentum() {
         let mut sim = Sim::new(17, &players(1));
@@ -2371,6 +2642,16 @@ mod tests {
             hash_after(&|s| s.players.get_mut(&foot).unwrap().status = PlayerStatus::Downed),
             h0,
             "player status must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.players.get_mut(&foot).unwrap().jump.coyote += 1),
+            h0,
+            "player coyote window must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.players.get_mut(&foot).unwrap().jump.buffer += 1),
+            h0,
+            "player jump buffer must be hashed"
         );
 
         assert_ne!(
