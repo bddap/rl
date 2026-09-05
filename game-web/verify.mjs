@@ -84,6 +84,21 @@ ws.onmessage = (ev) => {
 await send('Runtime.enable');
 await send('Network.enable');
 await send('Page.enable');
+// rl#419: Web Audio instrumentation, installed before any page script runs. The
+// page creates its AudioContext through the global constructor and drives output
+// by starting AudioBufferSourceNodes, so wrapping those two counts what the API
+// itself sees — no console-log matching.
+await send('Page.addScriptToEvaluateOnNewDocument', { source: `
+  window.__gcrAudio = { contexts: [], starts: 0 };
+  window.AudioContext = class extends AudioContext {
+    constructor(...args) { super(...args); window.__gcrAudio.contexts.push(this); }
+  };
+  const start = AudioBufferSourceNode.prototype.start;
+  AudioBufferSourceNode.prototype.start = function (...args) {
+    window.__gcrAudio.starts += 1;
+    return start.apply(this, args);
+  };
+` });
 await send('Page.navigate', { url });
 
 async function evaluate(expression) {
@@ -92,26 +107,46 @@ async function evaluate(expression) {
 }
 const loadingOverlayPresent = () => evaluate("!!document.getElementById('gcr-loading')");
 const focusedOnCanvas = () => evaluate("document.activeElement === document.getElementById('gcr-canvas')");
+const audioStates = () => evaluate('window.__gcrAudio.contexts.map((c) => c.state)');
+const audioStarts = () => evaluate('window.__gcrAudio.starts');
+async function click() {
+  for (const type of ['mousePressed', 'mouseReleased'])
+    await send('Input.dispatchMouseEvent', { type, x: 400, y: 225, button: 'left', clickCount: 1 });
+}
 const synthetic = (ctor, type, init) => evaluate(
   `!document.getElementById('gcr-canvas').dispatchEvent(new ${ctor}(${JSON.stringify(type)}, ${JSON.stringify(init)}))`);
 
-try {
-  // rl#413: the loading overlay is the page's only boot feedback — it must exist
-  // while the bundle downloads and be gone once real frames flow. Poll: navigation
-  // may not have committed yet, but removal can't beat the poll (it waits on wasm
-  // boot + first frames, seconds away).
-  {
-    const until = Date.now() + 10_000;
-    while (!(await loadingOverlayPresent())) {
-      if (Date.now() > until) throw new Error('no #gcr-loading overlay during load (rl#413 regression)');
-      await sleep(100);
-    }
+// rl#413: the loading overlay is the page's only boot feedback — it must exist
+// while the bundle downloads and be gone once real frames flow. Poll: navigation
+// may not have committed yet, but removal can't beat the poll (it waits on wasm
+// boot + first frames, seconds away).
+async function awaitLoadingOverlay() {
+  const until = Date.now() + 10_000;
+  while (!(await loadingOverlayPresent())) {
+    if (Date.now() > until) throw new Error('no #gcr-loading overlay during load (rl#413 regression)');
+    await sleep(100);
   }
+}
+
+try {
+  await awaitLoadingOverlay();
   await waitForLine('WEB_ASSETS_PRELOADED', 'asset prefetch');
   await waitForLine('WEB_FRAMETIME', 'first frame-rate snapshot (menu rendering)');
   await sleep(1500);
   if (await loadingOverlayPresent()) throw new Error('#gcr-loading overlay still up after frames flow (rl#413 regression)');
   await screenshot('menu.png');
+
+  // rl#419: chromium's autoplay policy holds an AudioContext created before the
+  // first gesture in `suspended` — asserted BEFORE any synthetic input (a key tap is
+  // a gesture too) so the running-state check after the click cannot pass
+  // vacuously; a bypass flag on the browser would show up here.
+  {
+    const states = await audioStates();
+    if (states.length === 0) throw new Error('no AudioContext created by the page (rl#419)');
+    if (!states.every((s) => s === 'suspended'))
+      throw new Error(`AudioContext ${states} before any gesture — autoplay policy not enforced, the audio check is vacuous (rl#419)`);
+  }
+  const startsBeforeGesture = await audioStarts();
 
   // rl#418: winit owns canvas focus + preventDefault only while bevy's
   // prevent_default_event_handling stays on; this is what catches it flipping off.
@@ -124,11 +159,21 @@ try {
     throw new Error('contextmenu on the canvas not defaultPrevented (rl#418)');
   await evaluate("document.getElementById('gcr-canvas').blur()");
   if (await focusedOnCanvas()) throw new Error('blur() left the canvas focused — the focus probe is vacuous');
-  for (const type of ['mousePressed', 'mouseReleased'])
-    await send('Input.dispatchMouseEvent', { type, x: 400, y: 225, button: 'left', clickCount: 1 });
+  await click();
   await sleep(250);
   if (!(await focusedOnCanvas())) throw new Error('click did not refocus the canvas (rl#418)');
   process.stderr.write('FOCUS_OK canvas keeps focus across Tab and click; Tab + contextmenu defaultPrevented\n');
+
+  await sleep(1000);
+  {
+    const states = await audioStates();
+    const starts = await audioStarts();
+    if (!states.every((s) => s === 'running'))
+      throw new Error(`AudioContext ${states} after the click — the gesture did not resume it (rl#419)`);
+    if (starts <= startsBeforeGesture)
+      throw new Error(`no source node started after the gesture (${starts} before and after) — the output chain is stalled (rl#419)`);
+    process.stderr.write(`AUDIO_OK AudioContext running after the click; ${starts - startsBeforeGesture} source nodes started since\n`);
+  }
 
   // Chooser: focus starts on Host; one Down lands on "Play solo (offline)".
   await tap('ArrowDown', 'ArrowDown');
@@ -174,6 +219,25 @@ try {
   if (nonLocal.length) throw new Error('page made non-local requests:\n  ' + nonLocal.join('\n  '));
   if (relayish.length) throw new Error('console shows link activity in solo:\n  ' + relayish.join('\n  '));
   process.stderr.write(`NETCHECK_OK page made ${pageRequests.length} requests, all same-origin (${origin}); no link activity logged\n`);
+
+  // rl#419, the other ordering: the gesture lands while the bundle is still
+  // downloading, before the wasm creates its AudioContext. The page must come up
+  // audible with no further input. A fresh navigation resets user activation.
+  consoleLines.length = 0;
+  await send('Page.navigate', { url });
+  await awaitLoadingOverlay();
+  await click();
+  if ((await audioStates()).length !== 0)
+    throw new Error('boot created its AudioContext before the click landed — the gesture-first ordering was not exercised (rl#419)');
+  await waitForLine('WEB_FRAMETIME', 'first frame-rate snapshot after a gesture-first reload');
+  await sleep(1000);
+  {
+    const states = await audioStates();
+    if (states.length === 0) throw new Error('no AudioContext created after the gesture-first reload (rl#419)');
+    if (!states.every((s) => s === 'running'))
+      throw new Error(`AudioContext ${states} when the gesture came before boot — the page stays silent (rl#419)`);
+    process.stderr.write('AUDIO_OK AudioContext running with the gesture before boot\n');
+  }
   process.stderr.write('VERIFY_PLAY_OK\n');
 } finally {
   fs.writeFileSync(`${outdir}/console.log`, consoleLines.join('\n') + '\n');

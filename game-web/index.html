@@ -18,6 +18,19 @@
 <body>
   <canvas id="gcr-canvas"></canvas>
   <div id="gcr-loading">loading…</div>
+  <script>
+    // Web Audio autoplay policy (rl#419): a context created before the first user
+    // gesture starts suspended, and nothing below the page (bevy → rodio → cpal)
+    // resumes it afterwards — so the page resumes every context it created. A
+    // classic script: the wasm glue binds `AudioContext` when its module evaluates,
+    // which precedes the module script below.
+    const audioContexts = [];
+    window.AudioContext = class extends AudioContext {
+      constructor(...args) { super(...args); audioContexts.push(this); }
+    };
+    for (const type of ['pointerdown', 'keydown'])
+      window.addEventListener(type, () => audioContexts.forEach((c) => c.resume()), { capture: true });
+  </script>
   <script type="module">
     import init, { boot } from './pkg/game_web.js';
     const status = document.getElementById('gcr-loading');

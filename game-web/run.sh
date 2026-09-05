@@ -92,7 +92,6 @@ start_chromium() {
   setsid nix-shell -p chromium --run "
     chromium --headless=new --no-sandbox --window-size=800,450 \
       --remote-debugging-port=9333 \
-      --autoplay-policy=no-user-gesture-required \
       --user-data-dir=$OUT/chrome-profile \
       --no-first-run --no-default-browser-check --metrics-recording-only \
       --disable-background-networking --disable-component-update \
