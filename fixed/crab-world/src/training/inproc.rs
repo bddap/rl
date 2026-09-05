@@ -1,0 +1,631 @@
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread::JoinHandle;
+use std::time::Instant;
+
+use bevy::prelude::*;
+use burn::record::{BinBytesRecorder, FullPrecisionSettings};
+
+use crate::TrainConfig;
+use crate::bot::arch::{AnyBrain, ArchId};
+
+use super::TrainBackend;
+use super::algorithm::RolloutBuffer;
+use super::checkpoint::{CheckpointDir, TICK_WATERMARK_FILENAME};
+use super::normalizer::NormalizerSnapshot;
+use super::systems::{HorizonOutput, HorizonRequest, LearnerState, StepTelemetry, WorkerState};
+
+type SnapshotRecorder = BinBytesRecorder<FullPrecisionSettings>;
+
+fn apply_nice(nice: i32) {
+    let nice = nice.clamp(0, 19);
+    if nice == 0 {
+        return;
+    }
+    // wasm has no processes to re-prioritize; the browser build never trains, this
+    // path is just linked (rl#411).
+    #[cfg(target_family = "wasm")]
+    let _ = nice;
+    #[cfg(not(target_family = "wasm"))]
+    {
+        // No errno pre-clear: unlike getpriority, setpriority returns -1 ONLY on error,
+        // so the bare return code is the whole verdict (and errno access is per-OS libc
+        // surface — __errno_location is glibc-only, which broke the macOS build).
+        let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
+        if rc == -1 {
+            let err = std::io::Error::last_os_error();
+            eprintln!("[nice] setpriority({nice}) failed: {err} — running at normal priority");
+        }
+    }
+}
+
+pub fn default_workers(explicit: Option<usize>) -> usize {
+    let k = explicit.unwrap_or_else(|| usable_cores().saturating_sub(2).max(1));
+    k.clamp(1, 64)
+}
+
+/// At most the cores this process can actually run on: the PHYSICAL core count
+/// capped by `available_parallelism()`.
+///
+/// Physical, not logical, as the base: each rollout thread saturates a core with
+/// rapier + a burn forward pass, and two such threads sharing one physical core
+/// via hyperthreading contend for the same FPU/cache and net well under 2× — so
+/// a count keyed off logical CPUs alone would oversubscribe ~2× and thrash. On
+/// Linux the physical count is the distinct (physical id, core id) pairs in
+/// `/proc/cpuinfo`, which collapses hyperthreads onto their shared core.
+///
+/// Capped by `available_parallelism()` because `/proc/cpuinfo` is host-wide
+/// while `available_parallelism()` honors cgroup CPU quotas and affinity masks:
+/// under a capped cgroup (CI, botq workers) the host may show 12 physical cores
+/// while the scheduler grants 8 — planning threads for cores the cgroup denies
+/// just adds contention. Falls back to `available_parallelism()` alone if
+/// `/proc/cpuinfo` is unavailable or yields nothing.
+fn usable_cores() -> usize {
+    let granted = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    if let Ok(info) = std::fs::read_to_string("/proc/cpuinfo") {
+        let mut pairs = std::collections::HashSet::new();
+        let (mut phys, mut core) = (None, None);
+        for line in info.lines() {
+            if let Some(v) = line.strip_prefix("physical id") {
+                phys = v
+                    .split(':')
+                    .nth(1)
+                    .and_then(|s| s.trim().parse::<u32>().ok());
+            } else if let Some(v) = line.strip_prefix("core id") {
+                core = v
+                    .split(':')
+                    .nth(1)
+                    .and_then(|s| s.trim().parse::<u32>().ok());
+            } else if line.trim().is_empty()
+                && let (Some(p), Some(c)) = (phys.take(), core.take())
+            {
+                pairs.insert((p, c));
+            }
+        }
+        if let (Some(p), Some(c)) = (phys, core) {
+            pairs.insert((p, c));
+        }
+        if !pairs.is_empty() {
+            return pairs.len().min(granted);
+        }
+    }
+    granted
+}
+
+fn init_process_pools() {
+    crate::bot::headless::pin_single_thread_pools();
+}
+
+fn read_tick_watermark(dir: &Path) -> u64 {
+    std::fs::read_to_string(dir.join(TICK_WATERMARK_FILENAME))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Persist the tick odometer via the crate-wide [`super::atomic_write`] (temp + fsync +
+/// rename), so neither a process crash nor a power loss can leave a torn count a restart
+/// would misread; a write failure is logged, not fatal.
+fn write_tick_watermark(dir: &Path, ticks: u64) {
+    let path = dir.join(TICK_WATERMARK_FILENAME);
+    if let Err(e) = super::atomic_write(&path, ticks.to_string().as_bytes()) {
+        eprintln!("[learner] failed to persist tick watermark to {path:?}: {e}");
+    }
+}
+
+const ANNEAL_EPOCH_FILENAME: &str = "log_std_anneal_epoch.txt";
+
+fn read_or_init_anneal_epoch(dir: &Path, total_ticks: u64) -> u64 {
+    let path = dir.join(ANNEAL_EPOCH_FILENAME);
+    let stored = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    match stored {
+        Some(epoch) if epoch <= total_ticks => epoch,
+        _ => {
+            if let Err(e) = super::atomic_write(&path, total_ticks.to_string().as_bytes()) {
+                eprintln!("[learner] failed to persist σ-anneal epoch to {path:?}: {e}");
+            }
+            total_ticks
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RollRequest {
+    brain_bytes: Arc<Vec<u8>>,
+    normalizer: Arc<NormalizerSnapshot>,
+    log_std_floor: f32,
+}
+
+enum RollOutcome {
+    // Boxed: the per-bearing reach array (rl#276) grew the payload past clippy's
+    // large-enum-variant line, and one channel send per thread per iter makes the
+    // indirection free.
+    Rolled {
+        output: Box<HorizonOutput>,
+        ticks: u64,
+    },
+    SnapshotLoadFailed,
+}
+
+/// The training half of a rollout env: the worker's [`WorkerState`] plus the systems
+/// that drive and record her — the trainer's counterpart of net's inference driver
+/// (`run_crab_policy`), occupying the same `BotSet::Think` slot.
+/// [`build_rollout_app`] is the sole composer, onto the server world — the
+/// systems-level tests (`systems::step`) build their one-env fixtures through it too.
+pub(crate) fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usize, arch: ArchId) {
+    use super::systems::{self, brain_step, reset_crab};
+
+    let state = systems::WorkerState::new_worker(config, id, arch);
+    app.insert_non_send(state).add_systems(
+        FixedUpdate,
+        (brain_step, reset_crab)
+            .chain()
+            .in_set(crate::bot::BotSet::Think),
+    );
+}
+
+/// Build one rollout worker's env — the trainer trains in the headless server world
+/// (rl#298 stage 4): [`headless_server_world`] on [`TrainConfig::terrain`]'s ground —
+/// default the canonical tile (the plant's world half, rl#293 — recorded in the
+/// checkpoint sidecar beside the friction cap; the sidecar does NOT track the
+/// diagnostic `flat` override, see [`crate::TrainTerrain`]) — driven by the training
+/// systems.
+///
+/// The ball target REPLACES the served world's hunt feed here, it does not ride its
+/// plumbing: the served world's hunt poser (`set_crab_walk_target` in net) poses prey at one
+/// fixed height above the surface, which cannot express the trained height band or the
+/// under-carapace close disc the grab curriculum needs (rl#250). The target source
+/// stays the ball sampler ([`super::targets`]), whose band/bearing/surface conventions
+/// the hunt poser already shares through the one `band_lure` implementation.
+///
+/// [`headless_server_world`]: crate::bot::headless::headless_server_world
+pub(crate) fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId) -> App {
+    use crate::bot::headless::{WorldRole, force_serial_schedules, headless_server_world};
+
+    let mut app = headless_server_world(
+        config.num_envs(),
+        WorldRole::RolloutWorker,
+        config.terrain.grid(),
+    );
+    wire_rollout_training(&mut app, config, id, arch);
+    force_serial_schedules(&mut app);
+    app.finish();
+    app.cleanup();
+    app
+}
+
+struct RolloutThread {
+    request_tx: Sender<RollRequest>,
+    result_rx: Receiver<RollOutcome>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl RolloutThread {
+    fn spawn(id: usize, config: TrainConfig, arch: ArchId, horizon: u64) -> Self {
+        let (request_tx, request_rx) = channel::<RollRequest>();
+        let (result_tx, result_rx) = channel::<RollOutcome>();
+        let handle = std::thread::Builder::new()
+            .name(format!("rollout-{id}"))
+            .spawn(move || rollout_thread_main(id, config, arch, horizon, request_rx, result_tx))
+            .expect("spawn rollout thread");
+        Self {
+            request_tx,
+            result_rx,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for RolloutThread {
+    fn drop(&mut self) {
+        let (dead_tx, _) = channel::<RollRequest>();
+        self.request_tx = dead_tx;
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn rollout_thread_main(
+    id: usize,
+    config: TrainConfig,
+    arch: ArchId,
+    horizon: u64,
+    request_rx: Receiver<RollRequest>,
+    result_tx: Sender<RollOutcome>,
+) {
+    let mut app = build_rollout_app(id, &config, arch);
+    warm_up_app(&mut app);
+
+ // No catch_unwind here, by directive (rl#346, extending rl#343): a roll
+    // panic — above all a physics-integrity violation — unwinds this thread, the
+    // learner's recv on the closed channel fails, and the RUN dies loud. Silently
+    // rebuilding the world and continuing is the recovery class rl#343 bans.
+    while let Ok(req) = request_rx.recv() {
+        let result = roll_one_horizon(&mut app, &req, horizon);
+        if result_tx.send(result).is_err() {
+            break;
+        }
+    }
+}
+
+fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutcome {
+    {
+        let mut st = app
+            .world_mut()
+            .get_non_send_mut::<WorkerState>()
+            .expect("rollout WorkerState");
+        let opened = st.begin_horizon(HorizonRequest {
+            brain_bytes: &req.brain_bytes,
+            normalizer: (*req.normalizer).clone(),
+            log_std_floor: req.log_std_floor,
+        });
+        if !opened {
+            return RollOutcome::SnapshotLoadFailed;
+        }
+    }
+
+    let start = horizon_tick(app);
+    while horizon_tick(app) - start < horizon {
+        app.update();
+    }
+    let rolled = horizon_tick(app) - start;
+
+    let mut st = app
+        .world_mut()
+        .get_non_send_mut::<WorkerState>()
+        .expect("rollout WorkerState");
+    RollOutcome::Rolled {
+        output: Box::new(st.end_horizon()),
+        ticks: rolled,
+    }
+}
+
+fn horizon_tick(app: &mut App) -> u64 {
+    app.world()
+        .get_non_send::<WorkerState>()
+        .map(|st| st.total_steps())
+        .unwrap_or(0)
+}
+
+fn warm_up_app(app: &mut App) {
+    for _ in 0..2 {
+        app.update();
+    }
+    let mut st = app
+        .world_mut()
+        .get_non_send_mut::<WorkerState>()
+        .expect("rollout WorkerState");
+    let _ = st.end_horizon();
+}
+
+/// The learner loop ({snapshot → roll all → merge → GPU update}) — a child module so the
+/// `wgpu` gate is written ONCE here instead of stamped on each of its items (#123).
+#[cfg(feature = "wgpu")]
+mod learner;
+#[cfg(feature = "wgpu")]
+pub use learner::run_learner;
+
+fn snapshot_brain_bytes(brain: &AnyBrain<TrainBackend>) -> Vec<u8> {
+    brain
+        .record_leaf(&SnapshotRecorder::default(), ())
+        .expect("serialize brain snapshot")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bot::sensor::OBS_SIZE;
+    use crate::training::checkpoint::crab_optimizer;
+    use crate::training::normalizer::NormalizerIncrement;
+    use crate::training::update::ppo_update_core;
+
+    pub(super) fn empty_normalizer_increment() -> NormalizerIncrement {
+        crate::training::normalizer::IncrementAccumulator::new().increment()
+    }
+
+    #[test]
+    fn default_workers_leaves_two_usable_cores_and_honors_override() {
+        let usable = usable_cores();
+        let granted = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        assert!(
+            (1..=granted).contains(&usable),
+            "usable {usable} must be in 1..=granted {granted}"
+        );
+
+        let k = default_workers(None);
+        assert!(k >= 1, "thread count must be at least 1, got {k}");
+        if usable > 2 {
+            assert_eq!(
+                k,
+                usable - 2,
+                "default must leave exactly 2 usable cores free"
+            );
+        }
+
+        assert_eq!(default_workers(Some(3)), 3, "explicit count must win");
+        assert_eq!(default_workers(Some(0)), 1, "0 clamps up to 1");
+        assert_eq!(default_workers(Some(999)), 64, "huge clamps down to 64");
+    }
+
+    #[test]
+    fn tick_watermark_round_trips_and_defaults_to_zero() {
+        let dir = std::env::temp_dir().join(format!("rl_test_tick_wm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(read_tick_watermark(&dir), 0, "absent watermark reads as 0");
+        write_tick_watermark(&dir, 1_234_567);
+        assert_eq!(read_tick_watermark(&dir), 1_234_567, "persisted reads back");
+        std::fs::write(dir.join(TICK_WATERMARK_FILENAME), b"not a number").unwrap();
+        assert_eq!(read_tick_watermark(&dir), 0, "unparsable reads as 0");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn brain_snapshot_round_trips_in_memory() {
+        use crate::bot::arch::ArchId;
+        use burn::backend::ndarray::NdArrayDevice;
+        use burn::tensor::Tensor;
+
+        let device = NdArrayDevice::Cpu;
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
+        let bytes = snapshot_brain_bytes(&brain);
+
+        let reloaded = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device)
+            .load_leaf_record(&SnapshotRecorder::default(), bytes, &device)
+            .expect("load snapshot");
+
+        let obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
+        let (m0, s0) = brain.policy(obs.clone());
+        let (m1, s1) = reloaded.policy(obs);
+        let (m0, m1): (Vec<f32>, Vec<f32>) = (
+            m0.to_data().to_vec().unwrap(),
+            m1.to_data().to_vec().unwrap(),
+        );
+        for (i, (a, b)) in m0.iter().zip(m1.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "policy mean[{i}] diverged: {a} vs {b}"
+            );
+        }
+        let (s0, s1): (Vec<f32>, Vec<f32>) = (
+            s0.to_data().to_vec().unwrap(),
+            s1.to_data().to_vec().unwrap(),
+        );
+        for (i, (a, b)) in s0.iter().zip(s1.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "log_std[{i}] diverged: {a} vs {b}");
+        }
+    }
+
+    /// The production rollout env end-to-end ([`build_rollout_app`]): the server
+    /// world armed (vehicle layer present), every env's crab spawned, the training
+    /// driver sampling live actions in the Think slot, and the ball target seeded to
+    /// its band + surface conventions — the rl#298 stage-4 acceptance in one world.
+    #[test]
+    fn rollout_env_is_the_server_world_driven_by_the_training_systems() {
+        use crate::bot::RESET_GRACE_TICKS;
+        use crate::bot::actuator::CrabActions;
+        use crate::bot::body::{CrabCarapace, CrabEnvId};
+        use crate::bot::sensor::CrabTargets;
+        use crate::training::targets::BAND_MAX_M;
+        use crate::vehicle::VehicleControls;
+
+        let m = 2usize;
+        let (config, dir) = scratch_config("rollout_env", m as u64);
+
+        let mut app = build_rollout_app(0, &config, ArchId::DEFAULT);
+        // Past spawn + settle grace, into live recording.
+        for _ in 0..(RESET_GRACE_TICKS + 24) {
+            app.update();
+        }
+
+        assert!(
+            app.world().contains_resource::<VehicleControls>(),
+            "the rollout env must be the server world — vehicle layer armed"
+        );
+
+        let mut crabs = app
+            .world_mut()
+            .query_filtered::<&CrabEnvId, With<CrabCarapace>>();
+        let mut envs: Vec<usize> = crabs.iter(app.world()).map(|e| e.0).collect();
+        envs.sort_unstable();
+        assert_eq!(envs, vec![0, 1], "one crab per env in the one world");
+
+        let actions = app.world().resource::<CrabActions>();
+        for e in 0..m {
+            assert!(
+                actions.rows()[e].iter().any(|v| *v != 0.0),
+                "env {e}: the training driver must be sampling live actions post-settle"
+            );
+        }
+        let first: Vec<_> = (0..m).map(|e| actions.rows()[e]).collect();
+        app.update();
+        let actions = app.world().resource::<CrabActions>();
+        assert!(
+            (0..m).any(|e| actions.rows()[e] != first[e]),
+            "consecutive steps must draw fresh exploration samples — an inference \
+             (deterministic) driver would repeat under a frozen obs"
+        );
+
+        let spawns = app.world().resource::<crate::bot::CrabSpawns>();
+        let targets = app.world().resource::<CrabTargets>();
+        let terrain = app.world().resource::<crate::terrain::Terrain>();
+        for e in 0..m {
+            let t = targets.get(e).expect("the ball target must be seeded");
+            let origin = spawns.origin(e);
+            let planar = Vec2::new(t.x - origin.x, t.z - origin.z).length();
+            assert!(
+                planar <= BAND_MAX_M + 1e-3,
+                "env {e}: ball at {planar} m must sit inside the trained band"
+            );
+            let above = t.y - terrain.height(t.x, t.z);
+            assert!(
+                (0.0..1.0).contains(&above),
+                "env {e}: ball rides {above} m above the surface — the ball target's \
+                 surface-relative convention, not the hunt feed's fixed claw height"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    pub(super) fn scratch_config(tag: &str, m: u64) -> (TrainConfig, std::path::PathBuf) {
+        use clap::Parser;
+        let dir = std::env::temp_dir().join(format!("rl_test_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = TrainConfig::try_parse_from([
+            "rl",
+            "--checkpoint-dir",
+            dir.to_str().unwrap(),
+            "--envs",
+            &m.to_string(),
+        ])
+        .expect("parse scratch TrainConfig");
+        (config, dir)
+    }
+
+    #[test]
+    fn empty_increment_merge_is_a_noop() {
+        use crate::training::normalizer::{NORMALIZER_CLIP, ObsNormalizer};
+
+        let mut master = ObsNormalizer::new(NORMALIZER_CLIP);
+        for i in 0..30 {
+            let mut o = [0.0f32; OBS_SIZE];
+            o[0] = i as f32;
+            o[1] = (i as f32) * 0.3 - 4.0;
+            master.normalize(&o);
+        }
+        let before = bincode::serialize(&master.snapshot()).unwrap();
+
+        master.merge(&empty_normalizer_increment());
+        let after = bincode::serialize(&master.snapshot()).unwrap();
+
+        assert_eq!(
+            before, after,
+            "merging an empty (panicked-thread) increment must leave the master \
+             normalizer byte-unchanged"
+        );
+    }
+
+    #[test]
+    #[ignore = "builds a bevy+rapier App; run with --ignored"]
+    fn rollout_thread_collects_per_env_buffers_and_learns() {
+        let m = 2u64;
+        let horizon = 96u64;
+        let (config, dir) = scratch_config("parity_thread", m);
+
+        let mut state = LearnerState::new(&config, None);
+        let before = snapshot_brain_bytes(state.brain());
+
+        let thread = RolloutThread::spawn(0, config.clone(), state.brain().arch(), horizon);
+        thread
+            .request_tx
+            .send(RollRequest {
+                brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
+                normalizer: Arc::new(state.normalizer_snapshot()),
+                log_std_floor: crate::bot::arch::LOG_STD_MIN,
+            })
+            .expect("send request");
+        let RollOutcome::Rolled { output, .. } = thread.result_rx.recv().expect("recv result")
+        else {
+            panic!("the roll must not panic");
+        };
+        let envs = output.envs;
+        assert_eq!(
+            envs.len(),
+            m as usize,
+            "one buffer per env (GAE must never sweep across envs)"
+        );
+        let total: usize = envs.iter().map(|e| e.len()).sum();
+        let max = (m * horizon) as usize;
+        assert!(
+            total > 0 && total <= max,
+            "collected {total} transitions, expected (0, {max}]"
+        );
+
+        let rollouts: Vec<RolloutBuffer> = envs;
+        let mut optimizer = crab_optimizer();
+        let device = state.device;
+        let (brain, ppo_config, ret_norm, rng) = state.learner_parts();
+        let metrics = ppo_update_core(
+            brain,
+            &mut optimizer,
+            ppo_config,
+            &rollouts,
+            &device,
+            ret_norm,
+            rng,
+            crate::bot::arch::LOG_STD_MIN,
+        );
+        assert!(
+            metrics.policy_loss.is_finite()
+                && metrics.value_loss.is_finite()
+                && metrics.entropy.is_finite(),
+            "PPO metrics must be finite: {metrics:?}"
+        );
+        let after = snapshot_brain_bytes(state.brain());
+        assert_ne!(
+            before, after,
+            "the PPO update must change the policy weights (learning)"
+        );
+
+        drop(thread);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "builds two bevy+rapier Apps; run with --ignored"]
+    fn two_threads_each_collect_a_full_horizon() {
+        let m = 1u64;
+        let horizon = 96u64;
+        let k = 2usize;
+        let (config, dir) = scratch_config("parity_two_threads", m);
+
+        let state = LearnerState::new(&config, None);
+        let brain_bytes = Arc::new(snapshot_brain_bytes(state.brain()));
+        let normalizer = Arc::new(state.normalizer_snapshot());
+
+        let threads: Vec<RolloutThread> = (0..k)
+            .map(|id| RolloutThread::spawn(id, config.clone(), state.brain().arch(), horizon))
+            .collect();
+        for t in &threads {
+            t.request_tx
+                .send(RollRequest {
+                    brain_bytes: Arc::clone(&brain_bytes),
+                    normalizer: Arc::clone(&normalizer),
+                    log_std_floor: crate::bot::arch::LOG_STD_MIN,
+                })
+                .expect("send");
+        }
+        let mut buffers = 0usize;
+        let mut total = 0usize;
+        for t in &threads {
+            let RollOutcome::Rolled { output, .. } = t.result_rx.recv().expect("recv") else {
+                panic!("neither thread should panic");
+            };
+            let envs = output.envs;
+            assert_eq!(envs.len(), m as usize, "each thread returns M buffers");
+            buffers += envs.len();
+            total += envs.iter().map(|e| e.len()).sum::<usize>();
+        }
+        assert_eq!(buffers, k * m as usize, "learner sees K·M buffers");
+        let max = k * (m * horizon) as usize;
+        assert!(
+            total > 0 && total <= max,
+            "collected {total} transitions across {k} threads, expected (0, {max}]"
+        );
+
+        drop(threads);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

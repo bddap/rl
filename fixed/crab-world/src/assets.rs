@@ -149,7 +149,7 @@ pub fn read_asset_to_string(path: &Path) -> std::io::Result<String> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-/// What a load path does when an asset it wants is not there (rl#375
+/// What a load path does when an asset it wants is not there (rl#375, owner
 /// directive): every release repeatedly shipped code without its assets and the
 /// resulting degradation was silent-by-design, found by ear. So missing-asset is now
 /// a PANIC at load — a broken bundle refuses to run instead of quietly shipping less
@@ -216,7 +216,7 @@ pub fn require_glyphs<I: IntoIterator<Item = &'static str>>(paths: I) {
                 &full,
                 "control glyph not found",
                 "These CC0 Kenney glyphs are committed at crab-world/assets/controls/ and \
-                 packaged by rl-release-build; if your assets live elsewhere, set \
+ packaged by rl-release-build; if your assets live elsewhere, set \
                  BEVY_ASSET_ROOT.",
             );
         }

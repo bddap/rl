@@ -1,6 +1,6 @@
 //! The baked-asset container (rl#411 stage 6): ONE opaque blob holding the full
 //! asset tree, so a hosted web build serves compiled artifacts only — never the raw
-//! asset files, which stay in the private assets repo (by directive).
+//! asset files, which stay in the private assets repo (directive).
 //! The writer runs in the packager (`pack-assets`), the parser in the web entry;
 //! sharing one module makes format drift impossible.
 //!

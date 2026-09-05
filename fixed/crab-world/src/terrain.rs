@@ -1,0 +1,686 @@
+//! The ONE terrain path (rl#281): a baked height grid drives BOTH the rapier
+//! [`Collider`] and (render-gated) the visible mesh, so wherever this module's mesh is
+//! what's drawn (rl-demo, GCR) it cannot diverge from what the crab stands on. Since
+//! the rl#293 flip the committed GCR bake is the default production grid; constant
+//! grids ([`TerrainGrid::flat`]) reach production only through the one diagnostic
+//! seam, [`crate::TrainTerrain`] — a flag choice, never a forked code path.
+//!
+//! Coordinates: the grid is centered on the world origin, +x = artifact column
+//! (preview-PNG right), +z = artifact row (preview-PNG down), heights along +y.
+//! [`TerrainGrid::height`] is triangle-exact against parry's default heightfield
+//! subdivision — the sampler IS the collider surface, not a bilinear approximation
+//! of it. Outside the tile the sampler clamps to the edge value, but the collider
+//! ends at the tile edge; a world-bounds policy is a later stage of rl#281
+//! (interim backstops: `rescue_lost_crabs`' BelowTerrain and the rl#339
+//! `rescue_lost_crafts` park).
+
+use std::sync::{Arc, OnceLock};
+
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::Collider;
+
+#[cfg(feature = "render")]
+use crate::sky::{hash3, rand01, smoothstep};
+
+/// The stage-1 bake artifact for GCR (rl#281): seed 281, 1024², 30 m pitch.
+static GCR_TERRAIN_BYTES: &[u8] = include_bytes!("../assets/terrain/gcr-seed281.terrain");
+
+/// Digest of the committed bake artifact, for the MP plant handshake (rl#286): two
+/// peers whose binaries embed different bakes stand on different mountains even when
+/// both say "terrain", so the bytes themselves are what the digest must witness.
+pub fn gcr_bake_digest() -> u64 {
+    static DIGEST: OnceLock<u64> = OnceLock::new();
+    *DIGEST.get_or_init(|| crate::fnv::fnv1a(GCR_TERRAIN_BYTES))
+}
+
+const MAGIC: &[u8; 8] = b"RLTERR01";
+
+/// Cell-size cap for [`TerrainGrid::flat`], for f32 contact precision — parry solves
+/// heightfield contacts against the containing cell's triangle, and one grid-spanning
+/// cell on a ±16 km fixture puts that triangle's vertices where f32 ulp is ~2 mm,
+/// comparable to contact tolerances (and it measurably perturbed the rl#224 flail-walk).
+/// 256 m keeps near-origin triangle vertices small at 129² points for the largest
+/// fixtures, instead of megabytes of zeros per world.
+const FLAT_CELL_MAX_M: f32 = 256.0;
+
+/// The `.terrain` metadata fields the runtime consumes; the rest of the header
+/// (seed, model rev, elevation range, …) is bake provenance and stays in the file.
+#[derive(serde::Deserialize)]
+struct Meta {
+    rows: usize,
+    cols: usize,
+    cell_size_m: f32,
+    height_scale: f32,
+}
+
+/// A heightmap over the world's XZ plane, centered on the origin. Heights are stored
+/// datum-shifted (the tile's center sample sits at y=0, so spawns near the origin stay
+/// near y=0 whatever the bake's absolute elevations) with the artifact's declarative
+/// `height_scale` already applied.
+pub struct TerrainGrid {
+    rows: usize,
+    cols: usize,
+    /// World meters per cell edge (`cell_size_m` from the artifact).
+    cell: f32,
+    /// Row-major `[row * cols + col]`, like the artifact.
+    heights: Vec<f32>,
+    /// Height span over the whole grid, computed once at construction.
+    relief: f32,
+}
+
+impl TerrainGrid {
+    /// Parse a `RLTERR01` artifact (see `scripts/terrain-bake/README.md`).
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, String> {
+        let header = bytes.get(..12).ok_or("artifact shorter than its header")?;
+        if &header[..8] != MAGIC {
+            return Err(format!("bad magic {:?}", &header[..8]));
+        }
+        let json_len = u32::from_le_bytes(header[8..12].try_into().expect("4 bytes")) as usize;
+        let meta_bytes = bytes
+            .get(12..12 + json_len)
+            .ok_or("truncated metadata blob")?;
+        let meta: Meta =
+            serde_json::from_slice(meta_bytes).map_err(|e| format!("bad metadata: {e}"))?;
+        if meta.rows < 2 || meta.cols < 2 {
+            return Err(format!("degenerate grid {}x{}", meta.rows, meta.cols));
+        }
+        if !(meta.cell_size_m > 0.0
+            && meta.cell_size_m.is_finite()
+            && meta.height_scale.is_finite())
+        {
+            return Err(format!(
+                "bad scale knobs: cell_size_m={} height_scale={}",
+                meta.cell_size_m, meta.height_scale
+            ));
+        }
+        let grid = &bytes[12 + json_len..];
+        let want = meta
+            .rows
+            .checked_mul(meta.cols)
+            .and_then(|n| n.checked_mul(2))
+            .ok_or("grid dimensions overflow")?;
+        if grid.len() != want {
+            return Err(format!(
+                "grid is {} bytes, want {}x{}x2",
+                grid.len(),
+                meta.rows,
+                meta.cols
+            ));
+        }
+        let raw: Vec<i16> = grid
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let datum = raw[(meta.rows / 2) * meta.cols + meta.cols / 2];
+        let heights: Vec<f32> = raw
+            .iter()
+            .map(|&h| (i32::from(h) - i32::from(datum)) as f32 * meta.height_scale)
+            .collect();
+        let (min, max) = heights
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
+        Ok(Self {
+            rows: meta.rows,
+            cols: meta.cols,
+            cell: meta.cell_size_m,
+            heights,
+            relief: max - min,
+        })
+    }
+
+    /// Build a grid from raw i16 heights THROUGH the real artifact codec — encode,
+    /// then [`Self::parse`] — because the parse path (datum shift included) IS the
+    /// seam every production grid rides; a field-struct fixture would skip it. The
+    /// one test-fixture constructor: hand-rolled `RLTERR01` framings in test modules
+    /// fold here (rl#318 review).
+    #[cfg(test)]
+    pub(crate) fn test_grid(
+        rows: usize,
+        cols: usize,
+        cell_size_m: f32,
+        height_scale: f32,
+        heights: &[i16],
+    ) -> Self {
+        let meta = format!(
+            r#"{{"rows":{rows},"cols":{cols},"cell_size_m":{cell_size_m},"height_scale":{height_scale}}}"#
+        );
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend((meta.len() as u32).to_le_bytes());
+        bytes.extend(meta.as_bytes());
+        for h in heights {
+            bytes.extend(h.to_le_bytes());
+        }
+        Self::parse(&bytes).expect("test grid artifact parses")
+    }
+
+    /// A constant y=0 grid spanning ±`half_extent`, expressed through the one
+    /// terrain path instead of a bespoke slab or halfspace — for tests whose expected
+    /// geometry is hand-computed on a plane, and for the `--terrain flat` rollout
+    /// diagnostic ([`crate::TrainTerrain`]). Was test-gated after the rl#293
+    /// flat-arena deletion; the diagnostic seam re-opened it, and "production ground
+    /// is [`Self::gcr`]" is now held by [`crate::TrainTerrain`]'s default instead of
+    /// by construction. Grids that run band logic ([`crate::training::targets`])
+    /// must span ≥ the edge margin + band — smaller grids fail the sampling clamp's
+    /// assert.
+    pub fn flat(half_extent: f32) -> Self {
+        let cells = ((half_extent * 2.0) / FLAT_CELL_MAX_M).ceil().max(1.0) as usize;
+        let n = cells + 1;
+        Self {
+            rows: n,
+            cols: n,
+            cell: half_extent * 2.0 / cells as f32,
+            heights: vec![0.0; n * n],
+            relief: 0.0,
+        }
+    }
+
+    /// The committed GCR bake (parsed once; the artifact ships inside the binary so the
+    /// headless trainer and every peer sample the identical world with no asset-path or
+    /// download dependence).
+    pub fn gcr() -> Arc<Self> {
+        static GRID: OnceLock<Arc<TerrainGrid>> = OnceLock::new();
+        GRID.get_or_init(|| {
+            Arc::new(Self::parse(GCR_TERRAIN_BYTES).expect("committed artifact parses"))
+        })
+        .clone()
+    }
+
+    /// The committed GCR bake with its relief scaled by ONE well-defined scalar
+ /// (rl#341/owner): every datum-shifted height is multiplied by `amplitude`,
+    /// so relief scales about the tile-centre datum (the centre sample stays y=0 and
+    /// spawns near the origin stay near y=0 at every amplitude). `1.0` returns the
+    /// canonical singleton BIT-IDENTICALLY — no silent arena change on the default
+    /// path. This is a runtime relief scalar, distinct from the bake pipeline's
+    /// `--fbm-amplitude-m` (a detail-octave knob that mutates samples and needs a GPU
+    /// re-bake); the eval takes THIS one. Headless-measurement knob only: the render
+    /// path's biome stops are keyed on absolute datum-shifted metres, so rendering a
+    /// scaled grid would repaint biomes as a side effect — nothing render-side calls
+    /// this. Non-finite or negative amplitudes refuse loudly.
+    pub fn gcr_with_amplitude(amplitude: f32) -> Result<Arc<Self>, String> {
+        if !(amplitude.is_finite() && amplitude >= 0.0) {
+            return Err(format!(
+                "terrain amplitude must be a finite non-negative scalar, got {amplitude}"
+            ));
+        }
+        if amplitude == 1.0 {
+            return Ok(Self::gcr());
+        }
+        let mut grid = Self::parse(GCR_TERRAIN_BYTES).expect("committed artifact parses");
+        for h in &mut grid.heights {
+            *h *= amplitude;
+        }
+        grid.relief *= amplitude;
+        Ok(Arc::new(grid))
+    }
+
+    /// Full world-x span (grid columns).
+    pub fn extent_x(&self) -> f32 {
+        (self.cols - 1) as f32 * self.cell
+    }
+
+    /// Half the tile's shorter span — where the ground collider ends on the tighter
+    /// axis. The ONE source for "the edge of the world": the sampling interior
+    /// (`training::targets::sample_clamp_half`) and the rl#339 craft rescue both
+    /// derive from it, so an escape bound can never drift outside the collider.
+    pub fn half_span_min(&self) -> f32 {
+        self.extent_x().min(self.extent_z()) / 2.0
+    }
+
+    /// Full world-z span (grid rows).
+    pub fn extent_z(&self) -> f32 {
+        (self.rows - 1) as f32 * self.cell
+    }
+
+    fn at(&self, row: usize, col: usize) -> f32 {
+        self.heights[row * self.cols + col]
+    }
+
+    /// (rows, cols) — the hydrology bake (moisture.rs) walks the raw grid.
+    #[cfg(feature = "render")]
+    pub(crate) fn dims(&self) -> (usize, usize) {
+        (self.rows, self.cols)
+    }
+
+    /// World meters per cell edge.
+    #[cfg(feature = "render")]
+    pub(crate) fn cell_m(&self) -> f32 {
+        self.cell
+    }
+
+    /// The raw height samples, row-major `[row * cols + col]`.
+    #[cfg(feature = "render")]
+    pub(crate) fn heights_row_major(&self) -> &[f32] {
+        &self.heights
+    }
+
+    /// Surface height at world `(x, z)` — exact on the collider's triangles: parry's
+    /// default (non-zigzag) subdivision splits each cell along the (row+1,col)—(row,col+1)
+    /// diagonal, and this reproduces that split, so a point this fn puts ON the surface
+    /// is on the physics surface. Clamps outside the tile (the edge continues flat).
+    pub fn height(&self, x: f32, z: f32) -> f32 {
+        self.height_f64(x as f64, z as f64) as f32
+    }
+
+    /// [`Self::height`]'s one formula, in f64 — the entry the render path samples
+    /// through (rl#354): an f32 world coordinate is already quantized at ~0.5–1.3 mm
+    /// out at the rl#305 locales, a large fraction of the 0.051 m player's walking
+    /// step, so an eye height sampled through f32 stair-steps while the eye
+    /// translates. Callers with exact (fixed-point-derived) coordinates keep their
+    /// precision by entering here.
+    pub fn height_f64(&self, x: f64, z: f64) -> f64 {
+        let u = ((x / self.extent_x() as f64 + 0.5) * (self.cols - 1) as f64)
+            .clamp(0.0, (self.cols - 1) as f64);
+        let v = ((z / self.extent_z() as f64 + 0.5) * (self.rows - 1) as f64)
+            .clamp(0.0, (self.rows - 1) as f64);
+        let col = (u as usize).min(self.cols - 2);
+        let row = (v as usize).min(self.rows - 2);
+        let (fu, fv) = (u - col as f64, v - row as f64);
+        let h00 = self.at(row, col) as f64;
+        let h10 = self.at(row + 1, col) as f64;
+        let h01 = self.at(row, col + 1) as f64;
+        let h11 = self.at(row + 1, col + 1) as f64;
+        if fu + fv <= 1.0 {
+            h00 + (h10 - h00) * fv + (h01 - h00) * fu
+        } else {
+            h11 + (h10 - h11) * (1.0 - fu) + (h01 - h11) * (1.0 - fv)
+        }
+    }
+
+    /// THE spawn-on-surface primitive: the world point `height_above` meters over the
+    /// surface at `xz`. Spawns and targets go through this so nothing seeds below a
+    /// hill or floats over a valley. Takes the offset as a separate scalar — not a Vec3
+    /// whose y is secretly an offset — so an already-lifted point can't be lifted twice.
+    pub fn place(&self, xz: Vec2, height_above: f32) -> Vec3 {
+        Vec3::new(xz.x, self.height(xz.x, xz.y) + height_above, xz.y)
+    }
+
+    /// The whole-tile static collider. Same grid as [`Self::height`] and [`Self::mesh`],
+    /// transposed to parry's column-major layout (rows along +z, columns along +x).
+    /// Built with `FIX_INTERNAL_EDGES`: the crab's soft contacts rest with ~cm
+    /// penetration, and without the flag a foot straddling a cell seam takes a tilted
+    /// ghost impulse from the neighbor triangle's edge — on a flat grid the seam
+    /// diagonal passes through the spawn origin, so the flag is what keeps the
+    /// heightfield floor contact-equivalent to the slab it replaced.
+    pub fn collider(&self) -> Collider {
+        use bevy_rapier3d::rapier::geometry::SharedShape;
+        use bevy_rapier3d::rapier::parry::shape::{HeightField, HeightFieldFlags};
+        use bevy_rapier3d::rapier::parry::utils::Array2;
+
+        let mut col_major = vec![0.0f32; self.rows * self.cols];
+        for col in 0..self.cols {
+            for row in 0..self.rows {
+                col_major[col * self.rows + row] = self.at(row, col);
+            }
+        }
+        let field = HeightField::with_flags(
+            Array2::new(self.rows, self.cols, col_major),
+            Vec3::new(self.extent_x(), 1.0, self.extent_z()),
+            HeightFieldFlags::FIX_INTERNAL_EDGES,
+        );
+        SharedShape::new(field).into()
+    }
+
+    /// Height span over the whole grid — 0 for the flat test grids.
+    pub fn relief(&self) -> f32 {
+        self.relief
+    }
+
+    /// The visible terrain surface — the SAME vertices and cell diagonal as the
+    /// collider's triangles, so render matches physics by construction. Smooth
+    /// per-vertex normals via central differences; per-vertex biome tint from
+    /// elevation + slope (rl#281 stage 3). No LOD: the 1024² tile is ~2M triangles in
+    /// one static buffer, which the demo already renders live at full rate — decimation
+    /// would only buy back memory we don't miss and open a render/physics seam gap.
+    #[cfg(feature = "render")]
+    pub fn mesh(&self) -> Mesh {
+        use bevy::asset::RenderAssetUsages;
+        use bevy::mesh::{Indices, PrimitiveTopology};
+
+        let (rows, cols) = (self.rows, self.cols);
+        let (ex, ez) = (self.extent_x(), self.extent_z());
+        let mut positions = Vec::with_capacity(rows * cols);
+        let mut normals = Vec::with_capacity(rows * cols);
+        let mut colors = Vec::with_capacity(rows * cols);
+        // No UV channel: the ground looks derive their procedural detail from
+        // `world_position.xz`, which [`crate::ground::apply_ground_anchor`] keeps
+        // anchor-relative — small, hence precise, everywhere play happens (rl#334,
+        // rl#354) — by translating the mesh's entity, not its vertices.
+        for row in 0..rows {
+            for col in 0..cols {
+                let x = (col as f32 / (cols - 1) as f32 - 0.5) * ex;
+                let z = (row as f32 / (rows - 1) as f32 - 0.5) * ez;
+                let h = self.at(row, col);
+                positions.push([x, h, z]);
+                let (c0, c1) = (col.saturating_sub(1), (col + 1).min(cols - 1));
+                let (r0, r1) = (row.saturating_sub(1), (row + 1).min(rows - 1));
+                let dhdx = (self.at(row, c1) - self.at(row, c0)) / (self.cell * (c1 - c0) as f32);
+                let dhdz = (self.at(r1, col) - self.at(r0, col)) / (self.cell * (r1 - r0) as f32);
+                let normal = Vec3::new(-dhdx, 1.0, -dhdz).normalize();
+                normals.push(normal.to_array());
+                colors.push(biome_tint(h, normal.y, row as i32, col as i32));
+            }
+        }
+        let mut indices = Vec::with_capacity((rows - 1) * (cols - 1) * 6);
+        for row in 0..rows - 1 {
+            for col in 0..cols - 1 {
+                let v00 = (row * cols + col) as u32;
+                let v10 = ((row + 1) * cols + col) as u32;
+                let v01 = (row * cols + col + 1) as u32;
+                let v11 = ((row + 1) * cols + col + 1) as u32;
+                indices.extend([v00, v10, v01, v10, v11, v01]);
+            }
+        }
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_indices(Indices::U32(indices))
+    }
+}
+
+/// The biome's elevation/slope stops (datum-shifted meters; steepness = 1 − normal_y)
+/// and the placement weights the scatter layer derives from them — ONE source, so
+/// tufts grow exactly where [`biome_tint`] paints vegetation and pebbles where it
+/// paints scree (rl#304: decoration that disagrees with the ground's own colors
+/// reads as pasted-on).
+#[cfg(feature = "render")]
+pub mod biome {
+    use crate::sky::smoothstep;
+
+    pub(crate) const DEEP_VALLEY_M: f32 = -3200.0;
+    pub(crate) const LOWLAND_M: f32 = -1400.0;
+    pub(crate) const DRY_GRASS_M: f32 = -500.0;
+    pub(crate) const SCREE_M: f32 = 100.0;
+    pub(crate) const HIGH_BROWN_M: f32 = 600.0;
+    /// Steepness where rock takes over the tint (start, full).
+    pub(crate) const ROCK_STEEP: (f32, f32) = (0.18, 0.42);
+    /// Steepness band snow holds on: starts letting go where rock starts, fully
+    /// gone a little before rock fully owns the face (snow slides first).
+    pub(crate) const SNOW_HOLD_STEEP: (f32, f32) = (ROCK_STEEP.0, 0.38);
+    /// Steepness band loose pebbles hold on — looser than snow (rocks wedge in).
+    pub(crate) const PEBBLE_HOLD_STEEP: (f32, f32) = (0.35, 0.60);
+    /// Elevation where snow starts / fully holds.
+    pub(crate) const SNOWLINE_M: (f32, f32) = (350.0, 650.0);
+
+    /// 0..1 how much snow covers the ground: past the snowline AND gentle enough
+    /// to hold (snow slides off cliffs first). The ONE snow formula — the tint
+    /// and every placement weight share it, so decoration can never disagree
+    /// with where the ground is painted white.
+    pub(crate) fn snow_amount(h: f32, steep: f32) -> f32 {
+        smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h)
+            * (1.0 - smoothstep(SNOW_HOLD_STEEP.0, SNOW_HOLD_STEEP.1, steep))
+    }
+
+    /// 0..1 chance weight that a grass tuft stands at elevation `h` on ground with
+    /// up-normal `normal_y`: grass thins past the scree rim, is gone by the
+    /// high-brown band, and never grows on rock-steep faces or under snow.
+    /// `pub` beyond the crate: the ambience bus (net's render) keys its grassland
+    /// beds on this same weight, so birds sing exactly where tufts grow.
+    pub fn tuft_weight(h: f32, normal_y: f32) -> f32 {
+        let steep = 1.0 - normal_y;
+        let low_enough = 1.0 - smoothstep(SCREE_M, HIGH_BROWN_M, h);
+        let flat_enough = 1.0 - smoothstep(ROCK_STEEP.0, ROCK_STEEP.1, steep);
+        low_enough * flat_enough * (1.0 - snow_amount(h, steep))
+    }
+
+    /// 0..1: green in the deep valleys, straw by the dry-grass band (the origin
+    /// plateau's tufts read sun-bleached, matching its tan tint).
+    /// `pub` beyond the crate: the ambience bus keys its wet-valley beds (frogs)
+    /// on the green side of this same ramp — the lush low greens are the closest
+    /// thing this terrain has to a moisture map.
+    pub fn grass_dryness(h: f32) -> f32 {
+        smoothstep(LOWLAND_M, DRY_GRASS_M, h)
+    }
+
+    /// 0..1 weight of exposed rock/scree ground: rock-steep faces at any
+    /// elevation, plus the scree→high-brown band where grass has thinned out —
+    /// gone again under snow cover (matching where the tint paints white, so
+    /// high cliffs too steep to hold snow stay rocky).
+    /// `pub` beyond the crate: the ambience bus keys its sparse mountain beds on
+    /// this, the complement of where [`tuft_weight`] grows grass.
+    pub fn rocky_weight(h: f32, normal_y: f32) -> f32 {
+        let steep = 1.0 - normal_y;
+        let rock_face = smoothstep(ROCK_STEEP.0, ROCK_STEEP.1, steep);
+        let high_band = smoothstep(SCREE_M, HIGH_BROWN_M, h);
+        rock_face.max(high_band) * (1.0 - snow_amount(h, steep))
+    }
+
+    /// 0..1 chance weight for a pebble: stonier toward (and above) the scree rim,
+    /// sparse in the greens, absent under snow and on faces too steep to hold loose
+    /// rock.
+    pub(crate) fn pebble_weight(h: f32, normal_y: f32) -> f32 {
+        let steep = 1.0 - normal_y;
+        let holds = 1.0 - smoothstep(PEBBLE_HOLD_STEEP.0, PEBBLE_HOLD_STEEP.1, steep);
+        (0.35 + 0.65 * smoothstep(LOWLAND_M, SCREE_M, h)) * holds * (1.0 - snow_amount(h, steep))
+    }
+}
+
+/// Per-vertex biome color (linear RGBA — multiplied into the terrain material):
+/// a hypsometric ramp over datum-shifted elevation `h` in METERS — not the tile's
+/// normalized range, because the datum shift puts y=0 where the crab lives (the tile's
+/// center sample), so bands stay anchored to gameplay ground whatever a bake's absolute
+/// span is (a normalized ramp painted the whole origin plateau as snow). Rock on steep
+/// slopes, snow only on gentle high peaks, and a per-vertex hash jitter so
+/// kilometer-scale bands don't read as flat paint.
+#[cfg(feature = "render")]
+fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
+    use biome::{DEEP_VALLEY_M, DRY_GRASS_M, HIGH_BROWN_M, LOWLAND_M, ROCK_STEEP, SCREE_M};
+
+    // (elevation m, srgb color) stops, low → high (bake.py's hillshade palette).
+    const LAND: [(f32, [f32; 3]); 5] = [
+        (DEEP_VALLEY_M, [0.20, 0.36, 0.16]), // deep valley green
+        (LOWLAND_M, [0.27, 0.42, 0.18]),     // lowland green
+        (DRY_GRASS_M, [0.40, 0.50, 0.24]),   // dry grass
+        (SCREE_M, [0.60, 0.50, 0.32]),       // tan scree (crab country rim)
+        (HIGH_BROWN_M, [0.59, 0.47, 0.39]),  // high brown
+    ];
+    const ROCK: [f32; 3] = [0.42, 0.39, 0.36];
+    const SNOW: [f32; 3] = [0.88, 0.89, 0.93];
+
+    let lin = |c: [f32; 3]| LinearRgba::from(Color::srgb(c[0], c[1], c[2]));
+    let mut c = lin(LAND[LAND.len() - 1].1);
+    for w in LAND.windows(2) {
+        let ((h0, c0), (h1, c1)) = (w[0], w[1]);
+        if h < h1 {
+            c = lin(c0).mix(&lin(c1), ((h - h0) / (h1 - h0)).clamp(0.0, 1.0));
+            break;
+        }
+    }
+
+    // Slope 0 → normal_y 1. Rock takes over from ~35° and owns ~55°+.
+    let steep = 1.0 - normal_y;
+    c = c.mix(&lin(ROCK), smoothstep(ROCK_STEEP.0, ROCK_STEEP.1, steep));
+    c = c.mix(&lin(SNOW), biome::snow_amount(h, steep));
+
+    // ±6% value jitter, deterministic per vertex.
+    let jitter = 1.0 + 0.06 * (2.0 * rand01(hash3(row, col, 0)) - 1.0);
+    [c.red * jitter, c.green * jitter, c.blue * jitter, 1.0]
+}
+
+/// The world's terrain, inserted by `PhysicsWorldPlugin` from its grid. `Arc` because
+/// eval worlds are rebuilt per bearing and training worlds per env batch — the
+/// (possibly 4 MB) grid is shared, not re-parsed.
+#[derive(Resource, Clone)]
+pub struct Terrain(Arc<TerrainGrid>);
+
+impl Terrain {
+    /// Only `PhysicsWorldPlugin` constructs this — the grid the resource carries is
+    /// BY CONSTRUCTION the one the ground collider was built from.
+    /// Deliberately no `Default`: a defaulted flat grid where the arena's real grid was
+    /// meant is exactly the sampler/collider divergence this module exists to prevent
+    /// (a missing resource panics loudly instead).
+    pub(crate) fn new(grid: Arc<TerrainGrid>) -> Self {
+        Terrain(grid)
+    }
+}
+
+impl std::ops::Deref for Terrain {
+    type Target = TerrainGrid;
+
+    fn deref(&self) -> &TerrainGrid {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn committed_gcr_artifact_parses_and_is_datum_shifted() {
+        let g = TerrainGrid::gcr();
+        assert_eq!((g.rows, g.cols), (1024, 1024));
+        assert_eq!(g.cell, 30.0);
+        // Datum shift: the (rows/2, cols/2) sample sits at y=0, and sampling its world
+        // position agrees (grid coord 512 of 0..=1023 → +0.5 cell off world center).
+        assert_eq!(g.at(512, 512), 0.0);
+        let x = (512.0 / 1023.0 - 0.5) * g.extent_x();
+        let z = (512.0 / 1023.0 - 0.5) * g.extent_z();
+        assert!(g.height(x, z).abs() < 1e-2);
+        // Metadata pins elevation 295..=4508 m; shifted by the center sample the span
+        // must be exactly preserved.
+        let (min, max) = g
+            .heights
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
+        assert_eq!(max - min, (4508 - 295) as f32);
+    }
+
+    #[test]
+    fn flat_grid_is_zero_everywhere_and_spans_the_arena() {
+        let g = TerrainGrid::flat(10.0);
+        assert_eq!(g.extent_x(), 20.0);
+        assert_eq!(g.extent_z(), 20.0);
+        for (x, z) in [(0.0, 0.0), (-10.0, 10.0), (7.3, -2.1), (500.0, -500.0)] {
+            assert_eq!(g.height(x, z), 0.0, "flat at ({x},{z})");
+        }
+        assert_eq!(
+            g.place(Vec2::new(1.0, -2.0), 0.3),
+            Vec3::new(1.0, 0.3, -2.0)
+        );
+    }
+
+    /// The sampler must agree with the collider's actual triangles — render/spawn
+    /// matching physics is the whole point of the one-path seam. Samples the parry
+    /// heightfield's triangle pair per probed cell and checks the plane height.
+    #[test]
+    fn sampler_is_exact_on_the_collider_triangles() {
+        let g = TerrainGrid::gcr();
+        let collider = g.collider();
+        let hf = collider
+            .as_heightfield()
+            .expect("terrain collider is a heightfield");
+        let raw = hf.raw;
+
+        let mut checked = 0;
+        for (row, col) in [(0, 0), (511, 512), (512, 511), (700, 200), (1022, 1022)] {
+            let (t1, t2) = raw.triangles_at(row, col);
+            for tri in [t1.expect("left tri"), t2.expect("right tri")] {
+                // The triangle centroid is strictly inside, so no diagonal/edge ties.
+                let c = (tri.a + tri.b + tri.c) / 3.0;
+                let sampled = g.height(c.x, c.z);
+                assert!(
+                    (sampled - c.y).abs() < 1e-2,
+                    "cell ({row},{col}): sampler {sampled} vs collider {}",
+                    c.y
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 10);
+    }
+
+    /// Pin the artifact→world orientation: artifact row 0 / col 0 (the preview PNG's
+    /// top-left) is the (-x, -z) corner of the world tile.
+    #[test]
+    fn artifact_row0_col0_is_the_minus_x_minus_z_corner() {
+        let g = TerrainGrid::gcr();
+        let (hx, hz) = (g.extent_x() / 2.0, g.extent_z() / 2.0);
+        assert_eq!(g.height(-hx, -hz), g.at(0, 0));
+        assert_eq!(g.height(hx, -hz), g.at(0, 1023));
+        assert_eq!(g.height(-hx, hz), g.at(1023, 0));
+    }
+
+    #[test]
+    fn relief_is_zero_flat_and_full_span_on_gcr() {
+        assert_eq!(TerrainGrid::flat(10.0).relief(), 0.0);
+        assert_eq!(TerrainGrid::gcr().relief(), (4508 - 295) as f32);
+    }
+
+    /// The rl#341 amplitude scalar: 1.0 is the canonical singleton bit-identically
+    /// (the same Arc — no silent arena change on the default path); any other value
+    /// scales every datum-shifted height about the tile-centre datum; degenerate
+    /// scalars refuse loudly.
+    #[test]
+    fn gcr_amplitude_scales_relief_about_the_datum() {
+        let canonical = TerrainGrid::gcr();
+        let identity = TerrainGrid::gcr_with_amplitude(1.0).unwrap();
+        assert!(Arc::ptr_eq(&canonical, &identity), "1.0 IS the singleton");
+
+        let doubled = TerrainGrid::gcr_with_amplitude(2.0).unwrap();
+        assert_eq!(doubled.relief(), 2.0 * canonical.relief());
+        assert_eq!(doubled.at(512, 512), 0.0, "the datum stays y=0");
+        for (x, z) in [(4800.0, -3600.0), (-6400.0, 5200.0), (123.0, 456.0)] {
+            assert!(
+                (doubled.height(x, z) - 2.0 * canonical.height(x, z)).abs() < 1e-3,
+                "height at ({x},{z}) scales by exactly the amplitude"
+            );
+        }
+
+        let flattened = TerrainGrid::gcr_with_amplitude(0.0).unwrap();
+        assert_eq!(flattened.relief(), 0.0, "amplitude 0 is a plane");
+
+        for bad in [f32::NAN, f32::INFINITY, -1.0] {
+            assert!(
+                TerrainGrid::gcr_with_amplitude(bad).is_err(),
+                "{bad} must refuse"
+            );
+        }
+    }
+
+    /// The biome tint contract the taste loop leans on: banded colors with
+    /// snow-bright peaks and darker valleys.
+    #[cfg(feature = "render")]
+    #[test]
+    fn mesh_tint_terrain_banded() {
+        use bevy::mesh::VertexAttributeValues;
+
+        let colors = |m: &Mesh| match m.attribute(Mesh::ATTRIBUTE_COLOR) {
+            Some(VertexAttributeValues::Float32x4(v)) => v.clone(),
+            other => panic!("expected Float32x4 colors, got {other:?}"),
+        };
+
+        let g = TerrainGrid::gcr();
+        let terr = colors(&g.mesh());
+        let luma = |c: &[f32; 4]| c[0] + c[1] + c[2];
+        // Somewhere up high there is snow (only the snow stop reaches this luma)...
+        let max_luma = terr.iter().map(luma).fold(f32::MIN, f32::max);
+        assert!(max_luma > 2.0, "no snow-bright vertex: max luma {max_luma}");
+        // ...and a real population of dark green valley ground (not one lucky vertex).
+        let green_dark = terr
+            .iter()
+            .filter(|c| luma(c) < 0.5 && c[1] > c[0] && c[1] > c[2])
+            .count();
+        assert!(
+            green_dark > terr.len() / 100,
+            "expected ≥1% dark green vertices, got {green_dark}/{}",
+            terr.len()
+        );
+    }
+
+    #[test]
+    fn parse_rejects_garbage() {
+        assert!(TerrainGrid::parse(b"").is_err());
+        assert!(TerrainGrid::parse(b"NOTMAGIC\0\0\0\0").is_err());
+        // Right magic, truncated grid.
+        let mut bytes = MAGIC.to_vec();
+        let meta = br#"{"rows":2,"cols":2,"cell_size_m":1.0,"height_scale":1.0}"#;
+        bytes.extend((meta.len() as u32).to_le_bytes());
+        bytes.extend(meta);
+        bytes.extend([0u8; 6]); // want 8
+        assert!(TerrainGrid::parse(&bytes).is_err());
+    }
+}

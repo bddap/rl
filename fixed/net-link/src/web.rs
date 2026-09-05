@@ -2,7 +2,7 @@
 //! the only path ("in browsers, there will never be any direct addresses" — iroh).
 //! Discovery is explicit dial from a join code — a bare [`iroh::EndpointId`], resolved
 //! to the peer's relay through the n0 defaults' pkarr-over-HTTPS lookup (rl#412
-//! cross-play; relay hosting stays n0 by decision). There is no mDNS here.
+//! cross-play; relay hosting stays n0 by held call). There is no mDNS here.
 
 use anyhow::{Context, Result};
 use iroh::endpoint::presets;
