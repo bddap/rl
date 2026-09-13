@@ -351,8 +351,12 @@ fn bend_axis(actuated: Option<CrabJointId>, in_dir: Vec3, out_dir: Vec3) -> Vec3
             Vec3::X
         };
     }
-    if matches!(actuated, Some(CrabJointId::ClawWrist(_))) {
-        return Vec3::new(0.86062, -0.27404, 0.42922);
+    if let Some(CrabJointId::ClawWrist(side)) = actuated {
+        let right = Vec3::new(0.86062, -0.27404, 0.42922);
+        return match side {
+            Side::Right => right,
+            Side::Left => mirror_axial(right),
+        };
     }
     let cross = in_dir.cross(out_dir);
     let axis = if cross.length() > 0.2 {
@@ -361,6 +365,10 @@ fn bend_axis(actuated: Option<CrabJointId>, in_dir: Vec3, out_dir: Vec3) -> Vec3
         out_dir.cross(Vec3::Y).normalize_or_zero()
     };
     if axis.length() > 0.5 { axis } else { Vec3::X }
+}
+
+fn mirror_axial(a: Vec3) -> Vec3 {
+    Vec3::new(a.x, -a.y, -a.z)
 }
 
 /// Rotation taking `from` onto `to` — THE collider-orientation convention for every

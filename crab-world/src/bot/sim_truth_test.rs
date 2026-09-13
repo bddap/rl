@@ -137,6 +137,126 @@ fn crab_spawns_in_rest_pose_inside_limits() {
 }
 
 #[test]
+fn claw_joint_frames_and_point_trajectories_are_bilateral() {
+    use bevy_rapier3d::plugin::context::{RapierContextJoints, RapierRigidBodySet};
+    use bevy_rapier3d::prelude::RapierMultibodyJointHandle;
+    use std::collections::HashMap;
+
+    fn claw(side: Side) -> [CrabJointId; 3] {
+        [
+            CrabJointId::ClawShoulder(side),
+            CrabJointId::ClawWrist(side),
+            CrabJointId::ClawPincer(side),
+        ]
+    }
+
+    fn mirror_point(v: Vec3) -> Vec3 {
+        Vec3::new(-v.x, v.y, v.z)
+    }
+
+    fn mirror_rotation(q: Quat) -> Quat {
+        Quat::from_xyzw(q.x, -q.y, -q.z, q.w)
+    }
+
+    fn rotation_distance(a: Quat, b: Quat) -> f32 {
+        (a - b).length().min((a + b).length())
+    }
+
+    const TOL: f32 = 1e-3;
+    const RIGHT_POINT: Vec3 = Vec3::new(-0.04, -0.08, 0.03);
+
+    let mut app = flat_headless_app();
+    tick(&mut app, 3);
+
+    let handles: HashMap<CrabJointId, _> = {
+        let mut q = app
+            .world_mut()
+            .query::<(&CrabJoint, &RapierMultibodyJointHandle)>();
+        q.iter(app.world()).map(|(j, h)| (j.id, h.0)).collect()
+    };
+    let right = claw(Side::Right);
+    let left = claw(Side::Left);
+    let mut context_q = app
+        .world_mut()
+        .query::<(&RapierContextJoints, &RapierRigidBodySet)>();
+    let (joints, bodies) = context_q.single(app.world()).expect("one rapier context");
+    let (multibody, _) = joints
+        .multibody_joints
+        .get(handles[&right[0]])
+        .expect("right claw is in a multibody");
+    let mut links = HashMap::new();
+    for id in right.into_iter().chain(left) {
+        let (candidate, link_id) = joints
+            .multibody_joints
+            .get(handles[&id])
+            .unwrap_or_else(|| panic!("{id:?} has no multibody link"));
+        assert!(std::ptr::eq(multibody, candidate));
+        links.insert(id, link_id);
+    }
+
+    let sweeps: Vec<[f32; 3]> = right
+        .iter()
+        .map(|id| {
+            let [lo, hi] = id.limits();
+            [lo, 0.0, hi]
+        })
+        .collect();
+    for &shoulder in &sweeps[0] {
+        for &wrist in &sweeps[1] {
+            for &pincer in &sweeps[2] {
+                let mut displacement = vec![0.0; multibody.ndofs()];
+                for (r, l) in right.iter().zip(&left) {
+                    let target = match r {
+                        CrabJointId::ClawShoulder(_) => shoulder,
+                        CrabJointId::ClawWrist(_) => wrist,
+                        _ => pincer,
+                    };
+                    for id in [*r, *l] {
+                        let link = multibody.link(links[&id]).expect("claw link");
+                        displacement[link.assembly_id()] = target - link.joint().coords()[3];
+                    }
+                }
+
+                let root = multibody.forward_kinematics_single_link(
+                    &bodies.bodies,
+                    0,
+                    Some(&displacement),
+                    None,
+                );
+                for (r, l) in right.iter().zip(&left) {
+                    let rp = root.inverse()
+                        * multibody.forward_kinematics_single_link(
+                            &bodies.bodies,
+                            links[r],
+                            Some(&displacement),
+                            None,
+                        );
+                    let lp = root.inverse()
+                        * multibody.forward_kinematics_single_link(
+                            &bodies.bodies,
+                            links[l],
+                            Some(&displacement),
+                            None,
+                        );
+                    let position_error = (lp.translation - mirror_point(rp.translation)).length();
+                    let rotation_error =
+                        rotation_distance(lp.rotation, mirror_rotation(rp.rotation));
+                    let point_error =
+                        (lp * mirror_point(RIGHT_POINT) - mirror_point(rp * RIGHT_POINT)).length();
+                    assert!(
+                        position_error < TOL && rotation_error < TOL && point_error < TOL,
+                        "{l:?} at (shoulder {shoulder:+.3}, wrist {wrist:+.3}, pincer \
+                         {pincer:+.3}) does not reflect {r:?}: frame position \
+                         {position_error:.4} m, rotation {rotation_error:.4}, point trajectory \
+                         {point_error:.4} m"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn actuator_injects_no_net_wrench() {
     use super::actuator::CrabActions;
     use super::body::CrabBodyPart;

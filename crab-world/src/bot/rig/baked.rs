@@ -218,7 +218,7 @@ pub fn baked_recipe() -> RigRecipe {
                 bone: "Def_pincer.005.L".to_string(),
                 parent: Some(16),
                 anchor1: Vec3::new(0.29605255, -0.1539428, 0.44454256),
-                axis_local: Vec3::new(0.86062, -0.27404, 0.42922),
+                axis_local: Vec3::new(0.86062, 0.27404, -0.42922),
                 shape: LinkShape::Cuboid { half: Vec3::new(0.0868484, 0.16734946, 0.09127027) },
                 center: Vec3::new(-0.033626705, -0.10772957, 0.018922746),
                 col_rot: Quat::from_xyzw(0.0, 0.0, 0.0, 1.0),

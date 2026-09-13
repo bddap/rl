@@ -58,6 +58,19 @@
       "why": "the pinned dev environment — every mapped suite below runs inside it, so a break fails those commands loudly"
     },
     {
+      "paths": ["crab-world/src/bot/rig/**", "meshfit/**"],
+      "tests": [
+        "nix-shell --run 'cargo fmt --check'",
+        "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
+        "nix-shell --run 'cargo build --release -p rl-train'",
+        "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
+        "nix-shell --run 'cargo test -q -- --test-threads=2'",
+        "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto -p net-link -p game-web'",
+        "nix-shell --run 'scripts/fetch-sally.sh && cargo test -q -p meshfit -- --test-threads=2'"
+      ],
+      "why": "the rig generator and its committed bake (rl#20, rl#423): meshfit's baked_matches_refit is the only check that the committed table equals what the generator emits from sally.glb, and it SKIPS without the model — so a generator edit or a hand-edited table lands green under the general rule. First-match-wins shadows the general rust rule, so this rule carries the full landing matrix plus the fetch-then-refit run (the fetch verifies the asset against the baked digest pin before the test reads it)"
+    },
+    {
       "paths": ["crab-world/src/eval.rs", "crab-world/src/eval/**", "crab-world/src/training/best.rs", "crab-world/src/bot/headless.rs", "crab-world/src/terrain.rs"],
       "tests": [
         "nix-shell --run 'cargo fmt --check'",

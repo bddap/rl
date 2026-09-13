@@ -158,15 +158,17 @@ fn offscreen_camera_transform(crab_xz: Vec3, terrain: &crate::terrain::TerrainGr
 pub(super) fn track_offscreen_camera(
     cfg: Res<ShotConfig>,
     terrain: Res<crate::terrain::Terrain>,
-    carapace_q: Query<&Transform, (With<CrabCarapace>, Without<Camera3d>)>,
-    mut cam_q: Query<&mut Transform, With<Camera3d>>,
+    rendered: Res<crate::bot::skin::CrabRenderPose>,
+    carapace_q: Query<(Entity, &Transform), With<CrabCarapace>>,
+    mut cam_q: Query<&mut Transform, (With<Camera3d>, Without<CrabCarapace>)>,
 ) {
     if cfg.view.is_some() {
         return; // fixed vista framing — the camera stays where it was spawned
     }
-    let (Ok(crab), Ok(mut cam)) = (carapace_q.single(), cam_q.single_mut()) else {
+    let (Ok((entity, crab)), Ok(mut cam)) = (carapace_q.single(), cam_q.single_mut()) else {
         return;
     };
+    let crab = rendered.rendered(entity, *crab);
     *cam = offscreen_camera_transform(crab.translation, &terrain);
 }
 
@@ -192,6 +194,39 @@ pub(super) fn spawn_offscreen_camera(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_camera_follows_rendered_root() {
+        use crate::bot::skin::CrabRenderPose;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.insert_resource(ShotConfig {
+            path: "unused.png".into(),
+            settle: 0,
+            width: 960,
+            height: 720,
+            view: None,
+        });
+        world.insert_resource(crate::terrain::Terrain::new(std::sync::Arc::new(
+            crate::terrain::TerrainGrid::flat(100.0),
+        )));
+        let root = world
+            .spawn((CrabCarapace, Transform::from_xyz(40.0, 0.0, 40.0)))
+            .id();
+        let camera = world
+            .spawn((Camera3d::default(), Transform::default()))
+            .id();
+        let pose = Transform::from_xyz(3.0, 1.0, -4.0);
+        world.init_resource::<CrabRenderPose>();
+        world.resource_mut::<CrabRenderPose>().0.insert(root, pose);
+        world.run_system_once(track_offscreen_camera).unwrap();
+        let expected = offscreen_camera_transform(
+            pose.translation,
+            world.resource::<crate::terrain::Terrain>(),
+        );
+        assert_eq!(*world.get::<Transform>(camera).unwrap(), expected);
+    }
 
     #[test]
     fn offscreen_framing_is_canonical_on_flat_ground() {

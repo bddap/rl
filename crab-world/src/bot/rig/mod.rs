@@ -410,5 +410,5 @@ mod digest_tests {
         assert_eq!(super::baked_body_digest(), GOLDEN_BODY_DIGEST);
     }
 
-    const GOLDEN_BODY_DIGEST: u64 = 0x3362_8dfe_aeb2_9dd3;
+    const GOLDEN_BODY_DIGEST: u64 = 0xe0ee_5cb3_0042_46ce;
 }

@@ -143,12 +143,12 @@ struct ScreenshotArgs {
           allow_hyphen_values = true)]
     shot_focus: Option<Vec3>,
 
-    /// Drive the selected joints at this action value (pose stills).
+    #[arg(help = "Render selected joints at this angle in radians; other joints at zero")]
     #[arg(long, env = "RL_RIG_POSE", allow_negative_numbers = true,
           value_parser = parse_finite_f32)]
     rig_pose: Option<f32>,
 
-    /// Which joints --rig-pose drives.
+    #[arg(help = "Which joints --rig-pose poses")]
     #[arg(
         long,
         env = "RL_RIG_POSE_PART",

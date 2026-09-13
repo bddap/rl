@@ -148,7 +148,6 @@ pub struct ScreenshotPlugin {
     pub overrides: PlayOverrides,
     /// Spawn the chase target ball (the demo/video modes always have one).
     pub target_ball: bool,
-    /// Drive these joints at this action value for a pose still.
     pub rig_pose: Option<(f32, RigPosePart)>,
     /// Fixed `(eye, look-at)` for the shot camera instead of the crab-tracking
     /// close-up — vista framing for the rl#281 terrain taste loop.
@@ -174,20 +173,11 @@ impl Plugin for ScreenshotPlugin {
             self.overrides.random_policy,
         );
         app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
-        if let Some((action, part)) = self.rig_pose {
-            app.insert_resource(rig_pose::RigPose::new(action, part))
-                .init_resource::<rig_pose::RigPosePin>()
+        if let Some((angle, part)) = self.rig_pose {
+            app.insert_resource(rig_pose::RigPose::new(angle, part))
                 .add_systems(
-                    FixedUpdate,
-                    rig_pose::rig_pose_drive
-                        .in_set(BotSet::Think)
-                        .after(policy_step),
-                )
-                .add_systems(
-                    FixedUpdate,
-                    rig_pose::rig_pose_pin
-                        .after(BotSet::Act)
-                        .before(PhysicsSet::SyncBackend),
+                    Update,
+                    rig_pose::rig_pose_render.before(track_offscreen_camera),
                 );
         }
         if self.target_ball {
