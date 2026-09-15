@@ -80,7 +80,7 @@
         "nix-shell --run 'cargo test -q -- --test-threads=2'",
         "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto -p net-link -p game-web'"
       ],
-      "why": "the rl#422 clamp-incidence path crosses Rapier handle attribution, episode boundaries, worker aggregation, and demo output, so the full native and web matrix must keep the counter wired through every consumer"
+      "why": "the rl#422 clamp-candidate incidence path crosses Rapier handle attribution, episode boundaries, worker aggregation, and demo output, so the full native and web matrix must keep the counter wired through every consumer"
     },
     {
       "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".cargo/config.toml", "**/*.wgsl", "crab-world/assets/**", "crab-world/tests/data/**"],

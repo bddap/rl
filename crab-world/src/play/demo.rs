@@ -57,11 +57,11 @@ fn demo_respawn(
     settle: &mut DemoSettle,
     actions: &mut CrabActions,
     rng: &mut rand::rngs::StdRng,
-    ccd_clamps: &mut crate::bot::CrabCcdClamps,
+    clamp_candidates: &mut crate::bot::CrabCcdClampCandidates,
 ) {
     info!(
-        "demo episode hard-CCD crab-link clamps: {}",
-        ccd_clamps.take(0)
+        "demo episode hard-CCD crab-link clamp candidates: {}",
+        clamp_candidates.take(0)
     );
     let origin = random_episode_origin(rng, terrain);
     spawns.set_origin(0, origin);
@@ -98,7 +98,7 @@ pub(super) fn demo_controls(
     mut rng: ResMut<super::DemoRng>,
     mut policy: NonSendMut<crate::policy::Policy>,
     mut manual: ResMut<ManualControl>,
-    mut ccd_clamps: ResMut<crate::bot::CrabCcdClamps>,
+    mut clamp_candidates: ResMut<crate::bot::CrabCcdClampCandidates>,
 ) {
     // Every discrete verb dispatches from DEMO_CHORDS (rl#330 stage 4) — the one
     // registered code per verb (no display surface since rl#358). The Manual toggle
@@ -132,7 +132,7 @@ pub(super) fn demo_controls(
             &mut settle,
             &mut actions,
             &mut rng.0,
-            &mut ccd_clamps,
+            &mut clamp_candidates,
         );
     }
     if chords.executed(DemoAction::Poke) {
@@ -179,7 +179,7 @@ mod tests {
                  mut settle: ResMut<DemoSettle>,
                  mut actions: ResMut<CrabActions>,
                  mut rng: ResMut<super::super::DemoRng>,
-                 mut ccd_clamps: ResMut<crate::bot::CrabCcdClamps>| {
+                 mut clamp_candidates: ResMut<crate::bot::CrabCcdClampCandidates>| {
                     demo_respawn(
                         &mut commands,
                         &assets,
@@ -190,7 +190,7 @@ mod tests {
                         &mut settle,
                         &mut actions,
                         &mut rng.0,
-                        &mut ccd_clamps,
+                        &mut clamp_candidates,
                     );
                 },
             )

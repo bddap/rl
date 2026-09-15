@@ -8,7 +8,7 @@ use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::bot::arch::GaussianHead;
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
-use crate::bot::{CrabCcdClamps, CrabRescued, CrabSpawns};
+use crate::bot::{CrabCcdClampCandidates, CrabRescued, CrabSpawns};
 use crate::training::algorithm::NormalizedValue;
 use crate::training::reward::{action_effort, planar_dist};
 use crate::training::targets::{closest_tip_dists, seed_target};
@@ -292,7 +292,7 @@ pub(crate) fn brain_step(
     claw_tips_q: Query<(&CrabEnvId, &Transform), With<CrabClawTip>>,
     mut exit: MessageWriter<AppExit>,
     mut rescued: MessageReader<CrabRescued>,
-    mut ccd_clamps: ResMut<CrabCcdClamps>,
+    mut clamp_candidates: ResMut<CrabCcdClampCandidates>,
 ) {
     let n = training.mode.envs.len();
     // rl#343: a rescue is the engine confessing it lost a crab (rl#137 non-finite /
@@ -378,7 +378,13 @@ pub(crate) fn brain_step(
             .record(e, tick, &obs.rows()[e], &step.max_speed);
     }
 
-    training.finalize_transitions(&steps, &mut targets, &spawns, &terrain, &mut ccd_clamps);
+    training.finalize_transitions(
+        &steps,
+        &mut targets,
+        &spawns,
+        &terrain,
+        &mut clamp_candidates,
+    );
 
     if training.mode.log_effort {
         log_effort_probe(&training.mode.envs, &steps, training.mode.effort_weight);

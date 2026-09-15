@@ -17,7 +17,7 @@ pub fn live_contact_audit(
     cols: Query<&RapierContextColliders>,
     parts: Query<(Option<&CrabJoint>, Has<CrabCarapace>), With<CrabBodyPart>>,
     terrain: Res<crate::terrain::Terrain>,
-    clamps: Res<super::CrabCcdClamps>,
+    clamps: Res<super::CrabCcdClampCandidates>,
     mut tick: Local<u32>,
 ) {
     *tick += 1;
@@ -83,7 +83,7 @@ pub fn live_contact_audit(
         .map(|(c, p)| (*c, p.as_str()))
         .unwrap_or((f32::INFINITY, "-"));
     println!(
-        "AUDIT tick {}: {} crab-terrain contacts >{:.0}mm; min-clearance {:.0}mm {}; hard-CCD crab-link clamps this episode {}",
+        "AUDIT tick {}: {} crab-terrain contacts >{:.0}mm; min-clearance {:.0}mm {}; hard-CCD crab-link clamp candidates this episode {}",
         *tick,
         terr.len(),
         FIGHT_MIN_DEPTH * 1000.0,

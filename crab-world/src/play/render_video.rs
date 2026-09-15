@@ -140,7 +140,7 @@ fn capture_video_frame(
     cfg: Res<VideoConfig>,
     target: Res<ShotTarget>,
     stats: Res<DriveStats>,
-    mut clamps: ResMut<crate::bot::CrabCcdClamps>,
+    mut clamp_candidates: ResMut<crate::bot::CrabCcdClampCandidates>,
     mut progress: ResMut<VideoProgress>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -156,7 +156,7 @@ fn capture_video_frame(
     progress.frames += 1;
     if progress.frames <= cfg.settle {
         if progress.frames == cfg.settle {
-            clamps.reset(0);
+            clamp_candidates.reset(0);
         }
         return;
     }
@@ -170,16 +170,16 @@ fn capture_video_frame(
             "render-video: captured {} frames into {:?}, encoding…",
             progress.captured, cfg.frame_dir
         );
-        report_drive_stats(&stats, clamps.current(0));
+        report_drive_stats(&stats, clamp_candidates.current(0));
         progress.done = true;
         progress.encode_countdown = 30;
     }
 }
 
-fn report_drive_stats(stats: &DriveStats, hard_ccd_link_clamps: u64) {
+fn report_drive_stats(stats: &DriveStats, hard_ccd_link_clamp_candidates: u64) {
     let n = stats.ticks.max(1) as f64;
     eprintln!(
-        "DRIVE_STATS ticks={} mean_abs_drive={:.5} mean_effort={:.5} hard_ccd_crab_link_clamps={hard_ccd_link_clamps}",
+        "DRIVE_STATS ticks={} mean_abs_drive={:.5} mean_effort={:.5} hard_ccd_crab_link_clamp_candidates={hard_ccd_link_clamp_candidates}",
         stats.ticks,
         stats.sum_mean_abs / n,
         stats.sum_effort / n,

@@ -78,9 +78,9 @@ pub enum BotSet {
 }
 
 #[derive(Resource, Default)]
-pub struct CrabCcdClamps(Vec<u64>);
+pub struct CrabCcdClampCandidates(Vec<u64>);
 
-impl CrabCcdClamps {
+impl CrabCcdClampCandidates {
     pub fn current(&self, env: usize) -> u64 {
         self.0.get(env).copied().unwrap_or(0)
     }
@@ -104,25 +104,25 @@ impl CrabCcdClamps {
     }
 }
 
-fn count_crab_ccd_clamps(
+fn count_crab_ccd_clamp_candidates(
     mut sim: Query<&mut bevy_rapier3d::plugin::context::RapierContextSimulation>,
     parts: Query<(
         &body::CrabEnvId,
         &bevy_rapier3d::prelude::RapierRigidBodyHandle,
     )>,
-    mut counts: ResMut<CrabCcdClamps>,
+    mut counts: ResMut<CrabCcdClampCandidates>,
 ) {
     let Ok(mut sim) = sim.single_mut() else {
         return;
     };
-    for clamped in sim.ccd_solver.drain_clamped_bodies() {
+    for clamped in sim.ccd_solver.drain_clamp_candidates() {
         if let Some((env, _)) = parts.iter().find(|(_, handle)| handle.0 == clamped) {
             counts.add(env.0, 1);
         }
     }
 }
 
-fn enable_crab_ccd_clamp_tracking(
+fn enable_crab_ccd_clamp_candidate_tracking(
     mut sim: Query<&mut bevy_rapier3d::plugin::context::RapierContextSimulation>,
 ) {
     if let Ok(mut sim) = sim.single_mut() {
@@ -335,7 +335,7 @@ impl Plugin for BotPlugin {
             .init_resource::<body::CrabModelPath>()
             .init_resource::<body::CrabAssets>()
             .init_resource::<RescueStats>()
-            .init_resource::<CrabCcdClamps>()
+            .init_resource::<CrabCcdClampCandidates>()
             .add_message::<CrabRescued>()
             .add_systems(Startup, spawn_initial_crabs)
             .add_systems(FixedUpdate, rescue_lost_crabs.before(BotSet::Sense))
@@ -361,13 +361,13 @@ impl Plugin for BotPlugin {
             .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act))
             .add_systems(
                 FixedUpdate,
-                enable_crab_ccd_clamp_tracking
+                enable_crab_ccd_clamp_candidate_tracking
                     .after(PhysicsSet::SyncBackend)
                     .before(PhysicsSet::StepSimulation),
             )
             .add_systems(
                 FixedUpdate,
-                count_crab_ccd_clamps
+                count_crab_ccd_clamp_candidates
                     .after(PhysicsSet::StepSimulation)
                     .before(PhysicsSet::Writeback),
             )

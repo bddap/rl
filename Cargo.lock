@@ -9662,7 +9662,7 @@ checksum = "c3d6831663a5098ea164f89cff59c6284e95f4e3c76ce9848d4529f5ccca9bde"
 [[package]]
 name = "rapier3d"
 version = "0.35.0-glamx0.2"
-source = "git+https://github.com/bddap-bot/rapier?rev=7f0ab86aa3bf08219c9f7d96809dc739d1a3658b#7f0ab86aa3bf08219c9f7d96809dc739d1a3658b"
+source = "git+https://github.com/bddap-bot/rapier?rev=8f2af0570f526f8222e31bc4474144a5a8eb9e39#8f2af0570f526f8222e31bc4474144a5a8eb9e39"
 dependencies = [
  "approx",
  "arrayvec",
@@ -11256,7 +11256,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0136791f7c95b1f6dd99f9cc786b91bb81c3800b639b3478e561ddb7be95e5f1"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.3",
  "windows-sys 0.61.2",
@@ -12814,7 +12814,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "once_cell",
- "ordered-float 4.6.0",
+ "ordered-float 5.1.0",
  "parking_lot",
  "portable-atomic",
  "portable-atomic-util",

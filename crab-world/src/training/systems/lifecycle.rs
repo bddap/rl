@@ -4,7 +4,7 @@ use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::bot::body::{CrabAssets, CrabBodyPart, CrabEnvId, random_spawn_rotation};
 use crate::bot::sensor::{CrabTargets, OBS_SIZE};
 use crate::bot::{
-    CrabCcdClamps, CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown,
+    CrabCcdClampCandidates, CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown,
 };
 use crate::training::algorithm::{NormalizedValue, StepEnd, Transition};
 use crate::training::reward::{GRAB_REWARD, compute_reward, is_progress_glitch, planar_dist};
@@ -148,7 +148,7 @@ impl WorkerState {
         targets: &mut CrabTargets,
         spawns: &CrabSpawns,
         terrain: &crate::terrain::TerrainGrid,
-        ccd_clamps: &mut CrabCcdClamps,
+        clamp_candidates: &mut CrabCcdClampCandidates,
     ) {
         #[allow(clippy::needless_range_loop)]
         for e in 0..self.mode.envs.len() {
@@ -159,7 +159,7 @@ impl WorkerState {
             }
 
             if self.mode.envs[e].steps == 0 && self.mode.envs[e].pending.is_none() {
-                ccd_clamps.reset(e);
+                clamp_candidates.reset(e);
             }
 
             if pre_touched_target(&self.mode.envs[e], step.min_tip_dist) {
@@ -241,10 +241,10 @@ impl WorkerState {
                 seed_target(targets, spawns, e, band_max_m, &mut self.rng, terrain);
 
                 let telemetry = &mut self.mode.telemetry;
-                let hard_ccd_link_clamps = ccd_clamps.take(e);
-                telemetry.hard_ccd_link_clamps += hard_ccd_link_clamps;
-                telemetry.hard_ccd_link_clamps_max =
-                    telemetry.hard_ccd_link_clamps_max.max(hard_ccd_link_clamps);
+                let candidates = clamp_candidates.take(e);
+                telemetry.hard_ccd_link_clamp_candidates += candidates;
+                telemetry.hard_ccd_link_clamp_candidates_max =
+                    telemetry.hard_ccd_link_clamp_candidates_max.max(candidates);
                 telemetry.reach_finished += 1;
                 if reached {
                     telemetry.reach_reached += 1;
@@ -459,7 +459,7 @@ mod tests {
             &mut targets,
             &spawns,
             &flat(),
-            &mut CrabCcdClamps::default(),
+            &mut CrabCcdClampCandidates::default(),
         );
 
         assert_eq!(ts.mode.rollouts[0].len(), 0, "no transition recorded");
@@ -492,9 +492,15 @@ mod tests {
         targets.resize(1);
         targets.envs[0] = Some(Vec3::new(0.0, 0.2, 5.0));
         let spawns = CrabSpawns::from_origins(vec![Vec3::ZERO]);
-        let mut ccd_clamps = CrabCcdClamps::default();
-        ccd_clamps.add(0, 7);
-        ts.finalize_transitions(&[step], &mut targets, &spawns, &flat(), &mut ccd_clamps);
+        let mut clamp_candidates = CrabCcdClampCandidates::default();
+        clamp_candidates.add(0, 7);
+        ts.finalize_transitions(
+            &[step],
+            &mut targets,
+            &spawns,
+            &flat(),
+            &mut clamp_candidates,
+        );
 
         assert_eq!(
             ts.mode.telemetry.reach_finished, 1,
@@ -506,9 +512,32 @@ mod tests {
             ts.mode.telemetry.reach_by_bearing, want,
             "the episode tallies (unreached) in its target's compass bin"
         );
-        assert_eq!(ts.mode.telemetry.hard_ccd_link_clamps, 7);
-        assert_eq!(ts.mode.telemetry.hard_ccd_link_clamps_max, 7);
-        assert_eq!(ccd_clamps.current(0), 0);
+        assert_eq!(ts.mode.telemetry.hard_ccd_link_clamp_candidates, 7);
+        assert_eq!(ts.mode.telemetry.hard_ccd_link_clamp_candidates_max, 7);
+        assert_eq!(clamp_candidates.current(0), 0);
+    }
+
+    #[test]
+    fn first_recording_tick_discards_settling_clamp_candidates() {
+        let (mut ts, step) = worker_and_step("settling_clamps", Some(REACH_RADIUS * 4.0));
+        let mut targets = CrabTargets::default();
+        targets.resize(1);
+        targets.envs[0] = Some(Vec3::X);
+        let spawns = CrabSpawns::from_origins(vec![Vec3::ZERO]);
+        let mut clamp_candidates = CrabCcdClampCandidates::default();
+        clamp_candidates.add(0, 7);
+
+        ts.finalize_transitions(
+            &[step],
+            &mut targets,
+            &spawns,
+            &flat(),
+            &mut clamp_candidates,
+        );
+
+        assert!(ts.mode.envs[0].pending.is_some());
+        assert_eq!(clamp_candidates.current(0), 0);
+        assert_eq!(ts.mode.telemetry.hard_ccd_link_clamp_candidates, 0);
     }
 
     #[test]
