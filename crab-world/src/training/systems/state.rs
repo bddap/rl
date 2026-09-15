@@ -86,6 +86,9 @@ pub(crate) struct StepTelemetry {
     pub(crate) progress_glitch_drops: u64,
 
     pub(crate) nonfinite_obs_elements: u64,
+
+    pub(crate) hard_ccd_link_clamps: u64,
+    pub(crate) hard_ccd_link_clamps_max: u64,
 }
 
 impl StepTelemetry {
@@ -101,6 +104,10 @@ impl StepTelemetry {
         }
         self.progress_glitch_drops += other.progress_glitch_drops;
         self.nonfinite_obs_elements += other.nonfinite_obs_elements;
+        self.hard_ccd_link_clamps += other.hard_ccd_link_clamps;
+        self.hard_ccd_link_clamps_max = self
+            .hard_ccd_link_clamps_max
+            .max(other.hard_ccd_link_clamps_max);
     }
 }
 

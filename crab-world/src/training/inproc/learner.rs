@@ -186,7 +186,9 @@ fn log_iteration(r: &IterReport) {
         ..
     } = *r;
     eprintln!(
-        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | reach {reach_note} over {finished} ep | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{load_fail_note}{glitch_note}{nonfinite_returns_note}{nonfinite_obs_note}",
+        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | reach {reach_note} over {finished} ep | hard-CCD crab-link clamps {}/{finished} ep (max {}) | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{load_fail_note}{glitch_note}{nonfinite_returns_note}{nonfinite_obs_note}",
+        r.telemetry.hard_ccd_link_clamps,
+        r.telemetry.hard_ccd_link_clamps_max,
         metrics.policy_loss,
         metrics.value_loss,
         metrics.entropy,
@@ -553,6 +555,8 @@ mod tests {
                         reach_by_bearing,
                         progress_glitch_drops: 3,
                         nonfinite_obs_elements: 7,
+                        hard_ccd_link_clamps: 11,
+                        hard_ccd_link_clamps_max: 8,
                     },
                 }),
                 ticks: 64,
@@ -575,6 +579,8 @@ mod tests {
             merged.telemetry.nonfinite_obs_elements, 7,
             "the Rolled thread's non-finite obs count flows through"
         );
+        assert_eq!(merged.telemetry.hard_ccd_link_clamps, 11);
+        assert_eq!(merged.telemetry.hard_ccd_link_clamps_max, 8);
         assert_eq!(merged.ticks, 64, "only the Rolled thread's ticks count");
         assert_eq!(
             (merged.telemetry.drift_sum, merged.telemetry.drift_count),

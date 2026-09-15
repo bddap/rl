@@ -15,6 +15,11 @@
       "why": "prose, licenses, and evidence artifacts (screenshots/logs recorded under docs/evidence)"
     },
     {
+      "paths": ["fixed/docs/evidence/**"],
+      "tests": [],
+      "why": "historical evidence snapshot mirrored under fixed, including compressed trace inputs and the plotting scripts preserved with them"
+    },
+    {
       "paths": [".github/**"],
       "tests": [],
       "why": "CI workflow definitions — exercised only by dispatching them on GitHub Actions; no local runner exists, and a broken workflow fails loudly at dispatch"
@@ -64,6 +69,18 @@
         "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto -p net-link -p game-web'"
       ],
       "why": "the chase-eval measurement seam (rl#341 S2-5): the physical path — run_eval through real batched bevy+rapier worlds, the fold, every guard — had ZERO executed coverage because its only end-to-end test is #[ignore]d (too heavy for every workspace change). First-match-wins shadows the general rust rule, so this rule carries the full landing matrix PLUS the --ignored end-to-end run (release, ~1 min after kache-warm compile); a regression in the settle/active split, the running min, the rescue forfeit, or the batched env wiring now fails a landing that touches the seam"
+    },
+    {
+      "paths": ["crab-world/src/bot/mod.rs", "crab-world/src/bot/contact_audit.rs", "crab-world/src/play/demo.rs", "crab-world/src/play/render_video.rs", "crab-world/src/training/inproc/learner.rs", "crab-world/src/training/systems/lifecycle.rs", "crab-world/src/training/systems/state.rs", "crab-world/src/training/systems/step.rs"],
+      "tests": [
+        "nix-shell --run 'cargo fmt --check'",
+        "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
+        "nix-shell --run 'cargo build --release -p rl-train'",
+        "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
+        "nix-shell --run 'cargo test -q -- --test-threads=2'",
+        "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto -p net-link -p game-web'"
+      ],
+      "why": "the rl#422 clamp-incidence path crosses Rapier handle attribution, episode boundaries, worker aggregation, and demo output, so the full native and web matrix must keep the counter wired through every consumer"
     },
     {
       "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".cargo/config.toml", "**/*.wgsl", "crab-world/assets/**", "crab-world/tests/data/**"],

@@ -77,6 +77,59 @@ pub enum BotSet {
     Act,
 }
 
+#[derive(Resource, Default)]
+pub struct CrabCcdClamps(Vec<u64>);
+
+impl CrabCcdClamps {
+    pub fn current(&self, env: usize) -> u64 {
+        self.0.get(env).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn take(&mut self, env: usize) -> u64 {
+        let Some(count) = self.0.get_mut(env) else {
+            return 0;
+        };
+        std::mem::take(count)
+    }
+
+    pub(crate) fn reset(&mut self, env: usize) {
+        let _ = self.take(env);
+    }
+
+    pub(crate) fn add(&mut self, env: usize, count: u64) {
+        if self.0.len() <= env {
+            self.0.resize(env + 1, 0);
+        }
+        self.0[env] += count;
+    }
+}
+
+fn count_crab_ccd_clamps(
+    mut sim: Query<&mut bevy_rapier3d::plugin::context::RapierContextSimulation>,
+    parts: Query<(
+        &body::CrabEnvId,
+        &bevy_rapier3d::prelude::RapierRigidBodyHandle,
+    )>,
+    mut counts: ResMut<CrabCcdClamps>,
+) {
+    let Ok(mut sim) = sim.single_mut() else {
+        return;
+    };
+    for clamped in sim.ccd_solver.drain_clamped_bodies() {
+        if let Some((env, _)) = parts.iter().find(|(_, handle)| handle.0 == clamped) {
+            counts.add(env.0, 1);
+        }
+    }
+}
+
+fn enable_crab_ccd_clamp_tracking(
+    mut sim: Query<&mut bevy_rapier3d::plugin::context::RapierContextSimulation>,
+) {
+    if let Ok(mut sim) = sim.single_mut() {
+        sim.ccd_solver.set_clamp_tracking_enabled(true);
+    }
+}
+
 /// The rl#116 pose sentinel's slot, ordered before `BotSet::Sense` and
 /// `PhysicsSet::SyncBackend` (NOT guaranteed first in `FixedUpdate` — an unordered
 /// system can still sneak in ahead of it). A deliberate physics-side teleport, if
@@ -282,6 +335,7 @@ impl Plugin for BotPlugin {
             .init_resource::<body::CrabModelPath>()
             .init_resource::<body::CrabAssets>()
             .init_resource::<RescueStats>()
+            .init_resource::<CrabCcdClamps>()
             .add_message::<CrabRescued>()
             .add_systems(Startup, spawn_initial_crabs)
             .add_systems(FixedUpdate, rescue_lost_crabs.before(BotSet::Sense))
@@ -305,6 +359,18 @@ impl Plugin for BotPlugin {
             )
             .add_systems(FixedUpdate, sensor::build_observation.in_set(BotSet::Sense))
             .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act))
+            .add_systems(
+                FixedUpdate,
+                enable_crab_ccd_clamp_tracking
+                    .after(PhysicsSet::SyncBackend)
+                    .before(PhysicsSet::StepSimulation),
+            )
+            .add_systems(
+                FixedUpdate,
+                count_crab_ccd_clamps
+                    .after(PhysicsSet::StepSimulation)
+                    .before(PhysicsSet::Writeback),
+            )
             .add_systems(
                 FixedUpdate,
                 aero::apply_air_drag

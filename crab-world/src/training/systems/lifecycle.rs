@@ -3,7 +3,9 @@ use bevy::prelude::*;
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::bot::body::{CrabAssets, CrabBodyPart, CrabEnvId, random_spawn_rotation};
 use crate::bot::sensor::{CrabTargets, OBS_SIZE};
-use crate::bot::{CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown};
+use crate::bot::{
+    CrabCcdClamps, CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown,
+};
 use crate::training::algorithm::{NormalizedValue, StepEnd, Transition};
 use crate::training::reward::{GRAB_REWARD, compute_reward, is_progress_glitch, planar_dist};
 use crate::training::targets::{seed_target, tip_touch};
@@ -146,6 +148,7 @@ impl WorkerState {
         targets: &mut CrabTargets,
         spawns: &CrabSpawns,
         terrain: &crate::terrain::TerrainGrid,
+        ccd_clamps: &mut CrabCcdClamps,
     ) {
         #[allow(clippy::needless_range_loop)]
         for e in 0..self.mode.envs.len() {
@@ -153,6 +156,10 @@ impl WorkerState {
             if matches!(self.mode.envs[e].phase, EnvPhase::Settling { .. }) || step.height.is_none()
             {
                 continue;
+            }
+
+            if self.mode.envs[e].steps == 0 && self.mode.envs[e].pending.is_none() {
+                ccd_clamps.reset(e);
             }
 
             if pre_touched_target(&self.mode.envs[e], step.min_tip_dist) {
@@ -234,6 +241,10 @@ impl WorkerState {
                 seed_target(targets, spawns, e, band_max_m, &mut self.rng, terrain);
 
                 let telemetry = &mut self.mode.telemetry;
+                let hard_ccd_link_clamps = ccd_clamps.take(e);
+                telemetry.hard_ccd_link_clamps += hard_ccd_link_clamps;
+                telemetry.hard_ccd_link_clamps_max =
+                    telemetry.hard_ccd_link_clamps_max.max(hard_ccd_link_clamps);
                 telemetry.reach_finished += 1;
                 if reached {
                     telemetry.reach_reached += 1;
@@ -443,7 +454,13 @@ mod tests {
         let touched = Vec3::new(0.5, 0.2, 0.4);
         targets.envs[0] = Some(touched);
         let spawns = CrabSpawns::from_origins(vec![Vec3::ZERO]);
-        ts.finalize_transitions(&[step], &mut targets, &spawns, &flat());
+        ts.finalize_transitions(
+            &[step],
+            &mut targets,
+            &spawns,
+            &flat(),
+            &mut CrabCcdClamps::default(),
+        );
 
         assert_eq!(ts.mode.rollouts[0].len(), 0, "no transition recorded");
         assert_eq!(ts.mode.telemetry.reach_finished, 0, "no episode counted");
@@ -475,7 +492,9 @@ mod tests {
         targets.resize(1);
         targets.envs[0] = Some(Vec3::new(0.0, 0.2, 5.0));
         let spawns = CrabSpawns::from_origins(vec![Vec3::ZERO]);
-        ts.finalize_transitions(&[step], &mut targets, &spawns, &flat());
+        let mut ccd_clamps = CrabCcdClamps::default();
+        ccd_clamps.add(0, 7);
+        ts.finalize_transitions(&[step], &mut targets, &spawns, &flat(), &mut ccd_clamps);
 
         assert_eq!(
             ts.mode.telemetry.reach_finished, 1,
@@ -487,6 +506,9 @@ mod tests {
             ts.mode.telemetry.reach_by_bearing, want,
             "the episode tallies (unreached) in its target's compass bin"
         );
+        assert_eq!(ts.mode.telemetry.hard_ccd_link_clamps, 7);
+        assert_eq!(ts.mode.telemetry.hard_ccd_link_clamps_max, 7);
+        assert_eq!(ccd_clamps.current(0), 0);
     }
 
     #[test]

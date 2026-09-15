@@ -79,4 +79,4 @@ lto = "thin"
 opt-level = "s"
 
 [patch.crates-io]
-rapier3d = { git = "https://github.com/bddap-bot/rapier", rev = "8a5d9859edbcd3fca6eeb6bd53bd6acb32cf00c5" }
+rapier3d = { git = "https://github.com/bddap-bot/rapier", rev = "7f0ab86aa3bf08219c9f7d96809dc739d1a3658b" }
