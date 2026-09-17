@@ -38,18 +38,10 @@ impl ArtifactKind {
         }
     }
 
-    /// The format version this build writes and accepts for this kind — each kind owns
-    /// its counter, so e.g. an optimizer-record layout change bumps only the optimizer's.
-    /// A file tagged with any other version is refused, never deserialized blind —
-    /// with deliberate BACKWARD exceptions so the fleet's live checkpoints resume instead of being
-    /// invalidated: every kind's v1 is still read (predates all stamps), and v2/v3
-    /// BRAINS (v2 predates the bddap/rl#215 save stamp, v3 the bddap/rl#271 layout
-    /// digest) are still read — each with the absent stamps as `None`
-    /// (trust-on-first-use); the next save writes the current version.
     pub(crate) fn current_version(self) -> u32 {
         match self {
-            Self::Brain => 4,
-            Self::Optimizer | Self::ObsNormalizer | Self::ReturnNormalizer => 2,
+            Self::Brain => 5,
+            Self::Optimizer | Self::ObsNormalizer | Self::ReturnNormalizer => 3,
         }
     }
 }
@@ -80,6 +72,7 @@ pub(crate) struct CheckpointEnvelope {
     /// ([`crate::bot::channel_layout_digest`], bddap/rl#271). `None` = a pre-v4 brain
     /// (trust-on-first-use) or a paired kind (the brain is the layout authority).
     pub(crate) layout_digest: Option<u64>,
+    pub(crate) simulation_identity: Option<u64>,
     /// The checkpoint-SET save stamp (bddap/rl#215): one random value drawn per
     /// `save_checkpoint`, written into every member saved together, so a mixed set is
     /// DETECTABLE at load — a paired member whose stamp differs from the brain's comes
@@ -143,6 +136,12 @@ struct RawEnvelopeV4 {
     layout_digest: u64,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RawEnvelopeV5 {
+    previous: RawEnvelopeV4,
+    simulation_identity: u64,
+}
+
 /// Paired-kind V2 (optimizer, normalizers): V1 plus the save stamp (bddap/rl#215).
 /// Bincode-identical layout to the brain's [`RawEnvelopeV2`] (both append one u64) — the
 /// reader can't cross them anyway, since it dispatches on (kind, version) first — but a
@@ -155,6 +154,12 @@ struct RawEnvelopePairedV2 {
     arch: String,
     payload: Vec<u8>,
     save_stamp: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RawEnvelopePairedV3 {
+    previous: RawEnvelopePairedV2,
+    simulation_identity: u64,
 }
 
 /// The shared decode prefix of every raw shape: enough to pick the full shape to decode
@@ -174,6 +179,7 @@ pub(crate) enum EnvelopeError {
     /// saved yet", every other variant as a fault.
     Absent,
     Io(std::io::Error),
+    Simulation(String),
     Legacy,
     /// Magic present but the envelope doesn't decode — a torn or corrupt file.
     Corrupt(String),
@@ -216,6 +222,7 @@ impl std::fmt::Display for EnvelopeError {
         match self {
             Self::Absent => write!(f, "no such file"),
             Self::Io(e) => write!(f, "read failed: {e}"),
+            Self::Simulation(e) => f.write_str(e),
             Self::Legacy => write!(
                 f,
                 "legacy pre-envelope file — the fleet was migrated to tagged envelopes \
@@ -266,6 +273,7 @@ pub(crate) struct BrainStamps {
     pub(crate) body_digest: u64,
     /// [`crate::bot::channel_layout_digest`] (bddap/rl#271).
     pub(crate) layout_digest: u64,
+    pub(crate) simulation_identity: u64,
 }
 
 /// Wrap `payload` in an envelope for `kind`/`arch` and write it atomically. The ONE
@@ -291,31 +299,37 @@ pub(crate) fn write_envelope(
             // Loud at the FIRST save, not at some later load: bumping `current_version`
             // without teaching this arm the new shape would otherwise write files that
             // claim the new version with the old shape — refused by every reader.
-            assert_eq!(version, 4, "no writer arm for brain envelope v{version}");
+            assert_eq!(version, 5, "no writer arm for brain envelope v{version}");
             let stamps = stamps
                 .unwrap_or_else(|| panic!("{kind} envelopes require the brain identity stamps"));
-            bincode::serialize(&RawEnvelopeV4 {
-                kind: kind_name,
-                version,
-                arch: arch_name,
-                payload,
-                body_digest: stamps.body_digest,
-                save_stamp,
-                layout_digest: stamps.layout_digest,
+            bincode::serialize(&RawEnvelopeV5 {
+                previous: RawEnvelopeV4 {
+                    kind: kind_name,
+                    version,
+                    arch: arch_name,
+                    payload,
+                    body_digest: stamps.body_digest,
+                    save_stamp,
+                    layout_digest: stamps.layout_digest,
+                },
+                simulation_identity: stamps.simulation_identity,
             })
         }
         ArtifactKind::Optimizer | ArtifactKind::ObsNormalizer | ArtifactKind::ReturnNormalizer => {
-            assert_eq!(version, 2, "no writer arm for {kind} envelope v{version}");
+            assert_eq!(version, 3, "no writer arm for {kind} envelope v{version}");
             assert!(
                 stamps.is_none(),
-                "{kind} envelopes carry no identity stamps (the brain is the authority)"
+                "{kind} envelopes carry no body or layout stamps"
             );
-            bincode::serialize(&RawEnvelopePairedV2 {
-                kind: kind_name,
-                version,
-                arch: arch_name,
-                payload,
-                save_stamp,
+            bincode::serialize(&RawEnvelopePairedV3 {
+                previous: RawEnvelopePairedV2 {
+                    kind: kind_name,
+                    version,
+                    arch: arch_name,
+                    payload,
+                    save_stamp,
+                },
+                simulation_identity: crate::simulation::simulation_identity(),
             })
         }
     }
@@ -326,13 +340,6 @@ pub(crate) fn write_envelope(
     atomic_write(path, &bytes)
 }
 
-/// TEST-ONLY writer of a LEGACY v1 envelope (any kind). The golden checkpoint fixture
-/// must stay v1 forever: the production writer stamps the writing machine's constructed
-/// body digest and a per-save stamp, which would make a committed fixture refuse to
-/// arm on every machine whose `sally.glb` differs or is absent — v1 reads as
-/// trust-on-first-use everywhere, i.e. machine-portable (and the fixture's brain and
-/// normalizer must BOTH be v1: an unstamped brain refuses a stamped partner,
-/// bddap/rl#215). Also the writer for reader-side TOFU tests.
 #[cfg(test)]
 pub(crate) fn write_v1_envelope(
     path: &Path,
@@ -380,58 +387,102 @@ pub(crate) fn read_envelope(
             expected,
         });
     }
-    // Accepted versions per kind: the current one, plus the pre-stamp backward reads —
-    // every kind's v1 (predates all stamps), the brain's v2 (pre-#215) and v3
-    // (pre-#271) — each with the absent stamps as `None` (trust-on-first-use).
-    // Anything else is refused.
-    let (arch, payload, body_digest, save_stamp, layout_digest) = match (expected, hdr.version) {
-        (ArtifactKind::Brain, 4) => {
-            let raw: RawEnvelopeV4 =
-                bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+    let (arch, payload, body_digest, save_stamp, layout_digest, simulation_identity) =
+        match (expected, hdr.version) {
+            (ArtifactKind::Brain, 5) => {
+                let raw: RawEnvelopeV5 = bincode::deserialize(body)
+                    .map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+                (
+                    raw.previous.arch,
+                    raw.previous.payload,
+                    Some(raw.previous.body_digest),
+                    Some(raw.previous.save_stamp),
+                    Some(raw.previous.layout_digest),
+                    Some(raw.simulation_identity),
+                )
+            }
+            (ArtifactKind::Brain, 4) => {
+                let raw: RawEnvelopeV4 = bincode::deserialize(body)
+                    .map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+                (
+                    raw.arch,
+                    raw.payload,
+                    Some(raw.body_digest),
+                    Some(raw.save_stamp),
+                    Some(raw.layout_digest),
+                    None,
+                )
+            }
+            (ArtifactKind::Brain, 3) => {
+                let raw: RawEnvelopeV3 = bincode::deserialize(body)
+                    .map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+                (
+                    raw.arch,
+                    raw.payload,
+                    Some(raw.body_digest),
+                    Some(raw.save_stamp),
+                    None,
+                    None,
+                )
+            }
             (
-                raw.arch,
-                raw.payload,
-                Some(raw.body_digest),
-                Some(raw.save_stamp),
-                Some(raw.layout_digest),
-            )
-        }
-        (ArtifactKind::Brain, 3) => {
-            let raw: RawEnvelopeV3 =
-                bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+                ArtifactKind::Optimizer
+                | ArtifactKind::ObsNormalizer
+                | ArtifactKind::ReturnNormalizer,
+                3,
+            ) => {
+                let raw: RawEnvelopePairedV3 = bincode::deserialize(body)
+                    .map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+                (
+                    raw.previous.arch,
+                    raw.previous.payload,
+                    None,
+                    Some(raw.previous.save_stamp),
+                    None,
+                    Some(raw.simulation_identity),
+                )
+            }
+            (ArtifactKind::Brain, 2) => {
+                let raw: RawEnvelopeV2 = bincode::deserialize(body)
+                    .map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+                (
+                    raw.arch,
+                    raw.payload,
+                    Some(raw.body_digest),
+                    None,
+                    None,
+                    None,
+                )
+            }
             (
-                raw.arch,
-                raw.payload,
-                Some(raw.body_digest),
-                Some(raw.save_stamp),
-                None,
-            )
-        }
-        (ArtifactKind::Brain, 2) => {
-            let raw: RawEnvelopeV2 =
-                bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
-            (raw.arch, raw.payload, Some(raw.body_digest), None, None)
-        }
-        (
-            ArtifactKind::Optimizer | ArtifactKind::ObsNormalizer | ArtifactKind::ReturnNormalizer,
-            2,
-        ) => {
-            let raw: RawEnvelopePairedV2 =
-                bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
-            (raw.arch, raw.payload, None, Some(raw.save_stamp), None)
-        }
-        (_, 1) => {
-            let raw: RawEnvelopeV1 =
-                bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
-            (raw.arch, raw.payload, None, None, None)
-        }
-        (_, found) => {
-            return Err(EnvelopeError::UnknownVersion {
-                found,
-                expected: expected.current_version(),
-            });
-        }
-    };
+                ArtifactKind::Optimizer
+                | ArtifactKind::ObsNormalizer
+                | ArtifactKind::ReturnNormalizer,
+                2,
+            ) => {
+                let raw: RawEnvelopePairedV2 = bincode::deserialize(body)
+                    .map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+                (
+                    raw.arch,
+                    raw.payload,
+                    None,
+                    Some(raw.save_stamp),
+                    None,
+                    None,
+                )
+            }
+            (_, 1) => {
+                let raw: RawEnvelopeV1 = bincode::deserialize(body)
+                    .map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+                (raw.arch, raw.payload, None, None, None, None)
+            }
+            (_, found) => {
+                return Err(EnvelopeError::UnknownVersion {
+                    found,
+                    expected: expected.current_version(),
+                });
+            }
+        };
     let arch = ArchId::try_from(arch.clone()).map_err(|_| EnvelopeError::UnknownArch(arch))?;
     Ok(CheckpointEnvelope {
         arch,
@@ -439,6 +490,7 @@ pub(crate) fn read_envelope(
         body_digest,
         save_stamp,
         layout_digest,
+        simulation_identity,
     })
 }
 
@@ -460,16 +512,17 @@ pub(crate) struct SetKey {
 /// [`EnvelopeError::ArchMismatch`] / [`EnvelopeError::SaveStampMismatch`]. The one place
 /// the coherence rules are spelled; the brain itself reads via the plain
 /// [`read_envelope`] because its tags ARE the authority the others are checked against.
-/// The save-stamp check is EXACT over `Option` (bddap/rl#215): `None == None` passes (a
-/// wholly pre-stamp set, trust-on-first-use), while a stamped member against an
-/// unstamped brain — or vice versa — is a partial save straddling the upgrade and
-/// refuses like any other mismatch.
 pub(crate) fn read_envelope_expecting(
     path: &Path,
     kind: ArtifactKind,
     key: SetKey,
 ) -> Result<CheckpointEnvelope, EnvelopeError> {
     let env = read_envelope(path, kind)?;
+    crate::simulation::check_simulation_identity(
+        env.simulation_identity,
+        crate::simulation::simulation_identity(),
+    )
+    .map_err(EnvelopeError::Simulation)?;
     if env.arch != key.arch {
         return Err(EnvelopeError::ArchMismatch {
             found: env.arch,
@@ -497,6 +550,71 @@ mod tests {
     }
 
     #[test]
+    fn paired_simulation_identity_refuses_mismatch_and_missing() {
+        let dir = scratch("paired-simulation");
+        let path = dir.join("paired.bin");
+        for kind in [
+            ArtifactKind::Optimizer,
+            ArtifactKind::ObsNormalizer,
+            ArtifactKind::ReturnNormalizer,
+        ] {
+            let raw = RawEnvelopePairedV3 {
+                previous: RawEnvelopePairedV2 {
+                    kind: kind.name().into(),
+                    version: 3,
+                    arch: ArchId::DEFAULT.name().into(),
+                    payload: vec![1],
+                    save_stamp: 17,
+                },
+                simulation_identity: crate::simulation::simulation_identity() ^ 1,
+            };
+            std::fs::write(
+                &path,
+                [MAGIC.as_slice(), &bincode::serialize(&raw).unwrap()].concat(),
+            )
+            .unwrap();
+            let key = SetKey {
+                arch: ArchId::DEFAULT,
+                save_stamp: Some(17),
+            };
+            assert!(matches!(
+                read_envelope_expecting(&path, kind, key),
+                Err(EnvelopeError::Simulation(_))
+            ));
+            assert!(matches!(
+                read_envelope_expecting(
+                    &path,
+                    kind,
+                    SetKey {
+                        save_stamp: Some(18),
+                        ..key
+                    }
+                ),
+                Err(EnvelopeError::Simulation(_))
+            ));
+            write_envelope(&path, kind, ArchId::DEFAULT, vec![1], None, 17).unwrap();
+            let env = read_envelope_expecting(&path, kind, key).unwrap();
+            assert_eq!(
+                env.simulation_identity,
+                Some(crate::simulation::simulation_identity())
+            );
+            write_v1_envelope(&path, kind, ArchId::DEFAULT, vec![1]).unwrap();
+            assert!(matches!(
+                read_envelope_expecting(
+                    &path,
+                    kind,
+                    SetKey {
+                        save_stamp: None,
+                        ..key
+                    }
+                ),
+                Err(EnvelopeError::Simulation(_))
+            ));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn round_trips_payload_arch_stamps_and_save_stamp() {
         let dir = scratch("roundtrip");
         let path = dir.join("brain.bin");
@@ -508,6 +626,7 @@ mod tests {
             Some(BrainStamps {
                 body_digest: 0xfeed_beef,
                 layout_digest: 0x1a_0e57,
+                simulation_identity: crate::simulation::simulation_identity(),
             }),
             0x6e6e_7261_7469_6f6e,
         )
@@ -518,6 +637,10 @@ mod tests {
         assert_eq!(env.body_digest, Some(0xfeed_beef));
         assert_eq!(env.save_stamp, Some(0x6e6e_7261_7469_6f6e));
         assert_eq!(env.layout_digest, Some(0x1a_0e57));
+        assert_eq!(
+            env.simulation_identity,
+            Some(crate::simulation::simulation_identity())
+        );
 
         // Paired kinds carry the save stamp but never the brain identity stamps.
         let path = dir.join("optimizer.bin");
@@ -639,13 +762,16 @@ mod tests {
         };
         assert!(read(&stamped, Some(77)).is_ok(), "matching stamps pair");
         assert!(
-            read(&unstamped, None).is_ok(),
-            "a wholly pre-stamp set pairs on trust"
+            matches!(read(&unstamped, None), Err(EnvelopeError::Simulation(_))),
+            "a pre-stamp set cannot verify its simulator"
         );
+        assert!(matches!(
+            read(&unstamped, Some(77)),
+            Err(EnvelopeError::Simulation(_))
+        ));
         for (path, expected) in [
-            (&stamped, Some(78)),   // different saves
-            (&stamped, None),       // stamped member, unstamped brain (brain write failed)
-            (&unstamped, Some(77)), // unstamped member, stamped brain (member write failed)
+            (&stamped, Some(78)), // different saves
+            (&stamped, None),     // stamped member, unstamped brain (brain write failed)
         ] {
             match read(path, expected) {
                 Err(EnvelopeError::SaveStampMismatch { .. }) => {}
@@ -732,11 +858,9 @@ mod tests {
             Err(EnvelopeError::UnknownVersion { .. })
         ));
 
-        // Version acceptance is per KIND: a paired kind at the brain's v3 (even with a
-        // well-formed V3 shape) is refused, never decoded through the brain's carve-outs.
         let raw = RawEnvelopeV3 {
             kind: "optimizer".into(),
-            version: 3,
+            version: 4,
             arch: ArchId::DEFAULT.name().into(),
             payload: vec![],
             body_digest: 7,
@@ -749,7 +873,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             read_envelope(&path, ArtifactKind::Optimizer),
-            Err(EnvelopeError::UnknownVersion { found: 3, .. })
+            Err(EnvelopeError::UnknownVersion { found: 4, .. })
         ));
 
         let _ = std::fs::remove_dir_all(&dir);

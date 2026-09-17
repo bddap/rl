@@ -438,3 +438,5 @@ mod render_args_tests {
         assert_eq!(posed_moving.timescale, moon::DEFAULT_TIMESCALE);
     }
 }
+
+pub mod simulation;

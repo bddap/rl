@@ -96,6 +96,26 @@
       "why": "the rl#422 clamp-candidate incidence path crosses Rapier handle attribution, episode boundaries, worker aggregation, and demo output, so the full native and web matrix must keep the counter wired through every consumer"
     },
     {
+      "paths": [
+        "crab-world/build.rs",
+        "crab-world/src/simulation.rs",
+        "crab-world/src/training/envelope.rs",
+        "crab-world/src/training/checkpoint.rs",
+        "crab-world/src/policy.rs",
+        "crab-world/src/physics/mod.rs"
+      ],
+      "tests": [
+        "nix-shell --run 'cargo fmt --check'",
+        "nix-shell --run 'cargo clippy --quiet --all-targets -- --deny warnings'",
+        "nix-shell --run 'cargo build --release -p rl-train'",
+        "nix-shell --run 'cargo build --release -p rl-demo -p game -p rl-update-ui'",
+        "nix-shell --run 'cargo test -q -- --test-threads=2'",
+        "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto -p net-link -p game-web'",
+        "nix-shell --run 'cargo test -q -p crab-world --lib simulation -- --test-threads=2'"
+      ],
+      "why": "rl#424 simulation identity spans the build fingerprint, checkpoint envelope, warm resume, and eval refusal; the component and consumer regressions accompany the native/web landing matrix."
+    },
+    {
       "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".cargo/config.toml", "**/*.wgsl", "crab-world/assets/**", "crab-world/tests/data/**"],
       "tests": [
         "nix-shell --run 'cargo fmt --check'",

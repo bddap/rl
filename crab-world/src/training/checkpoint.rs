@@ -13,6 +13,7 @@ use super::envelope::{
     write_envelope,
 };
 use crate::bot::arch::{AnyBrain, ArchId};
+use crate::simulation::check_simulation_identity;
 
 pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 
@@ -48,6 +49,7 @@ pub(crate) fn save_brain<B: Backend>(
         Some(BrainStamps {
             body_digest: crate::bot::rig::baked_body_digest(),
             layout_digest: crate::bot::channel_layout_digest(),
+            simulation_identity: crate::simulation::simulation_identity(),
         }),
         save_stamp,
     )
@@ -60,6 +62,7 @@ pub(crate) fn save_brain<B: Backend>(
 pub(crate) enum BrainLoadError {
     Envelope(EnvelopeError),
     Record(String),
+    Simulation(String),
 }
 
 impl std::fmt::Display for BrainLoadError {
@@ -67,6 +70,7 @@ impl std::fmt::Display for BrainLoadError {
         match self {
             Self::Envelope(e) => e.fmt(f),
             Self::Record(e) => write!(f, "leaf record does not decode: {e}"),
+            Self::Simulation(e) => f.write_str(e),
         }
     }
 }
@@ -145,6 +149,11 @@ pub(crate) fn load_brain_file<B: Backend>(
     device: &B::Device,
 ) -> Result<BrainFile<B>, BrainLoadError> {
     let env = read_envelope(path, ArtifactKind::Brain).map_err(BrainLoadError::Envelope)?;
+    check_simulation_identity(
+        env.simulation_identity,
+        crate::simulation::simulation_identity(),
+    )
+    .map_err(BrainLoadError::Simulation)?;
     let brain =
         decode_brain_payload::<B>(env.arch, env.payload, device).map_err(BrainLoadError::Record)?;
     Ok(BrainFile {
@@ -314,13 +323,7 @@ pub(crate) fn load_optimizer<B: AutodiffBackend>(
             );
             return cold;
         }
-        Err(e) => {
-            warn!(
-                "Refusing Adam optimizer state at {}: {e} — starting cold",
-                path.display()
-            );
-            return cold;
-        }
+        Err(e) => panic!("REFUSING Adam optimizer at {}: {e}", path.display()),
     };
     // Contained like `decode_brain_payload`: burn's bytes recorder PANICS on malformed
     // input, and this artifact's policy is refuse-and-cold, never a crash at resume.
@@ -399,6 +402,63 @@ mod tests {
     use burn::backend::ndarray::NdArrayDevice;
     use burn::optim::{GradientsParams, Optimizer};
     use burn::tensor::Tensor;
+
+    #[test]
+    fn optimizer_simulation_mismatch_aborts_even_across_save_stamps() {
+        let dir =
+            std::env::temp_dir().join(format!("rl-optimizer-simulation-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(OPTIMIZER_FILENAME);
+        write_envelope(
+            &path,
+            ArtifactKind::Optimizer,
+            ArchId::DEFAULT,
+            vec![],
+            None,
+            17,
+        )
+        .unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let offset = bytes.len() - 8;
+        bytes[offset..]
+            .copy_from_slice(&(crate::simulation::simulation_identity() ^ 1).to_le_bytes());
+        for unknown_arch in [false, true] {
+            let mut bytes = bytes.clone();
+            if unknown_arch {
+                let name = ArchId::DEFAULT.name().as_bytes();
+                let offset = bytes.windows(name.len()).position(|w| w == name).unwrap();
+                bytes[offset..offset + name.len()].fill(b'x');
+            }
+            std::fs::write(&path, bytes).unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                load_optimizer(
+                    crab_optimizer::<TrainBackend>(),
+                    &path,
+                    &NdArrayDevice::Cpu,
+                    SetKey {
+                        arch: ArchId::DEFAULT,
+                        save_stamp: Some(18),
+                    },
+                )
+            }));
+            match result {
+                Err(p) => {
+                    let message = panic_message(p);
+                    let diagnosis = if unknown_arch {
+                        "unregistered"
+                    } else {
+                        "simulation identity"
+                    };
+                    assert!(
+                        message.contains("REFUSING Adam optimizer") && message.contains(diagnosis),
+                        "{message}"
+                    );
+                }
+                Ok(_) => panic!("incompatible optimizer silently started cold"),
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn brain_checkpoint_round_trips() {
@@ -572,20 +632,20 @@ mod tests {
         save_optimizer(&warm, ArchId::DEFAULT, &path, 5);
         assert!(path.exists(), "optimizer.bin should be written");
 
-        // A save stamp from a different save refuses to cold (bddap/rl#215): these
-        // moments belong to a different brain than the one resuming.
-        let cross_save = load_optimizer(
-            crab_optimizer::<TrainBackend>(),
-            &path,
-            &device,
-            SetKey {
-                arch: ArchId::DEFAULT,
-                save_stamp: Some(6),
-            },
-        );
         assert!(
-            cross_save.to_record().is_empty(),
-            "a cross-save optimizer must load cold"
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                load_optimizer(
+                    crab_optimizer::<TrainBackend>(),
+                    &path,
+                    &device,
+                    SetKey {
+                        arch: ArchId::DEFAULT,
+                        save_stamp: Some(6),
+                    },
+                )
+            }))
+            .is_err(),
+            "a cross-save optimizer must refuse"
         );
 
         let restored = load_optimizer(
@@ -631,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_legacy_or_miscopied_optimizer_state_loads_cold_without_error() {
+    fn optimizer_missing_is_cold_but_invalid_envelopes_refuse() {
         let dir = std::env::temp_dir().join("rl_test_adam_compat");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -655,22 +715,22 @@ mod tests {
         );
 
         std::fs::write(&path, bincode::serialize(&(1u32, vec![0u8; 4])).unwrap()).unwrap();
-        let cold2 = load_optimizer(
-            crab_optimizer::<TrainBackend>(),
-            &path,
-            &device,
-            SetKey {
-                arch: ArchId::DEFAULT,
-                save_stamp: None,
-            },
-        );
         assert!(
-            cold2.to_record().is_empty(),
-            "a legacy optimizer file must leave the optimizer cold"
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                load_optimizer(
+                    crab_optimizer::<TrainBackend>(),
+                    &path,
+                    &device,
+                    SetKey {
+                        arch: ArchId::DEFAULT,
+                        save_stamp: None,
+                    },
+                )
+            }))
+            .is_err(),
+            "a legacy optimizer must refuse"
         );
 
-        // (c) A mis-copied file — a BRAIN envelope at the optimizer path — fails the kind
-        //     check → cold, never decoded as moments.
         write_envelope(
             &path,
             ArtifactKind::Brain,
@@ -679,22 +739,25 @@ mod tests {
             Some(BrainStamps {
                 body_digest: 0,
                 layout_digest: 0,
+                simulation_identity: crate::simulation::simulation_identity(),
             }),
             9,
         )
         .unwrap();
-        let cold3 = load_optimizer(
-            crab_optimizer::<TrainBackend>(),
-            &path,
-            &device,
-            SetKey {
-                arch: ArchId::DEFAULT,
-                save_stamp: Some(9),
-            },
-        );
         assert!(
-            cold3.to_record().is_empty(),
-            "a wrong-kind file must leave the optimizer cold"
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                load_optimizer(
+                    crab_optimizer::<TrainBackend>(),
+                    &path,
+                    &device,
+                    SetKey {
+                        arch: ArchId::DEFAULT,
+                        save_stamp: Some(9),
+                    },
+                )
+            }))
+            .is_err(),
+            "a wrong-kind optimizer must refuse"
         );
 
         // (d) A VALID envelope whose inner record bytes are corrupt: burn's bytes recorder

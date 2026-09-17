@@ -653,6 +653,72 @@ mod tests {
     use crate::bot::sensor::OBS_SIZE;
     use burn::tensor::Tensor;
 
+    #[test]
+    fn simulation_mismatch_refuses_warm_resume_and_eval() {
+        if std::env::var_os("RL_SIMULATION_REFUSAL_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "training::systems::state::tests::simulation_mismatch_refuses_warm_resume_and_eval", "--test-threads=2"])
+                .env("RL_SIMULATION_REFUSAL_CHILD", "1")
+                .env("RAYON_NUM_THREADS", "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use crate::training::envelope::{ArtifactKind, BrainStamps, read_envelope, write_envelope};
+        let dir =
+            std::env::temp_dir().join(format!("rl-simulation-refusal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = crate::TrainConfig::scratch(&dir, 1, 42);
+        let state = LearnerState::new(&config, None);
+        state.save_checkpoint(|_, _| {});
+        std::fs::write(
+            dir.join(crate::bot::body::PLANT_FILENAME),
+            "arena terrain\n",
+        )
+        .unwrap();
+        assert!(LearnerState::new(&config, None).resumed_set_key().is_some());
+        assert!(crate::policy::load_armed(&dir).is_ok());
+        let path = CheckpointDir::new(&dir).brain_file();
+        let env = read_envelope(&path, ArtifactKind::Brain).unwrap();
+        let mut other = crate::simulation::SimulationComponents::current();
+        other.physics.substeps += 1;
+        write_envelope(
+            &path,
+            ArtifactKind::Brain,
+            env.arch,
+            env.payload,
+            Some(BrainStamps {
+                body_digest: env.body_digest.unwrap(),
+                layout_digest: env.layout_digest.unwrap(),
+                simulation_identity: other.digest(),
+            }),
+            env.save_stamp.unwrap(),
+        )
+        .unwrap();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            LearnerState::new(&config, None)
+        }));
+        let payload = match panic {
+            Err(p) => p,
+            Ok(_) => panic!("incompatible simulator resumed"),
+        };
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.contains("simulation identity"), "{message}");
+        let refusal =
+            crate::eval::run_eval(&dir, 1, 24.0, 1.0).expect_err("incompatible eval refused");
+        assert!(refusal.contains("simulation identity"), "{refusal}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Bit-exact policy/value outputs for a brain over a fixed zero batch — the one
     /// fingerprint both determinism tests below compare by.
     fn policy_bits(brain: &AnyBrain<InferBackend>) -> Vec<u32> {

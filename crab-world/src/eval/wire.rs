@@ -145,7 +145,10 @@ impl EvalReport {
             write!(out, " charge_unmeasurable=true").expect("writing to a String never fails");
         }
         out.push('\n');
-        out
+        let identity = crate::simulation::simulation_identity();
+        out.lines()
+            .map(|line| format!("{line} simulation={identity:016x}\n"))
+            .collect()
     }
 }
 
@@ -260,7 +263,15 @@ mod tests {
     #[test]
     fn wire_report_matches_the_pinned_schema() {
         let wire = report(true, 0.0).wire_report();
-        let lines: Vec<&str> = wire.lines().collect();
+        let identity = format!(
+            " simulation={:016x}",
+            crate::simulation::simulation_identity()
+        );
+        assert!(wire.lines().all(|line| line.ends_with(&identity)));
+        let lines: Vec<&str> = wire
+            .lines()
+            .map(|line| line.strip_suffix(&identity).unwrap())
+            .collect();
         assert_eq!(lines.len(), EVAL_PAIRS + EVAL_BEARINGS + 2);
 
         assert_eq!(
@@ -383,7 +394,7 @@ mod tests {
         )));
         assert!(headline.contains(" charge_drift_frac="));
         assert!(headline.contains(" charge_drifted=false"));
-        assert!(headline.ends_with(&format!(" charge_target_m={PACE_PROBE_DISTANCE_M:.2}")));
+        assert!(headline.contains(&format!(" charge_target_m={PACE_PROBE_DISTANCE_M:.2}")));
         assert!(!headline.contains("charge_unmeasurable"));
 
         let baseline = report(false, 1.0).wire_report();
@@ -398,7 +409,7 @@ mod tests {
             wire.lines()
                 .last()
                 .unwrap()
-                .ends_with(" charge_unmeasurable=true")
+                .contains(" charge_unmeasurable=true")
         );
     }
 }

@@ -1414,21 +1414,14 @@ mod tests {
         (server, app)
     }
 
-    /// rl#298 stage 2, link 1: the policy FORWARD runs inside the server's crab slot.
-    /// After a slot pump, the actions driving the in-world body's motors are exactly
-    /// the loaded brain's forward pass over the obs the sensor built that same pump —
-    /// pinned by recomputing `act` on the observed row, so a Rest shortcut or a
-    /// stale/overwritten row cannot pass.
     #[test]
     fn host_slot_runs_the_policy_forward_between_advance_and_step_next() {
-        // The enveloped golden brain (crab-world's format-drift fixture): a real
-        // checkpoint the loader arms, so `act` runs a real NN forward.
-        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../crab-world/tests/data/golden-mlp512x3-env");
-        let policy = Policy::load(&golden, RestFallback::Rest);
+        let absent = std::env::temp_dir().join(format!("rl-host-forward-{}", std::process::id()));
+        assert!(!absent.exists());
+        let policy = Policy::load(&absent, RestFallback::RandomBrain);
         assert!(
             policy.is_loaded(),
-            "the golden checkpoint must load — a Rest fallback would make this test vacuous"
+            "the diagnostic brain must arm to exercise the policy forward"
         );
 
         let (mut server, mut app) = solo_host(policy);
@@ -1445,6 +1438,7 @@ mod tests {
              row the forward-pass pin below would hold vacuously"
         );
         let expected = app.world().non_send::<CrabPolicies>().0[0].act(&obs);
+        assert!(expected.iter().any(|v| *v != 0.0));
         let got = app.world().resource::<CrabActions>().rows()[0];
         assert_eq!(
             got, expected,

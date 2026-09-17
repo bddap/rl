@@ -647,9 +647,10 @@ pub fn instrument_fingerprint() -> String {
     }
     format!(
         "bake={:016x} amplitude=1 distance_m={DEFAULT_TARGET_DISTANCE_M} \
-         ticks={DEFAULT_EVAL_TICKS} settle={RESET_GRACE_TICKS} starts={:016x}",
+         ticks={DEFAULT_EVAL_TICKS} settle={RESET_GRACE_TICKS} starts={:016x} simulation={:016x}",
         crate::terrain::gcr_bake_digest(),
         starts.finish(),
+        crate::simulation::simulation_identity(),
     )
 }
 
@@ -756,7 +757,11 @@ pub fn run_eval(
     // `EVAL_RESULT` lines: consumers filter by prefix (eval/wire.rs), so an artifact
     // that shows the numbers shows the plant they were measured on.
     crate::bot::body::adopt_recorded_plant(checkpoint_dir)?;
-    println!("eval: plant: {}", crate::bot::body::plant_provenance());
+    println!(
+        "eval: plant: {} simulation={:016x}",
+        crate::bot::body::plant_provenance(),
+        crate::simulation::simulation_identity()
+    );
     pin_single_thread_pools();
 
     // ONE read arms-or-refuses (rl#241 — a classify-then-load pair could straddle a

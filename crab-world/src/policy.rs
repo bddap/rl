@@ -593,7 +593,11 @@ impl Policy {
     /// the demo, the GCR host, and (via the articulation wire) every GCR client render this
     /// exact string, so the label can't drift per surface.
     pub fn brain_label(&self) -> String {
-        let core = self.state_label();
+        let core = format!(
+            "{} simulation={:016x}",
+            self.state_label(),
+            crate::simulation::simulation_identity()
+        );
         // Driving a roster subdir (a brain swap, rl#232) carries the slot's dir name as
         // a prefix — derived from `dir` vs `swap_root` at read time, never cached, so an
         // unprefixed label always MEANS the latest/primary brain. ASCII separator: the
@@ -755,28 +759,36 @@ mod tests {
             .collect()
     }
 
-    /// GOLDEN FILE (bddap/rl#200 increment 2): `tests/data/golden-mlp512x3-env/` holds
-    /// an ENVELOPED golden brain (v1/TOFU shape, plus an identity obs normalizer) with
-    /// its action bits over [`golden_obs`] pinned in `actions.hex` at generation time.
-    /// Loading it through today's loader and reproducing those bits EXACTLY proves the
-    /// tagged on-disk format did not drift (a reader/writer change that re-mapped
-    /// envelope fields would strand every fleet checkpoint while all save/load-symmetric
-    /// tests stayed green). Regenerate with `regenerate_enveloped_golden_fixture` below
-    /// ONLY on a deliberate format version bump or an arch cull.
-    ///
-    /// Post-rl#298 this bit-exactness guard is justified as TRAINER/EVAL REPRODUCIBILITY —
-    /// the same forward pass the host runs in its crab slot is what the trainer trains and
-    /// the eval measures, so it must stay bit-stable across toolchain/backend bumps — not as
-    /// MP correctness: clients never run the policy (the host streams poses), so no
-    /// cross-peer forward determinism is required.
+    fn golden_policy() -> Policy {
+        let dir = golden_dir();
+        let paths = CheckpointDir::new(&dir);
+        let env =
+            crate::training::envelope::read_envelope(&paths.brain_file(), ArtifactKind::Brain)
+                .unwrap();
+        let raw = crate::training::envelope::read_envelope(
+            &paths.normalizer_path(),
+            ArtifactKind::ObsNormalizer,
+        )
+        .unwrap();
+        let mut normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
+        assert!(normalizer.load_snapshot(bincode::deserialize(&raw.payload).unwrap()));
+        let brain = crate::training::checkpoint::decode_brain_payload(
+            env.arch,
+            env.payload,
+            &NdArrayDevice::Cpu,
+        )
+        .unwrap();
+        let mut policy = Policy::rest();
+        policy.state = PolicyState::Diagnostic { brain, normalizer };
+        policy
+    }
+
     #[test]
-    fn golden_enveloped_checkpoint_loads_and_acts_bit_identically() {
-        let policy = Policy::load(&golden_dir(), RestFallback::Rest);
+    fn golden_envelope_preserves_actions_but_refuses_unverified_simulation() {
         assert!(
-            policy.is_loaded(),
-            "the enveloped golden checkpoint no longer loads — the tagged on-disk format \
-             drifted (every migrated fleet checkpoint would refuse to arm)"
+            matches!(load_armed(&golden_dir()), Err(CheckpointUnusable::Refused(why)) if why.contains("simulation identity"))
         );
+        let policy = golden_policy();
 
         let expected = golden_action_bits();
         assert_eq!(
@@ -848,8 +860,7 @@ mod tests {
         )
         .unwrap();
 
-        let policy = Policy::load(&dir, RestFallback::Rest);
-        assert!(policy.is_loaded(), "the fixture just written must load");
+        let policy = golden_policy();
         let bits: Vec<String> = policy
             .act(&golden_obs())
             .iter()
@@ -885,6 +896,7 @@ mod tests {
             Some(BrainStamps {
                 body_digest: wrong,
                 layout_digest: crate::bot::channel_layout_digest(),
+                simulation_identity: crate::simulation::simulation_identity(),
             }),
             21,
         )
@@ -929,6 +941,7 @@ mod tests {
             Some(BrainStamps {
                 body_digest: crate::bot::rig::baked_body_digest(),
                 layout_digest: crate::bot::channel_layout_digest() ^ 0xdead_beef,
+                simulation_identity: crate::simulation::simulation_identity(),
             }),
             21,
         )
@@ -1159,6 +1172,7 @@ mod tests {
             Some(BrainStamps {
                 body_digest: crate::bot::rig::baked_body_digest(),
                 layout_digest: crate::bot::channel_layout_digest(),
+                simulation_identity: crate::simulation::simulation_identity(),
             }),
             21,
         )

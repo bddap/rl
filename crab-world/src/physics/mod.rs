@@ -132,6 +132,32 @@ const LENGTH_UNIT: f32 = 1.0;
 
 pub const PHYSICS_GRAVITY: Vect = Vect::new(0.0, -9.81, 0.0);
 
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct PhysicsParameters {
+    pub dt: f32,
+    pub substeps: u64,
+    pub integration: IntegrationParameters,
+    pub gravity: [f32; 3],
+    pub length_unit: f32,
+}
+
+pub(crate) fn identity_parameters() -> PhysicsParameters {
+    let RapierContextInitialization::InitializeDefaultRapierContext {
+        integration_parameters,
+        rapier_configuration,
+    } = rapier_context_init()
+    else {
+        unreachable!()
+    };
+    PhysicsParameters {
+        dt: PHYSICS_DT,
+        substeps: PHYSICS_SUBSTEPS as u64,
+        integration: integration_parameters,
+        gravity: rapier_configuration.gravity.to_array(),
+        length_unit: LENGTH_UNIT,
+    }
+}
+
 fn rapier_context_init() -> RapierContextInitialization {
     RapierContextInitialization::InitializeDefaultRapierContext {
         integration_parameters: IntegrationParameters {
