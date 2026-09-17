@@ -323,7 +323,12 @@ pub fn constructed_plant_digest() -> u64 {
     for id in CrabJointId::all() {
         h.write(&id.friction_cap().to_bits().to_le_bytes());
         h.write(&id.drive_damping().to_bits().to_le_bytes());
+        h.write(&id.drive_torque_ceiling().to_bits().to_le_bytes());
+        for stop in id.limits() {
+            h.write(&stop.to_bits().to_le_bytes());
+        }
     }
+    h.write(&crate::bot::aero::TERMINAL_SPEED.to_bits().to_le_bytes());
     // The damper MECHANISM changed in rl#347 (capped impulse-joint motor → uncapped
     // implicit multibody dof damping) with identical coefficients, so the values
     // above can't tell the two plants apart; the tag makes a version-skewed MP pair

@@ -1,10 +1,13 @@
 use serde::Serialize;
 
+/// The resolved values that decide where a driven crab ends up, and nothing that
+/// does not: a checkpoint trains on ONE binary and ships to three (the native
+/// trainer, the deck/TV game, the wasm demo), so any build-side input — commit,
+/// source hash, compiler, target — would refuse every checkpoint the pipeline
+/// exists to ship. A mechanism change no value carries is tagged at its own
+/// site inside [`crate::bot::body::constructed_plant_digest`].
 #[derive(Clone, Serialize)]
 pub(crate) struct SimulationComponents {
-    pub rl_commit: String,
-    pub source_digest: String,
-    pub build_digest: String,
     pub rapier_pin: String,
     pub baked_rig: u64,
     pub physics: crate::physics::PhysicsParameters,
@@ -15,9 +18,6 @@ pub(crate) struct SimulationComponents {
 impl SimulationComponents {
     pub(crate) fn current() -> Self {
         Self {
-            rl_commit: env!("RL_COMMIT").into(),
-            source_digest: env!("RL_SOURCE_DIGEST").into(),
-            build_digest: env!("RL_BUILD_DIGEST").into(),
             rapier_pin: env!("RL_RAPIER_PIN").into(),
             baked_rig: crate::bot::rig::baked_body_digest(),
             physics: crate::physics::identity_parameters(),
@@ -57,10 +57,7 @@ mod tests {
     fn each_simulation_component_changes_identity_and_refuses() {
         let current = SimulationComponents::current();
         let expected = current.digest();
-        let changes: [fn(&mut SimulationComponents); 13] = [
-            |s| s.rl_commit.push('x'),
-            |s| s.source_digest.push('x'),
-            |s| s.build_digest.push('x'),
+        let changes: [fn(&mut SimulationComponents); 10] = [
             |s| s.rapier_pin.push('x'),
             |s| s.baked_rig ^= 1,
             |s| s.physics.substeps += 1,

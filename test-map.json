@@ -113,7 +113,7 @@
         "nix-shell --run 'cargo check --target wasm32-unknown-unknown -p net-proto -p net-link -p game-web'",
         "nix-shell --run 'cargo test -q -p crab-world --lib simulation -- --test-threads=2'"
       ],
-      "why": "rl#424 simulation identity spans the build fingerprint, checkpoint envelope, warm resume, and eval refusal; the component and consumer regressions accompany the native/web landing matrix."
+      "why": "rl#424 simulation identity spans the resolved physics values, checkpoint envelope, warm resume, and eval refusal; the component and consumer regressions accompany the native/web landing matrix."
     },
     {
       "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".cargo/config.toml", "**/*.wgsl", "crab-world/assets/**", "crab-world/tests/data/**"],
