@@ -7,7 +7,7 @@ Jun-28 checkpoint format; pre-2026-06-29 source history did not survive the rewr
 so archived binaries are the only era pins).
 
 Checkpoints archived durably at `~/.local/state/rl-target/archive/sally377-jun28-chase/`
-on bothouse. `RL_TARGET_BALL=1`, flat-floor era, lavapipe headless render.
+on the build host. `RL_TARGET_BALL=1`, flat-floor era, lavapipe headless render.
 
 - `sally377-recheck.*` — Jun-28 brain.bin (it~500 after the 2x energy tax), paired normalizer.
 - `prepenalty-paired.*` — Jun-28 brain-pre.bin (pre-energy-penalty), paired normalizer.
