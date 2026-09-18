@@ -56,3 +56,7 @@ read was at ~31) still localizes the bottleneck. When in doubt, just profile any
 
 Standing directive: endeavor to remove code comments — removing comments is good in
 itself. The rare survivor states a why the code cannot show, never what the code does.
+
+## Boundaries
+
+This rl repository names only its own components. Name another project only as a declared, versioned dependency, never through its internals. Give a needed shared service a neutral name owned by this project. Do not import the environment of machines running agents: hostnames, addresses, paths outside the repository, service or queue names, credentials, camera frames, or renders of private places. No person's name, schedule or presence enters the repository. Before landing, grep the diff for other projects' names and host details. Remove host details and undeclared project references; dependency declarations expose only the dependency's name and version.
