@@ -179,7 +179,6 @@ pub(crate) enum EnvelopeError {
     /// saved yet", every other variant as a fault.
     Absent,
     Io(std::io::Error),
-    Simulation(String),
     Legacy,
     /// Magic present but the envelope doesn't decode — a torn or corrupt file.
     Corrupt(String),
@@ -222,7 +221,6 @@ impl std::fmt::Display for EnvelopeError {
         match self {
             Self::Absent => write!(f, "no such file"),
             Self::Io(e) => write!(f, "read failed: {e}"),
-            Self::Simulation(e) => f.write_str(e),
             Self::Legacy => write!(
                 f,
                 "legacy pre-envelope file — the fleet was migrated to tagged envelopes \
@@ -518,11 +516,6 @@ pub(crate) fn read_envelope_expecting(
     key: SetKey,
 ) -> Result<CheckpointEnvelope, EnvelopeError> {
     let env = read_envelope(path, kind)?;
-    crate::simulation::check_simulation_identity(
-        env.simulation_identity,
-        crate::simulation::simulation_identity(),
-    )
-    .map_err(EnvelopeError::Simulation)?;
     if env.arch != key.arch {
         return Err(EnvelopeError::ArchMismatch {
             found: env.arch,
@@ -550,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn paired_simulation_identity_refuses_mismatch_and_missing() {
+    fn paired_simulation_identity_is_stamped_and_never_refused() {
         let dir = scratch("paired-simulation");
         let path = dir.join("paired.bin");
         for kind in [
@@ -558,6 +551,7 @@ mod tests {
             ArtifactKind::ObsNormalizer,
             ArtifactKind::ReturnNormalizer,
         ] {
+            let skewed = crate::simulation::simulation_identity() ^ 1;
             let raw = RawEnvelopePairedV3 {
                 previous: RawEnvelopePairedV2 {
                     kind: kind.name().into(),
@@ -566,7 +560,7 @@ mod tests {
                     payload: vec![1],
                     save_stamp: 17,
                 },
-                simulation_identity: crate::simulation::simulation_identity() ^ 1,
+                simulation_identity: skewed,
             };
             std::fs::write(
                 &path,
@@ -577,21 +571,8 @@ mod tests {
                 arch: ArchId::DEFAULT,
                 save_stamp: Some(17),
             };
-            assert!(matches!(
-                read_envelope_expecting(&path, kind, key),
-                Err(EnvelopeError::Simulation(_))
-            ));
-            assert!(matches!(
-                read_envelope_expecting(
-                    &path,
-                    kind,
-                    SetKey {
-                        save_stamp: Some(18),
-                        ..key
-                    }
-                ),
-                Err(EnvelopeError::Simulation(_))
-            ));
+            let env = read_envelope_expecting(&path, kind, key).unwrap();
+            assert_eq!(env.simulation_identity, Some(skewed));
             write_envelope(&path, kind, ArchId::DEFAULT, vec![1], None, 17).unwrap();
             let env = read_envelope_expecting(&path, kind, key).unwrap();
             assert_eq!(
@@ -599,17 +580,16 @@ mod tests {
                 Some(crate::simulation::simulation_identity())
             );
             write_v1_envelope(&path, kind, ArchId::DEFAULT, vec![1]).unwrap();
-            assert!(matches!(
-                read_envelope_expecting(
-                    &path,
-                    kind,
-                    SetKey {
-                        save_stamp: None,
-                        ..key
-                    }
-                ),
-                Err(EnvelopeError::Simulation(_))
-            ));
+            let env = read_envelope_expecting(
+                &path,
+                kind,
+                SetKey {
+                    save_stamp: None,
+                    ..key
+                },
+            )
+            .unwrap();
+            assert_eq!(env.simulation_identity, None);
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -762,16 +742,13 @@ mod tests {
         };
         assert!(read(&stamped, Some(77)).is_ok(), "matching stamps pair");
         assert!(
-            matches!(read(&unstamped, None), Err(EnvelopeError::Simulation(_))),
-            "a pre-stamp set cannot verify its simulator"
+            read(&unstamped, None).is_ok(),
+            "a wholly pre-stamp set pairs on trust"
         );
-        assert!(matches!(
-            read(&unstamped, Some(77)),
-            Err(EnvelopeError::Simulation(_))
-        ));
         for (path, expected) in [
-            (&stamped, Some(78)), // different saves
-            (&stamped, None),     // stamped member, unstamped brain (brain write failed)
+            (&stamped, Some(78)),
+            (&stamped, None),
+            (&unstamped, Some(77)),
         ] {
             match read(path, expected) {
                 Err(EnvelopeError::SaveStampMismatch { .. }) => {}

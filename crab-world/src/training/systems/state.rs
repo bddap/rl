@@ -654,13 +654,18 @@ mod tests {
     use burn::tensor::Tensor;
 
     #[test]
-    fn simulation_mismatch_refuses_warm_resume_and_eval() {
-        if std::env::var_os("RL_SIMULATION_REFUSAL_CHILD").is_none() {
+    fn simulation_mismatch_is_reported_and_proceeds() {
+        if std::env::var_os("RL_SIMULATION_MISMATCH_CHILD").is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "training::systems::state::tests::simulation_mismatch_refuses_warm_resume_and_eval", "--test-threads=2"])
-                .env("RL_SIMULATION_REFUSAL_CHILD", "1")
+                .args([
+                    "--exact",
+                    "training::systems::state::tests::simulation_mismatch_is_reported_and_proceeds",
+                    "--test-threads=2",
+                ])
+                .env("RL_SIMULATION_MISMATCH_CHILD", "1")
                 .env("RAYON_NUM_THREADS", "1")
-                .output().unwrap();
+                .output()
+                .unwrap();
             assert!(
                 output.status.success(),
                 "{}\n{}",
@@ -671,7 +676,7 @@ mod tests {
         }
         use crate::training::envelope::{ArtifactKind, BrainStamps, read_envelope, write_envelope};
         let dir =
-            std::env::temp_dir().join(format!("rl-simulation-refusal-{}", std::process::id()));
+            std::env::temp_dir().join(format!("rl-simulation-mismatch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let config = crate::TrainConfig::scratch(&dir, 1, 42);
         let state = LearnerState::new(&config, None);
@@ -687,6 +692,7 @@ mod tests {
         let env = read_envelope(&path, ArtifactKind::Brain).unwrap();
         let mut other = crate::simulation::SimulationComponents::current();
         other.physics.substeps += 1;
+        let other = other.digest();
         write_envelope(
             &path,
             ArtifactKind::Brain,
@@ -695,27 +701,31 @@ mod tests {
             Some(BrainStamps {
                 body_digest: env.body_digest.unwrap(),
                 layout_digest: env.layout_digest.unwrap(),
-                simulation_identity: other.digest(),
+                simulation_identity: other,
             }),
             env.save_stamp.unwrap(),
         )
         .unwrap();
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            LearnerState::new(&config, None)
-        }));
-        let payload = match panic {
-            Err(p) => p,
-            Ok(_) => panic!("incompatible simulator resumed"),
-        };
-        let message = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .unwrap();
-        assert!(message.contains("simulation identity"), "{message}");
-        let refusal =
-            crate::eval::run_eval(&dir, 1, 24.0, 1.0).expect_err("incompatible eval refused");
-        assert!(refusal.contains("simulation identity"), "{refusal}");
+        let built = crate::simulation::simulation_identity();
+        let line = format!("simulation identity: checkpoint {other:016x}, this build {built:016x}");
+        let (state, logs) = crate::simulation::captured_logs(|| LearnerState::new(&config, None));
+        assert!(
+            state.resumed_set_key().is_some(),
+            "a checkpoint stamped by another simulation build must warm-resume, never refuse"
+        );
+        assert!(
+            logs.contains(&line),
+            "warm resume must report the checkpoint's simulation identity against this \
+             build's, got:\n{logs}"
+        );
+        let (eval, logs) =
+            crate::simulation::captured_logs(|| crate::eval::run_eval(&dir, 1, 24.0, 1.0));
+        eval.expect("a checkpoint stamped by another simulation build must eval, never refuse");
+        assert!(
+            logs.contains(&line),
+            "eval must report the checkpoint's simulation identity against this build's, \
+             got:\n{logs}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

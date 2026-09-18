@@ -1,4 +1,7 @@
+use std::path::Path;
+
 use serde::Serialize;
+use tracing::{info, warn};
 
 /// The resolved values that decide where a driven crab ends up, and nothing that
 /// does not: a checkpoint trains on ONE binary and ships to three (the native
@@ -36,17 +39,51 @@ pub fn simulation_identity() -> u64 {
     *IDENTITY.get_or_init(|| SimulationComponents::current().digest())
 }
 
-pub(crate) fn check_simulation_identity(checkpoint: Option<u64>, built: u64) -> Result<(), String> {
+/// A stamp that differs from this build is a physics tweak the checkpoint predates,
+/// which a warm start usually survives; the line makes the skew visible, nothing
+/// refuses on it.
+pub(crate) fn report_simulation_identity(path: &Path, checkpoint: Option<u64>) {
+    let built = simulation_identity();
+    let stamp = checkpoint.map_or("unstamped".to_string(), |s| format!("{s:016x}"));
+    let line = format!(
+        "{}: simulation identity: checkpoint {stamp}, this build {built:016x}",
+        path.display()
+    );
     if checkpoint == Some(built) {
-        Ok(())
+        info!("{line}");
     } else {
-        Err(format!(
-            "simulation identity mismatch: checkpoint {} but this build is {built:016x}; use the matching simulation build or a fresh checkpoint directory",
-            checkpoint
-                .map(|d| format!("{d:016x}"))
-                .unwrap_or_else(|| "missing (unverified simulator)".into()),
-        ))
+        warn!("{line}");
     }
+}
+
+#[cfg(test)]
+pub(crate) fn captured_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+        type Writer = Sink;
+        fn make_writer(&'a self) -> Sink {
+            self.clone()
+        }
+    }
+    let sink = Sink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let logs = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    (out, logs)
 }
 
 #[cfg(test)]
@@ -54,7 +91,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_simulation_component_changes_identity_and_refuses() {
+    fn each_simulation_component_changes_identity() {
         let current = SimulationComponents::current();
         let expected = current.digest();
         let changes: [fn(&mut SimulationComponents); 10] = [
@@ -73,10 +110,24 @@ mod tests {
             let mut other = current.clone();
             change(&mut other);
             assert_ne!(other.digest(), expected);
-            let refusal = check_simulation_identity(Some(other.digest()), expected).unwrap_err();
-            assert!(refusal.contains("simulation identity"));
         }
-        assert!(check_simulation_identity(None, expected).is_err());
-        assert!(check_simulation_identity(Some(expected), expected).is_ok());
+    }
+
+    #[test]
+    fn report_names_both_identities_at_every_stamp_state() {
+        let built = simulation_identity();
+        let path = Path::new("brain.bin");
+        for (stamp, level, shown) in [
+            (Some(built), "INFO", format!("{built:016x}")),
+            (Some(built ^ 1), "WARN", format!("{:016x}", built ^ 1)),
+            (None, "WARN", "unstamped".to_string()),
+        ] {
+            let ((), logs) = captured_logs(|| report_simulation_identity(path, stamp));
+            let line = format!(
+                "brain.bin: simulation identity: checkpoint {shown}, this build {built:016x}"
+            );
+            assert_eq!(logs.lines().count(), 1, "{logs}");
+            assert!(logs.contains(level) && logs.contains(&line), "{logs}");
+        }
     }
 }

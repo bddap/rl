@@ -57,6 +57,7 @@ required-features = ["render"]
 
 [dev-dependencies]
 test-watchdog = { path = "../test-watchdog" }
+tracing-subscriber.workspace = true
 # Tests pin the tracing-target constants to otel's; the perf_collapse_smoke example
 # arms real export.
 otel = { path = "../otel" }

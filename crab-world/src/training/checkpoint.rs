@@ -13,7 +13,6 @@ use super::envelope::{
     write_envelope,
 };
 use crate::bot::arch::{AnyBrain, ArchId};
-use crate::simulation::check_simulation_identity;
 
 pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 
@@ -62,7 +61,6 @@ pub(crate) fn save_brain<B: Backend>(
 pub(crate) enum BrainLoadError {
     Envelope(EnvelopeError),
     Record(String),
-    Simulation(String),
 }
 
 impl std::fmt::Display for BrainLoadError {
@@ -70,7 +68,6 @@ impl std::fmt::Display for BrainLoadError {
         match self {
             Self::Envelope(e) => e.fmt(f),
             Self::Record(e) => write!(f, "leaf record does not decode: {e}"),
-            Self::Simulation(e) => f.write_str(e),
         }
     }
 }
@@ -149,11 +146,7 @@ pub(crate) fn load_brain_file<B: Backend>(
     device: &B::Device,
 ) -> Result<BrainFile<B>, BrainLoadError> {
     let env = read_envelope(path, ArtifactKind::Brain).map_err(BrainLoadError::Envelope)?;
-    check_simulation_identity(
-        env.simulation_identity,
-        crate::simulation::simulation_identity(),
-    )
-    .map_err(BrainLoadError::Simulation)?;
+    crate::simulation::report_simulation_identity(path, env.simulation_identity);
     let brain =
         decode_brain_payload::<B>(env.arch, env.payload, device).map_err(BrainLoadError::Record)?;
     Ok(BrainFile {
@@ -404,63 +397,6 @@ mod tests {
     use burn::tensor::Tensor;
 
     #[test]
-    fn optimizer_simulation_mismatch_aborts_even_across_save_stamps() {
-        let dir =
-            std::env::temp_dir().join(format!("rl-optimizer-simulation-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(OPTIMIZER_FILENAME);
-        write_envelope(
-            &path,
-            ArtifactKind::Optimizer,
-            ArchId::DEFAULT,
-            vec![],
-            None,
-            17,
-        )
-        .unwrap();
-        let mut bytes = std::fs::read(&path).unwrap();
-        let offset = bytes.len() - 8;
-        bytes[offset..]
-            .copy_from_slice(&(crate::simulation::simulation_identity() ^ 1).to_le_bytes());
-        for unknown_arch in [false, true] {
-            let mut bytes = bytes.clone();
-            if unknown_arch {
-                let name = ArchId::DEFAULT.name().as_bytes();
-                let offset = bytes.windows(name.len()).position(|w| w == name).unwrap();
-                bytes[offset..offset + name.len()].fill(b'x');
-            }
-            std::fs::write(&path, bytes).unwrap();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                load_optimizer(
-                    crab_optimizer::<TrainBackend>(),
-                    &path,
-                    &NdArrayDevice::Cpu,
-                    SetKey {
-                        arch: ArchId::DEFAULT,
-                        save_stamp: Some(18),
-                    },
-                )
-            }));
-            match result {
-                Err(p) => {
-                    let message = panic_message(p);
-                    let diagnosis = if unknown_arch {
-                        "unregistered"
-                    } else {
-                        "simulation identity"
-                    };
-                    assert!(
-                        message.contains("REFUSING Adam optimizer") && message.contains(diagnosis),
-                        "{message}"
-                    );
-                }
-                Ok(_) => panic!("incompatible optimizer silently started cold"),
-            }
-        }
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn brain_checkpoint_round_trips() {
         let dir = std::env::temp_dir().join("rl_test_brain_checkpoint");
         let _ = std::fs::remove_dir_all(&dir);
@@ -661,6 +597,26 @@ mod tests {
             restored.to_record().len(),
             warm.to_record().len(),
             "restored optimizer should hold the same per-parameter moment count"
+        );
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let offset = bytes.len() - 8;
+        bytes[offset..]
+            .copy_from_slice(&(crate::simulation::simulation_identity() ^ 1).to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let skewed = load_optimizer(
+            crab_optimizer::<TrainBackend>(),
+            &path,
+            &device,
+            SetKey {
+                arch: ArchId::DEFAULT,
+                save_stamp: Some(5),
+            },
+        );
+        assert_eq!(
+            skewed.to_record().len(),
+            warm.to_record().len(),
+            "a simulation identity stamp from another build must restore warm, never refuse"
         );
 
         let (warm_next, _) = adam_test_step(brain.clone(), warm, &device);

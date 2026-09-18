@@ -759,36 +759,21 @@ mod tests {
             .collect()
     }
 
-    fn golden_policy() -> Policy {
-        let dir = golden_dir();
-        let paths = CheckpointDir::new(&dir);
-        let env =
-            crate::training::envelope::read_envelope(&paths.brain_file(), ArtifactKind::Brain)
-                .unwrap();
-        let raw = crate::training::envelope::read_envelope(
-            &paths.normalizer_path(),
-            ArtifactKind::ObsNormalizer,
-        )
-        .unwrap();
-        let mut normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
-        assert!(normalizer.load_snapshot(bincode::deserialize(&raw.payload).unwrap()));
-        let brain = crate::training::checkpoint::decode_brain_payload(
-            env.arch,
-            env.payload,
-            &NdArrayDevice::Cpu,
-        )
-        .unwrap();
-        let mut policy = Policy::rest();
-        policy.state = PolicyState::Diagnostic { brain, normalizer };
-        policy
-    }
-
     #[test]
-    fn golden_envelope_preserves_actions_but_refuses_unverified_simulation() {
-        assert!(
-            matches!(load_armed(&golden_dir()), Err(CheckpointUnusable::Refused(why)) if why.contains("simulation identity"))
+    fn golden_enveloped_checkpoint_loads_and_acts_bit_identically() {
+        let (policy, logs) = crate::simulation::captured_logs(|| load_armed(&golden_dir()));
+        let policy = policy.expect(
+            "the enveloped golden checkpoint must arm: an unstamped simulation identity is \
+             reported, never refused",
         );
-        let policy = golden_policy();
+        let built = crate::simulation::simulation_identity();
+        assert!(
+            logs.contains(&format!(
+                "simulation identity: checkpoint unstamped, this build {built:016x}"
+            )),
+            "the loader must report the checkpoint's simulation identity against this \
+             build's, got:\n{logs}"
+        );
 
         let expected = golden_action_bits();
         assert_eq!(
@@ -860,7 +845,8 @@ mod tests {
         )
         .unwrap();
 
-        let policy = golden_policy();
+        let policy = Policy::load(&dir, RestFallback::Rest);
+        assert!(policy.is_loaded(), "the fixture just written must load");
         let bits: Vec<String> = policy
             .act(&golden_obs())
             .iter()

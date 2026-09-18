@@ -3573,6 +3573,7 @@ dependencies = [
  "serde_json",
  "test-watchdog",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
