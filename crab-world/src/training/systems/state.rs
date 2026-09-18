@@ -409,11 +409,11 @@ fn warm_start(
                     loaded.arch(),
                 );
             }
-            // Body↔policy identity (bddap/rl#214): training this checkpoint on a
-            // different body than it was trained on silently retrains a not-Sally
-            // policy — abort, same class as the arch refusals above. A pre-stamp
-            // checkpoint is trusted on first use; `save_checkpoint`'s next write
-            // stamps it (the one-time migration, never an invalidation).
+            // Body↔policy identity (bddap/rl#214): a warm start across a body change
+            // is reported, never refused — the policy adapts to the body it now
+            // trains on, and `save_checkpoint`'s next write stamps that body (the
+            // same migration a pre-stamp checkpoint gets). Inference keeps refusing
+            // the mismatch (`policy::load_armed`): only training may cross bodies.
             let constructed = crate::bot::rig::baked_body_digest();
             match check_body_identity(body_digest, constructed) {
                 Ok(StampIdentity::Match) => {}
@@ -423,9 +423,10 @@ fn warm_start(
                      {constructed:#018x}",
                     paths.brain_file().display(),
                 ),
-                Err(why) => panic!(
-                    "REFUSING to train over checkpoint dir {}: {why}",
-                    config.checkpoint.checkpoint_dir.display()
+                Err(why) => warn!(
+                    "checkpoint at {}: {why} — warm-starting across the body change; \
+                     the next save stamps body digest {constructed:#018x}",
+                    paths.brain_file().display(),
                 ),
             }
             // Channel-layout identity (bddap/rl#271): same class as the body check —
@@ -726,6 +727,85 @@ mod tests {
             "eval must report the checkpoint's simulation identity against this build's, \
              got:\n{logs}"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A checkpoint stamped for another body warm-starts the trainer (reported, then
+    /// re-stamped by the next save) while inference keeps refusing it until that save.
+    #[test]
+    fn body_mismatch_warm_starts_and_restamps() {
+        if std::env::var_os("RL_BODY_MISMATCH_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "training::systems::state::tests::body_mismatch_warm_starts_and_restamps",
+                    "--test-threads=2",
+                ])
+                .env("RL_BODY_MISMATCH_CHILD", "1")
+                .env("RAYON_NUM_THREADS", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use crate::training::envelope::{ArtifactKind, BrainStamps, read_envelope, write_envelope};
+        let dir = std::env::temp_dir().join(format!("rl-body-mismatch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = crate::TrainConfig::scratch(&dir, 1, 42);
+        LearnerState::new(&config, None).save_checkpoint(|_, _| {});
+        std::fs::write(
+            dir.join(crate::bot::body::PLANT_FILENAME),
+            "arena terrain\n",
+        )
+        .unwrap();
+        let path = CheckpointDir::new(&dir).brain_file();
+        let env = read_envelope(&path, ArtifactKind::Brain).unwrap();
+        let constructed = crate::bot::rig::baked_body_digest();
+        let other = constructed ^ 1;
+        write_envelope(
+            &path,
+            ArtifactKind::Brain,
+            env.arch,
+            env.payload,
+            Some(BrainStamps {
+                body_digest: other,
+                layout_digest: env.layout_digest.unwrap(),
+                simulation_identity: env.simulation_identity.unwrap(),
+            }),
+            env.save_stamp.unwrap(),
+        )
+        .unwrap();
+        assert!(
+            crate::policy::load_armed(&dir).is_err(),
+            "inference must refuse a policy stamped for another body"
+        );
+        let (state, logs) = crate::simulation::captured_logs(|| LearnerState::new(&config, None));
+        assert!(
+            state.resumed_set_key().is_some(),
+            "a checkpoint stamped for another body must warm-resume, never refuse"
+        );
+        let line = format!(
+            "stamped body digest {other:#018x} but this process constructs body digest \
+             {constructed:#018x}"
+        );
+        assert!(
+            logs.contains(&line) && logs.contains("warm-starting across the body change"),
+            "warm resume must report the body mismatch, got:\n{logs}"
+        );
+        state.save_checkpoint(|_, _| {});
+        assert_eq!(
+            read_envelope(&path, ArtifactKind::Brain)
+                .unwrap()
+                .body_digest,
+            Some(constructed),
+            "the next save stamps the body this build constructs"
+        );
+        crate::policy::load_armed(&dir).expect("the re-stamped checkpoint arms on this body");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

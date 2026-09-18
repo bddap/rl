@@ -225,7 +225,9 @@ fn load_set_once(dir: &Path, device: &NdArrayDevice) -> SetRead {
         crate::bot::rig::baked_body_digest(),
     ) {
         return SetRead::Done(Loaded::Refused(format!(
-            "{}: {why}",
+            "{}: {why}. A policy is only Sally on the body it trained on (bddap/rl#214); \
+             use a checkpoint trained on this body, or the binary/asset pair it was \
+             trained under.",
             crate::training::checkpoint::BRAIN_FILENAME
         )));
     }

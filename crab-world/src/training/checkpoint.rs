@@ -28,8 +28,9 @@ pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 /// ([`crate::bot::rig::baked_body_digest`], bddap/rl#214) and channel-layout
 /// digest ([`crate::bot::channel_layout_digest`], bddap/rl#271) — read here, not taken
 /// as parameters, so no caller can stamp an identity the process didn't actually build;
-/// the resume checks ([`check_body_identity`], [`check_channel_layout`]) abort a
-/// mismatch BEFORE any save, so the stamps can never launder a wrong resume either.
+/// the layout resume check ([`check_channel_layout`]) aborts a mismatch BEFORE any
+/// save, so the stamp can never launder a remapped resume; a body mismatch
+/// ([`check_body_identity`]) is a reported warm start that the next save re-stamps.
 /// `save_stamp` is the checkpoint-set stamp shared with the paired artifacts saved
 /// beside it (bddap/rl#215).
 pub(crate) fn save_brain<B: Backend>(
@@ -178,11 +179,12 @@ fn check_stamp(checkpoint: Option<u64>, constructed: u64) -> Result<StampIdentit
 }
 
 /// THE body↔policy identity check (bddap/rl#214): a checkpoint stamped with one body
-/// digest must never drive or train the body this process actually constructs if the two
+/// digest must never DRIVE the body this process actually constructs if the two
 /// differ — that policy is not this crab. Pure over (checkpoint stamp, constructed
 /// digest) so the matrix is unit-testable; callers pass
-/// [`crate::bot::rig::baked_body_digest`] and apply their refusal policy to
-/// the `Err` (the trainer aborts, inference refuses to arm).
+/// [`crate::bot::rig::baked_body_digest`] and apply their policy to the `Err`
+/// (inference refuses to arm; the trainer reports the warm start and re-stamps at
+/// its next save).
 ///
 /// (The rl#20 stage-1 legacy shim that accepted bare-asset-digest stamps is GONE, per
 /// its own instructions: the stage-2 table regen means the body those stamps trained
@@ -197,9 +199,7 @@ pub(crate) fn check_body_identity(
              digest {constructed:#018x} ({}) — the policy was trained on a DIFFERENT crab \
              body: the asset or the baked collider table changed (a re-bake is a new MDP, \
              rl#277), the binaries straddle a digest-formula change (rl#20 stage 1), or \
-             one side is the procedural fallback (digest 0). A policy is only Sally on \
-             the body it trained on (bddap/rl#214); use a checkpoint trained on this \
-             body, or the binary/asset pair it was trained under.",
+             one side is the procedural fallback (digest 0)",
             if constructed == 0 {
                 "the procedural fallback"
             } else {
