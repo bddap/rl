@@ -879,7 +879,7 @@ fn airborne_thrash_residual(kind: Thrash, seed: u64) -> (Vec3, usize) {
 /// bddap/rl#321 — THE physics contract: joint motors are INTERNAL forces, so an
 /// airborne, contact-free crab can reorient itself but never translate its COM
 /// beyond gravity: Δp = m·g·Δt over any window. A residual means an un-modeled
-/// EXTERNAL force — the self-propulsion the owner observed in GCR. Gravity stays ON
+/// EXTERNAL force — the self-propulsion seen in GCR. Gravity stays ON
 /// (unlike the angular twin): a velocity-proportional leak (world-frame damping) is
 /// invisible at v ≈ 0 and grows with the free-fall speed.
 ///

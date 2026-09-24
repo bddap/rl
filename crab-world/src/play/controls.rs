@@ -7,8 +7,8 @@ use crate::controls::{
 
 pub struct DemoControls;
 
-/// The demo's chord table (rl#330 stage 4) — every discrete verb is a code; the owner
-/// tunes assignments here in play. Where a verb exists on both surfaces the code
+/// The demo's chord table (rl#330 stage 4) — every discrete verb is a code, and
+/// assignments are tuned here in play. Where a verb exists on both surfaces the code
 /// matches GCR's `GCR_CHORDS` (net/src/controls.rs): < swap brain, the right-tap for
 /// the reset-flavored verb (Restart there, Rebuild here), [`crate::chord::QUIT_CODE`]
 /// quit — Quit stays ≥2 taps longer than every other code, so a stray tap after any
@@ -364,7 +364,7 @@ mod tests {
         );
     }
 
-    /// The owner's rl#358 pick (2026-08-12): chord codes have no textual lookup
+    /// rl#358: chord codes have no textual lookup
     /// surface — the demo legend never lists a chord entry either.
     #[test]
     fn legend_shows_no_chord_rows() {

@@ -215,7 +215,7 @@ fn slope_hold_table() {
 /// slide cut and flip-free 40°) yet cannot pass 1.5 m at 40°, and ≥45° is
 /// structurally out of reach. The basis-stop plant change was reverted per the
 /// revert rule (the gated test stays red either way, and halving the basis
-/// range is an MDP call bundled with direction (c) — the owner's rl#318 band
+/// range is an MDP call bundled with direction (c) — the rl#318 band
 /// re-scope, which now has this frontier to price against the 30–55° demand).
 ///
 /// rl#340 stage 9 (job 2506) re-priced both plants on the post-recycling plant

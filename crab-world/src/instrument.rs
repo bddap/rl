@@ -4,22 +4,20 @@
 //! [`crate::chord::install_chords`], so every chord surface (GCR, the demo, the
 //! offscreen evidence apps) sounds through the one path.
 //!
-//! The press→sound mapping is DATA, not code (owner amendment on rl#359): a scheme is
+//! The press→sound mapping is DATA, not code (rl#359): a scheme is
 //! a pure `(scale, code-prefix, press) → NoteSpec` function plus a [`Scale`], held in
 //! the [`InstrumentScheme`] resource — a replacement mapping swaps in by replacing the
 //! resource, never by touching the capture or input code.
 //!
-//! THE scheme is **heldbreath** on **A hirajoshi** — the owner's pick from the design
-//! exploration (rl#359, Telegram 2026-08-12: "held breath hirajoshi"). Entering a
-//! code is inhaling; completing it is the exhale. Presses are intervals relative to
-//! the melody so far (a code is a remembered *contour*), depth is a felt tension
-//! gradient, and the first press shades the whole phrase's brightness (the playground
-//! realizes heldbreath's timbre regions as brightness shades — that is the sound the
-//! owner picked by ear, so that is what ships). The depth gradient follows the owner's
-//! deep-code spec (rl#380 comment, 2026-08-13): note 0 is PURE; twin-voice detune
-//! ramps as `min(1, sqrt(s/8))` of max; bitcrush is silent until note 4, pops in at
-//! 25% of its ceiling, and reaches the ceiling at note 12 (the ceiling is
-//! [`MAX_CRUSH`], dialed down from full per the owner).
+//! THE scheme is **heldbreath** on **A hirajoshi**, from the rl#359 design exploration.
+//! Entering a code is inhaling; completing it is the exhale. Presses are intervals
+//! relative to the melody so far (a code is a remembered *contour*), depth is a felt
+//! tension gradient, and the first press shades the whole phrase's brightness (the
+//! playground realizes heldbreath's timbre regions as brightness shades — that is the
+//! sound chosen by ear, so that is what ships). The depth gradient follows the rl#380
+//! deep-code spec: note 0 is PURE; twin-voice detune ramps as `min(1, sqrt(s/8))` of
+//! max; bitcrush is silent until note 4, pops in at 25% of its ceiling, and reaches the
+//! ceiling at note 12 (the ceiling is [`MAX_CRUSH`], dialed down from full).
 //!
 //! Notes are procedurally synthesized plucks (additive partials, exponential decay) —
 //! no asset dependency, every parameter tunable from the [`NoteSpec`]. The instrument
@@ -50,7 +48,7 @@ pub struct Scale {
     pub degrees: &'static [u8],
 }
 
-/// A hirajoshi on A2 (A B C E F) — the owner's by-ear pick on the web playground.
+/// A hirajoshi on A2 (A B C E F), chosen by ear on the web playground.
 /// Rooted an octave below the playground's A3 because heldbreath voices its melody
 /// one octave down (dark register); the walk starts an octave above this root, so
 /// the first note of a code lands near A3.
@@ -83,7 +81,7 @@ pub struct NoteSpec {
     /// 0..1: upper-partial level (1 = glassy chime, 0 = pure dark fundamental).
     pub brightness: f32,
     /// 0..1 bitcrush intensity: sample-rate decimation + amplitude quantization.
-    /// 0 = clean; the deep-code tension layer (owner spec on rl#380).
+    /// 0 = clean; the deep-code tension layer (rl#380).
     pub crush: f32,
     pub gain: f32,
 }
@@ -149,7 +147,7 @@ fn home_degree(scale: &Scale) -> i32 {
 
 /// Region = first press of a code: it shades the whole phrase's brightness
 /// (L dark, D warm, R hollow-ish, U glassy) — the playground's realization of
-/// heldbreath's timbre families, which is the sound the owner picked.
+/// heldbreath's timbre families.
 fn region_brightness(first: ChordDir) -> f32 {
     match first {
         ChordDir::Left => 0.3,
@@ -159,7 +157,7 @@ fn region_brightness(first: ChordDir) -> f32 {
     }
 }
 
-/// The owner's deep-code tension curves (rl#380 spec, 2026-08-13), by note index
+/// The deep-code tension curves (rl#380), by note index
 /// `s` (0-based): detune ramps immediately, bitcrush enters discontinuously at 25%
 /// on note 4. Both hold at full from their end of ramp.
 fn tension_detune(s: usize) -> f32 {
@@ -174,8 +172,7 @@ fn tension_crush(s: usize) -> f32 {
 }
 
 /// Bitcrush ceiling. The rl#380 envelope shape is the contract, but full crush was
-/// too intense in play (owner, 2026-08-14: "Reduce max to 1/3 of current") — the
-/// whole envelope scales down to this ceiling.
+/// too intense in play — the whole envelope scales down to this ceiling.
 const MAX_CRUSH: f32 = 1.0 / 3.0;
 
 /// Full twin-voice spread at max tension. ±24¢ beats at ~6 Hz in the walk's
@@ -201,12 +198,10 @@ fn heldbreath_press(scale: &Scale, prefix: &[ChordDir], press: ChordDir) -> Note
     }
 }
 
-/// Completion = cadence. Accepted is the EXHALE, and per the owner amendment
-/// (2026-08-12: "confirmation chord … derived from the notes so far, not a single
-/// chord for all combos") it is spelled from the code's own melody: the distinct
-/// degrees the walk visited (most recent four, in visit order) strummed as a pure
-/// chord — detune and crush collapse to zero — landing longest and loudest on the
-/// home octave. Every code exhales into its own chord, and every exhale resolves
+/// Completion = cadence. Accepted is the EXHALE, spelled from the code's own melody:
+/// the distinct degrees the walk visited (most recent four, in visit order) strummed
+/// as a pure chord — detune and crush collapse to zero — landing longest and loudest
+/// on the home octave. Every code exhales into its own chord, and every exhale resolves
 /// home. Unknown: a deceptive cadence a half-step off home (deliberately the one
 /// out-of-scale interval the instrument can make), KEEPING the accumulated
 /// detune+crush and damping early — the breath is not released.
@@ -340,7 +335,7 @@ impl NoteVoice {
         let mut partials = Vec::with_capacity(PARTIALS.len() * 2);
         // Brightness is realized the way the PLAYGROUND realized it — a lowpass at
         // freq·(2+8·brightness) over fixed partial gains — because that filter is
-        // nearly transparent over these partials: the owner's timbre regions are
+        // nearly transparent over these partials: the timbre regions are
         // SUBTLE shades, and mapping brightness straight onto partial gains
         // over-realized them ~4× (reviewer finding).
         let cutoff_mult = 2.0 + 8.0 * brightness;
@@ -359,7 +354,7 @@ impl NoteVoice {
             }
         }
         // Crush intensity → decimation + quantization. The 25% entry point (the
-        // owner-spec'd pop-in) holds every 3rd sample (~15 kHz) at ~10 bits —
+        // spec'd pop-in) holds every 3rd sample (~15 kHz) at ~10 bits —
         // clearly audible grit; full crush is ~3.7 kHz at 4 bits.
         let crush = (crush_amt > 0.0).then(|| {
             let bits = 12.0 - 8.0 * crush_amt;
@@ -558,12 +553,12 @@ mod tests {
         assert_eq!(b, again, "same path must always sound the same");
     }
 
-    /// The owner's deep-code tension spec (rl#380): note 0 PURE; detune at 50% of
+    /// The deep-code tension spec (rl#380): note 0 PURE; detune at 50% of
     /// max on note 2, full by note 8; crush zero through note 3, 25% of
     /// [`MAX_CRUSH`] on note 4, the full ceiling by note 12 — and both hold,
     /// never recede.
     #[test]
-    fn tension_follows_the_owner_curve() {
+    fn tension_follows_the_spec_curve() {
         let s = scheme();
         let at = |depth: usize| {
             let prefix: Vec<ChordDir> = std::iter::repeat_n(Up, depth).collect();
@@ -583,8 +578,8 @@ mod tests {
         assert_eq!(at(20).crush, MAX_CRUSH, "crush holds");
     }
 
-    /// The accepted chord is DERIVED from the code's own melody (owner amendment
-    /// 2026-08-12): different codes exhale into different chords, every chord is
+    /// The accepted chord is DERIVED from the code's own melody: different codes
+    /// exhale into different chords, every chord is
     /// pure (no detune, no crush), and every one lands home on the octave.
     #[test]
     fn accepted_chord_derives_from_the_melody() {

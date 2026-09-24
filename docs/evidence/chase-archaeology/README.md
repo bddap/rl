@@ -1,4 +1,4 @@
-# Checkpoint archaeology — the last Sally that actually chased (owner ask, 2026-08-04)
+# Checkpoint archaeology — the last Sally that actually chased
 
 Pre-terrain (< rl#281, 2026-07-16), pre-chase-eval (< 79d11ae, 2026-06-30) candidates,
 re-verified 2026-08-06 by rendering each under the archived era binary

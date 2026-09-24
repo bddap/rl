@@ -6,7 +6,7 @@
 Per window: vy / horizontal speed / |v| time series with launch ticks marked,
 plus above-ground altitude and carapace specific energy, one shared time axis
 (separate subplots — never a dual axis). Across all windows: histogram of
-launch angle to the local ground normal (0 deg = the owner's "perpendicular").
+launch angle to the local ground normal (0 deg = "perpendicular").
 """
 import json
 import math

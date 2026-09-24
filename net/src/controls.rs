@@ -3,10 +3,10 @@ use crab_world::controls::{Binding, ContextRow, ControlScheme, Glyph, KbBinding,
 
 pub struct GcrControls;
 
-/// GCR's chord table (rl#330) — the ONE list of code → command assignments; the owner
-/// tunes codes here in play. These commands have no direct bindings — one trigger
+/// GCR's chord table (rl#330) — the ONE list of code → command assignments, where
+/// codes are tuned in play. These commands have no direct bindings — one trigger
 /// route per action, enforced by `assert_scheme_well_formed`. A bare modifier tap
-/// (the empty code) is deliberately unassigned: the owner de-overloaded X — vehicle
+/// (the empty code) is deliberately unassigned: X is de-overloaded — vehicle
 /// switching is a code per vehicle, not a tap verb (the ↑-family = the sky craft,
 /// ↓↓ = back to the ground). Every render/art variant is its own entry (stage 5,
 /// replacing the two Cycle* verbs): render modes under `^^`, ground looks under `v` —
@@ -1104,7 +1104,7 @@ mod tests {
         }
     }
 
-    /// The owner's rl#358 pick (2026-08-12): chord codes have NO textual lookup —
+    /// rl#358: chord codes have NO textual lookup —
     /// the legend never lists a chord entry; codes appear only on the combo map,
     /// discovered by play.
     #[test]

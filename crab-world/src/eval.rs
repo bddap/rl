@@ -90,8 +90,7 @@ pub const MAX_ENVS: usize = 16;
 pub const EVAL_STARTS_PER_HEADING: usize = 4;
 
 /// The far sweep's (heading, start) pair count — the mean-progress headline's sample
-/// size (owner 08-03: average progress over many headings over many deterministically
-/// chosen starting positions).
+/// size.
 pub const EVAL_PAIRS: usize = EVAL_BEARINGS * EVAL_STARTS_PER_HEADING;
 
 /// How many deterministic start candidates [`eval_pairs`] may consume before it
@@ -215,8 +214,8 @@ pub const DEFAULT_EVAL_TICKS: u64 = crate::training::systems::MAX_EPISODE_TICKS 
 /// bearing 0 = +X (the single bearing the pre-rl#239 eval judged, kept so bearing-0
 /// numbers stay comparable to the historical curve). Training samples bearing
 /// uniformly (`targets::sample_target`), so a brain competent at one bearing only is
-/// a training pathology the eval must EXPOSE: since the mean-pair headline (owner
-/// 08-03) that exposure is the per-heading means + the min pair + the rescued-pair
+/// a training pathology the eval must EXPOSE: since the mean-pair headline, that
+/// exposure is the per-heading means + the min pair + the rescued-pair
 /// count reported BESIDE the mean — a dead heading drags the average by its
 /// [`EVAL_STARTS_PER_HEADING`] share and names itself in the tail statistics, where
 /// the retired min-over-bearings headline flattened the whole learning phase to a
@@ -398,8 +397,8 @@ pub struct PairSweep {
 }
 
 impl PairSweep {
-    /// THE headline input: MEAN over pairs of zero-floored best-approach progress
-    /// (owner 08-03). Every scored ray is geometrically progressable BY CONSTRUCTION
+    /// THE headline input: MEAN over pairs of zero-floored best-approach progress.
+    /// Every scored ray is geometrically progressable BY CONSTRUCTION
     /// ([`eval_pairs`]) and a rescued pair contributes a forfeited 0, so a low mean
     /// is a policy that didn't walk — never terrain that couldn't be walked, and
     /// never an explosion laundered into progress. `pairs` is non-empty from
@@ -1624,7 +1623,7 @@ mod tests {
         assert!(sweep.plant_unbounded());
     }
 
-    /// The mean-pair fold (owner 08-03): headline = flat mean over pairs; the min
+    /// The mean-pair fold: headline = flat mean over pairs; the min
     /// pair and rescued count are the tail statistics beside it.
     #[test]
     fn mean_headline_with_tail_statistics() {
@@ -1758,8 +1757,7 @@ mod tests {
 
     /// The pair derivation is deterministic, covers the compass evenly with
     /// [`EVAL_STARTS_PER_HEADING`] DISTINCT starts each, and every scored ray is
-    /// progressable for its own heading (owner 08-03: many headings × many
-    /// deterministically chosen starts).
+    /// progressable for its own heading.
     #[test]
     fn eval_pairs_are_deterministic_distinct_and_progressable() {
         let g = crate::terrain::TerrainGrid::gcr();

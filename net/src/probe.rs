@@ -317,7 +317,7 @@ pub struct SoakReport {
     pub max_power_w: f32,
     pub teleports: u64,
     /// Zero-contact stretches ≥ 16 ticks (0.25 s): how often and how long she is
-    /// genuinely airborne — the owner-visible "flight" look even when every
+    /// genuinely airborne — the visible "flight" look even when every
     /// stretch is gravity-legit downhill ballistics.
     pub airborne_stretches: u64,
     pub longest_airborne_ticks: u64,

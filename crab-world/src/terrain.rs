@@ -186,7 +186,7 @@ impl TerrainGrid {
     }
 
     /// The committed GCR bake with its relief scaled by ONE well-defined scalar
-    /// (rl#341/owner 08-03): every datum-shifted height is multiplied by `amplitude`,
+    /// (rl#341): every datum-shifted height is multiplied by `amplitude`,
     /// so relief scales about the tile-centre datum (the centre sample stays y=0 and
     /// spawns near the origin stay near y=0 at every amplitude). `1.0` returns the
     /// canonical singleton BIT-IDENTICALLY — no silent arena change on the default

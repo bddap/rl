@@ -595,7 +595,7 @@ pub struct Crab {
 }
 
 /// One of Sally's claw colliders as of this tick, bridged into sim space — THE down
-/// mechanism, alone (rl#236 owner call): standing under her carapace is deliberately
+/// mechanism, alone (rl#236): standing under her carapace is deliberately
 /// safe-and-fun, so no center/footprint disc downs anyone; only a pincer touch does.
 /// The capsule is the pincer's
 /// real physics capsule (rl#249 — no separate hitbox to drift), as an XZ segment with
@@ -2759,7 +2759,7 @@ mod tests {
         );
     }
 
-    /// THE rl#236 owner call, pinned: standing under her carapace with no claw touching
+    /// THE rl#236 call, pinned: standing under her carapace with no claw touching
     /// is SAFE — her body core downs nobody. A center-disc regression (the exact
     /// mechanism rl#236 deleted) fails here, not in a playtest.
     #[test]

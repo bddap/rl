@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""rl#332 launch-geometry analysis (job 2186, owner follow-up 2026-08-04).
+"""rl#332 launch-geometry analysis (job 2186).
 
-Question under test: the owner saw launches "near perpendicular to the ground"
-and suspects a physics bug (e.g. solver depenetration popping) rather than the
-landed luge/ramp-conversion story. The two mechanisms differ in the SHAPE of
+Question under test: do launches seen "near perpendicular to the ground"
+point to a physics bug (e.g. solver depenetration popping) rather than the
+landed luge/ramp-conversion story? The two mechanisms differ in the SHAPE of
 vertical velocity at launch:
 
   INJECTION (solver kick) - vy steps up by several m/s within 1-2 ticks
@@ -278,7 +278,7 @@ def analyze(path):
             theta_g = math.degrees(math.atan(slope))
             rec["ground_slope_deg"] = theta_g
             # angle between velocity and the local ground NORMAL in the
-            # along-track vertical plane; 0 = the owner's "perpendicular".
+            # along-track vertical plane; 0 = "perpendicular".
             rec["angle_to_normal_deg"] = abs(90.0 - (theta_v - theta_g))
         launches.append(rec)
     return header, ticks, launches
@@ -297,7 +297,7 @@ def main(paths):
             b["file"] = p.name
             out["ballistic"].append(b)
         # What a viewer would read as "the launch direction": the velocity
-        # elevation while ascending fastest (owner: "near perpendicular").
+        # elevation while ascending fastest.
         k = max(range(len(ticks)), key=lambda k: ticks[k]["linvel"][1])
         v = ticks[k]["linvel"]
         out.setdefault("peak_ascent", []).append(

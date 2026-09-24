@@ -58,7 +58,7 @@ pub struct ChordEntry<A: 'static> {
 }
 
 /// The one data table mapping chord codes to commands. Code assignments are gameplay
-/// data the owner tunes — keep every entry in the surface's single registry const,
+/// data, tuned in play — keep every entry in the surface's single registry const,
 /// reached through [`crate::controls::ControlScheme::chords`] so the install sites and
 /// the well-formedness checks all read the same table.
 #[derive(Clone, Copy)]

@@ -29,7 +29,7 @@
 //!   settle= policy_loaded= saturation_mean= amplitude= bake= plant=` — the
 //!   HEADLINE, last.
 //!   `progress_m` is the MEAN over the far pairs of zero-floored best-approach
-//!   progress (owner 08-03; v1's median-of-min is retired — `schema=2` marks the
+//!   progress (v1's median-of-min is retired — `schema=2` marks the
 //!   ruler change for any long-run series). `net_progress_m`/`total_torque`/
 //!   `saturation_mean` are means over the same pairs. Tail statistics ride beside
 //!   the mean so a hole can't hide in it: `min_pair_m`/`min_pair_deg` (the worst

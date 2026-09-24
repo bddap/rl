@@ -52,7 +52,7 @@ const MATCH_VEL_DAMP: f32 = 0.9;
 /// moves the real top speed without updating this fails the ruler.
 pub const PLANE_TOP_SPEED_MPS: f32 = 9.13;
 
-// rl#379 (owner: "2x current"): every equilibrium speed doubled by scaling the
+// rl#379: every equilibrium speed doubled by scaling the
 // speed-shaped terms — thrust ×2 + quadratic drag ÷2 doubles the thrust-vs-drag
 // terminal (measured 4.64 → 9.13 m/s settled, `full_throttle_top_speed_settles_in_band`),
 // lift ÷2 doubles the lift-vs-weight level-flight speed, and the full-authority
@@ -65,8 +65,8 @@ const PLANE: VehicleParams = VehicleParams {
     // 0.45 puts level flight at ~5.7 m/s — above the slow-flight band (a
     // freshly-boarded craft can't free-balloon) and ~62% of the full-throttle terminal
     // ~9.1 m/s, so climb costs throttle. At
-    // 1.8 the plane out-lifted its ~2.6 N weight from 1.4 m/s (owner: "Bernoulli overdone",
-    // rl#230); the level-flight band is pinned by `slow_flight_sinks_high_speed_climbs`.
+    // 1.8 the plane out-lifted its ~2.6 N weight from 1.4 m/s (rl#230); the level-flight
+    // band is pinned by `slow_flight_sinks_high_speed_climbs`.
     lift: 0.45,
     // Alignment time-constant ≈ mass/grip ≈ 0.3 s — velocity follows the nose well inside
     // one turn's sweep, so a coordinated turn stays near-aligned and pays only the
@@ -84,7 +84,7 @@ const PLANE: VehicleParams = VehicleParams {
 };
 
 const SHIP_AIM_TORQUE: f32 = 0.015;
-// rl#307 feel spec (owner): rotational inertia — a released spin persists and is bled
+// rl#307 feel spec: rotational inertia — a released spin persists and is bled
 // by angular drag, never clamped; gravity "a bit"; drag "a bunch" (watercraft-heavy).
 // The knob for the inertia FEEL is angular_drag: spin-down τ = I/angular_drag, and the
 // craft box's yaw inertia is tiny (~0.0036 kg·m²), so the old 0.07 stopped a spin in
@@ -168,9 +168,8 @@ impl VehicleKind {
     fn gravity_scale(self) -> f32 {
         match self {
             VehicleKind::Plane => 1.0,
-            // "A bit" of gravity that reads as gravity IN MOTION, not only at idle
-            // (rl#316, owner: "ship shouldn't only sink when holding still"). The
-            // weight must exceed every non-vertical thruster — 0.30 weighs ~0.77 N
+            // "A bit" of gravity that reads as gravity IN MOTION, not only at idle (rl#316).
+            // The weight must exceed every non-vertical thruster — 0.30 weighs ~0.77 N
             // against the 0.75 N forward / 0.55 N strafe pair — or a pitched/rolled
             // attitude converts body-frame thrust into lift and cruise never loses
             // altitude. The idle side stays a perceptible ramp (rl#313): release→
@@ -1310,7 +1309,7 @@ mod tests {
         tail.sort_by(f32::total_cmp);
         let settled = tail[tail.len() / 2];
         println!("settled top speed = {settled:.3} m/s");
-        // rl#379: the owner-set target is 2× the pre-retune measurement (4.635 m/s,
+        // rl#379: the target is 2× the pre-retune measurement (4.635 m/s,
         // same ruler); ±5% keeps the pin tight without chasing solver noise.
         let (lo, hi) = (PLANE_TOP_SPEED_MPS * 0.95, PLANE_TOP_SPEED_MPS * 1.05);
         assert!(
@@ -1802,8 +1801,7 @@ mod tests {
         );
     }
 
-    /// rl#316 regression (owner: "ship shouldn't only sink when holding still — gravity
-    /// doesn't work that way"). Two pins:
+    /// rl#316 regression. Two pins:
     ///
     /// `ship_cruise_sink_matches_rest_sink` — the SYMPTOM. At zero vertical thrust and
     /// level attitude, the settled sink at cruise must sit within ~25% of the settled
@@ -1881,7 +1879,7 @@ mod tests {
         );
     }
 
-    /// rl#313 (owner): the idle sink must FEEL like gravity — an integrated force
+    /// rl#313: the idle sink must FEEL like gravity — an integrated force
     /// with a perceptible buildup from release to terminal, never a constant-velocity
     /// step. Pins the kinematic trace's SHAPE: still slow at a quarter second, most
     /// of the ramp swept by 1 s, settled near terminal by 2.5 s. A velocity write

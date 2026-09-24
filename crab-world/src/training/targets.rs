@@ -391,7 +391,7 @@ mod tests {
         );
     }
 
-    /// rl#292 owner constraint: NO target ever spawns below the terrain surface — at
+    /// rl#292 constraint: NO target ever spawns below the terrain surface — at
     /// any bearing and any distance across the WHOLE distribution (under-carapace
     /// disc through the 100 m+ band), the one placement path samples the heightfield
     /// at the target's own (x, z) and lands the ball on the surface's y band. A fixed

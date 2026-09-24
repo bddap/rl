@@ -102,7 +102,7 @@ impl Plugin for DemoPlugin {
         // combo map lives in `net` (GCR-only) and the textual menu/legend rows are
         // deleted everywhere, so demo code entry is audio feedback only.
         crate::chord::install_chords::<DemoControls>(app);
-        // The demo is a single always-armed owner-facing crab: a rescue there is a
+        // The demo is a single always-armed on-screen crab: a rescue there is a
         // visible teleport, so it logs at the same fault/warn tier GCR arms.
         app.insert_resource(crate::bot::CrabRescueIsFault);
         app.init_resource::<DemoSettle>()

@@ -30,8 +30,8 @@ fn classify_step_end(grabbed: bool, over_cap: bool, next_value: NormalizedValue)
 /// rl#343: a pose outside physical bounds is an ENGINE bug, not crab behavior — the
 /// run hard-fails with the state instead of ending the episode and respawning. The
 /// deleted `fell` terminal both hid the bug and made dying the dominant cold-start
-/// strategy (rl#342 finding #1). No penalty, no recovery, by owner directive: fix the
-/// engine bug the state points at.
+/// strategy (rl#342 finding #1). No penalty, no recovery: fix the engine bug the state
+/// points at.
 fn assert_physics_integrity(
     env: usize,
     tick: u64,

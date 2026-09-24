@@ -4,7 +4,7 @@
 //! Without any air resistance the GCR mountainsides turn Sally into a lossless
 //! luge: the policy (or a passive tumble — the zero-drive soak ablation) trades
 //! 100+ m of descent for 30–55 m/s and sails off terrain lips tens of meters into
-//! the air — the owner-reported "flight". The rl#321/#332 instruments cleared the
+//! the air — the "flight" seen in play. The rl#321/#332 instruments cleared the
 //! solver (passive energy strictly dissipates on flat AND on terrain); the
 //! remaining cause is un-modeled aerodynamics, so the fix is to model it.
 //!

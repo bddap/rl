@@ -16,7 +16,7 @@ const BEST_SUBDIR: &str = "best";
 /// sidecar, so the score-incumbent-first machinery re-baselines it under the current
 /// eval before any candidate is considered — never a new-metric candidate judged
 /// against an old-metric bar. `mean_progress` at the rl#341 flip: the headline
-/// became the MEAN over (heading, start) pairs (owner 08-03), so a min/median-era
+/// became the MEAN over (heading, start) pairs, so a min/median-era
 /// bar (structurally lower) must not gate mean-scale candidates. The file's second
 /// line is the [`crate::eval::instrument_fingerprint`] — everything the number
 /// depends on besides the brain — and a stamped bar whose fingerprint no longer

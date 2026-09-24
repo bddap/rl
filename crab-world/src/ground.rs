@@ -78,14 +78,12 @@ pub enum GroundLook {
     // fork). Naturalist = Design B: A minus the bloom (no emissive anywhere) and
     // minus fable-3's province hue — the safe subset. WatershedNocturne = Design C:
     // wet + bloom + comb with zero Voronoi — the fiction-forward subset. All three
-    // cycle under G / L3; the owner picks in play.
+    // cycle under G / L3 as candidates judged in play.
     WatershedNaturalist,
     WatershedNocturne,
-    // The night-bloom parameter sets (owner request 2026-08-01: "more variants of
-    // what is now called night bloom. Parameterizing night bloom could go a long
-    // way"): ONE shader, distinct rows in [`GroundLook::params`] — taste
-    // candidates the owner judges in play. NightBloomAurora carries the rl#329
-    // aurora palette (the glowy green/violet water colors) forward.
+    // The night-bloom parameter sets: ONE shader, distinct rows in
+    // [`GroundLook::params`] — taste candidates judged in play. NightBloomAurora
+    // carries the rl#329 aurora palette (the glowy green/violet water colors) forward.
     NightBloomAurora,
     NightBloomEmber,
     NightBloomFrost,

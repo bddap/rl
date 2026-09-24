@@ -1,9 +1,9 @@
 # rl#332 launch geometry — is there a depenetration kick? (job 2186)
 
-Owner (2026-08-04): "Launches I saw tended to be near perpendicular to the
-ground. Was hoping it was a lead to a physics bug." This dir tests that against
-recorded launch kinematics, treating job 2133's luge-conversion conclusion as a
-hypothesis under challenge, not a given.
+Launches seen in play tended to be near perpendicular to the ground — possibly
+a lead to a physics bug. This dir tests that against recorded launch
+kinematics, treating job 2133's luge-conversion conclusion as a hypothesis
+under challenge, not a given.
 
 ## Method (`analyze.py`, plots via `plot.py`)
 

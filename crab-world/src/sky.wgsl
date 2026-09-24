@@ -116,7 +116,7 @@ const HORIZON: vec3<f32> = vec3(0.078, 0.122, 0.235);
 const ZENITH: vec3<f32> = vec3(0.024, 0.039, 0.110);
 
 // Symmetric in y: straight down (past the terrain) reads like straight up, so the
-// sky wraps with no authored floor (the owner's ask; supersedes rl#197's
+// sky wraps with no authored floor (supersedes rl#197's
 // darkest-below-horizon rule, which dated from when below-horizon was void).
 fn base_gradient(dir: vec3<f32>) -> vec3<f32> {
     return mix(HORIZON, ZENITH, smoothstep(0.0, 0.9, abs(dir.y)));

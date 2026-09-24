@@ -1,15 +1,14 @@
 //! The d-pad combo map (rl#358): a spatial, DISCOVERED-ONLY presentation of the chord
 //! code space, shown full-screen while a code is being entered (the held-modifier
 //! capture) and gone the frame the hold ends — no linger, no fade-out (rl#381: the
-//! player is the bottleneck, not animations). Since the owner's post-playtest pick
-//! (2026-08-12) this IS the only code surface — the textual chord menu is gone, and
-//! look-and-feel iterates here.
+//! player is the bottleneck, not animations). This IS the only code surface — the
+//! textual chord menu is gone, and look-and-feel iterates here.
 //!
 //! The layout is the circular zoom-quadrant space from the winning design submission
 //! (`proposal/dpad-map-zoomquad`): every node is a circle, its four children nested
 //! inside it in the d-pad directions, so a code's address IS its position and each
 //! press dives one circle deeper while ancestors ghost past the edges. Button-true by
-//! construction. Owner directives built in:
+//! construction. Directives built in:
 //! - **Discovered-only**: the map renders codes the player has PLAYED (accepted
 //!   resolutions), persisted per save file — no teasers. The satisfaction is watching
 //!   the map grow more complex over time.
@@ -609,9 +608,8 @@ fn spawn_chord_map(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     );
     let handle = images.add(image);
     commands.insert_resource(ChordMapCanvas(handle.clone()));
-    // Full-screen (the owner's 2026-08-12 amendment): a dark backdrop over the whole
-    // window with the square canvas letterboxed to the short screen edge, so circles
-    // stay circles on any aspect ratio.
+    // Full-screen: a dark backdrop over the whole window with the square canvas
+    // letterboxed to the short screen edge, so circles stay circles on any aspect ratio.
     commands
         .spawn((
             Node {
@@ -713,7 +711,7 @@ fn drive_chord_map(
         return;
     };
     if !chords.capturing() {
-        // rl#381 owner directive: the map is GONE the frame the X hold ends — no
+        // rl#381: the map is GONE the frame the X hold ends — no
         // linger, no fade-out, no close animation. The player is the bottleneck.
         state.visible = 0.0;
         if panel_node.display != Display::None {

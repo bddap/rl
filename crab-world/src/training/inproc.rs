@@ -242,7 +242,7 @@ fn rollout_thread_main(
     let mut app = build_rollout_app(id, &config, arch);
     warm_up_app(&mut app);
 
-    // No catch_unwind here, by owner directive (rl#346, extending rl#343): a roll
+    // No catch_unwind here (rl#346, extending rl#343): a roll
     // panic — above all a physics-integrity violation — unwinds this thread, the
     // learner's recv on the closed channel fails, and the RUN dies loud. Silently
     // rebuilding the world and continuing is the recovery class rl#343 bans.

@@ -25,7 +25,7 @@ pub const BUCKETS: usize = 64;
 /// the open-ended top bucket; a <1.1 ms frame in the bottom one.
 const MAX_MS: f64 = 1000.0;
 
-/// Seconds of frames per snapshot — the owner's "flush ~1 Hz" bound on frame-path RAM.
+/// Seconds of frames per snapshot — a ~1 Hz flush bounds frame-path RAM.
 const FLUSH_EVERY_SECS: f32 = 1.0;
 
 /// Snapshots the queue holds before dropping oldest: a few seconds of sink stall

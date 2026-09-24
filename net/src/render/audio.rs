@@ -48,7 +48,7 @@ impl Default for ExternalBus {
 /// A bus member's muffle policy, declared per sound: `Duck` follows the bus,
 /// `Exempt` bleeds through untouched. Nothing is exempted yet — the flag exists so a
 /// specific sound can later be sent through a code-entry melody as artistic flair
-/// without restructuring the bus (owner spec, rl#359).
+/// without restructuring the bus (rl#359).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Muffle {
     Duck,
@@ -130,7 +130,7 @@ pub(super) const FULL_WIND_MPS: f32 = crab_world::vehicle::PLANE_TOP_SPEED_MPS;
 
 /// The plane airstream's level under [`WIND_MASTER`] — the ONE plane-wind knob.
 /// In the cockpit the wind sits UNDER the engine and the speed roar, not on top
-/// of the mix (owner acceptance call, rl#357); body and whistle both ride the
+/// of the mix (rl#357); body and whistle both ride the
 /// gain this scales, so it moves the whole airstream together. Pulled down ~4 dB
 /// and darkened (rl#402: sustained flight was aurally fatiguing).
 pub(super) const PLANE_WIND_LEVEL: f32 = 0.32;
@@ -275,8 +275,7 @@ pub(super) fn profile(kind: Option<VehicleKind>, speed_mps: f32) -> [f32; 5] {
     // Loudness ceiling: leave headroom under the rest of the mix.
     const MASTER: f32 = WIND_MASTER;
     // On foot the floor sits above sprint (~0.25 m/s): walking and sprinting stay
-    // near-silent, a fall or a claw launch is what roars (owner spec: "hear wind
-    // when I'm going fast — falling or flying").
+    // near-silent, a fall or a claw launch is what roars.
     let sprint_mps = crate::sim::SPRINT_SPEED as f32 / UNIT as f32 * TICK_HZ as f32;
     let (floor, ceil) = match kind {
         None => (sprint_mps, FULL_WIND_MPS),
