@@ -454,8 +454,6 @@ impl bevy::audio::Source for PhraseStream {
     }
 }
 
-/// Turn this frame's consumed taps + resolution into one phrase — pure, shared by the
-/// live system and the evidence renderer so the proof clip can't drift from the game.
 pub fn frame_phrase(
     scheme: &InstrumentScheme,
     presses: impl Iterator<Item = (impl AsRef<[ChordDir]>, ChordDir)>,
@@ -657,103 +655,5 @@ mod tests {
             .iter()
             .fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(tail < 0.01, "tail still hot at cutoff: {tail}");
-    }
-
-    /// Not a test — the rl#359/#369 evidence generator: renders a real chord entry
-    /// (every press through the live scheme, then the resolution) to WAV, at frame
-    /// timings matching the fp-screenshot chord script, for muxing with the frame
-    /// capture. From the REPO root (cargo test's cwd is the crate dir):
-    /// `DPAD_EVIDENCE_DIR=$PWD/docs/evidence/rl359 cargo test -p crab-world
-    /// --features render dpad_evidence -- --ignored`
-    #[test]
-    #[ignore = "artifact generator, not a check"]
-    fn dpad_evidence() {
-        let Some(dir) = std::env::var_os("DPAD_EVIDENCE_DIR") else {
-            return;
-        };
-        let s = scheme();
-        // (name, taps at 60 fps frame numbers, release frame, registered?).
-        // `v^^^` = GroundNightBloom (a real GCR code); `>>>` is unregistered.
-        type Clip = (&'static str, &'static [(u64, ChordDir)], u64, bool);
-        let clips: [Clip; 3] = [
-            (
-                "code-accepted-bloom",
-                &[(60, Down), (105, Up), (150, Up), (195, Up)],
-                255,
-                true,
-            ),
-            (
-                "code-unknown",
-                &[(60, Right), (105, Right), (150, Right)],
-                210,
-                false,
-            ),
-            // rl#369: free musical play — a 20-tap mash, well past the deleted
-            // MAX_CHORD_LEN=8 poison guard; every tap sounds and the release is
-            // just an unknown cadence, never silence.
-            (
-                "free-play-mash",
-                &[
-                    (30, Up),
-                    (39, Right),
-                    (48, Up),
-                    (57, Down),
-                    (66, Left),
-                    (75, Down),
-                    (84, Up),
-                    (93, Up),
-                    (102, Right),
-                    (111, Down),
-                    (120, Left),
-                    (129, Left),
-                    (138, Up),
-                    (147, Right),
-                    (156, Down),
-                    (165, Up),
-                    (174, Down),
-                    (183, Left),
-                    (192, Up),
-                    (201, Right),
-                ],
-                240,
-                false,
-            ),
-        ];
-        std::fs::create_dir_all(&dir).unwrap();
-        for (name, taps, release_frame, registered) in clips {
-            let total_s = release_frame as f32 / 60.0 + 2.5;
-            let n = (total_s * SAMPLE_RATE as f32) as usize;
-            let mut mix = vec![0.0f32; n];
-            let mut render_at = |frame: u64, notes: Vec<NoteSpec>| {
-                let base = (frame as f32 / 60.0 * SAMPLE_RATE as f32) as usize;
-                for (i, v) in PhraseStream::new(&notes).enumerate() {
-                    if let Some(slot) = mix.get_mut(base + i) {
-                        *slot += v;
-                    }
-                }
-            };
-            let mut path: Vec<ChordDir> = Vec::new();
-            for &(frame, d) in taps {
-                render_at(
-                    frame,
-                    frame_phrase(&s, [(path.clone(), d)].into_iter(), None),
-                );
-                path.push(d);
-            }
-            render_at(
-                release_frame,
-                frame_phrase(
-                    &s,
-                    std::iter::empty::<(Vec<ChordDir>, ChordDir)>(),
-                    Some((path.as_slice(), registered)),
-                ),
-            );
-            let pcm: Vec<i16> = mix
-                .iter()
-                .map(|v| (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-                .collect();
-            let path = std::path::Path::new(&dir).join(format!("{name}.wav"));
-            std::fs::write(&path, crate::wav::wav_bytes(&pcm)).unwrap();
-        }
     }
 }

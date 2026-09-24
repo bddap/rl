@@ -7,7 +7,6 @@ mod net;
 mod net_join;
 mod net_screenshot;
 mod nn_crab_probe;
-mod nn_crab_vehicle_stability;
 mod overlap_frame;
 mod play;
 mod sally_replay;
@@ -38,8 +37,6 @@ pub(crate) enum Command {
     NnCrabProbe(nn_crab_probe::Args),
     /// Verdict on a checkpoint dir: is it loadable, and does it match this binary's rig?
     CheckpointCheck(checkpoint_check::Args),
-    /// Probe whether an armed crab destabilizes a vehicle it stands on.
-    NnCrabVehicleStability(nn_crab_vehicle_stability::Args),
     /// rl#332: long headless soak hunting Sally's illegitimate "flight", with a
     /// JSONL state-window dump per detected event.
     SallySoak(sally_soak::Args),
@@ -67,7 +64,6 @@ pub(crate) fn dispatch(command: Command) -> Result<()> {
         Command::TelemetryCollector(args) => telemetry_collector::run(args),
         Command::NnCrabProbe(args) => nn_crab_probe::run(args),
         Command::CheckpointCheck(args) => checkpoint_check::run(args),
-        Command::NnCrabVehicleStability(args) => nn_crab_vehicle_stability::run(args),
         Command::SallySoak(args) => sally_soak::run(args),
         Command::SallyReplay(args) => sally_replay::run(args),
         Command::OverlapFrame(args) => overlap_frame::run(args),

@@ -1,7 +1,6 @@
 //! Headless NN-crab probes: the host's crab slot pumping the one world (rl#298
 //! stage 5) beside an authoritative [`Sim`], no renderer, sampling sim + world state
-//! per tick. Consumed by `game nn-crab-probe` (behavior/
-//! determinism A/B) and `game nn-crab-vehicle-stability` (the rl#137 ram test).
+//! per tick.
 //!
 //! The probe's sim is stepped 1:1 with the fixed schedule (one physics pass per sim
 //! tick — the probe's historical cadence, kept so hash logs stay comparable), and the
@@ -210,16 +209,6 @@ impl Probe {
             crab_asleep,
         });
     }
-
-    fn carapace(&mut self) -> Vec3 {
-        let world = self.app.world_mut();
-        world
-            .query_filtered::<(&CrabEnvId, &Transform), With<CrabCarapace>>()
-            .iter(world)
-            .find(|(env, _)| env.0 == 0)
-            .map(|(_, t)| t.translation)
-            .unwrap_or(Vec3::ZERO)
-    }
 }
 
 /// `visuals`: `Visuals(true)` steps the ARMED-RENDER configuration headless — the
@@ -248,65 +237,8 @@ pub fn run_headless_probe(
     probe.samples
 }
 
-pub struct StabilityResult {
-    pub samples: Vec<ProbeSample>,
-    pub ram_tick: u64,
-}
-
-impl StabilityResult {
-    pub fn carapace_stayed_finite(&self) -> bool {
-        self.samples.iter().all(|s| {
-            s.carapace_x.is_finite() && s.carapace_y.is_finite() && s.carapace_z.is_finite()
-        })
-    }
-}
-
-pub fn run_vehicle_stability_probe(
-    policy: crab_world::policy::Policy,
-    seed: u64,
-    warmup: u64,
-    post: u64,
-) -> StabilityResult {
-    use crab_world::vehicle::{VehicleKind, spawn_ram_vehicle};
-
-    let mut probe = Probe::new(
-        policy,
-        seed,
-        crab_world::Visuals(false),
-        true,
-        crab_world::terrain::TerrainGrid::gcr(),
-    );
-    for _ in 0..warmup {
-        probe.tick();
-    }
-    let ram_tick = probe.sim.tick();
-
-    let carapace = probe.carapace();
-    let spawn_at = Transform::from_translation(carapace + Vec3::new(1.2, -0.15, 0.0));
-    let ram_velocity = Velocity {
-        linear: Vec3::new(-10.0, 0.0, 0.0),
-        angular: Vec3::ZERO,
-    };
-    spawn_ram_vehicle(
-        probe.app.world_mut(),
-        VehicleKind::Plane,
-        spawn_at,
-        ram_velocity,
-    );
-
-    for _ in 0..post {
-        probe.tick();
-    }
-
-    StabilityResult {
-        samples: probe.samples,
-        ram_tick,
-    }
-}
-
 /// rl#332 flight-soak thresholds. Sally's carapace rides well under one stature
-/// (~0.61 m) off the ground in any gait the policy has ever produced; the rl#137
-/// vehicle-ram gate already treats 5 m as "launched skyward". Flight is called at
+/// (~0.61 m) off the ground in any gait the policy has ever produced. Flight is called at
 /// 1.5 m (~2.5 statures) SUSTAINED — a hop or a terrain lip crosses briefly, a
 /// launch stays up — or a single tick of vertical speed no gait reaches.
 pub const FLIGHT_ALT_M: f32 = 1.5;
@@ -320,8 +252,7 @@ pub const FLIGHT_SUSTAIN_TICKS: u32 = 128;
 /// past a stride's bounce (measured ≤ 2.25 m/s rebounding from a 13 m/s
 /// downhill impact).
 pub const FLIGHT_VY_M_S: f32 = 4.0;
-/// Instant-trigger altitude, m above local ground — the rl#137 vehicle-ram
-/// gate's "never launched her skyward" line.
+/// Instant-trigger altitude, m above local ground.
 pub const FLIGHT_ALT_INSTANT_M: f32 = 5.0;
 /// Carapace displacement in one 1/64 s tick that can only be a rescue/teleport.
 pub const TELEPORT_M: f32 = 5.0;

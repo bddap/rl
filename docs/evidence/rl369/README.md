@@ -5,9 +5,9 @@ cancel") is gone — deleted with the context menu in 5c056d7 (rl#358), and
 rl#380 made code length structurally unbounded (capture, walk clamp, map).
 This records the player-level verification that nothing re-caps it.
 
-`free-play-mash.wav`: a 20-tap mash rendered through the live scheme
-(`DPAD_EVIDENCE_DIR=… cargo test -p crab-world --features render dpad_evidence
--- --ignored`, the `free-play-mash` clip). Every tap sounds — measured peaks
+`free-play-mash.wav`: a 20-tap mash rendered through the live scheme (the
+`free-play-mash` clip of the `dpad_evidence` generator, present at
+3a1ae98). Every tap sounds — measured peaks
 −8 to −25 dB at taps 1/10/17/20 — and the release is the unknown cadence at
 4.0 s, never silence.
 

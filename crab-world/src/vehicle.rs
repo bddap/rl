@@ -592,7 +592,7 @@ pub fn spawn_ram_vehicle(
     transform: Transform,
     velocity: Velocity,
 ) -> Entity {
-    // Pilot 0: the gate rams one craft with no pilot roster; 0 is the server-auth local player.
+    // 0 is the server-auth local player.
     world
         .spawn(vehicle_bundle(PilotId(0), kind, transform, velocity))
         .id()

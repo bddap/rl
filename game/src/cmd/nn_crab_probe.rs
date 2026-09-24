@@ -104,8 +104,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
     // this scenario (a spawn-clearance-distance player, ~13 crab statures) is outside
     // the trained chase domain, so a
     // distance threshold here fails known-good policies (bddap/rl#144). Behavioral
-    // pass/fail lives in the one shared chase metric, `rl-train eval --min-progress`
-    // (bddap/bothouse#134) — never a second gate here that drifts from it.
+    // judgment lives in the one shared chase metric, `rl-train eval` — never a second
+    // gate here that drifts from it.
     if traj_match {
         println!(
             "nn-crab-probe: PASS — trajectory reproducible (closed {closed:.3} m, diagnostic only)"

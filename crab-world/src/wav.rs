@@ -1,23 +1,16 @@
-//! Minimal strict WAV IO plus the one DSP rendering rate every procedural audio
+//! Minimal strict WAV parsing plus the one DSP rendering rate every procedural audio
 //! source in the workspace runs at (net's wind/ambience, the d-pad instrument). The
 //! fetch pipeline ships every sampled bed as 16-bit mono PCM at [`SAMPLE_RATE`]
 //! (ffmpeg at asset-prep time is the one converter), so the reader REFUSES anything
 //! else instead of resampling — a runtime resampler would be a second, silent
 //! conversion path.
 
-use std::path::Path;
-
 /// The DSP rendering rate. Fixed rather than device-queried: rodio resamples to the
 /// device, and every synth's filter/envelope coefficients derive from this number.
 pub const SAMPLE_RATE: u32 = 44_100;
 
-/// Read a whole WAV file as f32 samples in −1..1, requiring 16-bit mono PCM at
+/// Parse a whole WAV as f32 samples in −1..1, requiring 16-bit mono PCM at
 /// [`SAMPLE_RATE`].
-pub fn read_mono_44k(path: &Path) -> Result<Vec<f32>, String> {
-    parse_mono_44k(&std::fs::read(path).map_err(|e| e.to_string())?)
-}
-
-/// Same strict contract over in-memory bytes.
 pub fn parse_mono_44k(b: &[u8]) -> Result<Vec<f32>, String> {
     if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
         return Err("not a RIFF/WAVE file".into());
@@ -96,31 +89,28 @@ impl bevy::asset::AssetLoader for WavLoader {
     }
 }
 
-/// RIFF/WAVE writer for tests and evidence generators (net's wind/ambience clips,
-/// the rl#359 instrument clips): 16-bit mono PCM at [`SAMPLE_RATE`] — the same
-/// (only) format the reader accepts.
-pub fn wav_bytes(pcm: &[i16]) -> Vec<u8> {
-    let data_len = (pcm.len() * 2) as u32;
-    let mut out = Vec::with_capacity(44 + pcm.len() * 2);
-    out.extend(b"RIFF");
-    out.extend((36 + data_len).to_le_bytes());
-    out.extend(b"WAVEfmt ");
-    out.extend(16u32.to_le_bytes());
-    out.extend(1u16.to_le_bytes()); // PCM
-    out.extend(1u16.to_le_bytes()); // mono
-    out.extend(SAMPLE_RATE.to_le_bytes());
-    out.extend((SAMPLE_RATE * 2).to_le_bytes()); // byte rate
-    out.extend(2u16.to_le_bytes()); // block align
-    out.extend(16u16.to_le_bytes()); // bits
-    out.extend(b"data");
-    out.extend(data_len.to_le_bytes());
-    out.extend(pcm.iter().flat_map(|s| s.to_le_bytes()));
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wav_bytes(pcm: &[i16]) -> Vec<u8> {
+        let data_len = (pcm.len() * 2) as u32;
+        let mut out = Vec::with_capacity(44 + pcm.len() * 2);
+        out.extend(b"RIFF");
+        out.extend((36 + data_len).to_le_bytes());
+        out.extend(b"WAVEfmt ");
+        out.extend(16u32.to_le_bytes());
+        out.extend(1u16.to_le_bytes());
+        out.extend(1u16.to_le_bytes());
+        out.extend(SAMPLE_RATE.to_le_bytes());
+        out.extend((SAMPLE_RATE * 2).to_le_bytes());
+        out.extend(2u16.to_le_bytes());
+        out.extend(16u16.to_le_bytes());
+        out.extend(b"data");
+        out.extend(data_len.to_le_bytes());
+        out.extend(pcm.iter().flat_map(|s| s.to_le_bytes()));
+        out
+    }
 
     #[test]
     fn round_trips_through_writer() {

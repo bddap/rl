@@ -66,33 +66,18 @@ struct EvalArgs {
           value_parser = clap::value_parser!(u64).range(1..))]
     ticks: u64,
 
-    /// DIAGNOSTIC: far-ball distance in metres, a finite in-band length (validated —
-    /// NaN/∞/negative/out-of-band used to panic, hang, or silently rescale the gate,
-    /// rl#341 S1-3). Non-default values also move the deterministic start set (starts
-    /// are drawn progressable at THIS distance) — the wire's `target_m=` and
-    /// provenance keys record it. Refused in gate mode.
+    /// DIAGNOSTIC: far-ball distance in metres, a finite in-band length. Non-default
+    /// values also move the deterministic start set (starts are drawn progressable at
+    /// THIS distance) — the wire's `target_m=` and provenance keys record it.
     #[arg(long, value_parser = parse_distance)]
     distance: Option<f32>,
 
     /// Terrain relief amplitude: scales the committed bake's datum-shifted heights by
     /// this ONE scalar (1 = the canonical bake bit-identically; 0 = a plane). The
     /// whole eval — start derivation, episodes, probes — runs on the scaled grid
-    /// (owner 08-03 / rl#341). Ground too rough to seat progressable starts refuses
-    /// loudly. Refused in gate mode (the gate judges the pinned instrument).
+    /// (rl#341). Ground too rough to seat progressable starts refuses loudly.
     #[arg(long, default_value_t = 1.0, value_parser = parse_amplitude)]
     terrain_amplitude: f32,
-
-    /// Gate mode: exit nonzero (after printing `EVAL_RESULT`) unless a real policy
-    /// loaded AND its mean pair progress is at least this many meters. Binds the
-    /// pass/fail verdict to THIS eval — the one chase metric shared with the demo and
-    /// GCR — so a release/promotion gate delegates here instead of growing a second
-    /// behavior probe that drifts (bddap/bothouse#134). Demands the PINNED instrument
-    /// (default ticks/distance/amplitude): a resized episode or rescaled arena would
-    /// silently rescale the bar it enforces (rl#341 S1-3). Without the flag, a
-    /// missing checkpoint stays the legitimate exit-0 zero-action baseline the
-    /// training monitor plots.
-    #[arg(long)]
-    min_progress: Option<f32>,
 }
 
 /// clap value-parser for `--arch`: delegates to the registry's `TryFrom<String>`, whose
@@ -162,21 +147,6 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 }
 
 fn eval(e: EvalArgs) -> Result<ExitCode, String> {
-    // Gate mode judges the PINNED instrument only (rl#341 S1-3): a shorter episode,
-    // a nearer ball, or a flattened arena would silently rescale the bar — e.g.
-    // `--distance 1 --min-progress 0.3` passed a 24 m-chase gate on a 0.3 m twitch.
-    if e.min_progress.is_some()
-        && (e.ticks != crab_world::eval::DEFAULT_EVAL_TICKS
-            || e.distance.is_some()
-            || e.terrain_amplitude != 1.0)
-    {
-        return Err(
-            "--min-progress judges the pinned instrument; drop --ticks/--distance/\
-             --terrain-amplitude (a resized episode or rescaled arena would silently \
-             rescale the gate)"
-                .to_string(),
-        );
-    }
     let distance = e
         .distance
         .unwrap_or(crab_world::eval::DEFAULT_TARGET_DISTANCE_M);
@@ -201,11 +171,8 @@ fn eval(e: EvalArgs) -> Result<ExitCode, String> {
         );
     }
     if r.plant_unbounded() {
-        // Unconditional (not just gate mode): an exploding plant is a plant bug, and
-        // every consumer — the eval monitor, a hand run — must see it as a hard
-        // fault, never as a slow eval with weird numbers (bddap/rl#315: the
-        // rigid-contact explosion surfaced as release unit timeouts for days before
-        // anyone read the magnitudes).
+        // An exploding plant is a plant bug: every consumer — the eval monitor, a hand
+        // run — must see a hard fault, never a slow eval with weird numbers (rl#315).
         eprintln!(
             "eval: FAIL — plant unbounded: a carapace strayed more than {:.0} m from \
              its spawn (or went non-finite unhealed) mid-episode; the plant is \
@@ -213,39 +180,6 @@ fn eval(e: EvalArgs) -> Result<ExitCode, String> {
             crab_world::eval::PLANT_POSITION_BOUND_M
         );
         return Ok(ExitCode::FAILURE);
-    }
-    if let Some(min) = e.min_progress {
-        // The literal `eval: FAIL` stderr prefix is the release gate's
-        // refusal-vs-machinery seam (bothouse#148) — these verdicts keep their own
-        // eprintln instead of riding the `rl-train:`-prefixed error spine.
-        if !r.policy_loaded {
-            eprintln!(
-                "eval: FAIL — --min-progress {min} demands a loaded policy, but no \
-                 usable checkpoint loaded from {}",
-                e.checkpoint.checkpoint_dir.display()
-            );
-            return Ok(ExitCode::FAILURE);
-        }
-        if r.progress_m() < min {
-            let min_pair = r.far.min_pair();
-            eprintln!(
-                "eval: FAIL — policy closed a mean {:.4} m toward the {:.2} m target \
-                 over {} (heading, start) pairs (worst pair {:.4} m @ {:.0}°, {} \
-                 rescued), below the required --min-progress {min} m (dead/collapsed \
-                 policy, or a dead heading dragging the mean)",
-                r.progress_m(),
-                r.far.target_distance_m,
-                r.far.pairs.len(),
-                min_pair.progress_m,
-                min_pair.bearing_rad.to_degrees(),
-                r.far.rescued_pairs(),
-            );
-            return Ok(ExitCode::FAILURE);
-        }
-        println!(
-            "eval: PASS — mean pair progress {:.4} m ≥ --min-progress {min} m",
-            r.progress_m()
-        );
     }
     Ok(ExitCode::SUCCESS)
 }

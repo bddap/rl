@@ -495,37 +495,4 @@ mod tests {
             "plane zcr {plane} not clearly above ship {ship}"
         );
     }
-
-    /// Not a test of the code — the evidence generator for rl#356: renders each
-    /// context's 0→full speed ramp to WAV under `WIND_EVIDENCE_DIR` when that env
-    /// var is set. `WIND_EVIDENCE_DIR=docs/evidence/rl356 cargo test -p net
-    /// --features render wind_evidence -- --ignored`
-    #[test]
-    #[ignore = "artifact generator, not a check"]
-    fn wind_evidence() {
-        let Some(dir) = std::env::var_os("WIND_EVIDENCE_DIR") else {
-            return;
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-        for (name, kind) in [
-            ("wind-onfoot", None),
-            ("wind-plane", Some(VehicleKind::Plane)),
-            ("wind-ship", Some(VehicleKind::Ship)),
-        ] {
-            let targets = Arc::new(WindTargets::default());
-            let mut s = WindStream::new(targets.clone());
-            let secs = 8;
-            let n = SAMPLE_RATE as usize * secs;
-            let mut pcm = Vec::with_capacity(n);
-            for i in 0..n {
-                // Hold still for 1 s, ramp to full over 5 s, hold 2 s.
-                let t = i as f32 / SAMPLE_RATE as f32;
-                let speed = ((t - 1.0) / 5.0).clamp(0.0, 1.0) * FULL_WIND_MPS;
-                targets.store(profile(kind, speed));
-                pcm.push((s.next().unwrap() * i16::MAX as f32) as i16);
-            }
-            let path = std::path::Path::new(&dir).join(format!("{name}.wav"));
-            std::fs::write(path, crab_world::wav::wav_bytes(&pcm)).unwrap();
-        }
-    }
 }
