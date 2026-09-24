@@ -154,12 +154,8 @@ impl ClientSim {
         &self.sim
     }
 
-    /// The local client's read seam onto authoritative game state ([`crate::snapshot`]). SP
-    /// funnels through the SAME serialized [`CoreSnapshot`] a wire client consumes — one
-    /// state-read path, no by-reference-in-SP fork ([[sp-is-mp-special-case]]). Byte-identical to
-    /// the server's emitted snapshot (the carried sim state plus the stashed `input_next`
-    /// watermarks); the round-trip through bytes just proves the seam end to end (the copy is
-    /// ~hundreds of bytes/tick).
+    /// SP reads state through the same serialized [`CoreSnapshot`] a wire client consumes:
+    /// one state-read path, no SP fork. The byte round-trip costs ~hundreds of bytes/tick.
     pub fn core_snapshot(&self) -> CoreSnapshot {
         let mut snap = self.sim.core_snapshot();
         snap.input_next = self.input_next.clone();

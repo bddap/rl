@@ -491,10 +491,8 @@ async fn wire_connection(
     let reader_id = link_id.clone();
     let reader_inbox = inbox.clone();
     n0_future::task::spawn(async move {
-        // WARN, not debug: read_loop returns Ok on every normal ending (clean EOF, session drop),
-        // so an Err here is a real protocol violation — a mis-framed/unknown/truncated frame (e.g.
-        // an ALPN-matched build with a drifted codec) — and must be visible, not a silent link
-        // drop the joiner mis-reads as "host unreachable" ([[silent-fallback-antipattern]]).
+        // read_loop returns Ok on every normal ending, so an Err is a protocol violation; a
+        // silent drop would reach the joiner as "host unreachable".
         if let Err(e) = read_loop(recv, peer, reader_inbox).await {
             tracing::warn!(%peer, "peer read loop ended on a protocol violation: {e:#}");
         }
