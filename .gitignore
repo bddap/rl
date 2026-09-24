@@ -1,14 +1,7 @@
 /target
-/target-ws
-/target-gc
-/target-fc
-/target-nn
-/target-bm
-/target-bmi
 /tmp
 /checkpoints
 .cargo-home/
-.sandbox-env
 *.png
 # Verify-run evidence frames referenced from issues/commits are the exception —
 # an ignored evidence PNG dies with its scratch worktree (rl#236).
@@ -28,7 +21,6 @@ crab-world/assets/ambience/
 # dir whose name contains `ckpt` so a broad `git add` can't sweep brain/optimizer
 # .bin dumps into the repo regardless of the chosen name (cost: 68367d2d, 5.6MB).
 *ckpt*/
-.nixshell.err
 __pycache__/
 
 # stray test/build output logs (do not commit)

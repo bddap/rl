@@ -15,11 +15,6 @@
       "why": "prose, licenses, and evidence artifacts (screenshots/logs recorded under docs/evidence)"
     },
     {
-      "paths": ["fixed/docs/evidence/**"],
-      "tests": [],
-      "why": "historical evidence snapshot mirrored under fixed, including compressed trace inputs and the plotting scripts preserved with them"
-    },
-    {
       "paths": [".github/**"],
       "tests": [],
       "why": "CI workflow definitions — exercised only by dispatching them on GitHub Actions; no local runner exists, and a broken workflow fails loudly at dispatch"
