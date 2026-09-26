@@ -56,6 +56,7 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
         client,
         coord,
         accumulator: 0.0,
+        dt_window: DtWindow::default(),
         prev,
         reported_outcome: false,
         next_tel_tick: next_sample_tick(0),
@@ -333,11 +334,12 @@ pub(super) struct GameState {
     pub(super) client: ClientSim,
     pub(super) coord: Box<Coordinator>,
     pub(super) accumulator: f64,
+    dt_window: DtWindow,
     pub(super) prev: SimSnapshot,
     /// Round-decided latch: set when this round's decided outcome has been reported, cleared
-    /// per Ongoing snapshot inside [`drive_client_sim`]'s drain arms (a RESTART revives a decided
-    /// round without rewinding the tick, rl#204). Lives here — not a system `Local` — so a new
-    /// round starts unlatched by construction (rl#210).
+    /// per Ongoing snapshot (a RESTART revives a decided round without rewinding the tick,
+    /// rl#204). Lives here — not a system `Local` — so a new round starts unlatched by
+    /// construction (rl#210).
     reported_outcome: bool,
     /// The next telemetry sampling boundary ([`next_sample_tick`]), in this ROUND's ticks.
     /// Per-round for the same reason: a fresh ClientSim restarts at tick 0, so a surviving
@@ -367,6 +369,23 @@ pub(super) struct GameState {
     /// the server sim between start and complete). Always `None` on a remote-adopt
     /// client (its frames are cheap; the host is the one peer that pumps physics).
     pending_pump: Option<u32>,
+}
+
+/// Even: an alternating fast/slow pair cancels exactly.
+const DT_WINDOW: usize = 8;
+
+/// `Time::delta` spaces render-thread completions, not displayed frames (rl#396).
+/// A mean, not a median: a median drops time, and the host's tick stream would run slow.
+/// Zero-filled, so the clock never leads wall time.
+#[derive(Default)]
+struct DtWindow([f64; DT_WINDOW]);
+
+impl DtWindow {
+    fn smooth(&mut self, raw: f64) -> f64 {
+        self.0.rotate_left(1);
+        self.0[DT_WINDOW - 1] = raw;
+        self.0.iter().sum::<f64>() / DT_WINDOW as f64
+    }
 }
 
 const JITTER_BUF_MAX: usize = 3;
@@ -1212,27 +1231,26 @@ fn record_tick_trace(world: &mut World) {
         .tick(tick, pos, alt);
 }
 
-/// The per-frame fixed-tick driver: accumulate render time, then per crossed tick
-/// assemble local control, exchange it through the [`Coordinator`], and run the
-/// role's arm — the host starts its tick's spread pump ([`start_host_tick`], rl#396);
-/// a remote client adopts what [`exchange_tick`]'s jitter buffer released. Frames
-/// that cross no tick pay one deferred physics step ([`step_pending_pump`]). Ends by
-/// writing the frame's [`RenderClock`] and perf stats.
 pub(super) fn drive_client_sim(world: &mut World) {
+    let raw = world.resource::<Time>().delta_secs_f64();
+    let dt = world.non_send_mut::<GameState>().dt_window.smooth(raw);
+    advance_frame(world, dt);
+}
+
+fn advance_frame(world: &mut World, dt: f64) {
     let sim_started = bevy::platform::time::Instant::now();
     let armed = world
         .get_resource::<crate::crab_slot::NnCrabsArmed>()
         .is_some();
     let role = PeerRole::of(world.non_send::<GameState>());
     let me = local_pilot(world.non_send::<GameState>());
-    let delta = world.resource::<Time>().delta().as_secs_f64();
     let (tel, roster_len) = {
         let state = world.non_send::<GameState>();
         let tel = state.coord.telemetry().cloned();
         (tel, state.client.sim().players().count())
     };
 
-    world.non_send_mut::<GameState>().accumulator += delta;
+    world.non_send_mut::<GameState>().accumulator += dt;
 
     apply_vehicle_request(world);
 
@@ -1356,16 +1374,17 @@ pub(super) fn drive_client_sim(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::{
-        FlightControl, GameState, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, PlaneControl,
-        RenderClock, drive_client_sim, install_round, jitter_take, render_frac,
+        DT_WINDOW, DtWindow, FlightControl, GameState, JITTER_BUF_MAX, JITTER_BUF_TARGET,
+        LocalControl, PlaneControl, RenderClock, advance_frame, drive_client_sim, install_round,
+        jitter_take, render_frac,
     };
     use crate::sim::{Input, TICK_DT, buttons};
     use bevy::prelude::*;
 
     /// rl#409 repro: a ship boarded on a live host must answer the stick BOTH before
-    /// and after an in-round RESTART. The 2026-08-21 session's dead-stick window
-    /// opened at a double RESTART while piloting: the walker track jumped to the
-    /// rl#322 park ring and the craft then ignored ~6 min of stick input.
+    /// and after an in-round RESTART. A double RESTART while piloting opened a
+    /// dead-stick window: the walker track jumped to the rl#322 park ring and the
+    /// craft then ignored ~6 min of stick input.
     #[test]
     fn ship_answers_the_stick_before_and_after_a_restart() {
         use crab_world::bot::headless::{
@@ -1409,10 +1428,7 @@ mod tests {
         // non-crossing frame that finalizes the spread pump (rl#396).
         fn tick(world: &mut World) {
             for dt in [TICK_DT * 1.01, 0.001] {
-                world
-                    .resource_mut::<Time>()
-                    .advance_by(std::time::Duration::from_secs_f64(dt));
-                drive_client_sim(world);
+                advance_frame(world, dt);
             }
         }
         fn craft_pos(world: &mut World) -> Option<Vec3> {
@@ -1520,10 +1536,7 @@ mod tests {
         let world = app.world_mut();
         let mut render_time = 0.0_f64;
         let mut drive = |world: &mut World, dt: f64| {
-            world
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_secs_f64(dt));
-            drive_client_sim(world);
+            advance_frame(world, dt);
             let clock = *world.resource::<RenderClock>();
             let now = clock.tick as f64 + clock.frac as f64;
             assert!(
@@ -1694,6 +1707,57 @@ mod tests {
         // arm, cleared by any adopting iteration and surviving zero-drain frames) is
         // not unit-tested: a remote-adopt GameState needs a live NetDriver. This
         // pins the pure half; the arm is the one line beside jitter_take's call.
+    }
+
+    #[test]
+    fn dt_window_spreads_a_hitch_and_never_leads_wall_time() {
+        let refresh = TICK_DT / 2.0;
+        let mut window = DtWindow::default();
+        let (mut wall, mut clock) = (0.0, 0.0);
+        for raw in std::iter::once(0.25).chain(std::iter::repeat_n(refresh, 2 * DT_WINDOW)) {
+            wall += raw;
+            clock += window.smooth(raw);
+            assert!(clock <= wall + 1e-12, "the clock ran ahead of wall time");
+        }
+        let trail = (DT_WINDOW - 1) as f64 / 2.0 * refresh;
+        assert!(
+            ((wall - clock) - trail).abs() < 1e-9,
+            "the clock trails wall time by {} s once the hitch left the window, not the \
+             steady {trail} s: the hitch's time was dropped",
+            wall - clock
+        );
+    }
+
+    #[test]
+    fn bunched_time_deltas_advance_the_render_clock_evenly() {
+        let me = crate::sim::PlayerId(0);
+        let client = crate::client::ClientSim::new(0xC0FFEE, &[me], me);
+        let coord = super::coordinator(None, client.peers(), client.me(), client.sim().clone());
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.insert_resource(super::super::chord_map::DiscoveredCodes::load(None));
+        world.init_resource::<crab_world::debug_overlay::SimFrameStats>();
+        install_round(&mut world, client, coord);
+
+        let fast = 0.003;
+        let mut prev = 0.0;
+        for frame in 0..6 * DT_WINDOW {
+            let raw = if frame % 2 == 0 { fast } else { TICK_DT - fast };
+            world
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f64(raw));
+            drive_client_sim(&mut world);
+            let clock = *world.resource::<RenderClock>();
+            let now = clock.tick as f64 + f64::from(clock.frac);
+            if frame >= DT_WINDOW {
+                assert!(
+                    (now - prev - 0.5).abs() < 1e-4,
+                    "frame {frame}: the render clock advanced {} ticks, not half a tick",
+                    now - prev
+                );
+            }
+            prev = now;
+        }
     }
 
     /// rl#399: stepping out of a craft must keep looking where the nose pointed —
