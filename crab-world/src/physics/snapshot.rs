@@ -427,12 +427,13 @@ impl PlantSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ShapeVariant {
     AsIs,
-    /// Capsule radius × factor; cuboids untouched.
+    /// Capsule radius × factor; cuboids and hulls untouched.
     CapsuleRadius(f32),
     /// Every oriented cuboid becomes the capsule along its longest axis.
     CuboidsToCapsules,
     /// Every link becomes a ball at its centre: radius = its capsule radius / the
-    /// cuboid's smallest half extent (`fat` = the bounding ball instead).
+    /// cuboid's smallest half extent / the hull's nearest face (`fat` = the bounding
+    /// ball instead).
     Balls {
         fat: bool,
     },
@@ -477,6 +478,25 @@ impl ShapeVariant {
                     let radius = if fat { half_len + r } else { r };
                     Some(SharedShape::compound(vec![(
                         Pose::from_translation((a + b) * 0.5),
+                        SharedShape::ball(radius),
+                    )]))
+                } else if let Some(h) = shape.as_convex_polyhedron() {
+                    let pts = h.points();
+                    let c = pts.iter().sum::<Vec3>() / pts.len() as f32;
+                    let radius = if fat {
+                        pts.iter().map(|&p| (p - c).length()).fold(0.0, f32::max)
+                    } else {
+                        let adj = h.vertices_adj_to_face();
+                        h.faces()
+                            .iter()
+                            .map(|f| {
+                                f.normal
+                                    .dot(pts[adj[f.first_vertex_or_edge as usize] as usize] - c)
+                            })
+                            .fold(f32::INFINITY, f32::min)
+                    };
+                    Some(SharedShape::compound(vec![(
+                        Pose::from_translation(c),
                         SharedShape::ball(radius),
                     )]))
                 } else {

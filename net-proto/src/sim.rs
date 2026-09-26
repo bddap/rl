@@ -179,23 +179,15 @@ const CRAB_SPEED: i64 = CRAB_CHARGE_SPEED_PER_S / TICK_HZ as i64;
 #[cfg(test)]
 const CLAW_M: i64 = PLAYER_HEIGHT_FP * 5 / 9;
 
-/// A claw capsule at body height. `dx` slides it sideways off the player so the
+/// A claw at body height. `dx` slides it sideways off the player so the
 /// near-miss cases stay one call.
 #[cfg(test)]
 fn claw_at(p: Pos, dx: i64, y: i64) -> ClawPose {
-    ClawPose {
-        a: Pos {
-            x: p.x + dx - 2 * CLAW_M,
-            z: p.z,
-        },
-        b: Pos {
-            x: p.x + dx + 2 * CLAW_M,
-            z: p.z,
-        },
-        a_y: y,
-        b_y: y,
-        radius: CLAW_M / 2,
-    }
+    let end = |sx: i64| Pos {
+        x: p.x + dx + sx * 2 * CLAW_M,
+        z: p.z,
+    };
+    ClawPose::new(&[(end(-1), y), (end(1), y)], CLAW_M / 2)
 }
 
 /// Advance every crab toward its nearest living player and return this tick's
@@ -459,7 +451,7 @@ impl Pos {
 }
 
 /// Scalar leg of [`Pos::from_meters`], for the heights that ride beside a `Pos`
-/// (a claw capsule's y — [`ClawPose`]).
+/// (a claw point's height — [`ClawPose`]).
 pub fn meters_to_grid(m: f32) -> i64 {
     (m * UNIT as f32) as i64
 }
@@ -597,41 +589,55 @@ pub struct Crab {
 /// One of Sally's claw colliders as of this tick, bridged into sim space — THE down
 /// mechanism, alone (rl#236): standing under her carapace is deliberately
 /// safe-and-fun, so no center/footprint disc downs anyone; only a pincer touch does.
-/// The capsule is the pincer's
-/// real physics capsule (rl#249 — no separate hitbox to drift), as an XZ segment with
-/// per-end heights ABOVE THE LOCAL GROUND SURFACE and the capsule radius, all on the
-/// fixed-point grid. Surface-relative y is what makes [`Self::downs`]'s player span
+/// The claw is the pincer's real physics collider (rl#249 — no separate hitbox to
+/// drift) as a convex point set dilated by a radius: the XZ footprint of the points and
+/// their height band ABOVE THE LOCAL GROUND SURFACE, all on the fixed-point grid.
+/// Surface-relative y is what makes [`Self::downs`]'s player span
 /// (`0..=PLAYER_HEIGHT_FP`, a walker standing ON the ground) hold on the baked terrain
 /// tile exactly as on the flat grids (rl#281 stage 6). External per-tick
 /// INPUT, not round state: the host's crab slot captures it fresh from the one rapier
 /// world into each step's [`Externals`], clients never see it (they receive the
 /// resulting [`PlayerStatus`] via snapshot), and nothing stores it to hash or snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClawPose {
-    pub a: Pos,
-    pub b: Pos,
-    pub a_y: i64,
-    pub b_y: i64,
-    pub radius: i64,
+    footprint: Vec<Pos>,
+    y_lo: i64,
+    y_hi: i64,
+    radius: i64,
 }
 
 impl ClawPose {
+    pub fn new(points: &[(Pos, i64)], radius: i64) -> Self {
+        let heights = || points.iter().map(|&(_, y)| y);
+        Self {
+            footprint: convex_footprint(points.iter().map(|&(p, _)| p).collect()),
+            y_lo: heights().min().expect("a claw collider has points"),
+            y_hi: heights().max().expect("a claw collider has points"),
+            radius,
+        }
+    }
+
+    pub fn footprint(&self) -> &[Pos] {
+        &self.footprint
+    }
+
     /// Whether this claw touches (within [`CLAW_DOWN_BUFFER`]) a player at `p` whose
     /// feet are `alt` over the surface: the player's vertical span must meet the
-    /// capsule's reach-fattened height band, and their XZ point must lie within reach
-    /// of the capsule's XZ segment. An airborne walker (rl#355) lifts its span with it,
+    /// claw's reach-fattened height band, and their XZ point must lie within reach
+    /// of the claw's XZ footprint. An airborne walker (rl#355) lifts its span with it,
     /// so sailing over a claw is safe passage — no separate exemption.
     fn downs(&self, p: Pos, alt: i64) -> bool {
         let reach = self.radius + CLAW_DOWN_BUFFER;
-        let (lo, hi) = (
-            self.a_y.min(self.b_y) - reach,
-            self.a_y.max(self.b_y) + reach,
-        );
-        if hi < alt || lo > alt + PLAYER_HEIGHT_FP {
+        if self.y_hi + reach < alt || self.y_lo - reach > alt + PLAYER_HEIGHT_FP {
             return false;
         }
-        let (cx, cz) = closest_on_segment(self.a, self.b, p);
-        within(p.x, p.z, cx, cz, reach)
+        let f = &self.footprint;
+        let edges = || (0..f.len()).map(|i| (f[i], f[(i + 1) % f.len()]));
+        (f.len() >= 3 && edges().all(|(a, b)| cross(a, b, p) >= 0))
+            || edges().any(|(a, b)| {
+                let (cx, cz) = closest_on_segment(a, b, p);
+                within(p.x, p.z, cx, cz, reach)
+            })
     }
 }
 
@@ -1400,6 +1406,35 @@ fn dist2_i128(dx: i64, dz: i64) -> i128 {
 
 fn within(ax: i64, az: i64, bx: i64, bz: i64, r: i64) -> bool {
     dist2_i128(ax - bx, az - bz) <= (r as i128) * (r as i128)
+}
+
+/// `(b - a) × (p - a)`: positive when `p` lies left of the directed edge `a`→`b`.
+fn cross(a: Pos, b: Pos, p: Pos) -> i128 {
+    (b.x - a.x) as i128 * (p.z - a.z) as i128 - (b.z - a.z) as i128 * (p.x - a.x) as i128
+}
+
+/// The convex hull of `pts`, counter-clockwise; one or two vertices when they are
+/// coincident or collinear.
+fn convex_footprint(mut pts: Vec<Pos>) -> Vec<Pos> {
+    pts.sort_by_key(|p| (p.x, p.z));
+    pts.dedup();
+    if pts.len() < 3 {
+        return pts;
+    }
+    let mut hull: Vec<Pos> = Vec::with_capacity(pts.len() + 1);
+    for pass in [pts.clone(), pts.into_iter().rev().collect()] {
+        let start = hull.len();
+        for p in pass {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0
+            {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    hull
 }
 
 /// The point on segment `a`–`b` nearest to `p`, on the fixed-point grid. i128
@@ -2878,6 +2913,48 @@ mod tests {
             PlayerStatus::Alive,
             "the still-piloting player stays exempt"
         );
+    }
+
+    #[test]
+    fn hull_claw_downs_across_its_footprint() {
+        let p = Pos::default();
+        let w = 4 * CLAW_DOWN_BUFFER;
+        let hull_at = |cx: i64, y: i64| {
+            let corners = [(-w, -w), (w, -w), (w, w), (-w, w), (0, w / 2)];
+            ClawPose::new(&corners.map(|(x, z)| (Pos { x: cx + x, z }, y)), 0)
+        };
+        assert!(
+            hull_at(0, CLAW_M).downs(p, 0),
+            "inside, far from every edge"
+        );
+        assert!(hull_at(w + CLAW_DOWN_BUFFER - 10, CLAW_M).downs(p, 0));
+        assert!(!hull_at(w + CLAW_DOWN_BUFFER + 10, CLAW_M).downs(p, 0));
+        let over = PLAYER_HEIGHT_FP + CLAW_DOWN_BUFFER + 10;
+        assert!(!hull_at(0, over).downs(p, 0), "overhead, clear of the span");
+        let slanted = |lo: i64, hi: i64| ClawPose::new(&[(p, lo), (Pos { x: 1, z: 0 }, hi)], 0);
+        assert!(
+            slanted(-10 * CLAW_M, CLAW_M).downs(p, 0),
+            "reaching up into the span"
+        );
+        assert!(
+            slanted(CLAW_M, 10 * CLAW_M).downs(p, 0),
+            "reaching down into it"
+        );
+    }
+
+    #[test]
+    fn convex_footprint_is_the_ccw_hull() {
+        let q = |x, z| Pos { x, z };
+        assert_eq!(
+            convex_footprint(vec![q(0, 4), q(4, 4), q(2, 2), q(0, 0), q(4, 0), q(2, 0)]),
+            vec![q(0, 0), q(4, 0), q(4, 4), q(0, 4)]
+        );
+        assert_eq!(
+            convex_footprint(vec![q(2, 0), q(0, 0), q(1, 0), q(2, 0)]),
+            vec![q(0, 0), q(2, 0)],
+            "collinear points reduce to the segment"
+        );
+        assert_eq!(convex_footprint(vec![q(3, 3), q(3, 3)]), vec![q(3, 3)]);
     }
 
     #[test]

@@ -321,12 +321,6 @@ pub fn draw_collider_wireframe(
                 draw_collider_wireframe(gizmos, sub, sub_world, color);
             }
         }
-        // No spawn path builds one of these — it is what bevy_rapier's `apply_scale`
-        // turns a curved shape (capsule/ball) into the moment a non-uniform scale
-        // reaches a collider (parry `scaled()`, the rl#314 TV incident). The crab cage
-        // reads `modeled_shape` and so never hands one in; this arm keeps the drawer
-        // total for callers tracing LIVE scaled views (the vehicle pass), where the
-        // hull is where physics genuinely is.
         ColliderView::ConvexPolyhedron(c) => {
             let pts: Vec<Vec3> = c.points().collect();
             for e in c.raw.edges() {

@@ -16,7 +16,7 @@ use crab_world::mesh_fallback::model_path;
 
 use crate::bake::fitted_recipe;
 use crate::containment::{MeshContainment, aabb};
-use crate::fit::{ColliderScore, score_box, score_capsule};
+use crate::fit::{ColliderScore, hull_min_half_width, score_box, score_capsule, score_hull};
 use crate::gltf_load::{LoadedModel, load_bind_mesh};
 
 /// The capsule<->cloud agreement bar: too much of the cloud outside, a p95 poke past
@@ -33,11 +33,10 @@ fn capsule_fit_fails(s: &ColliderScore, radius: f32) -> bool {
             .is_some_and(|c| !(0.85..=1.4).contains(&c.radius_ratio))
 }
 
-/// The cuboid<->cloud bar, carapace slab and limb boxes alike: same outside-fraction
-/// bar as capsules; the poke bound scales with the box's thinnest half-extent exactly
-/// as the capsule bound does with radius (the historical fixed 2 cm carapace bar was
-/// that slab's 0.15 × min-extent).
-fn cuboid_fit_fails(s: &ColliderScore, min_half: f32) -> bool {
+/// The polytope<->cloud bar — carapace slab, limb boxes and hulls alike: same
+/// outside-fraction bar as capsules; the poke bound scales with the thinnest half-width
+/// exactly as the capsule bound does with radius.
+fn polytope_fit_fails(s: &ColliderScore, min_half: f32) -> bool {
     s.frac_outside > 0.05 || s.poke_out_p95 > (0.15 * min_half).max(0.005)
 }
 
@@ -90,7 +89,7 @@ pub fn verify_colliders() -> Result<AuditVerdict, String> {
     for rc in rig::rest_colliders(&recipe) {
         let label = format!("{:?}", rc.part);
         // The carapace is fit against the trunk-bone cloud; every limb against its
-        // own part cloud (limbs can be capsules OR cuboids since rl#20 Phase 1).
+        // own part cloud.
         let pts = if rc.part == PartId::Carapace {
             trunk.as_slice()
         } else {
@@ -105,7 +104,13 @@ pub fn verify_colliders() -> Result<AuditVerdict, String> {
             RestShape::Cuboid { center, rot, half } => {
                 let s = score_box(pts, center, rot, half);
                 let rnorm = half.min_element().max(1e-3);
-                let fail = cuboid_fit_fails(&s, rnorm);
+                let fail = polytope_fit_fails(&s, rnorm);
+                (s, rnorm, fail)
+            }
+            RestShape::Hull { ref points } => {
+                let s = score_hull(pts, points);
+                let rnorm = hull_min_half_width(points).max(1e-3);
+                let fail = polytope_fit_fails(&s, rnorm);
                 (s, rnorm, fail)
             }
         };
@@ -290,6 +295,22 @@ pub fn verify_pivots() -> Result<AuditVerdict, String> {
                     yn(ccin)
                 );
             }
+            // A hull's vertices ARE mesh vertices, on the surface by construction, so
+            // only its interior says anything.
+            RestShape::Hull { ref points } => {
+                let centroid = points.iter().sum::<Vec3>() / points.len() as f32;
+                let (cwn, cdist, cin) = probe(centroid);
+                println!(
+                    "  {:<24} | {:>+7.3} {:>+8.4} {:>4} | {:>+7.3} {:>+8.4} {:>4} | (hull centroid)",
+                    label,
+                    pwn,
+                    pdist,
+                    yn(pin),
+                    cwn,
+                    cdist,
+                    yn(cin)
+                );
+            }
         }
     }
 
@@ -383,24 +404,23 @@ mod tests {
         );
     }
 
-    /// The cuboid bars scale with the thinnest half-extent, capsule-style.
     #[test]
-    fn cuboid_bars_scale_with_min_extent() {
+    fn polytope_bars_scale_with_min_extent() {
         let min_half = 0.13;
-        assert!(!cuboid_fit_fails(&clean_score(), min_half));
+        assert!(!polytope_fit_fails(&clean_score(), min_half));
 
         let mut s = clean_score();
         s.frac_outside = 0.06;
-        assert!(cuboid_fit_fails(&s, min_half));
+        assert!(polytope_fit_fails(&s, min_half));
 
         let mut s = clean_score();
         s.poke_out_p95 = 0.15 * min_half + 1e-4;
-        assert!(cuboid_fit_fails(&s, min_half));
+        assert!(polytope_fit_fails(&s, min_half));
         s.poke_out_p95 = 0.15 * min_half - 1e-4;
-        assert!(!cuboid_fit_fails(&s, min_half));
+        assert!(!polytope_fit_fails(&s, min_half));
         // The 5 mm floor keeps hairline pokes on a thin box out of the verdict.
         s.poke_out_p95 = 0.004;
-        assert!(!cuboid_fit_fails(&s, 0.01));
+        assert!(!polytope_fit_fails(&s, 0.01));
     }
 
     /// The watertight verdict: interior ~+1, exterior ~0, integer windings.

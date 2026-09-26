@@ -212,6 +212,7 @@ fn spawn_crab_silhouette(
     let shape_mid = |s: &RestShape| match *s {
         RestShape::Capsule { a, b, .. } => (a + b) * 0.5,
         RestShape::Cuboid { center, .. } => center,
+        RestShape::Hull { ref points } => points.iter().sum::<Vec3>() / points.len() as f32,
     };
     let fwd = if sil.limbs.is_empty() {
         Vec3::ZERO
@@ -249,6 +250,11 @@ fn spawn_crab_silhouette(
             RestShape::Cuboid { center, rot, half } => {
                 for c in crab_world::bot::rig::cuboid_corners(center, rot, half) {
                     grow(r * c);
+                }
+            }
+            RestShape::Hull { ref points } => {
+                for &p in points {
+                    grow(r * p);
                 }
             }
         }
@@ -309,10 +315,34 @@ fn spawn_crab_silhouette(
                     Transform::from_translation(map(center)).with_rotation(r * rot),
                 ))
                 .id(),
+            RestShape::Hull { ref points } => {
+                let mapped: Vec<Vec3> = points.iter().map(|&p| map(p)).collect();
+                commands
+                    .spawn((Mesh3d(meshes.add(hull_mesh(&mapped))), MeshMaterial3d(mat)))
+                    .id()
+            }
         };
         children.push(child);
     }
     commands.entity(crab_root).add_children(&children);
+}
+
+fn hull_mesh(points: &[Vec3]) -> Mesh {
+    use bevy::mesh::PrimitiveTopology;
+
+    let tris = crab_world::bot::rig::hull_triangles(points);
+    let mut positions = Vec::with_capacity(tris.len() * 3);
+    let mut normals = Vec::with_capacity(tris.len() * 3);
+    for [a, b, c] in tris {
+        let n = (b - a).cross(c - a).normalize();
+        for p in [a, b, c] {
+            positions.push(p.to_array());
+            normals.push(n.to_array());
+        }
+    }
+    Mesh::new(PrimitiveTopology::TriangleList, default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
 }
 
 type AvatarXf<'w, 's> = Query<
@@ -548,4 +578,29 @@ pub(super) fn spawn_fp_camera(mut commands: Commands) {
         Transform::default(),
         FpCamera,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hull_mesh_faces_wind_outward() {
+        let pts = [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z, Vec3::splat(0.1)];
+        let mesh = hull_mesh(&pts);
+        let pos = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|a| a.as_float3())
+            .expect("positions");
+        assert_eq!(
+            pos.len(),
+            12,
+            "a tetrahedron: 4 faces, interior point dropped"
+        );
+        let inside = Vec3::splat(0.25);
+        for tri in pos.chunks(3) {
+            let [a, b, c] = [0, 1, 2].map(|i| Vec3::from_array(tri[i]));
+            assert!((b - a).cross(c - a).dot((a + b + c) / 3.0 - inside) > 0.0);
+        }
+    }
 }

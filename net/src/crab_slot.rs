@@ -283,9 +283,9 @@ struct ReadPose {
     claws: Vec<ClawPose>,
 }
 
-/// Read every crab's world pose + claw capsules off its body — the sim feed
+/// Read every crab's world pose + claw colliders off its body — the sim feed
 /// ([`crate::sim::Externals::crabs`]). One frame: the carapace's translation IS her
-/// sim position, her claw capsules cross in world coordinates with surface-relative
+/// sim position, her claw colliders cross in world coordinates with surface-relative
 /// heights ([`ClawPose`]'s convention). Yaw derives from the carapace's planar
 /// velocity. `fallback` is each crab's current sim pose ([`SlotInputs::fallback`]):
 /// where the world has nothing readable, the sim keeps acting at her last adopted
@@ -327,14 +327,12 @@ pub(crate) fn collect_crab_poses(world: &mut World, fallback: &[CrabPose]) -> Ve
             if !read.contains_key(&env.0) {
                 continue;
             }
-            let Some((a, b, radius)) =
-                claw_tip_capsule(modeled_shape(col, "claw capture"), Mat4::IDENTITY)
-            else {
+            let Some((points, radius)) = claw_tip_shape(modeled_shape(col, "claw capture")) else {
                 // A claw the sim can't model is a code defect, never a skippable
                 // row: this claw would stop touching players in MP with no other
                 // symptom (rl#288). ERROR so it surfaces through fleet telemetry.
                 error_once!(
-                    "claw capture: claw-tip collider is not capsule-readable — \
+                    "claw capture: claw-tip collider is neither a capsule nor a hull — \
                      this claw is INVISIBLE to MP claw-touch (rl#288)"
                 );
                 continue;
@@ -348,17 +346,10 @@ pub(crate) fn collect_crab_poses(world: &mut World, fallback: &[CrabPose]) -> Ve
                     crate::sim::meters_to_grid(w.y - terrain.height(w.x, w.z)),
                 )
             };
-            let (pa, ay) = world_pt(a);
-            let (pb, by) = world_pt(b);
+            let points: Vec<(Pos, i64)> = points.into_iter().map(world_pt).collect();
             claws.push((
                 env.0,
-                ClawPose {
-                    a: pa,
-                    b: pb,
-                    a_y: ay,
-                    b_y: by,
-                    radius: crate::sim::meters_to_grid(radius),
-                },
+                ClawPose::new(&points, crate::sim::meters_to_grid(radius)),
             ));
         }
         for (env, claw) in claws {
@@ -580,37 +571,15 @@ pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
     });
 }
 
-/// Resolve a claw-tip collider to its capsule — segment endpoints in entity-local
-/// space plus radius. `spawn_crab` places capsules bare and wraps only oriented cuboid
-/// links as ONE-shape compounds (the compound carries the rotation bevy_rapier's cuboid
-/// constructor can't); the compound read-through here is future-proofing so the pincer
-/// stays readable if capsules ever ship wrapped the same way. Readable = a bare capsule,
-/// or a one-shape compound resolving to one. `None` = anything else — a multi-shape
-/// compound is a shape our claw model can't honestly reduce, not a wrapper — and the
-/// caller screams: a bare `as_capsule` here silently dropped the claw from MP
-/// claw-touch (rl#288). Callers must pass the UNSCALED view
-/// ([`modeled_shape`]): the scaled `raw` shape stops being a capsule the moment
-/// `apply_scale` sees corrupt non-unit transform scale, while the unscaled shape IS
-/// the modeled claw.
-fn claw_tip_capsule(view: ColliderView<'_>, local: Mat4) -> Option<(Vec3, Vec3, f32)> {
+/// A claw-tip collider as the sim's claw model: its points in entity-local space and
+/// the radius dilating them. `None` for anything but a capsule or a hull — the caller
+/// screams, because an unreadable claw is invisible to MP claw-touch (rl#288). Callers
+/// pass the UNSCALED view ([`modeled_shape`]): corrupt transform scale rebuilds the
+/// scaled `raw` shape as a different primitive, while the unscaled one IS the claw.
+fn claw_tip_shape(view: ColliderView<'_>) -> Option<(Vec<Vec3>, f32)> {
     match view {
-        ColliderView::Capsule(c) => {
-            let seg = c.segment();
-            Some((
-                local.transform_point3(seg.a()),
-                local.transform_point3(seg.b()),
-                c.radius(),
-            ))
-        }
-        ColliderView::Compound(c) => {
-            let mut shapes = c.shapes();
-            match (shapes.next(), shapes.next()) {
-                (Some((pos, rot, sub)), None) => {
-                    claw_tip_capsule(sub, local * Mat4::from_rotation_translation(rot, pos))
-                }
-                _ => None,
-            }
-        }
+        ColliderView::Capsule(c) => Some((vec![c.segment().a(), c.segment().b()], c.radius())),
+        ColliderView::ConvexPolyhedron(c) => Some((c.points().collect(), 0.0)),
         _ => None,
     }
 }
@@ -720,64 +689,55 @@ impl HeadlessHostWorld {
 }
 
 #[cfg(test)]
-mod claw_tip_capsule_tests {
+mod claw_tip_shape_tests {
     use super::*;
 
     #[test]
-    fn reads_bare_and_compound_wrapped_capsules() {
-        let a = Vec3::new(0.0, -0.05, 0.0);
-        let b = Vec3::new(0.0, 0.05, 0.0);
-        let bare = Collider::capsule(a, b, 0.02);
-        let (ba, bb, br) = claw_tip_capsule(bare.as_typed_shape(), Mat4::IDENTITY).unwrap();
-        assert!((ba - a).length() < 1e-6 && (bb - b).length() < 1e-6 && (br - 0.02).abs() < 1e-6);
+    fn reads_capsules_and_hulls() {
+        let (a, b) = (Vec3::new(0.0, -0.05, 0.0), Vec3::new(0.0, 0.05, 0.0));
+        let capsule = Collider::capsule(a, b, 0.02);
+        assert_eq!(
+            claw_tip_shape(capsule.as_typed_shape()),
+            Some((vec![a, b], 0.02))
+        );
 
-        // A one-shape-compound-wrapped capsule (spawn_crab's wrapping convention)
-        // must read through with the sub-shape placement folded in.
-        let off = Vec3::new(0.1, 0.2, 0.3);
-        let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-        let wrapped = Collider::compound(vec![(off, rot, Collider::capsule(a, b, 0.02))]);
-        let (wa, wb, wr) = claw_tip_capsule(wrapped.as_typed_shape(), Mat4::IDENTITY).unwrap();
-        assert!((wa - (off + rot * a)).length() < 1e-5);
-        assert!((wb - (off + rot * b)).length() < 1e-5);
-        assert!((wr - 0.02).abs() < 1e-6);
+        let tet = [Vec3::ZERO, Vec3::X * 0.1, Vec3::Y * 0.1, Vec3::Z * 0.1];
+        let hull = Collider::convex_hull(&tet).unwrap();
+        let (mut pts, r) = claw_tip_shape(hull.as_typed_shape()).unwrap();
+        pts.sort_by(|p, q| p.to_array().partial_cmp(&q.to_array()).unwrap());
+        let mut want = tet.to_vec();
+        want.sort_by(|p, q| p.to_array().partial_cmp(&q.to_array()).unwrap());
+        assert_eq!((pts, r), (want, 0.0));
     }
 
     #[test]
-    fn refuses_non_capsule_shapes() {
+    fn refuses_other_shapes() {
         let boxy = Collider::compound(vec![(
             Vec3::ZERO,
             Quat::IDENTITY,
             Collider::cuboid(0.1, 0.1, 0.1),
         )]);
-        assert!(claw_tip_capsule(boxy.as_typed_shape(), Mat4::IDENTITY).is_none());
-        let bare_box = Collider::cuboid(0.1, 0.1, 0.1);
-        assert!(claw_tip_capsule(bare_box.as_typed_shape(), Mat4::IDENTITY).is_none());
-        // A multi-shape compound is not a wrapper — even one containing a capsule
-        // cannot be honestly reduced to the claw model, so it must refuse.
-        let multi = Collider::compound(vec![
-            (Vec3::ZERO, Quat::IDENTITY, Collider::capsule_y(0.05, 0.02)),
-            (Vec3::X, Quat::IDENTITY, Collider::cuboid(0.1, 0.1, 0.1)),
-        ]);
-        assert!(claw_tip_capsule(multi.as_typed_shape(), Mat4::IDENTITY).is_none());
+        let wrapped = Collider::compound(vec![(
+            Vec3::X,
+            Quat::IDENTITY,
+            Collider::capsule_y(0.05, 0.02),
+        )]);
+        for col in [boxy, wrapped, Collider::ball(0.1)] {
+            assert!(claw_tip_shape(col.as_typed_shape()).is_none());
+        }
     }
 
-    /// The 2026-07-25 tv firing of rl#288: a physics blowup denormalized the pincer's
-    /// rotation, `apply_scale` decomposed non-unit scale out of `GlobalTransform`, and
-    /// bevy_rapier rebuilt the scaled `raw` shape as a convex hull — no longer
-    /// capsule-readable, so the claw went invisible to MP claw-touch. The capture must
-    /// read the UNSCALED shape, which stays the modeled capsule through the corruption.
+    /// The rl#288 corruption: non-unit collider scale rebuilds the scaled `raw` shape;
+    /// the unscaled view the capture reads stays the modeled capsule.
     #[test]
     fn scale_corruption_keeps_the_unscaled_capsule_readable() {
-        let a = Vec3::new(0.0, -0.05, 0.0);
-        let b = Vec3::new(0.0, 0.05, 0.0);
+        let (a, b) = (Vec3::new(0.0, -0.05, 0.0), Vec3::new(0.0, 0.05, 0.0));
         let mut col = Collider::capsule(a, b, 0.02);
         col.set_scale(Vec3::new(1.0, 0.9, 1.0), 4);
-
-        // Documents the failure mode: the scaled raw shape is no longer a capsule…
-        assert!(claw_tip_capsule(col.as_typed_shape(), Mat4::IDENTITY).is_none());
-        // …but the unscaled view — what the capture reads — still resolves.
-        let (ua, ub, ur) = claw_tip_capsule(col.as_unscaled_typed_shape(), Mat4::IDENTITY).unwrap();
-        assert!((ua - a).length() < 1e-6 && (ub - b).length() < 1e-6 && (ur - 0.02).abs() < 1e-6);
+        assert_eq!(
+            claw_tip_shape(col.as_unscaled_typed_shape()),
+            Some((vec![a, b], 0.02))
+        );
     }
 }
 
@@ -856,7 +816,7 @@ mod one_world_tests {
         );
     }
 
-    /// The slot reads her sim pose OFF the body — and her claw capsules ride along
+    /// The slot reads her sim pose OFF the body — and her claw colliders ride along
     /// (rl#249: the sim's down check uses her real physics claws, no second hitbox).
     #[test]
     fn collected_pose_is_the_carapace_and_carries_real_claws() {
@@ -877,13 +837,13 @@ mod one_world_tests {
         );
         assert!(
             !poses[0].claws.is_empty(),
-            "the collected pose must carry her claw capsules"
+            "the collected pose must carry her claw colliders"
         );
-        for claw in &poses[0].claws {
-            let (ax, az) = claw.a.to_meters();
+        for p in poses[0].claws.iter().flat_map(|c| c.footprint()) {
+            let (ax, az) = p.to_meters();
             assert!(
                 (Vec2::new(ax, az) - cara).length() < 2.0,
-                "claw capsules cross in world frame, near her body"
+                "claw colliders cross in world frame, near her body"
             );
         }
     }

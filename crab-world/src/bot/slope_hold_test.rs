@@ -430,23 +430,28 @@ fn stance_stats() {
     let mut tips = Vec::new();
     for (link, &wp) in recipe.links.iter().zip(&world_pos) {
         let shape = rig::link_rest_shape(link, Vec3::ZERO);
-        let c = match shape {
-            rig::RestShape::Capsule { a, b, radius } => {
-                bevy_rapier3d::prelude::Collider::capsule(a, b, radius)
-            }
-            rig::RestShape::Cuboid { half, .. } => {
-                bevy_rapier3d::prelude::Collider::cuboid(half.x, half.y, half.z)
-            }
-        };
-        let m = c.raw.mass_properties(link.density).mass();
-        com += (wp + link.center) * m;
+        let mp = super::body::link_collider(link)
+            .raw
+            .mass_properties(link.density);
+        let m = mp.mass();
+        com += (wp + mp.local_com) * m;
         total += m;
         if matches!(link.actuated, Some(super::body::CrabJointId::LegCarpus(..))) {
-            let rig::RestShape::Capsule { a, b, radius } = shape else {
-                panic!("carpus links are capsules in every bake so far");
-            };
-            let tip = wp + if a.y < b.y { a } else { b };
-            tips.push((tip, radius));
+            tips.push(match shape {
+                rig::RestShape::Capsule { a, b, radius } => {
+                    (wp + if a.y < b.y { a } else { b }, radius)
+                }
+                rig::RestShape::Hull { ref points } => (
+                    wp + *points
+                        .iter()
+                        .min_by(|p, q| p.y.total_cmp(&q.y))
+                        .expect("hull has points"),
+                    0.0,
+                ),
+                rig::RestShape::Cuboid { .. } => {
+                    panic!("stance_stats reads foot tips off capsules and hulls")
+                }
+            });
         }
     }
     com /= total;

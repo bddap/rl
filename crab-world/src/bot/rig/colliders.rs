@@ -12,6 +12,19 @@ pub struct RestCollider {
 pub enum RestShape {
     Capsule { a: Vec3, b: Vec3, radius: f32 },
     Cuboid { center: Vec3, rot: Quat, half: Vec3 },
+    Hull { points: Vec<Vec3> },
+}
+
+/// The convex hull of `points` as triangles wound counter-clockwise seen from outside,
+/// slivers dropped: the exact surface a hull collider's support map defines. Not the
+/// collider's own polyhedron faces — parry merges near-coplanar triangles into
+/// non-planar faces.
+pub fn hull_triangles(points: &[Vec3]) -> Vec<[Vec3; 3]> {
+    let (verts, tris) = bevy_rapier3d::parry::transformation::convex_hull(points);
+    tris.iter()
+        .map(|t| t.map(|i| verts[i as usize]))
+        .filter(|[a, b, c]| (*b - *a).cross(*c - *a).length_squared() > 1e-24)
+        .collect()
 }
 
 /// The eight world-space corners of an oriented cuboid.
@@ -71,6 +84,12 @@ impl CrabSilhouette {
                         hi = hi.max(c.y);
                     }
                 }
+                RestShape::Hull { ref points } => {
+                    for p in points {
+                        lo = lo.min(p.y);
+                        hi = hi.max(p.y);
+                    }
+                }
             }
         }
         if lo.is_finite() && hi.is_finite() {
@@ -115,6 +134,9 @@ pub fn link_rest_shape(link: &RigLink, origin: Vec3) -> RestShape {
             rot: link.col_rot,
             half,
         },
+        LinkShape::Hull { ref points } => RestShape::Hull {
+            points: points.iter().map(|&p| c + link.col_rot * p).collect(),
+        },
     }
 }
 
@@ -130,6 +152,20 @@ fn carapace_cuboid(recipe: &RigRecipe, hub: Vec3) -> RestShape {
 mod tests {
     use super::*;
     use crate::bot::rig::baked_recipe;
+
+    #[test]
+    fn hull_rest_shape_places_points_in_the_link_frame() {
+        let mut link = baked_recipe().links.swap_remove(0);
+        link.center = Vec3::new(0.1, 0.2, 0.3);
+        link.col_rot = Quat::from_rotation_z(0.7);
+        let p = Vec3::new(0.05, -0.02, 0.01);
+        link.shape = LinkShape::Hull { points: vec![p] };
+        let origin = Vec3::new(-1.0, 0.5, 2.0);
+        let RestShape::Hull { points } = link_rest_shape(&link, origin) else {
+            panic!("a hull link rests as a hull");
+        };
+        assert_eq!(points, vec![origin + link.center + link.col_rot * p]);
+    }
 
     #[test]
     fn recipe_silhouette_covers_all_links_plus_carapace() {
@@ -153,6 +189,7 @@ mod tests {
                             && half.min_element() > 0.0
                     );
                 }
+                RestShape::Hull { ref points } => assert!(points.iter().all(|p| p.is_finite())),
             }
         }
         assert!(

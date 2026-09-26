@@ -220,16 +220,7 @@ pub fn spawn_crab(
             Some(idx) => ents[idx],
         };
         let here = world_pos[i];
-        let collider = match rig::link_rest_shape(link, Vec3::ZERO) {
-            rig::RestShape::Capsule { a, b, radius } => Collider::capsule(a, b, radius),
-            // An oriented box has no direct bevy_rapier constructor; a one-shape
-            // compound carries the rotation.
-            rig::RestShape::Cuboid { center, rot, half } => Collider::compound(vec![(
-                center,
-                rot,
-                Collider::cuboid(half.x, half.y, half.z),
-            )]),
-        };
+        let collider = link_collider(link);
         total_mass += collider.raw.mass_properties(link.density).mass();
         let id = link
             .actuated
@@ -269,6 +260,21 @@ pub fn spawn_crab(
         .insert(crate::bot::aero::CarapaceDrag::for_total_mass(total_mass));
 
     carapace
+}
+
+pub fn link_collider(link: &rig::RigLink) -> Collider {
+    match rig::link_rest_shape(link, Vec3::ZERO) {
+        rig::RestShape::Capsule { a, b, radius } => Collider::capsule(a, b, radius),
+        // An oriented box has no direct bevy_rapier constructor; a one-shape
+        // compound carries the rotation.
+        rig::RestShape::Cuboid { center, rot, half } => Collider::compound(vec![(
+            center,
+            rot,
+            Collider::cuboid(half.x, half.y, half.z),
+        )]),
+        rig::RestShape::Hull { points } => Collider::convex_hull(&points)
+            .expect("baked hull points span no 3D convex hull — the collider table is broken"),
+    }
 }
 
 /// The one joint of an articulation (bddap/rl#347 — was two in rl#315): the
@@ -388,5 +394,37 @@ mod tests {
             parts += 1;
         }
         assert!(parts > 10, "expected a whole crab, got {parts} parts");
+    }
+
+    #[test]
+    fn every_baked_link_collider_has_mass() {
+        for link in &crate::bot::rig::baked_recipe().links {
+            let c = link_collider(link);
+            assert!(
+                c.raw.mass_properties(link.density).mass() > 0.0,
+                "{} spawns massless",
+                link.bone
+            );
+        }
+    }
+
+    #[test]
+    fn hull_link_collider_is_its_placed_hull() {
+        let mut link = crate::bot::rig::baked_recipe().links.swap_remove(0);
+        link.center = Vec3::new(0.1, 0.2, 0.3);
+        link.col_rot = Quat::from_rotation_y(0.5);
+        link.shape = rig::LinkShape::Hull {
+            points: vec![Vec3::ZERO, Vec3::X * 0.3, Vec3::Y * 0.2, Vec3::Z * 0.1],
+        };
+        let c = link_collider(&link);
+        let ColliderView::ConvexPolyhedron(h) = c.as_typed_shape() else {
+            panic!("a hull link must spawn a convex polyhedron");
+        };
+        assert!(h.points().any(|p| (p - link.center).length() < 1e-6));
+        let volume = c.raw.mass_properties(1.0).mass();
+        assert!(
+            (volume - 0.3 * 0.2 * 0.1 / 6.0).abs() < 1e-7,
+            "volume {volume}"
+        );
     }
 }

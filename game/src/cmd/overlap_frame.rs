@@ -22,6 +22,7 @@ const RGB_WORST: [u8; 3] = [220, 30, 30];
 enum Prim {
     Capsule(Vec3, Vec3, f32),
     Box(Pose, Vec3),
+    Edges(Vec<(Vec3, Vec3)>),
 }
 
 fn prims(shape: &dyn Shape, pose: Pose, out: &mut Vec<Prim>) {
@@ -36,6 +37,14 @@ fn prims(shape: &dyn Shape, pose: Pose, out: &mut Vec<Prim>) {
     } else if let Some(b) = shape.as_ball() {
         let c = pose.transform_point(Vec3::ZERO);
         out.push(Prim::Capsule(c, c, b.radius));
+    } else if let Some(h) = shape.as_convex_polyhedron() {
+        let p = |i: u32| pose.transform_point(h.points()[i as usize]);
+        out.push(Prim::Edges(
+            h.edges()
+                .iter()
+                .map(|e| (p(e.vertices[0]), p(e.vertices[1])))
+                .collect(),
+        ));
     } else if let Some(comp) = shape.as_compound() {
         for (local, sub) in comp.shapes() {
             prims(&**sub, pose * *local, out);
@@ -127,6 +136,11 @@ fn draw(canvas: &mut Canvas, view: &View, prim: &Prim, rgb: [u8; 3]) {
                 }
             }
         }
+        Prim::Edges(edges) => {
+            for &(a, b) in edges {
+                canvas.line(view.map(a), view.map(b), rgb);
+            }
+        }
     }
 }
 
@@ -153,6 +167,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
                     pose.transform_point(Vec3::ZERO) - Vec3::splat(half.length()),
                     pose.transform_point(Vec3::ZERO) + Vec3::splat(half.length()),
                 ],
+                Prim::Edges(edges) => edges.iter().flat_map(|&(a, b)| [a, b]).collect(),
             };
             for q in pts {
                 lo = lo.min(q);

@@ -362,6 +362,56 @@ pub fn score_box(points: &[Vec3], center: Vec3, rot: Quat, half: Vec3) -> Collid
     ColliderScore::from_signed(&sd)
 }
 
+fn hull_faces(hull: &[Vec3]) -> Vec<(Vec3, [Vec3; 3])> {
+    crab_world::bot::rig::hull_triangles(hull)
+        .into_iter()
+        .map(|t| ((t[1] - t[0]).cross(t[2] - t[0]).normalize(), t))
+        .collect()
+}
+
+/// Half the hull's thinnest width over its face normals — the polytope analogue of a
+/// cuboid's smallest half-extent.
+pub fn hull_min_half_width(hull: &[Vec3]) -> f32 {
+    hull_faces(hull)
+        .iter()
+        .map(|(n, _)| {
+            let (lo, hi) = hull
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| {
+                    (lo.min(n.dot(*p)), hi.max(n.dot(*p)))
+                });
+            (hi - lo) * 0.5
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// Exact signed distances: inside, the nearest face plane; outside, the nearest face.
+/// Not parry's polyhedron point projection — it is GJK-based and misreads points on
+/// the boundary.
+pub fn score_hull(points: &[Vec3], hull: &[Vec3]) -> ColliderScore {
+    use bevy_rapier3d::parry::query::PointQuery;
+    use bevy_rapier3d::parry::shape::Triangle;
+
+    let faces = hull_faces(hull);
+    let sd: Vec<f32> = points
+        .iter()
+        .map(|&p| {
+            let plane = faces
+                .iter()
+                .map(|(n, t)| n.dot(p - t[0]))
+                .fold(f32::NEG_INFINITY, f32::max);
+            if plane <= 0.0 {
+                return plane;
+            }
+            faces
+                .iter()
+                .map(|(_, t)| Triangle::new(t[0], t[1], t[2]).distance_to_local_point(p, true))
+                .fold(f32::INFINITY, f32::min)
+        })
+        .collect();
+    ColliderScore::from_signed(&sd)
+}
+
 #[allow(clippy::needless_range_loop)]
 fn covariance_eigenframe(points: &[Vec3]) -> (Vec3, [Vec3; 3]) {
     let centroid = points.iter().copied().sum::<Vec3>() / points.len() as f32;
@@ -574,6 +624,22 @@ mod tests {
                 .is_some(),
             "a fittable capsule cloud has diagnostics"
         );
+    }
+
+    /// A hull vertex must read as ON the surface — the case a GJK projection misreads.
+    #[test]
+    fn score_hull_is_exact() {
+        let half = Vec3::new(1.0, 0.5, 0.25);
+        let hull: Vec<Vec3> =
+            crab_world::bot::rig::cuboid_corners(Vec3::ZERO, Quat::IDENTITY, half).to_vec();
+        let at = |p: Vec3| score_hull(&[p], &hull);
+        assert!((at(Vec3::new(3.0, 0.0, 0.0)).poke_out_max - 2.0).abs() < 1e-5);
+        assert!((at(Vec3::new(2.0, 1.5, 0.0)).poke_out_max - 2f32.sqrt()).abs() < 1e-5);
+        assert!((at(Vec3::new(2.0, 1.5, 1.25)).poke_out_max - 3f32.sqrt()).abs() < 1e-5);
+        assert!((at(Vec3::new(0.5, 0.0, 0.0)).bulge_p95 - 0.25).abs() < 1e-5);
+        let corner = at(half);
+        assert_eq!((corner.frac_outside, corner.poke_out_max), (0.0, 0.0));
+        assert!((hull_min_half_width(&hull) - 0.25).abs() < 1e-6);
     }
 
     #[test]

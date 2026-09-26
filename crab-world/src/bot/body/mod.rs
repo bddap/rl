@@ -22,7 +22,7 @@ pub(in crate::bot) use spawn::set_flail_damping;
 pub(crate) use spawn::{
     CRAB_SETTLE_EXTRA_ITERATIONS, CRAB_SLEEP_NOISE_FLOOR, random_spawn_rotation,
 };
-pub use spawn::{LIMIT_SOFTNESS, SPAWN_HEIGHT, spawn_crab};
+pub use spawn::{LIMIT_SOFTNESS, SPAWN_HEIGHT, link_collider, spawn_crab};
 
 #[cfg(feature = "render")]
 pub use debug_gizmos::{PivotGizmos, register_pivot_markers};

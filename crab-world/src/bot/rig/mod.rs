@@ -8,8 +8,8 @@ mod recipe;
 
 pub use baked::{BAKED_ASSET_DIGEST, baked_recipe};
 pub use colliders::{
-    CrabSilhouette, RestCollider, RestShape, cuboid_corners, link_rest_shape, recipe_silhouette,
-    rest_colliders,
+    CrabSilhouette, RestCollider, RestShape, cuboid_corners, hull_triangles, link_rest_shape,
+    recipe_silhouette, rest_colliders,
 };
 pub(crate) use recipe::link_world_origins;
 pub use recipe::{TRUNK_BONES, arc_to, build_recipe, part_for_bone, parts_adjacent};
@@ -17,10 +17,9 @@ pub use recipe::{TRUNK_BONES, arc_to, build_recipe, part_for_bone, parts_adjacen
 /// The full digest of THE baked Sally body every process constructs (rl#340 stage
 /// 10: there is no other body): the asset-byte digest chained with the committed
 /// [`baked_recipe`] table's [`RigRecipe::digest`]. Both inputs are compiled
-/// constants — no asset on disk needed — which is what lets the rl#20 legacy-stamp
-/// pin and the golden test check it model-free. This is the checkpoint
-/// body-identity stamp (bddap/rl#214) AND the per-peer collider digest the MP
-/// membership handshake advertises (rl#100/rl#114).
+/// constants — no asset on disk needed — which is what lets the golden test check it
+/// model-free. This is the checkpoint body-identity stamp (bddap/rl#214) AND the
+/// per-peer collider digest the MP membership handshake advertises (rl#100/rl#114).
 ///
 /// WHY both halves (bddap/rl#20 stage 1): the asset digest alone certified the
 /// render mesh but NOT the body — a `baked.rs` regen (a re-fit of the same
@@ -82,34 +81,36 @@ pub trait BindSource {
 
 /// A link's collider primitive, in the frame set by [`RigLink::center`] /
 /// [`RigLink::col_rot`]. Capsules stand on the local Y axis (half_height to each
-/// cap center); cuboids carry half-extents per local axis. Which primitive a part
-/// wears is the offline fitter's scored choice (bddap/rl#20 Phase 1) — the runtime
-/// only consumes the baked result.
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// cap center); cuboids carry half-extents per local axis; a hull is the convex hull
+/// of its points.
+#[derive(Clone, PartialEq, Debug)]
 pub enum LinkShape {
     Capsule { half_height: f32, radius: f32 },
     Cuboid { half: Vec3 },
+    Hull { points: Vec<Vec3> },
 }
 
 impl LinkShape {
     fn is_finite(&self) -> bool {
-        match *self {
+        match self {
             LinkShape::Capsule {
                 half_height,
                 radius,
             } => half_height.is_finite() && radius.is_finite(),
             LinkShape::Cuboid { half } => half.is_finite(),
+            LinkShape::Hull { points } => points.iter().all(|p| p.is_finite()),
         }
     }
 
     /// Radius of the shape's bounding sphere about its own center.
     pub fn bounding_radius(&self) -> f32 {
-        match *self {
+        match self {
             LinkShape::Capsule {
                 half_height,
                 radius,
             } => half_height + radius,
             LinkShape::Cuboid { half } => half.length(),
+            LinkShape::Hull { points } => points.iter().map(|p| p.length()).fold(0.0, f32::max),
         }
     }
 }
@@ -181,20 +182,27 @@ impl RigRecipe {
             write_vec3(&mut h, link.axis_local);
             // Capsules hash exactly as the pre-LinkShape encoding (half_height then
             // radius, no tag) so an all-capsule table keeps its fleet-stamped digest
-            // across the enum introduction. Cuboids lead with CUBOID_TAG — 8 bytes a
-            // capsule can never emit (its first field would have to be a NaN bit
-            // pattern, and `is_finite` bars that), so the variants cannot alias.
-            match link.shape {
+            // across the enum introduction. The other variants lead with a tag — 8
+            // bytes a capsule can never emit (its first field would have to be a NaN
+            // bit pattern, and `is_finite` bars that), so the variants cannot alias.
+            match &link.shape {
                 LinkShape::Capsule {
                     half_height,
                     radius,
                 } => {
-                    write_f32(&mut h, half_height);
-                    write_f32(&mut h, radius);
+                    write_f32(&mut h, *half_height);
+                    write_f32(&mut h, *radius);
                 }
                 LinkShape::Cuboid { half } => {
                     h.write(&CUBOID_TAG.to_le_bytes());
-                    write_vec3(&mut h, half);
+                    write_vec3(&mut h, *half);
+                }
+                LinkShape::Hull { points } => {
+                    h.write(&HULL_TAG.to_le_bytes());
+                    h.write(&(points.len() as u64).to_le_bytes());
+                    for &p in points {
+                        write_vec3(&mut h, p);
+                    }
                 }
             }
             write_vec3(&mut h, link.center);
@@ -213,9 +221,10 @@ impl RigRecipe {
     }
 }
 
-/// Shape-variant discriminator in [`RigRecipe::digest`]'s cuboid arm. All-ones is
-/// NaN as an f32 bit pattern, which no finite capsule field can produce.
+/// Shape-variant discriminators in [`RigRecipe::digest`]. Both halves of each are
+/// NaN as f32 bit patterns, which no finite capsule field can produce.
 const CUBOID_TAG: u64 = u64::MAX;
+const HULL_TAG: u64 = u64::MAX - 1;
 
 fn write_f32(h: &mut crate::fnv::Fnv, v: f32) {
     h.write(&v.to_bits().to_le_bytes());
@@ -397,14 +406,55 @@ mod digest_tests {
         }
     }
 
-    /// GOLDEN pin of the full body digest, the durable sibling of the rl#20
-    /// legacy-stamp shim's pin (which deletes itself with the shim): every stamped
-    /// checkpoint in the fleet keys off this value, so an ACCIDENTAL change — a
-    /// `digest()` encoding refactor as much as a table edit — must never slip through
-    /// as a green build. On a DELIBERATE, reviewed `baked.rs` regen (a new MDP, plan
-    /// the retrain per rl#277), re-pin this golden in the same commit — and delete
-    /// the legacy shim per `legacy_stamp_pin_matches_current_body`, which forbids
-    /// re-pinning ITS constant.
+    #[test]
+    fn hull_digest_is_field_sensitive() {
+        let digest = |shape: super::LinkShape| {
+            let mut r = baked_recipe();
+            let i = capsule_idx(&r);
+            r.links[i].shape = shape;
+            r.digest()
+        };
+        let pts = vec![
+            Vec3::new(0.05, -0.1, 0.0),
+            Vec3::new(-0.05, -0.1, 0.02),
+            Vec3::new(0.0, 0.12, -0.03),
+            Vec3::new(0.01, 0.0, 0.06),
+        ];
+        let hull = |points: Vec<Vec3>| digest(super::LinkShape::Hull { points });
+        let base = hull(pts.clone());
+        assert_eq!(base, hull(pts.clone()), "digest must be deterministic");
+        assert_ne!(
+            base,
+            baked_recipe().digest(),
+            "hull vs the capsule it replaced"
+        );
+        let cuboid = super::LinkShape::Cuboid {
+            half: Vec3::splat(0.1),
+        };
+        assert_ne!(base, digest(cuboid), "hull vs cuboid");
+        let mut bit = pts.clone();
+        bit[2].z = f32::from_bits(bit[2].z.to_bits() ^ 1);
+        let mut added = pts.clone();
+        added.push(Vec3::ZERO);
+        let mut dropped = pts.clone();
+        dropped.pop();
+        let mut swapped = pts.clone();
+        swapped.swap(0, 1);
+        for (what, edited) in [
+            ("point bit", bit),
+            ("added point", added),
+            ("dropped point", dropped),
+            ("point order", swapped),
+        ] {
+            assert_ne!(hull(edited), base, "hull digest must cover {what}");
+        }
+    }
+
+    /// GOLDEN pin of the full body digest: every stamped checkpoint in the fleet keys
+    /// off this value, so an ACCIDENTAL change — a `digest()` encoding refactor as much
+    /// as a table edit — must never slip through as a green build. On a DELIBERATE,
+    /// reviewed `baked.rs` regen (a new MDP, plan the retrain per rl#277), re-pin this
+    /// golden in the same commit.
     #[test]
     fn body_digest_golden() {
         assert_eq!(super::baked_body_digest(), GOLDEN_BODY_DIGEST);

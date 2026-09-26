@@ -77,18 +77,11 @@ pub fn fitted_recipe(model: &LoadedModel) -> Option<RigRecipe> {
     Some(recipe)
 }
 
-fn shape_volume(shape: LinkShape) -> f32 {
-    match shape {
-        LinkShape::Capsule {
-            half_height,
-            radius,
-        } => {
-            let r = radius.max(1e-6);
-            std::f32::consts::PI * r * r * (2.0 * half_height)
-                + (4.0 / 3.0) * std::f32::consts::PI * r * r * r
-        }
-        LinkShape::Cuboid { half } => 8.0 * half.x * half.y * half.z,
-    }
+fn link_volume(link: &RigLink) -> f32 {
+    crab_world::bot::body::link_collider(link)
+        .raw
+        .mass_properties(1.0)
+        .mass()
 }
 
 /// rl#20 Phase 3: every link keeps the MASS it carries in the reference (committed)
@@ -113,13 +106,13 @@ fn rederive_densities(recipe: &mut RigRecipe, reference: &RigRecipe) {
             link.bone, ref_link.bone,
             "link order diverged from the committed table"
         );
-        link.density = ref_link.density * shape_volume(ref_link.shape) / shape_volume(link.shape);
+        link.density = ref_link.density * (link_volume(ref_link) / link_volume(link));
     }
     let ref_carapace_vol =
         8.0 * reference.carapace_half.x * reference.carapace_half.y * reference.carapace_half.z;
     let carapace_vol =
         8.0 * recipe.carapace_half.x * recipe.carapace_half.y * recipe.carapace_half.z;
-    recipe.carapace_density = reference.carapace_density * ref_carapace_vol / carapace_vol;
+    recipe.carapace_density = reference.carapace_density * (ref_carapace_vol / carapace_vol);
 }
 
 fn f(x: f32) -> String {
@@ -161,8 +154,8 @@ fn joint(id: CrabJointId) -> String {
     }
 }
 
-fn shape(s: LinkShape) -> String {
-    match s {
+fn shape(s: &LinkShape) -> String {
+    match *s {
         LinkShape::Capsule {
             half_height,
             radius,
@@ -172,6 +165,14 @@ fn shape(s: LinkShape) -> String {
             f(radius)
         ),
         LinkShape::Cuboid { half } => format!("LinkShape::Cuboid {{ half: {} }}", vec3(half)),
+        LinkShape::Hull { ref points } => {
+            let mut out = "LinkShape::Hull { points: vec![\n".to_string();
+            for &p in points {
+                let _ = writeln!(out, "                    {},", vec3(p));
+            }
+            out.push_str("                ] }");
+            out
+        }
     }
 }
 
@@ -190,7 +191,7 @@ fn push_link(out: &mut String, l: &RigLink) {
         l.bone,
         vec3(l.anchor1),
         vec3(l.axis_local),
-        shape(l.shape),
+        shape(&l.shape),
         vec3(l.center),
         quat(l.col_rot),
         f(l.density),
@@ -239,6 +240,20 @@ mod tests {
     use super::*;
     use crab_world::bot::rig::{BAKED_ASSET_DIGEST, baked_recipe};
     use crab_world::mesh_fallback::model_path;
+
+    #[test]
+    fn hull_emits_every_point() {
+        let hull = LinkShape::Hull {
+            points: vec![Vec3::new(0.1, -2.5e-9, 3.0), Vec3::new(-0.0, 1.0, 0.25)],
+        };
+        assert_eq!(
+            shape(&hull),
+            "LinkShape::Hull { points: vec![\n\
+             \x20                   Vec3::new(0.1, -2.5e-9, 3.0),\n\
+             \x20                   Vec3::new(-0.0, 1.0, 0.25),\n\
+             \x20               ] }"
+        );
+    }
 
     /// THE fitted-vs-committed drift-guard (bddap/rl#20 Phase 0's promise, Phase 2's
     /// teeth): a re-fit of the canonical asset must reproduce the committed baked
