@@ -180,25 +180,21 @@ impl RigRecipe {
             write_opt_index(&mut h, link.parent.map(|p| p as u64));
             write_vec3(&mut h, link.anchor1);
             write_vec3(&mut h, link.axis_local);
-            // Capsules hash exactly as the pre-LinkShape encoding (half_height then
-            // radius, no tag) so an all-capsule table keeps its fleet-stamped digest
-            // across the enum introduction. The other variants lead with a tag — 8
-            // bytes a capsule can never emit (its first field would have to be a NaN
-            // bit pattern, and `is_finite` bars that), so the variants cannot alias.
             match &link.shape {
                 LinkShape::Capsule {
                     half_height,
                     radius,
                 } => {
+                    h.write(&[0]);
                     write_f32(&mut h, *half_height);
                     write_f32(&mut h, *radius);
                 }
                 LinkShape::Cuboid { half } => {
-                    h.write(&CUBOID_TAG.to_le_bytes());
+                    h.write(&[1]);
                     write_vec3(&mut h, *half);
                 }
                 LinkShape::Hull { points } => {
-                    h.write(&HULL_TAG.to_le_bytes());
+                    h.write(&[2]);
                     h.write(&(points.len() as u64).to_le_bytes());
                     for &p in points {
                         write_vec3(&mut h, p);
@@ -220,11 +216,6 @@ impl RigRecipe {
         h.finish()
     }
 }
-
-/// Shape-variant discriminators in [`RigRecipe::digest`]. Both halves of each are
-/// NaN as f32 bit patterns, which no finite capsule field can produce.
-const CUBOID_TAG: u64 = u64::MAX;
-const HULL_TAG: u64 = u64::MAX - 1;
 
 fn write_f32(h: &mut crate::fnv::Fnv, v: f32) {
     h.write(&v.to_bits().to_le_bytes());
@@ -460,5 +451,5 @@ mod digest_tests {
         assert_eq!(super::baked_body_digest(), GOLDEN_BODY_DIGEST);
     }
 
-    const GOLDEN_BODY_DIGEST: u64 = 0xe0ee_5cb3_0042_46ce;
+    const GOLDEN_BODY_DIGEST: u64 = 0x9e77_9a4f_f657_74dd;
 }

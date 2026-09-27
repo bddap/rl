@@ -87,8 +87,8 @@ pub(crate) fn random_episode_origin(rng: &mut impl rand::Rng, terrain: &TerrainG
 /// `reach_radius_is_finer_than_the_crab`), so a target seeded under the
 /// carapace (rl#250) is only touchable by an actual claw strike — the skill
 /// GCR's collider-contact downing (rl#249) needs. The floor is GCR's contact
-/// scale, claw capsule radius + bridged `CLAW_DOWN_BUFFER` (`net::sim`) ≈
-/// 0.1 m in these metres: 0.2 stays ~2× that, so exploration can plausibly
+/// scale, the bridged `CLAW_DOWN_BUFFER` (`net::sim`) measured from the claw hull's
+/// edge, under 0.1 m in these metres: 0.2 stays over 2× that, so exploration can plausibly
 /// discover the grab.
 pub const REACH_RADIUS: f32 = 0.2;
 
