@@ -154,6 +154,20 @@ mod tests {
     use crate::bot::rig::baked_recipe;
 
     #[test]
+    fn feet_and_pincers_are_hulls() {
+        use crate::bot::body::CrabJointId::{ClawPincer, LegCarpus};
+        for link in baked_recipe().links {
+            if matches!(link.actuated, Some(LegCarpus(..) | ClawPincer(_))) {
+                assert!(
+                    matches!(link.shape, LinkShape::Hull { .. }),
+                    "{}: the MP claw reader and the foot-tip reads take hulls only",
+                    link.bone
+                );
+            }
+        }
+    }
+
+    #[test]
     fn hull_rest_shape_places_points_in_the_link_frame() {
         let mut link = baked_recipe().links.swap_remove(0);
         link.center = Vec3::new(0.1, 0.2, 0.3);

@@ -183,11 +183,17 @@ const CLAW_M: i64 = PLAYER_HEIGHT_FP * 5 / 9;
 /// near-miss cases stay one call.
 #[cfg(test)]
 fn claw_at(p: Pos, dx: i64, y: i64) -> ClawPose {
-    let end = |sx: i64| Pos {
-        x: p.x + dx + sx * 2 * CLAW_M,
-        z: p.z,
+    let corner = |sx: i64, sz: i64| {
+        let x = p.x + dx + sx * (2 * CLAW_M + CLAW_M / 2);
+        (
+            Pos {
+                x,
+                z: p.z + sz * CLAW_M / 2,
+            },
+            y,
+        )
     };
-    ClawPose::new(&[(end(-1), y), (end(1), y)], CLAW_M / 2)
+    ClawPose::new(&[corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)])
 }
 
 /// Advance every crab toward its nearest living player and return this tick's
@@ -249,7 +255,7 @@ const fn player_heights(h: f32) -> i64 {
 
 /// "Very close" slack around a claw collider (rl#249): the sim player is a point, so this
 /// covers their body radius plus the near-miss feel margin — and absorbs one tick of claw
-/// sweep (the capsule is sampled per tick, not swept). At her scale a graze this wide
+/// sweep (the claw is sampled per tick, not swept). At her scale a graze this wide
 /// (~1.1 player heights) reads as a hit. Pure feel parameter; tune on playtest.
 pub const CLAW_DOWN_BUFFER: i64 = player_heights(2.0 / 1.8);
 
@@ -590,8 +596,8 @@ pub struct Crab {
 /// mechanism, alone (rl#236): standing under her carapace is deliberately
 /// safe-and-fun, so no center/footprint disc downs anyone; only a pincer touch does.
 /// The claw is the pincer's real physics collider (rl#249 — no separate hitbox to
-/// drift) as a convex point set dilated by a radius: the XZ footprint of the points and
-/// their height band ABOVE THE LOCAL GROUND SURFACE, all on the fixed-point grid.
+/// drift) as a convex point set: the XZ footprint of the points and their height band
+/// ABOVE THE LOCAL GROUND SURFACE, all on the fixed-point grid.
 /// Surface-relative y is what makes [`Self::downs`]'s player span
 /// (`0..=PLAYER_HEIGHT_FP`, a walker standing ON the ground) hold on the baked terrain
 /// tile exactly as on the flat grids (rl#281 stage 6). External per-tick
@@ -603,17 +609,15 @@ pub struct ClawPose {
     footprint: Vec<Pos>,
     y_lo: i64,
     y_hi: i64,
-    radius: i64,
 }
 
 impl ClawPose {
-    pub fn new(points: &[(Pos, i64)], radius: i64) -> Self {
+    pub fn new(points: &[(Pos, i64)]) -> Self {
         let heights = || points.iter().map(|&(_, y)| y);
         Self {
             footprint: convex_footprint(points.iter().map(|&(p, _)| p).collect()),
             y_lo: heights().min().expect("a claw collider has points"),
             y_hi: heights().max().expect("a claw collider has points"),
-            radius,
         }
     }
 
@@ -627,7 +631,7 @@ impl ClawPose {
     /// of the claw's XZ footprint. An airborne walker (rl#355) lifts its span with it,
     /// so sailing over a claw is safe passage — no separate exemption.
     fn downs(&self, p: Pos, alt: i64) -> bool {
-        let reach = self.radius + CLAW_DOWN_BUFFER;
+        let reach = CLAW_DOWN_BUFFER;
         if self.y_hi + reach < alt || self.y_lo - reach > alt + PLAYER_HEIGHT_FP {
             return false;
         }
@@ -2921,7 +2925,7 @@ mod tests {
         let w = 4 * CLAW_DOWN_BUFFER;
         let hull_at = |cx: i64, y: i64| {
             let corners = [(-w, -w), (w, -w), (w, w), (-w, w), (0, w / 2)];
-            ClawPose::new(&corners.map(|(x, z)| (Pos { x: cx + x, z }, y)), 0)
+            ClawPose::new(&corners.map(|(x, z)| (Pos { x: cx + x, z }, y)))
         };
         assert!(
             hull_at(0, CLAW_M).downs(p, 0),
@@ -2931,7 +2935,7 @@ mod tests {
         assert!(!hull_at(w + CLAW_DOWN_BUFFER + 10, CLAW_M).downs(p, 0));
         let over = PLAYER_HEIGHT_FP + CLAW_DOWN_BUFFER + 10;
         assert!(!hull_at(0, over).downs(p, 0), "overhead, clear of the span");
-        let slanted = |lo: i64, hi: i64| ClawPose::new(&[(p, lo), (Pos { x: 1, z: 0 }, hi)], 0);
+        let slanted = |lo: i64, hi: i64| ClawPose::new(&[(p, lo), (Pos { x: 1, z: 0 }, hi)]);
         assert!(
             slanted(-10 * CLAW_M, CLAW_M).downs(p, 0),
             "reaching up into the span"
@@ -2976,8 +2980,7 @@ mod tests {
             PlayerStatus::Alive,
             "a claw passing overhead must not down anyone"
         );
-        // Beside the player at body height, just past radius + buffer (measured from the
-        // segment's near END — the segment check, not an endpoint/center approximation).
+        // Beside the player at body height, just past the buffer off the claw's near edge.
         let reach = CLAW_M / 2 + CLAW_DOWN_BUFFER;
         assert_eq!(
             step_armed(
@@ -2994,7 +2997,7 @@ mod tests {
                 claw_at(p, 2 * CLAW_M + reach - CLAW_M / 10, CLAW_M)
             ),
             PlayerStatus::Downed,
-            "within the buffer of the capsule segment downs"
+            "within the buffer of the claw downs"
         );
     }
 

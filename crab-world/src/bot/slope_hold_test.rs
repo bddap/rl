@@ -424,12 +424,10 @@ fn stance_stats() {
         total += m;
         println!("carapace m {m:.3} at {p:?}");
     }
-    // A foot is the LOW capsule endpoint — the point that actually meets the
-    // ground — not the link center, which sits half a capsule higher and inboard
-    // on splayed legs.
-    let mut tips = Vec::new();
+    // A foot is its hull's LOWEST vertex — the point that actually meets the ground —
+    // not the link center, which sits higher and inboard on splayed legs.
+    let mut feet = Vec::new();
     for (link, &wp) in recipe.links.iter().zip(&world_pos) {
-        let shape = rig::link_rest_shape(link, Vec3::ZERO);
         let mp = super::body::link_collider(link)
             .raw
             .mass_properties(link.density);
@@ -437,27 +435,20 @@ fn stance_stats() {
         com += (wp + mp.local_com) * m;
         total += m;
         if matches!(link.actuated, Some(super::body::CrabJointId::LegCarpus(..))) {
-            tips.push(match shape {
-                rig::RestShape::Capsule { a, b, radius } => {
-                    (wp + if a.y < b.y { a } else { b }, radius)
-                }
-                rig::RestShape::Hull { ref points } => (
-                    wp + *points
-                        .iter()
-                        .min_by(|p, q| p.y.total_cmp(&q.y))
-                        .expect("hull has points"),
-                    0.0,
-                ),
-                rig::RestShape::Cuboid { .. } => {
-                    panic!("stance_stats reads foot tips off capsules and hulls")
-                }
-            });
+            let rig::RestShape::Hull { points } = rig::link_rest_shape(link, Vec3::ZERO) else {
+                panic!("feet are baked as hulls");
+            };
+            feet.push(
+                wp + *points
+                    .iter()
+                    .min_by(|p, q| p.y.total_cmp(&q.y))
+                    .expect("hull"),
+            );
         }
     }
     com /= total;
     println!("total m {total:.3}  com {com:?}");
-    let feet: Vec<Vec3> = tips.iter().map(|&(t, _)| t).collect();
-    let ground = tips.iter().map(|&(t, r)| t.y - r).fold(f32::MAX, f32::min);
+    let ground = feet.iter().map(|f| f.y).fold(f32::MAX, f32::min);
     let h = com.y - ground;
     let max_x = feet.iter().map(|f| f.x).fold(f32::MIN, f32::max);
     let min_x = feet.iter().map(|f| f.x).fold(f32::MAX, f32::min);

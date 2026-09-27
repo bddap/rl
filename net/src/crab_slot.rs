@@ -327,12 +327,12 @@ pub(crate) fn collect_crab_poses(world: &mut World, fallback: &[CrabPose]) -> Ve
             if !read.contains_key(&env.0) {
                 continue;
             }
-            let Some((points, radius)) = claw_tip_shape(modeled_shape(col, "claw capture")) else {
+            let Some(points) = claw_tip_points(modeled_shape(col, "claw capture")) else {
                 // A claw the sim can't model is a code defect, never a skippable
                 // row: this claw would stop touching players in MP with no other
                 // symptom (rl#288). ERROR so it surfaces through fleet telemetry.
                 error_once!(
-                    "claw capture: claw-tip collider is neither a capsule nor a hull — \
+                    "claw capture: claw-tip collider is not a hull — \
                      this claw is INVISIBLE to MP claw-touch (rl#288)"
                 );
                 continue;
@@ -347,10 +347,7 @@ pub(crate) fn collect_crab_poses(world: &mut World, fallback: &[CrabPose]) -> Ve
                 )
             };
             let points: Vec<(Pos, i64)> = points.into_iter().map(world_pt).collect();
-            claws.push((
-                env.0,
-                ClawPose::new(&points, crate::sim::meters_to_grid(radius)),
-            ));
+            claws.push((env.0, ClawPose::new(&points)));
         }
         for (env, claw) in claws {
             read.get_mut(&env).expect("gated above").claws.push(claw);
@@ -571,15 +568,13 @@ pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
     });
 }
 
-/// A claw-tip collider as the sim's claw model: its points in entity-local space and
-/// the radius dilating them. `None` for anything but a capsule or a hull — the caller
-/// screams, because an unreadable claw is invisible to MP claw-touch (rl#288). Callers
-/// pass the UNSCALED view ([`modeled_shape`]): corrupt transform scale rebuilds the
-/// scaled `raw` shape as a different primitive, while the unscaled one IS the claw.
-fn claw_tip_shape(view: ColliderView<'_>) -> Option<(Vec<Vec3>, f32)> {
+/// A claw-tip hull's points in entity-local space — the sim's claw model. `None` for any
+/// other shape; the caller screams, because an unreadable claw is invisible to MP
+/// claw-touch (rl#288). Callers pass the UNSCALED view ([`modeled_shape`]): corrupt
+/// transform scale rebuilds the scaled `raw` shape, while the unscaled one IS the claw.
+fn claw_tip_points(view: ColliderView<'_>) -> Option<Vec<Vec3>> {
     match view {
-        ColliderView::Capsule(c) => Some((vec![c.segment().a(), c.segment().b()], c.radius())),
-        ColliderView::ConvexPolyhedron(c) => Some((c.points().collect(), 0.0)),
+        ColliderView::ConvexPolyhedron(c) => Some(c.points().collect()),
         _ => None,
     }
 }
@@ -689,54 +684,42 @@ impl HeadlessHostWorld {
 }
 
 #[cfg(test)]
-mod claw_tip_shape_tests {
+mod claw_tip_points_tests {
     use super::*;
 
-    #[test]
-    fn reads_capsules_and_hulls() {
-        let (a, b) = (Vec3::new(0.0, -0.05, 0.0), Vec3::new(0.0, 0.05, 0.0));
-        let capsule = Collider::capsule(a, b, 0.02);
-        assert_eq!(
-            claw_tip_shape(capsule.as_typed_shape()),
-            Some((vec![a, b], 0.02))
-        );
+    const TET: [Vec3; 4] = [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z];
 
-        let tet = [Vec3::ZERO, Vec3::X * 0.1, Vec3::Y * 0.1, Vec3::Z * 0.1];
-        let hull = Collider::convex_hull(&tet).unwrap();
-        let (mut pts, r) = claw_tip_shape(hull.as_typed_shape()).unwrap();
+    fn sorted(mut pts: Vec<Vec3>) -> Vec<Vec3> {
         pts.sort_by(|p, q| p.to_array().partial_cmp(&q.to_array()).unwrap());
-        let mut want = tet.to_vec();
-        want.sort_by(|p, q| p.to_array().partial_cmp(&q.to_array()).unwrap());
-        assert_eq!((pts, r), (want, 0.0));
+        pts
     }
 
     #[test]
-    fn refuses_other_shapes() {
+    fn reads_hulls_and_refuses_other_shapes() {
+        let hull = Collider::convex_hull(&TET.map(|p| p * 0.1)).unwrap();
+        assert_eq!(
+            claw_tip_points(hull.as_typed_shape()).map(sorted),
+            Some(sorted(TET.map(|p| p * 0.1).to_vec()))
+        );
         let boxy = Collider::compound(vec![(
             Vec3::ZERO,
             Quat::IDENTITY,
             Collider::cuboid(0.1, 0.1, 0.1),
         )]);
-        let wrapped = Collider::compound(vec![(
-            Vec3::X,
-            Quat::IDENTITY,
-            Collider::capsule_y(0.05, 0.02),
-        )]);
-        for col in [boxy, wrapped, Collider::ball(0.1)] {
-            assert!(claw_tip_shape(col.as_typed_shape()).is_none());
+        for col in [boxy, Collider::capsule_y(0.05, 0.02), Collider::ball(0.1)] {
+            assert!(claw_tip_points(col.as_typed_shape()).is_none());
         }
     }
 
     /// The rl#288 corruption: non-unit collider scale rebuilds the scaled `raw` shape;
-    /// the unscaled view the capture reads stays the modeled capsule.
+    /// the unscaled view the capture reads stays the modeled hull.
     #[test]
-    fn scale_corruption_keeps_the_unscaled_capsule_readable() {
-        let (a, b) = (Vec3::new(0.0, -0.05, 0.0), Vec3::new(0.0, 0.05, 0.0));
-        let mut col = Collider::capsule(a, b, 0.02);
+    fn scale_corruption_keeps_the_unscaled_hull() {
+        let mut col = Collider::convex_hull(&TET.map(|p| p * 0.1)).unwrap();
         col.set_scale(Vec3::new(1.0, 0.9, 1.0), 4);
         assert_eq!(
-            claw_tip_shape(col.as_unscaled_typed_shape()),
-            Some((vec![a, b], 0.02))
+            claw_tip_points(col.as_unscaled_typed_shape()).map(sorted),
+            Some(sorted(TET.map(|p| p * 0.1).to_vec()))
         );
     }
 }

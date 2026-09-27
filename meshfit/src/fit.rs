@@ -7,31 +7,17 @@ pub struct FittedCapsule {
     pub radius: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum FittedShape {
     Capsule(FittedCapsule),
     Cuboid { center: Vec3, rot: Quat, half: Vec3 },
-}
-
-/// Which primitives a part may fit. Contact-critical parts stay capsules: feet
-/// plant and roll on their spherical tips, and the claw-strike capture reads the
-/// pincer collider back via `as_capsule` (net::crab_slot), so a box there
-/// would silently vanish from the sim's claw-touch decisions.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ShapePolicy {
-    CapsuleOnly,
-    Any,
+    Hull(Vec<Vec3>),
 }
 
 /// Radius percentiles tried per capsule candidate. The historical fixed 0.92 leaves
 /// ~8% of a surface-vertex cloud outside by construction; higher-coverage radii
-/// compete and the score decides. Capsule-pinned parts try 0.92 only: on their
-/// tapered clouds (feet, pincers) a higher-cover radius means a fatter tip — the
-/// collider overhangs the rendered flesh exactly where it meets the world, which
-/// reads as hover/phantom reach. Until a tapered primitive can be honest at both
-/// ends, they keep the historical cover.
+/// compete and the score decides.
 const RADIUS_QS: [f32; 2] = [0.92, 0.96];
-const PINNED_RADIUS_QS: [f32; 1] = [0.92];
 
 /// Extent percentiles tried per cuboid candidate (per-axis lo/hi, so an asymmetric
 /// cloud shifts the box center rather than fattening it). 1.0 = the exact extremes:
@@ -49,26 +35,14 @@ const BOX_MARGIN: f32 = 1.0;
 /// Candidates: capsules about the dominant PCA axis and (when given) the bone-chain
 /// direction — the chain axis is what rescues an isotropic cloud whose PCA axis is
 /// noise (the degenerate middle-coxa hips) — each with uniform and taper-aware end
-/// insets over [`RADIUS_QS`]; plus, under [`ShapePolicy::Any`], PCA-frame cuboids
-/// over [`BOX_QS`]. One dimensionless loss ([`fit_loss`]) picks the winner.
-pub fn fit_link_shape(
-    points: &[Vec3],
-    chain_dir: Option<Vec3>,
-    policy: ShapePolicy,
-) -> Option<FittedShape> {
+/// insets over [`RADIUS_QS`]; plus PCA- and identity-frame cuboids over [`BOX_QS`].
+/// One dimensionless loss ([`fit_loss`]) picks the winner.
+pub fn fit_link_shape(points: &[Vec3], chain_dir: Option<Vec3>) -> Option<FittedShape> {
     if points.len() < 4 {
         return None;
     }
     let (centroid, axes) = pca_frame(points);
     let scale = cloud_thickness(points, centroid, axes[0]);
-    // Capsule-pinned parts are pinned BECAUSE their surface meets the world (feet
-    // plant, pincers strike): a collider overhanging the rendered flesh there reads
-    // as hovering/phantom contact, so bulge costs as much as poke. Elsewhere poke
-    // stays the dominant dishonesty.
-    let (bulge_w, radius_qs): (f32, &[f32]) = match policy {
-        ShapePolicy::CapsuleOnly => (1.0, &PINNED_RADIUS_QS),
-        ShapePolicy::Any => (0.5, &RADIUS_QS),
-    };
 
     let mut axis_cands = vec![axes[0]];
     if let Some(d) = chain_dir {
@@ -80,9 +54,9 @@ pub fn fit_link_shape(
 
     let mut best_cap: Option<(f32, FittedCapsule)> = None;
     for axis in axis_cands {
-        for cap in capsule_candidates(points, centroid, axis, radius_qs) {
+        for cap in capsule_candidates(points, centroid, axis, &RADIUS_QS) {
             let s = score_capsule(points, cap.a, cap.b, cap.radius);
-            let loss = fit_loss(&s, scale, bulge_w);
+            let loss = fit_loss(&s, scale);
             if best_cap.is_none_or(|(l, _)| loss < l) {
                 best_cap = Some((loss, cap));
             }
@@ -91,23 +65,29 @@ pub fn fit_link_shape(
     let (cap_loss, cap) = best_cap?;
     let mut best = (cap_loss, FittedShape::Capsule(cap));
 
-    if policy == ShapePolicy::Any {
-        // Two frames: the PCA frame fits elongated slabs; the identity frame keeps an
-        // isotropic blob's box untilted, so no corner pokes past the flesh envelope
-        // on a noise axis.
-        let id_axes = [Vec3::X, Vec3::Y, Vec3::Z];
-        for frame in [axes, id_axes] {
-            for (center, rot, half) in box_candidates(points, centroid, frame) {
-                let s = score_box(points, center, rot, half);
-                let loss = fit_loss(&s, scale, bulge_w)
-                    + CORNER_W * corner_emptiness(points, center, rot, half) / half.length();
-                if loss < BOX_MARGIN * cap_loss && loss < best.0 {
-                    best = (loss, FittedShape::Cuboid { center, rot, half });
-                }
+    // Two frames: the PCA frame fits elongated slabs; the identity frame keeps an
+    // isotropic blob's box untilted, so no corner pokes past the flesh envelope on a
+    // noise axis.
+    let id_axes = [Vec3::X, Vec3::Y, Vec3::Z];
+    for frame in [axes, id_axes] {
+        for (center, rot, half) in box_candidates(points, centroid, frame) {
+            let s = score_box(points, center, rot, half);
+            let loss = fit_loss(&s, scale)
+                + CORNER_W * corner_emptiness(points, center, rot, half) / half.length();
+            if loss < BOX_MARGIN * cap_loss && loss < best.0 {
+                best = (loss, FittedShape::Cuboid { center, rot, half });
             }
         }
     }
     Some(best.1)
+}
+
+/// The cloud's convex hull as its vertices; `None` when it spans no 3D hull.
+pub fn fit_hull(points: &[Vec3]) -> Option<FittedShape> {
+    bevy_rapier3d::parry::shape::ConvexPolyhedron::from_convex_hull(points)
+        .map(|h| h.points().to_vec())
+        .filter(|v| hull_min_half_width(v) > 1e-4)
+        .map(FittedShape::Hull)
 }
 
 /// Weight of the corner-emptiness term relative to the box's half-diagonal.
@@ -137,10 +117,10 @@ fn corner_emptiness(points: &[Vec3], center: Vec3, rot: Quat, half: Vec3) -> f32
 
 /// One dimensionless fit loss for every candidate shape. Poke-out (mesh the physics
 /// doesn't back) and bulge (collider past the rendered surface — invisible walls)
-/// are both dishonest; `bulge_w` sets their relative cost per part policy, and the
-/// outside fraction trades ~1% of stray verts against pk95 of ~scale/4.
-fn fit_loss(s: &ColliderScore, scale: f32, bulge_w: f32) -> f32 {
-    4.0 * s.frac_outside + (s.poke_out_p95 + bulge_w * s.bulge_p95) / scale
+/// are both dishonest, poke twice as much; the outside fraction trades ~1% of stray
+/// verts against pk95 of ~scale/4.
+fn fit_loss(s: &ColliderScore, scale: f32) -> f32 {
+    4.0 * s.frac_outside + (s.poke_out_p95 + 0.5 * s.bulge_p95) / scale
 }
 
 /// Typical cloud thickness — p95 of perpendicular distance about the dominant axis —
@@ -202,7 +182,7 @@ fn capsule_candidates(
             radius: r,
         });
         // Taper-aware end insets: each end sphere sits one LOCAL end-radius in from
-        // its extreme, so a 2:1 tapered link (a foot) doesn't get its thin end
+        // its extreme, so a 2:1 tapered link doesn't get its thin end
         // shortened by the fat end's radius.
         if !lo.is_empty() && !hi.is_empty() {
             let r_lo = percentile(&lo, q).max(1e-4);
@@ -514,9 +494,8 @@ mod tests {
         let r = 0.05f32;
         let hseg = 0.2f32;
         let pts = synthetic_capsule_cloud(Vec3::X, r, hseg);
-        let Some(FittedShape::Capsule(fit)) = fit_link_shape(&pts, None, ShapePolicy::CapsuleOnly)
-        else {
-            panic!("capsule-only policy must yield a capsule");
+        let Some(FittedShape::Capsule(fit)) = fit_link_shape(&pts, None) else {
+            panic!("a genuinely cylindrical cloud must fit a capsule, not a box");
         };
         let dir = (fit.b - fit.a).normalize();
         assert!(dir.dot(Vec3::X).abs() > 0.999, "axis off: {dir:?}");
@@ -534,19 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn cylindrical_cloud_keeps_a_capsule_even_unpinned() {
-        let pts = synthetic_capsule_cloud(Vec3::X, 0.05, 0.2);
-        assert!(
-            matches!(
-                fit_link_shape(&pts, None, ShapePolicy::Any),
-                Some(FittedShape::Capsule(_))
-            ),
-            "a genuinely cylindrical cloud must not be displaced by a box"
-        );
-    }
-
-    #[test]
-    fn boxy_cloud_fits_a_cuboid_under_any_policy() {
+    fn boxy_cloud_fits_a_cuboid() {
         // A flat slab: capsules waste most of their cross-section on it.
         let mut pts = Vec::new();
         for i in 0..12 {
@@ -558,7 +525,7 @@ mod tests {
                 }
             }
         }
-        match fit_link_shape(&pts, None, ShapePolicy::Any) {
+        match fit_link_shape(&pts, None) {
             Some(FittedShape::Cuboid { half, .. }) => {
                 assert!(
                     half.max_element() < 0.25 && half.min_element() < 0.05,
@@ -567,13 +534,13 @@ mod tests {
             }
             other => panic!("a slab must fit a cuboid, got {other:?}"),
         }
-        assert!(
-            matches!(
-                fit_link_shape(&pts, None, ShapePolicy::CapsuleOnly),
-                Some(FittedShape::Capsule(_))
-            ),
-            "CapsuleOnly must never yield a box"
-        );
+        let Some(FittedShape::Hull(hull)) = fit_hull(&pts) else {
+            panic!("a 3D cloud has a hull");
+        };
+        assert_eq!(hull.len(), 8, "a slab's hull is its 8 corners");
+        assert_eq!(score_hull(&pts, &hull).frac_outside, 0.0);
+        let flat: Vec<Vec3> = pts.iter().map(|p| p.with_y(0.0)).collect();
+        assert!(fit_hull(&flat).is_none(), "a coplanar cloud spans no hull");
     }
 
     #[test]
@@ -587,9 +554,7 @@ mod tests {
             pts.push(Vec3::new(r * a.cos(), r * a.sin(), z) * 0.08);
         }
         let chain = Vec3::new(1.0, 0.0, 0.0);
-        let Some(FittedShape::Capsule(fit)) =
-            fit_link_shape(&pts, Some(chain), ShapePolicy::CapsuleOnly)
-        else {
+        let Some(FittedShape::Capsule(fit)) = fit_link_shape(&pts, Some(chain)) else {
             panic!("expected a capsule");
         };
         // On a sphere every axis scores alike; the fit must stay sane (radius ≈ 0.08).

@@ -9,18 +9,8 @@ use bevy::prelude::*;
 use crab_world::bot::body::{CrabJointId, Side};
 use crab_world::bot::rig::{LinkShape, PartId, RigLink, RigRecipe, arc_to};
 
-use crate::fit::{FittedShape, ShapePolicy, fit_link_shape};
+use crate::fit::{FittedShape, fit_hull, fit_link_shape};
 use crate::gltf_load::LoadedModel;
-
-/// Feet plant and roll on their spherical capsule tips, and the pincer collider is
-/// read back via `as_capsule` for the sim's claw-touch decisions
-/// (net::crab_slot) — both stay capsules whatever the fit score says.
-fn shape_policy(id: CrabJointId) -> ShapePolicy {
-    match id {
-        CrabJointId::LegCarpus(..) | CrabJointId::ClawPincer(_) => ShapePolicy::CapsuleOnly,
-        _ => ShapePolicy::Any,
-    }
-}
 
 /// The fitted recipe: `rig::build_recipe`'s bone-chain skeleton with each link's
 /// collider geometry replaced by the best-scoring primitive fit of its skinned
@@ -46,11 +36,13 @@ pub fn fitted_recipe(model: &LoadedModel) -> Option<RigRecipe> {
         // center direction IS the chain axis — the hint that rescues isotropic
         // clouds whose PCA axis is noise (the degenerate middle coxae).
         let chain_dir = link.center.normalize_or_zero();
-        let Some(fitted) = fit_link_shape(
-            pts,
-            (chain_dir.length_squared() > 0.5).then_some(chain_dir),
-            shape_policy(id),
-        ) else {
+        let fitted = match id {
+            // Flattened tapering blades that meet the world: no capsule or box is honest
+            // at both ends of the taper; the hull of the flesh is.
+            CrabJointId::LegCarpus(..) | CrabJointId::ClawPincer(_) => fit_hull(pts),
+            _ => fit_link_shape(pts, (chain_dir.length_squared() > 0.5).then_some(chain_dir)),
+        };
+        let Some(fitted) = fitted else {
             continue;
         };
         let origin = model
@@ -70,6 +62,14 @@ pub fn fitted_recipe(model: &LoadedModel) -> Option<RigRecipe> {
                 link.center = center - origin;
                 link.col_rot = rot;
                 link.shape = LinkShape::Cuboid { half };
+            }
+            FittedShape::Hull(points) => {
+                let center = points.iter().sum::<Vec3>() / points.len() as f32;
+                link.center = center - origin;
+                link.col_rot = Quat::IDENTITY;
+                link.shape = LinkShape::Hull {
+                    points: points.iter().map(|&p| p - center).collect(),
+                };
             }
         }
     }
