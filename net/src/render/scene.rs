@@ -4,7 +4,7 @@ use super::pose::Pose;
 use super::*;
 
 #[derive(Component)]
-pub(super) struct PlayerAvatar(PlayerId);
+pub(super) struct PlayerAvatar(pub(super) PlayerId);
 
 #[derive(Component)]
 pub(super) struct CrabAvatar(pub(super) usize);
@@ -471,7 +471,7 @@ pub(super) fn apply_transforms(
         }
         clamp_camera_above_terrain(&mut cam, &terrain, *origin);
         if let Some(mut trace) = trace {
-            trace.frame(clock.tick, alpha, time.delta(), cam.translation, origin.0);
+            trace.frame(clock.tick, alpha, time.delta(), &cam, origin.0);
         }
     }
 }
@@ -547,6 +547,11 @@ pub(super) fn lerp_yaw(a: i32, b: i32, alpha: f32) -> f32 {
 pub(super) fn look_direction(yaw_radians: f32, pitch_radians: f32) -> Vec3 {
     let rot = Quat::from_rotation_y(yaw_radians) * Quat::from_rotation_x(-pitch_radians);
     (rot * Vec3::Z).normalize()
+}
+
+/// The yaw [`look_direction`] takes, recovered from a direction.
+pub(super) fn heading(dir: Vec3) -> f32 {
+    dir.x.atan2(dir.z)
 }
 
 /// The FP cameras' perspective: Bevy's stock 0.1 m near plane assumes a 1.8 m human;

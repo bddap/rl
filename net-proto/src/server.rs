@@ -390,6 +390,10 @@ impl Server {
         self.pending.is_some()
     }
 
+    pub(crate) fn pending_inputs(&self) -> Option<&BTreeMap<PlayerId, Input>> {
+        self.pending.as_ref().map(|p| &p.inputs)
+    }
+
     /// File one remote client's input into its per-player stream. `from` MUST be the
     /// authenticated sender (the transport binds it to the QUIC peer id), never read from a
     /// body — otherwise a client could file input as someone else. An input from a player

@@ -1203,8 +1203,6 @@ impl Sim {
         }
     }
 
-    // Live only via `ClientSim::reconcile_local_prediction` (render-only) outside
-    // tests (rl#248).
     pub(crate) fn predict_player(&mut self, id: PlayerId, inp: Input) {
         if self.outcome != Outcome::Ongoing {
             return;

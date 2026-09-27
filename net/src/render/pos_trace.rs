@@ -12,9 +12,10 @@
 //!   whenever it changes (in practice once per round).
 //! - `T,<tick>,<x>,<z>,<alt>` — local player sim position after this tick, grid
 //!   units.
-//! - `F,<tick>,<frac>,<dt_us>,<cx>,<cy>,<cz>` — the frame's [`RenderClock`] and
-//!   camera translation (render-frame meters) after `apply_transforms`, plus the
-//!   frame's `Time` delta in microseconds.
+//! - `F,<tick>,<frac>,<dt_us>,<cx>,<cy>,<cz>,<yaw>` — the frame's [`RenderClock`],
+//!   camera translation (render-frame meters) and heading (radians, the sim's yaw
+//!   convention) after `apply_transforms`, plus the frame's `Time` delta in
+//!   microseconds.
 //! - `V,<tick>,<x>,<y>,<z>` — the local craft pose entering the pose window
 //!   (rl#376), render-frame meters: the per-tick craft displacement ground truth.
 //! - `Q,<tick>,<qx>,<qy>,<qz>,<qw>` — that pose's orientation quaternion (rl#377:
@@ -101,7 +102,7 @@ impl PosTrace {
         tick: u64,
         frac: f32,
         dt: std::time::Duration,
-        cam: Vec3,
+        cam: &Transform,
         origin: Pos,
     ) {
         if let Some(t) = &mut self.0 {
@@ -111,11 +112,12 @@ impl PosTrace {
             }
             writeln!(
                 t.w,
-                "F,{tick},{frac},{},{:.9e},{:.9e},{:.9e}",
+                "F,{tick},{frac},{},{:.9e},{:.9e},{:.9e},{:.9e}",
                 dt.as_micros(),
-                cam.x,
-                cam.y,
-                cam.z
+                cam.translation.x,
+                cam.translation.y,
+                cam.translation.z,
+                super::scene::heading(*cam.forward())
             )
             .expect("pos trace write");
         }

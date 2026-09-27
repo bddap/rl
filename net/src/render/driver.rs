@@ -313,7 +313,7 @@ fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose>
                 PlayerId(v.pilot.0),
                 crate::sim::PilotPose {
                     pos,
-                    yaw: crate::sim::trig_client::radians_to_turns(nose.x.atan2(nose.z)),
+                    yaw: crate::sim::trig_client::radians_to_turns(super::scene::heading(nose)),
                     alt: crate::sim::meters_to_grid_f64(y) - crate::sim::ground_at(pos),
                     vel: crate::sim::Vel {
                         x: per_tick(vel.linear.x),
@@ -363,11 +363,12 @@ pub(super) struct GameState {
     /// ([`complete_pending_pump`]) — finalize (pose collect + hunt feed,
     /// authoritative sim step, snapshot + articulation broadcast) happens at
     /// owed-complete, so the wire still sees whole 30 Hz ticks. While `Some`, the
-    /// client sim sits one tick behind the exchanged tick — the [`RenderClock`] write
-    /// adds it back so render time never rewinds. Just a step count: the tick's slot
-    /// inputs are re-derived at finalize, identical by construction (nothing touches
-    /// the server sim between start and complete). Always `None` on a remote-adopt
-    /// client (its frames are cheap; the host is the one peer that pumps physics).
+    /// client sim's tick sits one behind the exchanged tick (its walkers predicted
+    /// into it) — the [`RenderClock`] write adds the tick back so render time never
+    /// rewinds. Just a step count: the tick's slot inputs are re-derived at finalize,
+    /// identical by construction (nothing touches the server sim between start and
+    /// complete). Always `None` on a remote-adopt client (its frames are cheap; the
+    /// host is the one peer that pumps physics).
     pending_pump: Option<u32>,
 }
 
@@ -744,7 +745,7 @@ fn apply_vehicle_request(world: &mut World) {
 /// roll has no on-foot analogue and drops.
 fn exit_look_angles(orient: Quat) -> (f32, f32) {
     let nose = orient * Vec3::Z;
-    let yaw = nose.x.atan2(nose.z).rem_euclid(std::f32::consts::TAU);
+    let yaw = super::scene::heading(nose).rem_euclid(std::f32::consts::TAU);
     let pitch = nose
         .y
         .clamp(-1.0, 1.0)
@@ -945,11 +946,8 @@ fn start_host_tick(world: &mut World, me: PilotId, armed: bool) {
         }
     }
     {
-        // The capture stays HERE, not in the finalize: mid-pump `prev == now`, so the
-        // scene's prev→now interpolation holds the crossing frame at the last stepped
-        // tick instead of rewinding a tick — the interpolation-side twin of the
-        // RenderClock pending bump. Moving it next to `step_next` reintroduces the
-        // rewind.
+        // Here, not at finalize: `prev` stays the last stepped tick while the
+        // RenderClock counts the pending one.
         let mut state = world.non_send_mut::<GameState>();
         state.prev = SimSnapshot::capture(&state.client);
     }
@@ -1345,6 +1343,15 @@ fn advance_frame(world: &mut World, dt: f64) {
 
     log_round_edges(world, tel.as_ref());
 
+    // Once per tick: every crossing completes the tick before it starts its own.
+    if applied > 0 && world.non_send::<GameState>().pending_pump.is_some() {
+        let mut state = world.non_send_mut::<GameState>();
+        let state = &mut *state;
+        state
+            .client
+            .predict_pending_tick(state.coord.server().expect("a pending pump ⇒ a server"));
+    }
+
     let clock = {
         let state = world.non_send::<GameState>();
         RenderClock {
@@ -1381,21 +1388,17 @@ mod tests {
     use crate::sim::{Input, TICK_DT, buttons};
     use bevy::prelude::*;
 
-    /// rl#409 repro: a ship boarded on a live host must answer the stick BOTH before
-    /// and after an in-round RESTART. A double RESTART while piloting opened a
-    /// dead-stick window: the walker track jumped to the rl#322 park ring and the
-    /// craft then ignored ~6 min of stick input.
-    #[test]
-    fn ship_answers_the_stick_before_and_after_a_restart() {
+    /// A host round over a real armed crab world (rest-pose policy, flat ground): the
+    /// host is `PlayerId(0)`, joined by `remotes` more players.
+    fn armed_host(remotes: u8) -> App {
         use crab_world::bot::headless::{
             HeadlessStack, WorldRole, force_serial_schedules, headless_stack,
             pin_single_thread_pools,
         };
-        use crab_world::vehicle::{Vehicle, VehicleKind};
 
         pin_single_thread_pools();
-        let me = crate::sim::PlayerId(0);
-        let mut client = crate::client::ClientSim::new(0xC0FFEE, &[me], me);
+        let peers: Vec<crate::sim::PlayerId> = (0..=remotes).map(crate::sim::PlayerId).collect();
+        let mut client = crate::client::ClientSim::new(0xC0FFEE, &peers, peers[0]);
         let spawns = super::super::app::seed_round_crabs(&mut client, 1);
         let mut app = headless_stack(HeadlessStack {
             num_envs: spawns.len(),
@@ -1415,6 +1418,7 @@ mod tests {
         crate::crab_slot::park_fixed_auto_pump(&mut app);
         crate::crab_slot::restart_crabs_to_spawns(app.world_mut(), &spawns);
         force_serial_schedules(&mut app);
+        // Spawn the crab world's Update-side entities before installing the round.
         for _ in 0..8 {
             app.update();
         }
@@ -1422,7 +1426,18 @@ mod tests {
         install_round(app.world_mut(), client, coord);
         app.insert_resource(super::super::chord_map::DiscoveredCodes::load(None));
         app.init_resource::<crab_world::debug_overlay::SimFrameStats>();
+        app
+    }
 
+    /// rl#409 repro: a ship boarded on a live host must answer the stick BOTH before
+    /// and after an in-round RESTART. A double RESTART while piloting opened a
+    /// dead-stick window: the walker track jumped to the rl#322 park ring and the
+    /// craft then ignored ~6 min of stick input.
+    #[test]
+    fn ship_answers_the_stick_before_and_after_a_restart() {
+        use crab_world::vehicle::{Vehicle, VehicleKind};
+
+        let mut app = armed_host(0);
         let world = app.world_mut();
         // One full tick per call: a crossing frame (exchange + first owed step) then a
         // non-crossing frame that finalizes the spread pump (rl#396).
@@ -1498,41 +1513,7 @@ mod tests {
     /// tick, so a missed force-complete would panic right here.
     #[test]
     fn host_pump_spreads_steps_across_frames() {
-        use crab_world::bot::headless::{
-            HeadlessStack, WorldRole, force_serial_schedules, headless_stack,
-            pin_single_thread_pools,
-        };
-
-        pin_single_thread_pools();
-        let me = crate::sim::PlayerId(0);
-        let mut client = crate::client::ClientSim::new(0xC0FFEE, &[me], me);
-        let spawns = super::super::app::seed_round_crabs(&mut client, 1);
-        let mut app = headless_stack(HeadlessStack {
-            num_envs: spawns.len(),
-            role: WorldRole::Standalone,
-            grid: std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(16_384.0)),
-            visuals: crab_world::Visuals(false),
-        });
-        app.add_plugins(crate::crab_slot::NnCrabPlugin::new(
-            spawns
-                .iter()
-                .map(|_| crab_world::policy::Policy::rest())
-                .collect(),
-            spawns.clone(),
-        ));
-        crate::crab_slot::arm(app.world_mut());
-        crate::crab_slot::park_fixed_auto_pump(&mut app);
-        crate::crab_slot::restart_crabs_to_spawns(app.world_mut(), &spawns);
-        force_serial_schedules(&mut app);
-        // Spawn the crab world's Update-side entities before installing the round.
-        for _ in 0..8 {
-            app.update();
-        }
-        let coord = super::coordinator(None, client.peers(), client.me(), client.sim().clone());
-        install_round(app.world_mut(), client, coord);
-        app.insert_resource(super::super::chord_map::DiscoveredCodes::load(None));
-        app.init_resource::<crab_world::debug_overlay::SimFrameStats>();
-
+        let mut app = armed_host(0);
         let world = app.world_mut();
         let mut render_time = 0.0_f64;
         let mut drive = |world: &mut World, dt: f64| {
@@ -1587,6 +1568,105 @@ mod tests {
         );
         assert!(pending, "and deferred its own");
         assert_eq!(clock.tick, t0 + 3);
+    }
+
+    /// rl#396: every host frame renders the walkers — the on-foot camera's position and
+    /// heading, and a remote walker's avatar — exactly at the authoritative ticks'
+    /// interpolation for its RenderClock, the frames clocked into a tick the spread pump
+    /// has not stepped yet included. Inputs change every few frames, so a pending tick
+    /// held, extrapolated, delayed or fed stale input shows.
+    #[test]
+    fn host_walkers_render_the_pending_tick_exactly() {
+        use super::super::scene::{
+            FpCamera, PlayerAvatar, apply_transforms, heading, lerp_pos, lerp_yaw,
+            sync_ground_anchor,
+        };
+        use crate::sim::PlayerId;
+        use bevy::ecs::system::RunSystemOnce;
+        use std::f32::consts::{PI, TAU};
+
+        let (me, remote) = (PlayerId(0), PlayerId(1));
+        let mut app = armed_host(1);
+        let world = app.world_mut();
+        let cam = world.spawn((FpCamera, Transform::default())).id();
+        let avatar = world
+            .spawn((
+                PlayerAvatar(remote),
+                Transform::default(),
+                Visibility::default(),
+            ))
+            .id();
+        world.init_resource::<crab_world::ground::GroundAnchor>();
+        world
+            .run_system_once(sync_ground_anchor)
+            .expect("sync_ground_anchor runs");
+        let origin = world.resource::<super::super::RenderOrigin>().0;
+
+        let mut stepped = std::collections::BTreeMap::new();
+        let mut frames = Vec::new();
+        for frame in 0..400u32 {
+            let phase = frame / 5;
+            {
+                let mut pending = world.resource_mut::<super::PendingInput>();
+                pending.forward = 1.0;
+                pending.strafe = [0.5, -0.3, 0.0][phase as usize % 3];
+                pending.yaw_delta = [0.03, -0.02, 0.0, 0.05][phase as usize % 4];
+                pending.sprint = phase % 2 == 0;
+            }
+            world.insert_resource(super::ScriptedPackInput(Input::new(
+                [0.4, -0.4][phase as usize % 2],
+                1.0,
+                [0.5, -0.2, 0.0][phase as usize % 3],
+                if phase % 5 == 0 { buttons::SPRINT } else { 0 },
+            )));
+            // Frame deltas of 0.44–0.57 ticks: crossing frames land at every phase,
+            // ticks span one to three frames, and the run meets every 64:30 bunching.
+            advance_frame(
+                world,
+                TICK_DT * (0.44 + 0.13 * (f64::from(frame) * 0.618_034 % 1.0)),
+            );
+            world
+                .run_system_once(apply_transforms)
+                .expect("apply_transforms runs");
+            let state = world.non_send::<GameState>();
+            let sim = state.coord.server().expect("the host serves").sim();
+            let walker = |pid| sim.player(pid).expect("both walkers stay in the round");
+            stepped.insert(sim.tick(), (walker(me), walker(remote)));
+            let at = |e: Entity| *world.get::<Transform>(e).expect("spawned above");
+            frames.push((*world.resource::<RenderClock>(), at(cam), at(avatar)));
+        }
+
+        let xz = |t: &Transform| (t.translation.x, t.translation.z);
+        let mut checked = 0;
+        for (frame, (clock, cam, avatar)) in frames.iter().enumerate() {
+            let (Some((me0, remote0)), Some((me1, remote1))) = (
+                clock.tick.checked_sub(1).and_then(|t| stepped.get(&t)),
+                stepped.get(&clock.tick),
+            ) else {
+                continue;
+            };
+            let alpha = clock.frac;
+            let eye = lerp_pos(me0.pos(), me1.pos(), alpha).rel_meters(origin);
+            assert_eq!(xz(cam), eye, "frame {frame}: camera off the stepped ticks");
+            let yaw = lerp_yaw(me0.yaw(), me1.yaw(), alpha);
+            let yaw_err = (heading(*cam.forward()) - yaw + PI).rem_euclid(TAU) - PI;
+            assert!(
+                yaw_err.abs() < 1e-4,
+                "frame {frame}: camera heading {yaw_err} rad off the stepped ticks"
+            );
+            let body = lerp_pos(remote0.pos(), remote1.pos(), alpha).rel_meters(origin);
+            assert_eq!(
+                xz(avatar),
+                body,
+                "frame {frame}: remote walker off the stepped ticks"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > frames.len() - 8,
+            "only {checked} of {} frames had both stepped ticks",
+            frames.len()
+        );
     }
 
     #[test]

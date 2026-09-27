@@ -199,6 +199,23 @@ impl ClientSim {
         }
     }
 
+    /// Exact while a walker's step reads only its own input — a craft ride or a round
+    /// restart aside — until the tick's snapshot replaces it. Incremental: once per
+    /// assembled tick.
+    pub fn predict_pending_tick(&mut self, server: &crate::server::Server) {
+        debug_assert_eq!(
+            self.sim.tick(),
+            server.sim().tick(),
+            "the prediction walks the host's mirror of the server's sim"
+        );
+        let inputs = server
+            .pending_inputs()
+            .expect("predicted only while a tick is assembled");
+        for (&pid, &inp) in inputs {
+            self.sim.predict_player(pid, inp);
+        }
+    }
+
     pub fn configure_crabs(&mut self, crabs: usize) {
         self.sim.configure_crabs(crabs);
     }
