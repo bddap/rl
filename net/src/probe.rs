@@ -96,11 +96,12 @@ impl Probe {
 
     /// One probe tick through the host seam: `Update` wrap, one fixed pump (the
     /// probe's 1:1 cadence), poses off the world into the sim step, next tick's hunt
-    /// fed back — the same pump→collect→feed seam the hosts run ([`pump_slot_steps`]).
+    /// fed back — the same pump→collect→feed seam the hosts run ([`crab_slot::finish_slot_tick`]).
     fn tick(&mut self) {
         let inputs = crab_slot::slot_inputs(&self.sim);
         self.app.update();
-        let mut poses = crab_slot::pump_slot_steps(self.app.world_mut(), 1, &inputs);
+        crab_slot::pump_fixed_steps(self.app.world_mut(), 1);
+        let mut poses = crab_slot::finish_slot_tick(self.app.world_mut(), &inputs);
         for p in &mut poses {
             // Pursuit probe: no downs (module doc) — the pose crosses, the claws don't.
             p.claws.clear();
@@ -898,9 +899,7 @@ pub fn run_step_profile(
         }
 
         let t = Instant::now();
-        // Steps already pumped above; a zero-step pump is finalize alone (pose
-        // collect + hunt feed), the same split the render driver's spread pump runs.
-        let mut poses = crab_slot::pump_slot_steps(probe.app.world_mut(), 0, &inputs);
+        let mut poses = crab_slot::finish_slot_tick(probe.app.world_mut(), &inputs);
         let finalize_ms = t.elapsed().as_secs_f64() * 1e3;
         for p in &mut poses {
             // Pursuit profile: no downs (module doc) — the pose crosses, the claws don't.

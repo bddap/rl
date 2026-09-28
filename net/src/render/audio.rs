@@ -229,8 +229,7 @@ pub(super) fn local_speed_mps(state: &GameState, vehicle: &LocalVehicle) -> f32 
                 (x * x + y * y + z * z).sqrt() / UNIT as f32 * TICK_HZ as f32
             })
             .unwrap_or(0.0),
-        // The craft's pose window is the same tick-stamped stream the cockpit
-        // renders from; empty (engage grace / teleport reset) reads as still air.
+        // Under two poses (engage, teleport reset) reads as still air.
         LocalVehicle::Flying { poses, .. } => poses.speed_mps().unwrap_or(0.0),
     }
 }
@@ -262,9 +261,9 @@ pub(super) fn trace_wind_speed(
         return;
     };
     if let LocalVehicle::Flying { poses, .. } = &*vehicle
-        && let Some(t) = poses.newest_tick()
+        && let Some(step) = poses.newest_step()
     {
-        trace.wind(t, local_speed_mps(&state, &vehicle));
+        trace.wind(step, local_speed_mps(&state, &vehicle));
     }
 }
 

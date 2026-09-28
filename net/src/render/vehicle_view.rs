@@ -258,21 +258,19 @@ mod tests {
     fn world_with(remote: Vec<VehiclePoseWire>, mode: RenderMode) -> World {
         let mut w = World::new();
         w.insert_resource(stub_assets());
-        let mut rv = RemoteVehicle::default();
-        rv.adopt(1, &remote);
-        w.insert_resource(rv);
-        // A 1-deep window samples its newest pose raw, so these reconcile tests see the
-        // exact wire poses they fed; the interpolation law itself is pinned in pose.rs
-        // and articulation.rs.
-        w.insert_resource(super::super::driver::RenderClock { tick: 1, frac: 0.0 });
+        readopt(&mut w, 1, remote);
         w.insert_resource(mode);
         w.insert_resource(super::super::RenderOrigin::default());
         w
     }
 
-    /// Adopt a fresh wire set at the next tick and move the render clock with it.
+    /// A 1-deep window samples its pose raw, so these reconcile tests see the exact
+    /// wire poses they fed; the interpolation law itself is pinned in pose.rs and
+    /// articulation.rs.
     fn readopt(w: &mut World, tick: u64, remote: Vec<VehiclePoseWire>) {
-        w.resource_mut::<RemoteVehicle>().adopt(tick, &remote);
+        let mut rv = RemoteVehicle::default();
+        rv.adopt(crate::cadence::cumulative_steps(tick), &remote);
+        w.insert_resource(rv);
         w.insert_resource(super::super::driver::RenderClock { tick, frac: 0.0 });
     }
 

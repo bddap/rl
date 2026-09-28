@@ -617,7 +617,7 @@ pub(super) enum LocalVehicle {
     OnFoot,
     Flying {
         kind: VehicleKind,
-        poses: PoseWindow,
+        poses: Box<PoseWindow>,
     },
 }
 
@@ -650,40 +650,42 @@ impl LocalVehicle {
         }
     }
 
-    fn update_pose(&mut self, tick: u64, p: Pose) {
+    fn update_pose(&mut self, step: u64, p: Pose) {
         if let Self::Flying { poses, .. } = self {
-            poses.push(tick, p);
+            poses.push(step, p);
         }
     }
 }
 
-/// Read OUR OWN vehicle rigidbody's world-frame pose (position + attitude) from the crab
-/// world, or `None` if none is spawned (on foot, or the frame a freshly-boarded body
-/// hasn't appeared yet). At most one body per pilot — `manage_vehicles` enforces it.
-/// Keyed by pilot because the host's world will also carry REMOTE pilots' crafts
-/// (rl#191): the cockpit camera must fly from ours alone.
-fn read_vehicle_pose(world: &mut World, me: PilotId) -> Option<Pose> {
-    let mut q = world.query::<(&Transform, &Vehicle)>();
-    q.iter(world)
-        .find(|(_, v)| v.pilot == me)
-        .map(|(t, _)| Pose {
-            pos: t.translation,
-            orient: t.rotation,
-        })
-}
-
-/// The remote-client twin of [`read_vehicle_pose`]: our own craft's world-frame pose out
-/// of an adopted articulation. The host simulates the craft; its pose comes back
-/// per-pilot on the wire. `None` keeps the cockpit camera off while the pose ring is
-/// empty — usually the request→grant window, but also a silent HOST REFUSAL
-/// (`file_intent` saw [`crate::sim::PlayerStatus::may_board`] false; the client can't
-/// tell the two apart) and the unarmed round (no articulation at all). Either way the
-/// camera simply holds off.
+/// Keyed by pilot: the host's world also carries REMOTE pilots' crafts (rl#191), and
+/// the cockpit camera must fly from ours alone.
 fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Option<Pose> {
     art.vehicles.iter().find(|v| v.pilot == me.0).map(|v| Pose {
         pos: Vec3::from_array(v.pos),
         orient: Quat::from_array(v.rot),
     })
+}
+
+/// The one pose-window feed on both arms (rl#274), stamped by physics step.
+fn feed_pose_windows(
+    world: &mut World,
+    step: u64,
+    art: &crate::articulation::CrabArticulation,
+    me: PilotId,
+) {
+    super::articulation::feed_crab_part_windows(world, step, &art.crabs);
+    super::articulation::publish_remote_vehicles(world, step, &art.vehicles, me);
+    let Some(p) = own_wire_pose(art, me) else {
+        return;
+    };
+    let mut vehicle = world.resource_mut::<LocalVehicle>();
+    if matches!(&*vehicle, LocalVehicle::Flying { poses, .. } if poses.is_empty()) {
+        info!("cockpit engaged: own craft's first pose arrived");
+    }
+    vehicle.update_pose(step, p);
+    world
+        .resource_mut::<super::pos_trace::PosTrace>()
+        .craft(step, p.pos, p.orient);
 }
 
 /// Apply a chord-issued [`VehicleRequest`], if one is pending: boarding from foot needs
@@ -709,7 +711,7 @@ fn apply_vehicle_request(world: &mut World) {
         {
             Some(LocalVehicle::Flying {
                 kind,
-                poses: PoseWindow::default(),
+                poses: Box::default(),
             })
         }
         VehicleRequest::Exit if vehicle.kind().is_some() => Some(LocalVehicle::OnFoot),
@@ -872,29 +874,13 @@ fn exchange_tick(world: &mut World, role: PeerRole, local: &LocalControl) -> Tic
     }
 }
 
-/// Publish an adopted articulation to the render surfaces: crab poses, remote craft
-/// models, and — if OUR craft's pose just crossed the wire — the cockpit window.
 fn adopt_wire_articulation(
     world: &mut World,
     art: &crate::articulation::CrabArticulation,
     me: PilotId,
 ) {
-    crate::render::articulation::adopt(world, art);
-    super::articulation::publish_remote_vehicles(world, art.tick, &art.vehicles, me);
-    if let Some(p) = own_wire_pose(art, me) {
-        {
-            let mut vehicle = world.resource_mut::<LocalVehicle>();
-            if matches!(&*vehicle, LocalVehicle::Flying { poses, .. } if poses.is_empty()) {
-                // The request→grant edge (rl#191): the host accepted our intent and our
-                // craft's first pose just crossed the wire — the cockpit camera engages.
-                info!("cockpit engaged: own craft pose arrived on the wire");
-            }
-            vehicle.update_pose(art.tick, p);
-        }
-        world
-            .resource_mut::<super::pos_trace::PosTrace>()
-            .craft(art.tick, p.pos, p.orient);
-    }
+    super::articulation::adopt_brain_labels(world, art);
+    feed_pose_windows(world, crate::cadence::cumulative_steps(art.tick), art, me);
 }
 
 /// (Host) Bridge every pilot's intent into a [`PilotCommand`] for the crab world's
@@ -956,8 +942,9 @@ fn start_host_tick(world: &mut World, me: PilotId, armed: bool) {
             let state = world.non_send::<GameState>();
             state.client.sim().tick() + 1
         };
-        crate::crab_slot::pump_fixed_steps(world, 1);
-        crate::cadence::steps_for_tick(stepping_into) - 1
+        let owed = crate::cadence::steps_for_tick(stepping_into) - 1;
+        host_physics_step(world, me, owed);
+        owed
     } else {
         0
     };
@@ -977,11 +964,22 @@ fn step_pending_pump(world: &mut World, me: PilotId, armed: bool) {
         return;
     };
     if remaining > 1 {
-        crate::crab_slot::pump_fixed_steps(world, 1);
+        host_physics_step(world, me, remaining - 1);
         world.non_send_mut::<GameState>().pending_pump = Some(remaining - 1);
     } else {
         complete_pending_pump(world, me, armed);
     }
+}
+
+/// (Host) One physics step toward the pending tick, leaving `owed_after` still owed.
+/// Fed per step, not per tick: the RenderClock counts a pending tick, so a window
+/// holding only finalized ticks clamps until the spread pump finishes (rl#396).
+fn host_physics_step(world: &mut World, me: PilotId, owed_after: u32) {
+    crate::crab_slot::pump_fixed_steps(world, 1);
+    let stepping_into = world.non_send::<GameState>().client.sim().tick() + 1;
+    let art = super::articulation::capture(world, stepping_into);
+    let step = crate::cadence::cumulative_steps(stepping_into) - u64::from(owed_after);
+    feed_pose_windows(world, step, &art, me);
 }
 
 /// Force-complete the pending host tick: run every still-owed physics step now, then
@@ -1001,17 +999,10 @@ fn complete_pending_pump(world: &mut World, me: PilotId, armed: bool) {
         crate::crab_slot::slot_inputs(state.server().expect("server_auth ⇒ a server").sim())
     };
     let (crab_poses, shadows) = if armed {
-        let poses = crate::crab_slot::pump_slot_steps(world, remaining, &inputs);
-        if let Some(p) = read_vehicle_pose(world, me) {
-            world
-                .resource_mut::<LocalVehicle>()
-                .update_pose(inputs.stepping_into, p);
-            world.resource_mut::<super::pos_trace::PosTrace>().craft(
-                inputs.stepping_into,
-                p.pos,
-                p.orient,
-            );
+        for owed in (0..remaining).rev() {
+            host_physics_step(world, me, owed);
         }
+        let poses = crate::crab_slot::finish_slot_tick(world, &inputs);
         (poses, pilot_shadows(world))
     } else {
         // The one unarmed host: the crab-less screenshot path
@@ -1043,12 +1034,6 @@ fn complete_pending_pump(world: &mut World, me: PilotId, armed: bool) {
     {
         let state = world.non_send::<GameState>();
         state.coord.broadcast_step(&snap, articulation.as_ref());
-    }
-    if let Some(art) = &articulation {
-        // The host renders its OWN Sally through the same windows a client
-        // adopts (rl#274) — one interpolation mechanism on both arms.
-        super::articulation::feed_crab_part_windows(world, art);
-        super::articulation::publish_remote_vehicles(world, art.tick, &art.vehicles, me);
     }
     {
         let mut state = world.non_send_mut::<GameState>();
@@ -1667,6 +1652,184 @@ mod tests {
             "only {checked} of {} frames had both stepped ticks",
             frames.len()
         );
+    }
+
+    /// rl#396: the host's [`super::pose::PoseWindow`] surfaces render its physics
+    /// steps on time while the spread pump holds a tick pending. A ship flight and a
+    /// settling crab at ~60 and ~144 fps frame deltas: every frame's cockpit and
+    /// carapace samples must equal the physics steps, recorded as they ran,
+    /// interpolated at that frame's [`RenderClock`] — capped at the steps run so far,
+    /// which a crossing frame late in its tick phase trails by a fraction of a step.
+    #[test]
+    fn host_pose_windows_render_every_physics_step_on_time() {
+        use super::super::articulation::sample_crab_part_poses;
+        use bevy::ecs::system::RunSystemOnce;
+        use crab_world::bot::body::{CrabBodyPart, CrabCarapace};
+        use crab_world::bot::skin::CrabRenderPose;
+        use crab_world::vehicle::{Vehicle, VehicleKind};
+
+        /// Craft and carapace translations after each physics step, index = step − 1.
+        #[derive(Resource, Default)]
+        struct Stepped(Vec<(Option<Vec3>, Vec3)>);
+
+        let r = crab_world::physics::PHYSICS_HZ as f64 / crate::sim::TICK_HZ as f64;
+        for (rate, dt_lo, dt_span) in [("~60 fps", 0.44, 0.13), ("~144 fps", 0.19, 0.04)] {
+            let mut app = armed_host(0);
+            app.init_resource::<Stepped>();
+            app.add_systems(
+                FixedLast,
+                |mut stepped: ResMut<Stepped>,
+                 crafts: Query<&Transform, With<Vehicle>>,
+                 carapaces: Query<&Transform, (With<CrabCarapace>, With<CrabBodyPart>)>| {
+                    let craft = crafts.iter().next().map(|t| t.translation);
+                    let carapace = carapaces.single().expect("one crab").translation;
+                    stepped.0.push((craft, carapace));
+                },
+            );
+            let world = app.world_mut();
+            let carapace = world
+                .query_filtered::<Entity, (With<CrabCarapace>, With<CrabBodyPart>)>()
+                .single(world)
+                .expect("one crab");
+            world.resource_mut::<super::PendingInput>().vehicle =
+                Some(super::VehicleRequest::Board(VehicleKind::Ship));
+            world.resource_mut::<super::FlightInput>().left = Vec2::new(0.0, 1.0);
+            let mut frames = Vec::new();
+            for frame in 0..400u32 {
+                advance_frame(
+                    world,
+                    TICK_DT * (dt_lo + dt_span * (f64::from(frame) * 0.618_034 % 1.0)),
+                );
+                world
+                    .run_system_once(sample_crab_part_poses)
+                    .expect("sample_crab_part_poses runs");
+                let clock = *world.resource::<RenderClock>();
+                let cockpit = world
+                    .resource::<super::LocalVehicle>()
+                    .cockpit_sample(clock.tick, clock.frac)
+                    .map(|p| p.pos);
+                let body = world.resource::<CrabRenderPose>().0[&carapace].translation;
+                let ran = world.resource::<Stepped>().0.len();
+                frames.push((clock, ran, cockpit, body));
+            }
+            let offset = world.resource::<super::super::RenderOrigin>().offset_m();
+            let stepped = &world.resource::<Stepped>().0;
+
+            let at = |t: f64, pick: fn(&(Option<Vec3>, Vec3)) -> Option<Vec3>| {
+                let s = t.floor() as usize;
+                let a = pick(&stepped[s - 1])?;
+                let w = (t - s as f64) as f32;
+                Some(if w == 0.0 {
+                    a
+                } else {
+                    a.lerp(pick(&stepped[s])?, w)
+                })
+            };
+            let (mut flown, mut settled) = (0, 0);
+            for (frame, &(clock, ran, cockpit, body)) in frames.iter().enumerate() {
+                let target = r * (clock.tick.saturating_sub(1) as f64 + clock.frac as f64) - 1.0;
+                if clock.tick == 0 || target < 1.0 {
+                    continue;
+                }
+                let shortfall = target - ran as f64;
+                assert!(
+                    shortfall < 0.25,
+                    "{rate} frame {frame} (clock {} + {}): the clock is {shortfall} steps \
+                     past the {ran} run",
+                    clock.tick,
+                    clock.frac,
+                );
+                let t = target.min(ran as f64);
+                let off = |got: Vec3, want: Vec3| (got - want).length();
+                let body_want = at(t, |s| Some(s.1)).expect("the crab is always stepped") - offset;
+                assert!(
+                    off(body, body_want) < 1e-4,
+                    "{rate} frame {frame} (clock {} + {}): carapace {body} vs the \
+                     physics steps' {body_want}",
+                    clock.tick,
+                    clock.frac,
+                );
+                settled += 1;
+                if let (Some(want), Some(cockpit)) = (at(t, |s| s.0), cockpit) {
+                    assert!(
+                        off(cockpit, want) < 1e-4,
+                        "{rate} frame {frame} (clock {} + {}): cockpit {cockpit} vs the \
+                         physics steps' {want}",
+                        clock.tick,
+                        clock.frac,
+                    );
+                    flown += 1;
+                }
+            }
+            let (first, last) = (stepped.first().unwrap().1, stepped.last().unwrap().1);
+            let mut flight = stepped.iter().filter_map(|s| s.0);
+            let (lift, cruise) = (flight.clone().next().unwrap(), flight.next_back().unwrap());
+            assert!(
+                (first - last).length() > 0.01 && (lift - cruise).length() > 1.0,
+                "{rate}: sanity — the crab settled and the ship flew \
+                 ({first} -> {last}, {lift} -> {cruise})"
+            );
+            assert!(
+                flown > frames.len() / 2 && settled > frames.len() - 16,
+                "{rate}: {flown} flown and {settled} settled frames of {}",
+                frames.len()
+            );
+        }
+    }
+
+    /// A remote client stamps each adopted articulation at its tick's physics step —
+    /// the clock [`super::pose::PoseWindow`] samples on — so a craft moving at constant
+    /// velocity in physics time renders exactly on that clock through the 64:30
+    /// staircase.
+    #[test]
+    fn client_cockpit_samples_adopted_ticks_on_the_step_clock() {
+        use crate::articulation::{CrabArticulation, VehiclePoseWire};
+        use crate::cadence::cumulative_steps;
+        use crab_world::vehicle::{PilotId, VehicleKind};
+
+        let r = crab_world::physics::PHYSICS_HZ as f64 / crate::sim::TICK_HZ as f64;
+        let mut world = World::new();
+        world.init_resource::<super::super::articulation::CrabPartWindows>();
+        world.init_resource::<super::super::articulation::RemoteVehicle>();
+        world.init_resource::<super::super::pos_trace::PosTrace>();
+        world.insert_resource(super::LocalVehicle::Flying {
+            kind: VehicleKind::Ship,
+            poses: Box::default(),
+        });
+        let mut checked = 0;
+        for tick in 1..=12u64 {
+            let art = CrabArticulation {
+                tick,
+                crabs: Vec::new(),
+                vehicles: vec![VehiclePoseWire {
+                    pilot: 0,
+                    kind: VehicleKind::Ship,
+                    pos: [cumulative_steps(tick) as f32, 0.0, 0.0],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    thrust: [0; 3],
+                }],
+            };
+            super::adopt_wire_articulation(&mut world, &art, PilotId(0));
+            if tick < 4 {
+                continue;
+            }
+            for f in 0..4 {
+                let frac = f as f32 / 4.0;
+                let x = world
+                    .resource::<super::LocalVehicle>()
+                    .cockpit_sample(tick, frac)
+                    .expect("flying with poses fed")
+                    .pos
+                    .x;
+                let step = r * ((tick - 1) as f64 + frac as f64) - 1.0;
+                assert!(
+                    (f64::from(x) - step).abs() < 1e-4,
+                    "tick {tick} frac {frac}: cockpit at step {x}, clock at {step}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 36);
     }
 
     #[test]

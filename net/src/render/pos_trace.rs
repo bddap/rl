@@ -16,12 +16,13 @@
 //!   camera translation (render-frame meters) and heading (radians, the sim's yaw
 //!   convention) after `apply_transforms`, plus the frame's `Time` delta in
 //!   microseconds.
-//! - `V,<tick>,<x>,<y>,<z>` — the local craft pose entering the pose window
-//!   (rl#376), render-frame meters: the per-tick craft displacement ground truth.
-//! - `Q,<tick>,<qx>,<qy>,<qz>,<qw>` — that pose's orientation quaternion (rl#377:
+//! - `V,<step>,<x>,<y>,<z>` — the local craft pose entering the pose window
+//!   (rl#376), stamped with its cumulative physics step: the craft displacement
+//!   ground truth, per tick on a client, per physics step on the host.
+//! - `Q,<step>,<qx>,<qy>,<qz>,<qw>` — that pose's orientation quaternion (rl#377:
 //!   the parked wiggle is rotational; position alone pins at the f32 ULP).
-//! - `W,<tick>,<speed>` — the airspeed the wind synth was driven with this frame
-//!   (rl#376), m/s, stamped with the pose window's newest tick.
+//! - `W,<step>,<speed>` — the airspeed the wind synth was driven with this frame
+//!   (rl#376), m/s, stamped with the pose window's newest step.
 //! - `S,<tick>,<sim_ms>,<ticks>` — the frame's measured whole-sim wall cost, ms,
 //!   and how many fixed ticks it pumped (rl#376): the perf-graph correlation axis.
 
@@ -65,17 +66,17 @@ impl PosTrace {
         }
     }
 
-    /// The local craft pose the window just accepted for tick `tick` (rl#376), plus
+    /// The local craft pose the window just accepted at physics step `step` (rl#376), plus
     /// its orientation as a `Q` record (rl#377: the parked-craft wiggle is
     /// rotational — position pins at the far-locale f32 ULP while orientation
     /// chatters, so a position-only trace reads a wiggling craft as still).
-    pub(crate) fn craft(&mut self, tick: u64, pos: Vec3, orient: Quat) {
+    pub(crate) fn craft(&mut self, step: u64, pos: Vec3, orient: Quat) {
         if let Some(t) = &mut self.0 {
-            writeln!(t.w, "V,{tick},{:.9e},{:.9e},{:.9e}", pos.x, pos.y, pos.z)
+            writeln!(t.w, "V,{step},{:.9e},{:.9e},{:.9e}", pos.x, pos.y, pos.z)
                 .expect("pos trace write");
             writeln!(
                 t.w,
-                "Q,{tick},{:.9e},{:.9e},{:.9e},{:.9e}",
+                "Q,{step},{:.9e},{:.9e},{:.9e},{:.9e}",
                 orient.x, orient.y, orient.z, orient.w
             )
             .expect("pos trace write");
@@ -83,9 +84,9 @@ impl PosTrace {
     }
 
     /// The airspeed handed to the wind synth this frame (rl#376).
-    pub(crate) fn wind(&mut self, tick: u64, speed_mps: f32) {
+    pub(crate) fn wind(&mut self, step: u64, speed_mps: f32) {
         if let Some(t) = &mut self.0 {
-            writeln!(t.w, "W,{tick},{speed_mps:.9e}").expect("pos trace write");
+            writeln!(t.w, "W,{step},{speed_mps:.9e}").expect("pos trace write");
         }
     }
 

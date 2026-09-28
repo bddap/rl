@@ -2,8 +2,9 @@
 //! [`Server::step_next`] where the tick's crab physics — including each crab's policy
 //! forward (`run_crab_policy` in `BotSet::Think`) — runs in the host's ONE world, and
 //! the resulting world poses are handed to `step_next`. An INTERNAL seam: only the
-//! server-auth arm calls [`pump_crab_slot`] — the windowed driver and the renderless
-//! [`HeadlessHostWorld`] go through this one function, so a host with and without a
+//! server-auth arm runs it, and every host ends its tick in [`finish_slot_tick`] — the
+//! windowed driver after spreading the steps across frames, the renderless
+//! [`HeadlessHostWorld`] through [`pump_crab_slot`] — so a host with and without a
 //! renderer cannot drift. Remote-adopt clients never enter it: their `FixedUpdate` is
 //! parked ([`park_fixed_auto_pump`]) and nothing pumps it, so the policy is host-side
 //! by construction; clients only consume the resulting `CoreSnapshot` +
@@ -419,7 +420,7 @@ pub(crate) fn feed_hunt(world: &mut World, hunt: &[Option<Pos>], poses: &[CrabPo
 }
 
 /// The caller's half of the slot contract, computed from the authoritative sim BEFORE
-/// the pump. One implementation for every caller of [`pump_crab_slot`], so the
+/// the pump. One implementation for every caller of [`finish_slot_tick`], so the
 /// pre-read cannot drift between the windowed driver, the renderless host, and the
 /// probes.
 pub(crate) struct SlotInputs {
@@ -457,20 +458,15 @@ pub(crate) fn slot_inputs(sim: &Sim) -> SlotInputs {
 /// Run the crab slot for the tick being stepped INTO: pump the owed fixed steps
 /// (sensing, policy forward, actuation, physics), read the crabs'
 /// world poses + claws for [`Server::step_next`](crate::server::Server::step_next),
-/// and feed the NEXT tick's hunt targets. [`pump_slot_steps`] is the same seam at an
-/// explicit step count — the probes' 1:1 cadence, and the render driver's rl#396
-/// spread pump, which runs early steps via [`pump_fixed_steps`] and finalizes the
-/// tick here with the residue, so collect+feed still happen exactly once per tick.
+/// and feed the NEXT tick's hunt targets.
 pub(crate) fn pump_crab_slot(world: &mut World, inputs: &SlotInputs) -> Vec<CrabPose> {
-    pump_slot_steps(
-        world,
-        crate::cadence::steps_for_tick(inputs.stepping_into),
-        inputs,
-    )
+    pump_fixed_steps(world, crate::cadence::steps_for_tick(inputs.stepping_into));
+    finish_slot_tick(world, inputs)
 }
 
-pub(crate) fn pump_slot_steps(world: &mut World, steps: u32, inputs: &SlotInputs) -> Vec<CrabPose> {
-    pump_fixed_steps(world, steps);
+/// The slot's per-tick tail once every owed step has run: collect + hunt feed, exactly
+/// once per tick however the steps were spread.
+pub(crate) fn finish_slot_tick(world: &mut World, inputs: &SlotInputs) -> Vec<CrabPose> {
     let poses = collect_crab_poses(world, &inputs.fallback);
     feed_hunt(world, &inputs.hunt, &poses);
     poses
@@ -633,8 +629,8 @@ fn discard_parked_overstep(mut fixed: ResMut<bevy::time::Time<bevy::time::Fixed>
 
 /// A renderless host's crab world — the "headless HOST driver" (rl#298 stage 5):
 /// the same server world the windowed host pumps ([`headless_server_world`] — the one
-/// constructor the trainer's rollout env builds on too), armed and pumped through the
-/// same [`pump_crab_slot`] seam. This is what makes crab poses mandatory everywhere:
+/// constructor the trainer's rollout env builds on too), armed and pumped through
+/// [`pump_crab_slot`], whose tick ends in the windowed host's [`finish_slot_tick`]. This is what makes crab poses mandatory everywhere:
 /// the headless `game net` / solo harnesses serve REAL world-read poses (a rest-pose
 /// brain when no checkpoint is bound) instead of the deleted inert-crab escape.
 ///
