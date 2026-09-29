@@ -3,9 +3,8 @@ use clap::Parser;
 use net::{net_loop, render};
 
 use crab_world::RenderArgs;
-use crab_world::controls::ControlsOverlayArgs;
 
-use super::shared::{ChordScriptArgs, MATCH_SEED, boot_view, gcr_controls, parse_join_dial};
+use super::shared::{ChordScriptArgs, MATCH_SEED, boot_view, parse_join_dial};
 use net::render::nn_crab_policy;
 
 #[derive(Parser)]
@@ -34,8 +33,6 @@ pub(crate) struct Args {
     nn_crab_checkpoint: Option<std::path::PathBuf>,
     #[command(flatten)]
     render: RenderArgs,
-    #[command(flatten)]
-    controls: ControlsOverlayArgs,
     /// Press the vehicle E-cycle at this frame (repeatable) and hold a forward drive while
     /// piloting — a scripted pilot, so a two-peer run live-verifies board/fly/cycle/exit over
     /// the real wire (rl#191).
@@ -52,9 +49,6 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    // Args before I/O: a bad --show-controls-context must fail on its own terms, not hide
-    // behind whatever the checkpoint load happens to say first.
-    let controls = gcr_controls(&args.controls)?;
     let boot_view = boot_view(args.render);
     let (_, nn_crab) = nn_crab_policy(args.nn_crab_checkpoint)?;
 
@@ -63,10 +57,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         MATCH_SEED,
         args.discover_secs,
         args.expect,
-        net_loop::DialTargets {
-            host: dial,
-            collector: None,
-        },
+        dial,
         net::SyncStamp::local(1),
     )?;
 
@@ -90,8 +81,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(0.0, args.cam_pitch)
         .with_fov(Some(args.cam_fov));
-    let mut app =
-        render::build_net_screenshot_app(client, driver, cfg, nn_crab, boot_view, controls);
+    let mut app = render::build_net_screenshot_app(client, driver, cfg, nn_crab, boot_view);
     if !args.pilot_toggle_at.is_empty() || args.pilot_walk_at.is_some() {
         app.insert_resource(render::PilotScript::new(
             args.pilot_toggle_at,

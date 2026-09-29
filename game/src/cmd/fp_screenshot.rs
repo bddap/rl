@@ -4,9 +4,8 @@ use net::render;
 use net::sim::PlayerId;
 
 use crab_world::RenderArgs;
-use crab_world::controls::ControlsOverlayArgs;
 
-use super::shared::{ChordScriptArgs, MATCH_SEED, boot_view, gcr_controls, parse_hold};
+use super::shared::{ChordScriptArgs, MATCH_SEED, boot_view, parse_hold};
 use net::render::nn_crab_policy;
 
 #[derive(Parser)]
@@ -38,9 +37,6 @@ pub(crate) struct Args {
 
     #[command(flatten)]
     render: RenderArgs,
-
-    #[command(flatten)]
-    controls: ControlsOverlayArgs,
 
     /// Yaw axis held by the scripted pack (−1..1): non-zero makes the pack orbit instead
     /// of bee-lining, presenting the crab flank/bystander geometry (the claw-down regime,
@@ -131,9 +127,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .map(|flag| nn_crab_policy(Some(flag)).map(|(_, policy)| policy))
         .transpose()?;
     let boot_view = boot_view(args.render);
-    let controls = gcr_controls(&args.controls)?;
     let pack = net::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
-    let mut app = render::build_screenshot_app(client, cfg, nn_crab, boot_view, controls, pack);
+    let mut app = render::build_screenshot_app(client, cfg, nn_crab, boot_view, pack);
     if args.debug_overlay {
         app.insert_resource(crab_world::debug_overlay::DebugOverlay { visible: true });
     }

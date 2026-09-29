@@ -1,5 +1,5 @@
 //! The native poll-driven driver around the platform-free formation core
-//! ([`net_proto::formation::FormationCore`], rl#411 stage 2): transport I/O, telemetry,
+//! ([`net_proto::formation::FormationCore`], rl#411 stage 2): transport I/O
 //! and user-facing prints live here; every protocol decision — beats, timeouts,
 //! agreement, the solo fallbacks — is the core's. No thread, no async: the owner of a
 //! [`FormationDriver`] pumps it from its own loop (the render frame, or a paced CLI
@@ -9,7 +9,6 @@ use anyhow::Result;
 use iroh::EndpointId;
 
 use crate::membership::Role;
-use crate::telemetry::{self, TelemetryEvent, TelemetrySender};
 use crate::transport::{self, PeerWire};
 
 use net_proto::formation::{FormationCore, Outcome};
@@ -89,13 +88,9 @@ impl FormationDriver {
     /// loop of their own (the CLI paths). The windowed lobby polls [`Self::pump`] per
     /// frame instead: one driver, two pacers.
     #[cfg(not(target_family = "wasm"))]
-    pub fn pump_blocking(
-        mut self,
-        session: &mut transport::Session,
-        tel: Option<&TelemetrySender>,
-    ) -> Result<Formation> {
+    pub fn pump_blocking(mut self, session: &mut transport::Session) -> Result<Formation> {
         loop {
-            if let Some(outcome) = self.pump(session, tel) {
+            if let Some(outcome) = self.pump(session) {
                 return outcome;
             }
             std::thread::sleep(FORM_POLL);
@@ -109,11 +104,7 @@ impl FormationDriver {
     /// One pump: drain the session's inbox into the core, step it, send what it emits.
     /// Call at any cadence at or above the beat rate (frame rate is fine — the core's
     /// beat deadline is epoch-aligned, so faster polling never over-beats).
-    pub fn pump(
-        &mut self,
-        session: &mut transport::Session,
-        tel: Option<&TelemetrySender>,
-    ) -> Option<Result<Formation>> {
+    pub fn pump(&mut self, session: &mut transport::Session) -> Option<Result<Formation>> {
         let now_ms = session.now_ms();
 
         while let Some(from) = session.try_recv() {
@@ -147,32 +138,18 @@ impl FormationDriver {
                 "forming: {live}/{} player(s) live, waiting for agreement…",
                 self.expect
             );
-            if let Some(t) = tel {
-                t.send(TelemetryEvent::RosterForming {
-                    live,
-                    expect: self.expect,
-                });
-            }
         }
         match step.outcome {
-            Some(Outcome::Agreed(a)) => Some(self.agreed(session.endpoint_id(), a, tel, now_ms)),
+            Some(Outcome::Agreed(a)) => Some(self.agreed(session.endpoint_id(), a, now_ms)),
             Some(Outcome::Alone) => {
                 println!("no other peer found — starting a solo round");
                 Some(Ok(Formation::Alone))
             }
-            Some(Outcome::Failed) => {
-                let e = anyhow::anyhow!(
-                    "match formation failed: peers never agreed on one roster within the join window \
+            Some(Outcome::Failed) => Some(Err(anyhow::anyhow!(
+                "match formation failed: peers never agreed on one roster within the join window \
                      (too few players showed up, or a peer kept appearing/disappearing, or a link is \
                      one-way). Relaunch together."
-                );
-                if let Some(t) = tel {
-                    t.send(TelemetryEvent::RosterFailed {
-                        reason: format!("{e:#}"),
-                    });
-                }
-                Some(Err(e))
-            }
+            ))),
             None => None,
         }
     }
@@ -181,7 +158,6 @@ impl FormationDriver {
         &self,
         my_eid: EndpointId,
         agreement: net_proto::formation::Agreement,
-        tel: Option<&TelemetrySender>,
         now_ms: u64,
     ) -> Result<Formation> {
         let id_map = assign_player_ids(my_eid, &agreement.roster)?;
@@ -191,13 +167,6 @@ impl FormationDriver {
             id_map.len(),
             now_ms.saturating_sub(self.born_ms) as f64 / 1000.0
         );
-        if let Some(t) = tel {
-            t.send(TelemetryEvent::RosterAgreed {
-                members: telemetry::short_ids(&agreement.roster),
-                roster_hash: crate::membership::roster_hash(&agreement.roster),
-                me: me.0,
-            });
-        }
         if self.stamp.body_digest() != 0 {
             if !agreement.sync.body {
                 tracing::warn!(
@@ -246,7 +215,6 @@ mod tests {
     use crate::sim::PlayerId;
 
     #[test]
-    #[ignore = "binds real iroh UDP endpoints; run explicitly with --ignored"]
     fn three_endpoints_form_the_identical_match_over_iroh() {
         let _serial = crate::real_net_serial();
         use std::collections::BTreeMap;
@@ -293,7 +261,7 @@ mod tests {
                 (&mut r2, &mut d2, &mut s2),
             ] {
                 if r.is_none() {
-                    *r = d.pump(s, None);
+                    *r = d.pump(s);
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(10));

@@ -15,7 +15,6 @@ otel = { path = "../otel" }
 anyhow.workspace = true
 clap.workspace = true
 iroh.workspace = true
-tokio.workspace = true
 # The headless net loop reports progress/faults as tracing events (not println), so they
 # ride the same subscriber + OTLP export as every other game fault (#133).
 tracing.workspace = true

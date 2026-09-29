@@ -17,7 +17,18 @@ use tokio::sync::mpsc;
 
 use crate::{Links, Session, locked, spawn_router, transport_config, wire_connection};
 
-const SERVICE_NAME: &str = "bddap-rl-game";
+static SERVICE_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn service_name() -> &'static str {
+    SERVICE_NAME.get_or_init(|| "bddap-rl-game".to_string())
+}
+
+/// Confine this process's mDNS discovery to a service name of its own, so real-network
+/// tests running in concurrent processes on one machine — or a game in its lobby
+/// there — never join each other's rosters. Takes effect only before the first session.
+pub fn confine_discovery_to_process() {
+    let _ = SERVICE_NAME.set(format!("rl-{}", std::process::id()));
+}
 
 const ADDR_WAIT: Duration = Duration::from_secs(10);
 
@@ -53,8 +64,7 @@ impl Drop for Session {
 
 impl Session {
     /// Graceful teardown of the endpoint — every pre-round exit path ends through here
-    /// (`Drop` backstops the paths that never call it). Telemetry is its own component
-    /// with its own teardown; the link knows nothing of it.
+    /// (`Drop` backstops the paths that never call it).
     pub fn close(&self) {
         self.guts.rt.block_on(self.endpoint.close());
     }
@@ -135,7 +145,7 @@ async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
         .await
         .context("binding iroh endpoint")?;
     let mdns = MdnsAddressLookup::builder()
-        .service_name(SERVICE_NAME)
+        .service_name(service_name())
         .build(endpoint.id())
         .context("starting mDNS discovery")?;
     endpoint
@@ -149,19 +159,18 @@ async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
     // this lands, which is exactly discovery's own timeline.
     let ep = endpoint.clone();
     tokio::spawn(async move {
-        if let Err(e) = publish_lan_addr(&ep, SERVICE_NAME).await {
+        if let Err(e) = publish_lan_addr(&ep).await {
             tracing::warn!("LAN address publish failed (undiscoverable until retry): {e:#}");
         }
     });
     Ok((endpoint, mdns))
 }
 
-/// Wait for a direct addr, then publish the given service name for mDNS browsers.
-/// Shared with the telemetry endpoints, which publish their own service names.
-pub async fn publish_lan_addr(endpoint: &Endpoint, service_name: &str) -> Result<()> {
+/// Wait for a direct addr, then publish the service name for mDNS browsers.
+async fn publish_lan_addr(endpoint: &Endpoint) -> Result<()> {
     wait_for_direct_addr(endpoint).await?;
     tokio::time::sleep(PUBLISH_SETTLE).await;
-    let ud = iroh::endpoint_info::UserData::try_from(service_name.to_string())
+    let ud = iroh::endpoint_info::UserData::try_from(service_name().to_string())
         .context("building discovery user data")?;
     endpoint.set_user_data_for_address_lookup(Some(ud));
     Ok(())

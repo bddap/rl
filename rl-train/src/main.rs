@@ -45,9 +45,6 @@ struct LearnArgs {
 
     #[arg(long, default_value_t = 0)]
     iters: u64,
-
-    #[arg(long, default_value_t = 10)]
-    nice: i32,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -56,21 +53,6 @@ struct EvalArgs {
     // the run in flight.
     #[command(flatten)]
     checkpoint: CheckpointArgs,
-
-    /// Physics ticks to run the policy for PER (heading, start) PAIR (after a short
-    /// settle drop each). The default is [`crab_world::eval::DEFAULT_EVAL_TICKS`] —
-    /// the one place the chase-eval episode is defined, shared with the trainer's
-    /// keep-best gate (bddap/rl#233). 0 would read a default-constructed episode as
-    /// a plausible hard zero, so it refuses at parse (rl#341 S1-3).
-    #[arg(long, default_value_t = crab_world::eval::DEFAULT_EVAL_TICKS,
-          value_parser = clap::value_parser!(u64).range(1..))]
-    ticks: u64,
-
-    /// DIAGNOSTIC: far-ball distance in metres, a finite in-band length. Non-default
-    /// values also move the deterministic start set (starts are drawn progressable at
-    /// THIS distance) — the wire's `target_m=` and provenance keys record it.
-    #[arg(long, value_parser = parse_distance)]
-    distance: Option<f32>,
 
     /// Terrain relief amplitude: scales the committed bake's datum-shifted heights by
     /// this ONE scalar (1 = the canonical bake bit-identically; 0 = a plane). The
@@ -84,13 +66,6 @@ struct EvalArgs {
 /// error already names the unknown arch and lists the known ones.
 fn parse_arch(s: &str) -> Result<bot::arch::ArchId, String> {
     bot::arch::ArchId::try_from(s.to_string())
-}
-
-/// clap value-parser for `--distance`: the eval owns its own domain
-/// ([`crab_world::eval::validate_target_distance`], rl#341 S1-3).
-fn parse_distance(s: &str) -> Result<f32, String> {
-    let d: f32 = s.parse().map_err(|e| format!("{e}"))?;
-    crab_world::eval::validate_target_distance(d)
 }
 
 /// clap value-parser for `--terrain-amplitude`: same domain the grid constructor
@@ -130,7 +105,6 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 training::inproc::default_workers(l.workers),
                 l.horizon,
                 l.iters,
-                l.nice,
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -147,17 +121,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 }
 
 fn eval(e: EvalArgs) -> Result<ExitCode, String> {
-    let distance = e
-        .distance
-        .unwrap_or(crab_world::eval::DEFAULT_TARGET_DISTANCE_M);
     // A refused/mismatched checkpoint is a hard failure with NO `EVAL_RESULT` line
     // (the daemon greps that prefix; wrong-body baseline numbers plotted as training
     // progress would be the eval-side rl#214). Absent stays the legitimate
     // zero-action baseline below.
     let r = crab_world::eval::run_eval(
         &e.checkpoint.checkpoint_dir,
-        e.ticks,
-        distance,
+        crab_world::eval::DEFAULT_EVAL_TICKS,
+        crab_world::eval::DEFAULT_TARGET_DISTANCE_M,
         e.terrain_amplitude,
     )
     .map_err(|refusal| format!("eval: {refusal}"))?;

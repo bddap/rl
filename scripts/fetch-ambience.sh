@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CC0 ambient beds for the soundscape (rl#357) — see NOTICE for provenance.
-# The release packager (bothouse rl-release-build) runs this at package time so
+# The release packager runs this at package time so
 # assets/ambience/ ships with every release (rl#375); dev checkouts run it by hand.
 set -euo pipefail
 

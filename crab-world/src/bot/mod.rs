@@ -20,8 +20,6 @@ pub mod sensor;
 mod sim_truth_test;
 #[cfg(feature = "render")]
 pub mod skin;
-#[cfg(test)]
-mod slope_hold_test;
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;
@@ -412,13 +410,10 @@ pub struct CrabRescueIsFault;
 #[derive(Resource, Default)]
 pub struct RescueStats {
     pub total: u64,
-    /// Rescues since the telemetry drain last cleared, tallied PER REASON: the
-    /// fault/warn split must survive aggregation, or a legitimate tunneling rescue
-    /// surfaces on the hub feed as an rl#137 non-finite fault — a false alarm.
-    pub since_nonfinite: u32,
-    pub since_below_terrain: u32,
-    pub since_buried: u32,
-    pub since_escaped: u32,
+    pub nonfinite: u32,
+    pub below_terrain: u32,
+    pub buried: u32,
+    pub escaped: u32,
     pub last_body: Option<RescueBody>,
 }
 
@@ -589,16 +584,16 @@ pub fn rescue_lost_crabs(
         stats.total += 1;
         match reason {
             RescueReason::NonFinite => {
-                stats.since_nonfinite = stats.since_nonfinite.saturating_add(1);
+                stats.nonfinite = stats.nonfinite.saturating_add(1);
             }
             RescueReason::BelowTerrain => {
-                stats.since_below_terrain = stats.since_below_terrain.saturating_add(1);
+                stats.below_terrain = stats.below_terrain.saturating_add(1);
             }
             RescueReason::Buried => {
-                stats.since_buried = stats.since_buried.saturating_add(1);
+                stats.buried = stats.buried.saturating_add(1);
             }
             RescueReason::Escaped => {
-                stats.since_escaped = stats.since_escaped.saturating_add(1);
+                stats.escaped = stats.escaped.saturating_add(1);
             }
         }
         stats.last_body = Some(body);

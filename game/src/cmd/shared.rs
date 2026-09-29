@@ -15,14 +15,6 @@ pub(crate) fn boot_view(args: crab_world::RenderArgs) -> crab_world::BootView {
     args.resolve(crab_world::mesh_fallback::Surface::Game)
 }
 
-/// The controls-overlay force-knobs resolved against GCR's control scheme — an unknown
-/// context id dies here, at t=0, naming the valid ids.
-pub(crate) fn gcr_controls(
-    args: &crab_world::controls::ControlsOverlayArgs,
-) -> Result<crab_world::controls::ControlsOverrides<net::controls::GcrControls>> {
-    args.resolve().map_err(anyhow::Error::msg)
-}
-
 /// One determinism-log line, `<tick> <hash>` (zero-padded 16-hex) — the format two
 /// peers/runs `diff` to prove byte-identical sims. The line IS the cross-peer diff
 /// contract, so every writer (this file's whole-log writer and `game net`'s streaming

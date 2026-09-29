@@ -1181,7 +1181,6 @@ mod tests {
     };
     use crab_world::bot::physics_digest::crab_state_digest;
     use crab_world::bot::sensor::CrabObservation;
-    use crab_world::policy::RestFallback;
 
     use super::*;
     use crate::client::TickMsg;
@@ -1372,12 +1371,10 @@ mod tests {
 
     #[test]
     fn host_slot_runs_the_policy_forward_between_advance_and_step_next() {
-        let absent = std::env::temp_dir().join(format!("rl-host-forward-{}", std::process::id()));
-        assert!(!absent.exists());
-        let policy = Policy::load(&absent, RestFallback::RandomBrain);
+        let policy = Policy::untrained();
         assert!(
             policy.is_loaded(),
-            "the diagnostic brain must arm to exercise the policy forward"
+            "the untrained brain must arm to exercise the policy forward"
         );
 
         let (mut server, mut app) = solo_host(policy);

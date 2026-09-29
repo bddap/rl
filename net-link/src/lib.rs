@@ -39,7 +39,7 @@ mod native;
 #[cfg(not(target_family = "wasm"))]
 use native as platform;
 #[cfg(not(target_family = "wasm"))]
-pub use native::{publish_lan_addr, start_session};
+pub use native::{confine_discovery_to_process, start_session};
 
 #[cfg(target_family = "wasm")]
 mod web;

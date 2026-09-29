@@ -16,29 +16,18 @@ pub(crate) struct PpoConfig {
     pub(crate) batch_size: usize,
     pub(crate) value_loss_clip: f32,
     pub(crate) target_kl: f32,
-    /// Hard cap on minibatch steps per update; `None` = uncapped (rl#276).
-    pub(crate) steps_cap: Option<std::num::NonZeroU32>,
-    pub(crate) log_std_floor_start: f32,
     pub(crate) log_std_floor_end: f32,
-    pub(crate) log_std_anneal_ticks: u64,
 }
 
 impl PpoConfig {
     pub(crate) fn log_std_floor(&self, ticks_into_anneal: u64) -> f32 {
-        if self.log_std_anneal_ticks == 0 {
-            return self.log_std_floor_end;
-        }
-        let frac = (ticks_into_anneal as f32 / self.log_std_anneal_ticks as f32).clamp(0.0, 1.0);
-        self.log_std_floor_start + (self.log_std_floor_end - self.log_std_floor_start) * frac
+        let frac = (ticks_into_anneal as f32 / LOG_STD_ANNEAL_TICKS as f32).clamp(0.0, 1.0);
+        LOG_STD_FLOOR_START + (self.log_std_floor_end - LOG_STD_FLOOR_START) * frac
     }
 }
 
-/// σ-floor anneal defaults — the live baseline's exploration schedule (rl#161).
-/// Per-run overrides flow only through `TrainConfig` flags (clap, including their
-/// `RL_LOG_STD_*` env fallbacks), so `Default` itself is PURE — it reads no ambient
-/// state (rl#272).
-pub(crate) const LOG_STD_FLOOR_START_DEFAULT: f32 = -0.7;
-pub(crate) const LOG_STD_ANNEAL_TICKS_DEFAULT: u64 = 5_000_000;
+pub(crate) const LOG_STD_FLOOR_START: f32 = -0.7;
+pub(crate) const LOG_STD_ANNEAL_TICKS: u64 = 5_000_000;
 
 impl Default for PpoConfig {
     fn default() -> Self {
@@ -53,10 +42,7 @@ impl Default for PpoConfig {
             batch_size: 64,
             value_loss_clip: 3.0,
             target_kl: 0.03,
-            steps_cap: None,
-            log_std_floor_start: LOG_STD_FLOOR_START_DEFAULT,
             log_std_floor_end: crate::bot::arch::LOG_STD_MIN,
-            log_std_anneal_ticks: LOG_STD_ANNEAL_TICKS_DEFAULT,
         }
     }
 }
@@ -320,35 +306,25 @@ mod tests {
     #[test]
     fn log_std_floor_anneals_start_to_end_then_holds() {
         let config = PpoConfig {
-            log_std_floor_start: -0.7,
             log_std_floor_end: -2.0,
-            log_std_anneal_ticks: 1000,
             ..PpoConfig::default()
         };
+        let at = |ticks| config.log_std_floor(ticks);
         assert!(
-            (config.log_std_floor(0) - (-0.7)).abs() < 1e-6,
+            (at(0) - LOG_STD_FLOOR_START).abs() < 1e-6,
             "wide at the epoch"
         );
         assert!(
-            (config.log_std_floor(500) - (-1.35)).abs() < 1e-6,
+            (at(LOG_STD_ANNEAL_TICKS / 2) - (LOG_STD_FLOOR_START - 2.0) / 2.0).abs() < 1e-6,
             "linear midpoint"
         );
         assert!(
-            (config.log_std_floor(1000) - (-2.0)).abs() < 1e-6,
+            (at(LOG_STD_ANNEAL_TICKS) - (-2.0)).abs() < 1e-6,
             "refine at horizon"
         );
         assert!(
-            (config.log_std_floor(10_000) - (-2.0)).abs() < 1e-6,
+            (at(LOG_STD_ANNEAL_TICKS * 10) - (-2.0)).abs() < 1e-6,
             "holds at the refine floor past the horizon"
-        );
-
-        let off = PpoConfig {
-            log_std_anneal_ticks: 0,
-            ..config
-        };
-        assert!(
-            (off.log_std_floor(0) - (-2.0)).abs() < 1e-6,
-            "a zero horizon is the refine floor from tick 0 (schedule off)"
         );
     }
 

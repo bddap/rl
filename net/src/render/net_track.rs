@@ -30,9 +30,8 @@ pub(super) struct NetTrack {
     /// Highest sim tick seen — a smaller current tick means a round reset, which
     /// rewinds the watermarks below instead of muting sampling until the old count.
     seen: u64,
-    /// Next tick at/after which to sample ([`crate::telemetry::next_sample_tick`]
-    /// shape) — a watermark, not a modulus, so remote-adopt jumps of several ticks
-    /// still sample once.
+    /// Next tick at/after which to sample — a watermark, not a modulus, so remote-adopt
+    /// jumps of several ticks still sample once.
     next_sample: u64,
     /// Next tick at/after which to hand the batches to `tracing`.
     next_emit: u64,

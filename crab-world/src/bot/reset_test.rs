@@ -239,9 +239,9 @@ fn rescue_frees_a_carapace_pinned_under_the_sheet() {
 
     let stats = app.world().resource::<super::RescueStats>();
     assert!(
-        stats.since_buried >= 1,
-        "the buried-carapace rescue must have fired (since_buried={})",
-        stats.since_buried
+        stats.buried >= 1,
+        "the buried-carapace rescue must have fired (buried={})",
+        stats.buried
     );
     tick(&mut app, 192);
     assert_crab_sane(&mut app, n_parts, "after rescue from under the sheet");
@@ -330,9 +330,9 @@ fn rescue_recovers_an_upward_escaped_crab() {
     tick(&mut app, 4);
     let stats = app.world().resource::<super::RescueStats>();
     assert!(
-        stats.since_escaped >= 1,
-        "the escaped-crab rescue must have fired (since_escaped={})",
-        stats.since_escaped
+        stats.escaped >= 1,
+        "the escaped-crab rescue must have fired (escaped={})",
+        stats.escaped
     );
     tick(&mut app, 188);
     assert_crab_sane(&mut app, n_parts, "after rescue from off the tile");

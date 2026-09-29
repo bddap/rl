@@ -18,24 +18,17 @@ use super::systems::{HorizonOutput, HorizonRequest, LearnerState, StepTelemetry,
 
 type SnapshotRecorder = BinBytesRecorder<FullPrecisionSettings>;
 
-fn apply_nice(nice: i32) {
-    let nice = nice.clamp(0, 19);
-    if nice == 0 {
-        return;
-    }
-    // wasm has no processes to re-prioritize; the browser build never trains, this
-    // path is just linked (rl#411).
-    #[cfg(target_family = "wasm")]
-    let _ = nice;
+const TRAINER_NICE: i32 = 10;
+
+fn apply_nice() {
     #[cfg(not(target_family = "wasm"))]
     {
-        // No errno pre-clear: unlike getpriority, setpriority returns -1 ONLY on error,
-        // so the bare return code is the whole verdict (and errno access is per-OS libc
-        // surface — __errno_location is glibc-only, which broke the macOS build).
-        let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
+        let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, TRAINER_NICE) };
         if rc == -1 {
             let err = std::io::Error::last_os_error();
-            eprintln!("[nice] setpriority({nice}) failed: {err} — running at normal priority");
+            eprintln!(
+                "[nice] setpriority({TRAINER_NICE}) failed: {err} — running at normal priority"
+            );
         }
     }
 }
@@ -57,7 +50,7 @@ pub fn default_workers(explicit: Option<usize>) -> usize {
 ///
 /// Capped by `available_parallelism()` because `/proc/cpuinfo` is host-wide
 /// while `available_parallelism()` honors cgroup CPU quotas and affinity masks:
-/// under a capped cgroup (CI, botq workers) the host may show 12 physical cores
+/// under a capped cgroup (CI, containers) the host may show 12 physical cores
 /// while the scheduler grants 8 — planning threads for cores the cgroup denies
 /// just adds contention. Falls back to `available_parallelism()` alone if
 /// `/proc/cpuinfo` is unavailable or yields nothing.
@@ -518,7 +511,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "builds a bevy+rapier App; run with --ignored"]
     fn rollout_thread_collects_per_env_buffers_and_learns() {
         let m = 2u64;
         let horizon = 96u64;
@@ -584,7 +576,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "builds two bevy+rapier Apps; run with --ignored"]
     fn two_threads_each_collect_a_full_horizon() {
         let m = 1u64;
         let horizon = 96u64;

@@ -24,7 +24,7 @@ pub struct RenderVideoPlugin {
     pub seconds: f32,
     pub width: u32,
     pub height: u32,
-    pub overrides: super::PlayOverrides,
+    pub seed: Option<u64>,
 }
 
 #[derive(Resource)]
@@ -66,13 +66,8 @@ impl Plugin for RenderVideoPlugin {
             panic!("render-video: cannot create frame dir {frame_dir:?}: {e}");
         }
 
-        add_inference(
-            app,
-            &self.checkpoint_dir,
-            None,
-            self.overrides.random_policy,
-        );
-        self.overrides.apply_rng_and_ball(app);
+        add_inference(app, &self.checkpoint_dir, None);
+        app.insert_resource(super::DemoRng::seeded(self.seed));
         app.insert_resource(ShotConfig {
             path: self.path.clone(),
             settle: 0,

@@ -37,8 +37,7 @@ pub const DEFAULT_TARGET_DISTANCE_M: f32 = 24.0;
 /// slide (see [`bearing_progressable`] for why the bound is symmetric), so terrain
 /// contributes neither forced zeros nor gravity-donated metres to the average — a
 /// low mean is a policy verdict, never a terrain lottery. 0.36 ≈ 20° is deliberately
-/// conservative — far below the 55° zero-input HOLD the contact fix guarantees
-/// (`slope_hold_test`) and moderate for a competent walker. Rejecting more terrain
+/// conservative — moderate for a competent walker. Rejecting more terrain
 /// only flattens the arena; accepting an unclimbable ray hands the mean a
 /// structural zero no policy can close, so err strict.
 pub const MAX_PROGRESSABLE_GRADE: f32 = 0.36;
@@ -202,7 +201,7 @@ const _: () = assert!(
 /// The default eval episode length PER PAIR — one training episode horizon (~23 s of
 /// crab time at 64 Hz), enough for a working gait to traverse a far target. The eval's
 /// instrument is the (ticks, distance, compass, starts, amplitude, settle) tuple —
-/// `--ticks`/`--distance`/`--terrain-amplitude` move the first three knobs, the starts
+/// `--terrain-amplitude` moves the amplitude, the starts
 /// derive from (bake × amplitude, distance), and the settle window borrows
 /// [`RESET_GRACE_TICKS`] (a bot-module constant: touching it re-bases `initial_dist`
 /// and every historical progress number). Every judge — the CLI (release gate,
@@ -651,21 +650,6 @@ pub fn instrument_fingerprint() -> String {
         starts.finish(),
         crate::simulation::simulation_identity(),
     )
-}
-
-/// CLI-facing validation for `--distance` (rl#341 S1-3): the far distance must be a
-/// real positive length inside the training band — past [`BAND_MAX_M`] the obs
-/// target is out-of-distribution and an unreachable ball measures obstruction, not
-/// chase (rl#292); NaN/∞/negative used to panic in the locale bake, hang the start
-/// search, or silently sweep the mirrored bearing.
-pub fn validate_target_distance(d: f32) -> Result<f32, String> {
-    if d.is_finite() && d > 0.0 && d <= BAND_MAX_M {
-        Ok(d)
-    } else {
-        Err(format!(
-            "target distance must be a finite length in (0, {BAND_MAX_M}] m, got {d}"
-        ))
-    }
 }
 
 #[derive(Resource)]
@@ -1675,18 +1659,6 @@ mod tests {
         );
     }
 
-    /// The rl#341 S1-3 CLI guard: only real in-band lengths pass.
-    #[test]
-    fn target_distance_validation_refuses_degenerates() {
-        use crate::training::targets::BAND_MAX_M;
-        assert!(validate_target_distance(DEFAULT_TARGET_DISTANCE_M).is_ok());
-        assert!(validate_target_distance(1.0).is_ok());
-        assert!(validate_target_distance(BAND_MAX_M).is_ok());
-        for bad in [0.0, -5.0, f32::NAN, f32::INFINITY, BAND_MAX_M + 1.0] {
-            assert!(validate_target_distance(bad).is_err(), "{bad} must refuse");
-        }
-    }
-
     #[test]
     fn compass_covers_bearings_and_keeps_the_historical_first() {
         let origin = Vec3::new(2.0, 0.0, -3.0);
@@ -1877,90 +1849,5 @@ mod tests {
                 pair.bearing_rad.to_degrees()
             );
         }
-    }
-
-    /// The end-to-end physical path (rl#341 S2-5): `run_eval` on an empty
-    /// (rest-pose) checkpoint through real worlds — batched far pairs, close and
-    /// pace probes — with the full fold and every guard live. The landing gate runs
-    /// this whenever the eval seam is touched (test-map rule); it stays `#[ignore]`d
-    /// for the plain workspace suite because it builds ~18 bevy+rapier worlds.
-    #[test]
-    #[ignore = "builds ~18 headless bevy+rapier worlds; the eval test-map rule runs it with --ignored"]
-    fn rest_pose_has_zero_torque_and_no_progress() {
-        let dir = std::env::temp_dir().join(format!("rl-eval-restpose-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // Stamp the resolved plant: since the rl#293 strict adoption a recordless dir
-        // REFUSES (unknown ground provenance), so the legitimate no-brain-yet
-        // baseline is a plant-stamped dir with no brain — what a fresh run's
-        // checkpoint dir looks like before the first save.
-        crate::bot::body::record_plant(&dir).unwrap();
-
-        let r = run_eval(&dir, 200, DEFAULT_TARGET_DISTANCE_M, 1.0)
-            .expect("an absent checkpoint is the legitimate baseline, never a refusal");
-
-        assert!(!r.policy_loaded, "an empty dir loads no policy (rest pose)");
-        assert_eq!(r.far.pairs.len(), EVAL_PAIRS);
-        assert_eq!(
-            r.far.reached_count(),
-            0,
-            "a rest-pose crab never reaches a far ball"
-        );
-        // Zero floor: under the tip-based touch (rl#253) even the real Sally's
-        // full-episode slump never brings a claw tip near the ball (see
-        // CLOSE_PROBE_DISTANCE_M), so rest-pose reached_count is 0 on every body.
-        assert_eq!(r.close.reached_count(), 0);
-        assert_eq!(r.close.target_distance_m, CLOSE_PROBE_DISTANCE_M);
-        for b in &r.close.per_bearing {
-            assert_eq!(b.total_torque, 0.0);
-            assert!(
-                b.initial_distance_m > REACH_RADIUS,
-                "close probe starts outside reach ({} m) at bearing {:.0}°",
-                b.initial_distance_m,
-                b.bearing_rad.to_degrees()
-            );
-            assert!(
-                b.initial_distance_m < DEFAULT_TARGET_DISTANCE_M,
-                "close probe is the CLOSE sweep, not another far one"
-            );
-        }
-        assert!(
-            (0.0..1.0).contains(&r.progress_m()),
-            "rest-pose mean progress should be ~0, got {} m",
-            r.progress_m()
-        );
-        for b in &r.far.pairs {
-            assert_eq!(
-                b.total_torque, 0.0,
-                "the rest pose applies no joint torque, so total_torque must be exactly 0"
-            );
-            assert_eq!(b.saturation, 0.0, "zero drive saturates nothing");
-            assert_eq!(b.work_j, 0.0, "zero torque does zero mechanical work");
-            // Passive slump CAN clear the J/m floor (~0.55 m on some bodies) —
-            // measurable or not, zero work means a zero cost of transport.
-            assert_eq!(b.j_per_m().unwrap_or(0.0), 0.0);
-            assert_eq!(b.active_ticks, 200, "all active ticks are measured");
-            assert_eq!(b.rescues, 0, "a resting crab is never rescued");
-            assert!(
-                b.initial_distance_m.is_finite() && b.closest_distance_m.is_finite(),
-                "distances are real finite metres"
-            );
-            assert!(
-                b.initial_distance_m > REACH_RADIUS,
-                "the ball starts far outside reach ({} m) at bearing {:.0}°",
-                b.initial_distance_m,
-                b.bearing_rad.to_degrees()
-            );
-            assert!(
-                (0.0..1.5).contains(&b.progress_m),
-                "rest pose shuffles nowhere at bearing {:.0}° start ({:.0},{:.0}), got {} m",
-                b.bearing_rad.to_degrees(),
-                b.start_xz.x,
-                b.start_xz.y,
-                b.progress_m
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

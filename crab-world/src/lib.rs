@@ -284,34 +284,10 @@ pub struct TrainConfig {
     #[arg(long)]
     pub seed: Option<u64>,
 
-    /// Exploration σ-floor (log-space) at the start of the anneal (rl#161).
-    #[arg(long, env = "RL_LOG_STD_FLOOR_START", allow_negative_numbers = true,
-          default_value_t = training::algorithm::LOG_STD_FLOOR_START_DEFAULT)]
-    pub log_std_floor_start: f32,
-
     /// Exploration σ-floor (log-space) the anneal refines down to.
     #[arg(long, env = "RL_LOG_STD_FLOOR_END", allow_negative_numbers = true,
           default_value_t = bot::arch::LOG_STD_MIN)]
     pub log_std_floor_end: f32,
-
-    /// Ticks over which the σ-floor anneals from start to end (0 = pinned at end).
-    #[arg(long, env = "RL_LOG_STD_ANNEAL_TICKS",
-          default_value_t = training::algorithm::LOG_STD_ANNEAL_TICKS_DEFAULT)]
-    pub log_std_anneal_ticks: u64,
-
-    /// Effort-tax coefficient on Σ|drive|² — the reward's only economy term (rl#268).
-    #[arg(long, env = "RL_EFFORT_WEIGHT", value_parser = parse_effort_weight,
-          default_value_t = training::reward::EFFORT_WEIGHT_DEFAULT)]
-    pub effort_weight: f32,
-
-    /// DIAGNOSTIC: log the rollout's mean Σ|drive|² and the tax it pays, per step.
-    #[arg(long, env = "RL_LOG_EFFORT", value_parser = clap::builder::FalseyValueParser::new())]
-    pub log_effort: bool,
-
-    /// Hard cap on PPO minibatch steps per update — the rl#276 escalation lever: fewer
-    /// steps per iteration slows the per-checkpoint policy walk at the σ-floor.
-    #[arg(long, env = "RL_PPO_STEPS_CAP")]
-    pub ppo_steps_cap: Option<std::num::NonZeroU32>,
 
     /// DIAGNOSTIC: the ROLLOUT worlds' ground. Default `gcr`, the canonical tile —
     /// the only ground a deployable policy trains on (rl#293). `flat` isolates the
@@ -397,16 +373,6 @@ fn parse_band_max(s: &str) -> Result<f32, String> {
             training::targets::BAND_START_MIN,
             training::targets::BAND_MAX_M
         ))
-    }
-}
-
-fn parse_effort_weight(s: &str) -> Result<f32, String> {
-    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
-    // Negative would PAY for flailing; NaN would poison every reward in the run.
-    if v.is_finite() && v >= 0.0 {
-        Ok(v)
-    } else {
-        Err(format!("{v} is not a finite non-negative weight"))
     }
 }
 

@@ -4,7 +4,6 @@ use std::time::Duration;
 use bevy::prelude::*;
 use clap::builder::FalseyValueParser;
 use clap::{Parser, Subcommand};
-use crab_world::controls::{ControlsOverlayArgs, ControlsOverrides};
 use crab_world::{CheckpointArgs, RenderArgs, bot, parse_finite_f32, physics, play};
 
 /// Watch the trained crab: a live demo window, a still, or a rendered video.
@@ -48,17 +47,6 @@ struct Common {
     #[arg(long, env = "RL_DEMO_SEED")]
     seed: Option<u64>,
 
-    /// DIAGNOSTIC: when no usable checkpoint loads, drive an untrained random brain
-    /// instead of the zero-action rest pose.
-    #[arg(long, env = "RL_RANDOM_POLICY", value_parser = FalseyValueParser::new())]
-    random_policy: bool,
-
-    /// Pin the chase target ball here instead of sampling positions (a claw touch
-    /// still re-rolls it).
-    #[arg(long, env = "RL_TARGET_BALL_AT", value_name = "X,Y,Z", value_parser = parse_vec3,
-          allow_hyphen_values = true)]
-    target_ball_at: Option<Vec3>,
-
     /// DIAGNOSTIC: every 64th tick, log the deepest crab self-intersections and
     /// crab-vs-terrain penetrations (which body parts, by how much).
     #[arg(long, env = "RL_CONTACT_AUDIT", value_parser = FalseyValueParser::new())]
@@ -82,10 +70,6 @@ struct DemoArgs {
     #[command(flatten)]
     common: Common,
 
-    /// Force-knobs for the controls legend overlay.
-    #[command(flatten)]
-    controls: ControlsOverlayArgs,
-
     /// Run in a window instead of borderless fullscreen.
     #[arg(long)]
     windowed: bool,
@@ -102,20 +86,12 @@ struct DemoArgs {
     /// Show the joint-trace graph overlay from launch (also toggleable in-app).
     #[arg(long, env = "RL_GRAPH", value_parser = FalseyValueParser::new())]
     graph: bool,
-
-    /// Capture the graph overlay to PATH once its traces fill (implies --graph).
-    #[arg(long, env = "RL_GRAPH_SHOT", value_name = "PATH")]
-    graph_shot: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
 struct ScreenshotArgs {
     #[command(flatten)]
     common: Common,
-
-    /// Force-knobs for the controls legend overlay.
-    #[command(flatten)]
-    controls: ControlsOverlayArgs,
 
     #[command(flatten)]
     size: SizeArgs,
@@ -195,18 +171,6 @@ fn main() {
     }
 }
 
-/// Resolved against the demo's scheme before any world is built: an unknown context id
-/// dies HERE, at t=0, rather than silently capturing the default legend (rl#275).
-fn resolve_controls(args: &ControlsOverlayArgs) -> ControlsOverrides<play::DemoControls> {
-    match args.resolve::<play::DemoControls>() {
-        Ok(controls) => controls,
-        Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(2);
-        }
-    }
-}
-
 /// How the app is driven: a live window pumped by winit, or offscreen frames pumped
 /// by a ScheduleRunner at the given interval. An enum so a mode can't get it
 /// half-right (window plus no runner, or both).
@@ -279,18 +243,7 @@ fn boot(common: &Common, driver: Driver) -> (App, otel::OtelGuard) {
     (app, otel_guard)
 }
 
-impl Common {
-    fn play_overrides(&self) -> play::PlayOverrides {
-        play::PlayOverrides {
-            seed: self.seed,
-            random_policy: self.random_policy,
-            target_ball_at: self.target_ball_at,
-        }
-    }
-}
-
 fn run_demo(args: DemoArgs) {
-    let controls = resolve_controls(&args.controls);
     let window = bevy::window::Window {
         title: "Crab RL".into(),
         mode: if args.windowed {
@@ -300,7 +253,6 @@ fn run_demo(args: DemoArgs) {
         },
         ..default()
     };
-    let overrides = args.common.play_overrides();
     let (mut app, _otel) = boot(&args.common, Driver::Windowed(Box::new(window)));
     if let Err(reason) = crab_world::mesh_fallback::usable_model() {
         app.insert_resource(MeshFallbackBanner(reason.clone()));
@@ -310,38 +262,32 @@ fn run_demo(args: DemoArgs) {
         checkpoint_dir: args.common.checkpoint.checkpoint_dir,
         live_checkpoint_dir: args.live_checkpoint_dir,
         manual_control: args.manual_control,
-        overrides,
+        seed: args.common.seed,
         graph: args.graph,
-        graph_shot: args.graph_shot,
-        controls,
     });
     app.run();
 }
 
 fn run_screenshot(args: ScreenshotArgs) {
-    let controls = resolve_controls(&args.controls);
     let (mut app, _otel) = boot(
         &args.common,
         Driver::Offscreen(Duration::from_secs_f64(1.0 / 60.0)),
     );
-    let overrides = args.common.play_overrides();
     app.add_plugins(play::ScreenshotPlugin {
         checkpoint_dir: args.common.checkpoint.checkpoint_dir,
         path: args.path,
         settle: args.settle,
         width: args.size.width,
         height: args.size.height,
-        overrides,
-        target_ball: args.target_ball || args.common.target_ball_at.is_some(),
+        seed: args.common.seed,
+        target_ball: args.target_ball,
         rig_pose: args.rig_pose.map(|a| (a, args.rig_pose_part)),
         shot_view: args.shot_cam.zip(args.shot_focus),
-        controls,
     });
     app.run();
 }
 
 fn run_render_video(args: RenderVideoArgs) {
-    let overrides = args.common.play_overrides();
     let (mut app, _otel) = boot(&args.common, Driver::Offscreen(Duration::ZERO));
     app.add_plugins(play::RenderVideoPlugin {
         checkpoint_dir: args.common.checkpoint.checkpoint_dir,
@@ -349,7 +295,7 @@ fn run_render_video(args: RenderVideoArgs) {
         seconds: args.seconds,
         width: args.size.width,
         height: args.size.height,
-        overrides,
+        seed: args.common.seed,
     });
     app.run();
 }

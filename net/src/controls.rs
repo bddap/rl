@@ -398,25 +398,6 @@ impl ControlScheme for GcrControls {
         }
     }
 
-    fn context_id(ctx: GcrContext) -> &'static str {
-        match ctx {
-            GcrContext::OnFoot => "foot",
-            GcrContext::Plane => "plane",
-            GcrContext::Ship => "ship",
-            GcrContext::Menu => "menu",
-        }
-    }
-
-    fn context_from_id(id: &str) -> Option<GcrContext> {
-        match id {
-            "foot" => Some(GcrContext::OnFoot),
-            "plane" => Some(GcrContext::Plane),
-            "ship" => Some(GcrContext::Ship),
-            "menu" => Some(GcrContext::Menu),
-            _ => None,
-        }
-    }
-
     fn reveal_action() -> Action {
         Action::RevealControls
     }
@@ -1285,22 +1266,6 @@ mod tests {
                 Glyph::Icon("controls/keyboard_space.png")
             ]
         );
-    }
-
-    /// The screenshot context override round-trips the ids the evidence harness uses.
-    #[test]
-    fn context_from_id_round_trips() {
-        assert_eq!(
-            GcrControls::context_from_id("foot"),
-            Some(GcrContext::OnFoot)
-        );
-        assert_eq!(
-            GcrControls::context_from_id("plane"),
-            Some(GcrContext::Plane)
-        );
-        assert_eq!(GcrControls::context_from_id("ship"), Some(GcrContext::Ship));
-        assert_eq!(GcrControls::context_from_id("menu"), Some(GcrContext::Menu));
-        assert_eq!(GcrControls::context_from_id("nope"), None);
     }
 
     #[test]

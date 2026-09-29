@@ -254,12 +254,10 @@ pub fn run_learner(
     k: usize,
     horizon: u64,
     iters: u64,
-    nice: i32,
 ) {
-    // Own nicing here (one place): lowers this whole process's priority before any
-    // world is built, so a foreground game preempts training. The rollout threads
-    // spawned below inherit it (POSIX priority is per-process).
-    apply_nice(nice);
+    // Before any world is built, so the rollout threads spawned below inherit it and a
+    // foreground game preempts training.
+    apply_nice();
     init_process_pools();
 
     // Resolve the run's master RNG seed ONCE here, so the same base seed reaches the host
@@ -325,22 +323,19 @@ pub fn run_learner(
     // rightly refuse. Present from here, every staged generation hardlink-carries it.
     write_tick_watermark(&checkpoint_dir, total_ticks);
 
-    // Anchor the exploration-σ anneal to THIS experiment's start (bddap/rl#161): the schedule
-    // ramps from a wide floor down to the refine floor over `log_std_anneal_ticks`, measured
-    // from `anneal_epoch`. Persisted beside the checkpoint so the anneal continues across the
-    // overnight loop's restarts rather than re-widening on every relaunch.
+    // Persisted beside the checkpoint so the anneal continues across restarts rather
+    // than re-widening on every relaunch.
     let anneal_epoch = read_or_init_anneal_epoch(&checkpoint_dir, total_ticks);
     eprintln!(
         "[learner] exploration-σ schedule: log_std floor {:.3} → {:.3} over {} ticks (epoch @ {} ticks)",
-        state.ppo_config().log_std_floor_start,
+        crate::training::algorithm::LOG_STD_FLOOR_START,
         state.ppo_config().log_std_floor_end,
-        state.ppo_config().log_std_anneal_ticks,
+        crate::training::algorithm::LOG_STD_ANNEAL_TICKS,
         anneal_epoch,
     );
-    // Loud so a run's train.log proves which reward economy it trained under (rl#268).
     eprintln!(
-        "[learner] reward economy: effort_weight {} (--effort-weight)",
-        config.effort_weight,
+        "[learner] reward economy: effort_weight {}",
+        crate::training::reward::EFFORT_WEIGHT,
     );
     // Loud so train.log proves the rollout ground + band — the plant sidecar does NOT
     // track the diagnostic terrain override (see `crate::TrainTerrain`), so this line
@@ -372,7 +367,7 @@ pub fn run_learner(
 
     let compute_threads = bevy::tasks::ComputeTaskPool::get().thread_num();
     eprintln!(
-        "[learner] in-process: K={k} threads × M={m} envs × H={horizon} ticks/iter → {} transitions/update | budget {} ticks (0=∞), {iters} iters (0=∞) | nice {nice} | compute pool {compute_threads} thread(s), rayon pool {} thread(s)",
+        "[learner] in-process: K={k} threads × M={m} envs × H={horizon} ticks/iter → {} transitions/update | budget {} ticks (0=∞), {iters} iters (0=∞) | nice {TRAINER_NICE} | compute pool {compute_threads} thread(s), rayon pool {} thread(s)",
         k as u64 * m as u64 * horizon,
         tick_budget,
         // The ACTUAL pool width, not the env — the env is not what the pin reads

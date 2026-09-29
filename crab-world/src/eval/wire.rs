@@ -56,10 +56,9 @@
 //!
 //! # Consumer contract
 //!
-//! Consumers (rl-eval-monitor's `field()`, bothouse) select a record by its prefix
-//! and extract values BY KEY NAME, never by position. Under that contract adding a
-//! key is always safe; renaming or removing one is a breaking change to grep for in
-//! bothouse first. Values are `{:.4}`/`{:.2}`/`{:.0}` decimals, `true`/`false`
+//! Consumers select a record by its prefix and extract values BY KEY NAME, never by
+//! position. Under that contract adding a key is always safe; renaming or removing one
+//! is a breaking change for every consumer. Values are `{:.4}`/`{:.2}`/`{:.0}` decimals, `true`/`false`
 //! booleans, bare integers, or `%016x` hex digests; a never-measured tip distance
 //! prints as `inf`, which by-name consumers must tolerate on keys they don't
 //! validate.
@@ -257,7 +256,7 @@ mod tests {
         }
     }
 
-    /// Pins the wire format the bothouse consumers grep: prefixes, key names, key
+    /// Pins the wire format consumers grep: prefixes, key names, key
     /// order, line order — the headline last, its `progress_m` the PAIR MEAN
     /// (schema=2), tail statistics and provenance beside it.
     #[test]

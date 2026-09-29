@@ -1,9 +1,7 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
-use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy_rapier3d::prelude::*;
 
 use crate::bot::actuator::CrabActions;
@@ -42,21 +40,10 @@ struct GraphUi;
 #[reflect(Default)]
 struct GraphGizmos;
 
-#[derive(Resource)]
-struct GraphShot {
-    path: PathBuf,
-    frame: u32,
-}
-
-/// `visible` shows the overlay from launch (it stays toggleable at runtime);
-/// `shot` additionally captures it to that path once the traces fill.
-pub fn register(app: &mut App, visible: bool, shot: Option<PathBuf>) {
-    app.insert_resource(JointGraph::new(visible || shot.is_some()));
+/// `visible` shows the overlay from launch (it stays toggleable at runtime).
+pub fn register(app: &mut App, visible: bool) {
+    app.insert_resource(JointGraph::new(visible));
     app.init_gizmo_group::<GraphGizmos>();
-    if let Some(path) = shot {
-        app.insert_resource(GraphShot { path, frame: 0 });
-        app.add_systems(Update, graph_shot_capture);
-    }
     app.add_systems(Startup, setup_overlay);
     app.add_systems(Update, (toggle_graph, draw_graph));
     app.add_systems(FixedUpdate, sample_graph);
@@ -225,25 +212,5 @@ fn draw_plot(
             Vec2::new(x, y)
         });
         gizmos.linestrip_2d(pts, color);
-    }
-}
-
-fn graph_shot_capture(
-    mut commands: Commands,
-    mut shot: ResMut<GraphShot>,
-    mut exit: MessageWriter<AppExit>,
-) {
-    shot.frame += 1;
-    if shot.frame == 150 {
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(shot.path.clone()));
-        info!(
-            "graph self-check: capturing window to {}",
-            shot.path.display()
-        );
-    }
-    if shot.frame >= 156 {
-        exit.write(AppExit::Success);
     }
 }

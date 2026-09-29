@@ -8,11 +8,6 @@ use crate::training::targets::{closest_tip_dist, sample_target, tip_touch};
 #[derive(Component)]
 pub(super) struct TargetBall;
 
-/// A pinned target position (rl-demo `--target-ball-at x,y,z`): the ball holds here
-/// instead of sampling, until a claw touch re-rolls it. `None` = sample normally.
-#[derive(Resource, Default, Clone, Copy)]
-pub(super) struct TargetBallAt(pub(super) Option<Vec3>);
-
 /// The demo ball mirrors the trained distribution, close disc included (rl#292:
 /// ball-under is canonical, not a curriculum flag — and a ball she grabs at her
 /// feet is the skill on display). One source with training's mix on purpose; a
@@ -45,21 +40,18 @@ pub(super) fn target_ball(
     claw_tips_q: Query<(&body::CrabEnvId, &Transform), With<CrabClawTip>>,
     mut ball_q: Query<&mut Transform, (With<TargetBall>, Without<CrabClawTip>)>,
     mut rng: ResMut<super::DemoRng>,
-    pinned: Res<TargetBallAt>,
 ) {
     let origin = spawns.origin(0);
 
     let mut target = match targets.get(0) {
         Some(t) => t,
-        None => pinned.0.unwrap_or_else(|| {
-            sample_target(
-                origin,
-                DEMO_CLOSE_FRAC,
-                crate::training::targets::BAND_MAX_M,
-                &mut rng.0,
-                &terrain,
-            )
-        }),
+        None => sample_target(
+            origin,
+            DEMO_CLOSE_FRAC,
+            crate::training::targets::BAND_MAX_M,
+            &mut rng.0,
+            &terrain,
+        ),
     };
 
     if closest_tip_dist(0, target, &claw_tips_q).is_some_and(tip_touch) {
@@ -113,7 +105,6 @@ mod tests {
     fn demo_target_obs_tracks_moved_ball() {
         let mut app = flat_headless_app();
         app.init_resource::<super::super::DemoRng>();
-        app.init_resource::<TargetBallAt>();
         // The demo/render-video schedule for this system, minus rendering: after Sense,
         // so it reads the post-physics state the observation consumed.
         app.add_systems(FixedUpdate, target_ball.after(BotSet::Sense));

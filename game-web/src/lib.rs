@@ -48,11 +48,9 @@ fn run(pack: Vec<u8>) -> Result<()> {
     install_console_frametime_sink();
 
     // The web launch surface: menu boot — solo, host, and join all drive the same
-    // menu as native (rl#412). No telemetry collector (TelemetrySender is
-    // uninhabited on wasm) and no scripted lobby.
+    // menu as native. No scripted lobby.
     net::render::run_game(net::render::GameConfig {
         launch: net::render::Launch::Menu,
-        telemetry: None,
         nn_crab_checkpoints: Vec::new(),
         view: crab_world::RenderArgs::default(),
         // Page-relative: bevy's wasm reader and the page's prefetch both resolve

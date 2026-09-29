@@ -118,10 +118,6 @@ pub(crate) struct WorkerMode {
     pub(super) rollouts: Vec<RolloutBuffer>,
     pub(super) explore_noise: OuNoise,
     pub(super) log_std_floor: f32,
-    /// Effort-tax coefficient (rl#268) — `TrainConfig::effort_weight`.
-    pub(super) effort_weight: f32,
-    /// DIAGNOSTIC effort probe — `TrainConfig::log_effort`.
-    pub(super) log_effort: bool,
     /// Far edge of the target-band draw — `TrainConfig::band_max_m`.
     pub(super) band_max_m: f32,
     pub(super) tick_budget: u64,
@@ -243,9 +239,6 @@ impl LearnerState {
             &mut obs_normalizer,
             &mut return_normalizer,
         );
-        if let Some(cap) = config.ppo_steps_cap {
-            info!("PPO step cap active: --ppo-steps-cap {cap} (rl#276)");
-        }
         Self {
             brain: InferenceCachedBrain::new(brain),
             device,
@@ -254,10 +247,7 @@ impl LearnerState {
             recent_rewards: Vec::new(),
             mode: LearnerMode {
                 config: PpoConfig {
-                    steps_cap: config.ppo_steps_cap,
-                    log_std_floor_start: config.log_std_floor_start,
                     log_std_floor_end: config.log_std_floor_end,
-                    log_std_anneal_ticks: config.log_std_anneal_ticks,
                     ..PpoConfig::default()
                 },
                 return_normalizer,
@@ -547,8 +537,6 @@ impl WorkerState {
                 rollouts: (0..n).map(|_| RolloutBuffer::new()).collect(),
                 explore_noise: OuNoise::new(n),
                 log_std_floor: crate::bot::arch::LOG_STD_MIN,
-                effort_weight: config.effort_weight,
-                log_effort: config.log_effort,
                 band_max_m: config.band_max_m,
                 tick_budget: config.ticks,
                 total_steps: 0,

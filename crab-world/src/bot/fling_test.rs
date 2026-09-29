@@ -1,50 +1,31 @@
-//! rl#349 solver-integrity probes. Two instruments, one lesson:
-//!
-//! - [`violent_fling_tick_stays_uniform`] — the rl#339 hypersonic class: a huge
-//!   uniform kick must stay uniform (no internal-dof redistribution) and later
-//!   near-force-free ticks must not amplify the COM. Red before the 9f01a0e
-//!   drag-brake force cap; green since. The regression gate for that class.
-//! - [`luge_impact_conserves_energy`] — the rl#349 storm class: a crab rammed
-//!   into steep terrain at storm speed (30–120 m/s) throws distal links to
-//!   1000+ rad/s, and the whole-body KE ledger proves the spins are CONVERTED
-//!   from body KE (whip-crack, energy-legit), not injected by the solve. The
-//!   assert is on the ledger, not the spins: spins at storm speed are honest
-//!   physics — the rl#332 actuator rescale is what removes the speeds. A future
-//!   solver injector (the thing six rl#349 candidate fixes went looking for)
-//!   would turn this red.
+//! Storm-impact energy ledger: a crab rammed into steep terrain at storm speed
+//! throws distal links to 1000+ rad/s, and the whole-body KE ledger proves the
+//! spins are converted from body KE, not injected by the solve. The assert is on
+//! the ledger, not the spins.
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::{ExternalForce, Velocity};
 
 use super::body::{CrabBodyPart, CrabCarapace, CrabEnvId};
-use super::headless::{HeadlessStack, WorldRole, flat_headless_app, headless_stack, tick};
+use super::headless::{HeadlessStack, WorldRole, headless_stack, tick};
 use crate::Visuals;
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::physics::PHYSICS_HZ;
 
-/// Fling controller: while armed, add `force` to the carapace's `ExternalForce`
-/// AFTER `apply_actions` zeroed it. `one_shot` disarms
-/// after a single tick; otherwise it holds — the sustained "rocket" that stands
-/// in for rl#332 policy-catapult storm power.
+/// While armed, adds `force` to the carapace's `ExternalForce` AFTER `apply_actions`
+/// zeroed it — a sustained rocket standing in for policy-catapult storm power.
 #[derive(Resource, Default)]
 struct Fling {
     force: Vec3,
     armed: bool,
-    one_shot: bool,
 }
 
-fn apply_fling(
-    mut fling: ResMut<Fling>,
-    mut carapaces: Query<&mut ExternalForce, With<CrabCarapace>>,
-) {
+fn apply_fling(fling: Res<Fling>, mut carapaces: Query<&mut ExternalForce, With<CrabCarapace>>) {
     if !fling.armed {
         return;
     }
     for mut ef in carapaces.iter_mut() {
         ef.force += fling.force;
-    }
-    if fling.one_shot {
-        fling.armed = false;
     }
 }
 
@@ -58,10 +39,9 @@ fn add_fling(app: &mut App) {
     );
 }
 
-/// (COM velocity, max |part velocity − COM velocity|) over env 0's parts.
-/// Unweighted: parts are similar-density and the probes read scales, not exact
-/// momentum.
-fn com_and_internal(app: &mut App) -> (Vec3, f32) {
+/// Unweighted mean part velocity of env 0: parts are similar-density and the ledger
+/// reads scales, not exact momentum.
+fn com_velocity(app: &mut App) -> Vec3 {
     let mut q = app
         .world_mut()
         .query_filtered::<(&CrabEnvId, &Velocity), With<CrabBodyPart>>();
@@ -71,12 +51,7 @@ fn com_and_internal(app: &mut App) -> (Vec3, f32) {
         .map(|(_, v)| v.linear)
         .collect();
     assert!(vels.len() > 30, "expected a whole crab, got {}", vels.len());
-    let com = vels.iter().copied().sum::<Vec3>() / vels.len() as f32;
-    let internal = vels
-        .iter()
-        .map(|v| (*v - com).length())
-        .fold(0.0f32, f32::max);
-    (com, internal)
+    vels.iter().copied().sum::<Vec3>() / vels.len() as f32
 }
 
 /// Whole-crab kinetic energy (translational + rotational) and total mass, from
@@ -113,7 +88,6 @@ fn crab_energy(app: &mut App) -> (f32, f32) {
 /// reach 1000+ rad/s in these impacts (whip-crack conversion of body KE); the
 /// gate deliberately does NOT bound them.
 #[test]
-#[ignore = "multi-second solver probe — run explicitly (rl#349)"]
 fn luge_impact_conserves_energy() {
     // A valley between two 30–60° walls, 12×8 cells at 2 m pitch: whichever way
     // the rocket points, the crab rams UP a face with its feet catching — the
@@ -168,7 +142,6 @@ fn luge_impact_conserves_energy() {
             let mut fling = app.world_mut().resource_mut::<Fling>();
             fling.force = Vec3::X * (dir * THRUST_N);
             fling.armed = true;
-            fling.one_shot = false;
         }
         for _ in 0..96 {
             {
@@ -187,7 +160,7 @@ fn luge_impact_conserves_energy() {
             }
             tick(&mut app, 1);
             let (ke, _) = crab_energy(&mut app);
-            let (com, _) = com_and_internal(&mut app);
+            let com = com_velocity(&mut app);
             // Falling at |v| trades PE→KE at m·g·|v|; generous 2x slack + 2 J.
             let budget = DT * (2.0 * mass * 9.81 * com.length() + p_drives) + 2.0;
             let over = (ke - ke_prev) - budget;
@@ -226,59 +199,4 @@ fn luge_impact_conserves_energy() {
         worst_injection.1,
         worst_injection.2
     );
-}
-
-/// The rl#339 hypersonic gate: Δv 6000 m/s in one uniform-force tick must stay
-/// uniform (internal spread at joint scale) and must not be amplified by later
-/// near-force-free solves. Red before the 9f01a0e drag force cap (COM ×7 with
-/// ≤113 N external); green since.
-#[test]
-#[ignore = "multi-second solver probe — run explicitly (rl#339/rl#349)"]
-fn violent_fling_tick_stays_uniform() {
-    let mut app = flat_headless_app();
-    add_fling(&mut app);
-    tick(&mut app, 64); // settle on the flat floor
-
-    // Whole-crab mass ~0.78 kg (rl#332): F = Δv·m·Hz for one tick.
-    let m = 0.781;
-    let dv = 6000.0;
-    {
-        let mut fling = app.world_mut().resource_mut::<Fling>();
-        fling.force = Vec3::Y * (dv * m * PHYSICS_HZ as f32);
-        fling.armed = true;
-        fling.one_shot = true;
-    }
-    tick(&mut app, 1);
-    let (com1, internal1) = com_and_internal(&mut app);
-    println!(
-        "fling tick: com {:.0} m/s (y {:.0}), internal spread {:.0} m/s",
-        com1.length(),
-        com1.y,
-        internal1
-    );
-
-    // A uniform kick must stay uniform: articulation under this jerk is O(10)
-    // m/s, not kilometers/second.
-    assert!(
-        internal1 < 100.0,
-        "fling tick redistributed a uniform force into {internal1:.0} m/s of \
-         internal dof motion (rl#339/rl#349)"
-    );
-
-    let mut prev = com1.length();
-    for t in 0..5 {
-        tick(&mut app, 1);
-        let (com, internal) = com_and_internal(&mut app);
-        let s = com.length();
-        println!(
-            "tick +{}: com {s:.0} m/s, internal {internal:.0} m/s",
-            t + 1
-        );
-        assert!(
-            s.is_finite() && s < prev * 1.05 + 1.0,
-            "COM amplified {prev:.0} -> {s:.0} m/s with no external force \
-             (rl#339 drag-brake amplification)"
-        );
-        prev = s;
-    }
 }

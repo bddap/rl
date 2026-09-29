@@ -90,7 +90,7 @@ pub(crate) fn random_episode_origin(rng: &mut impl rand::Rng, terrain: &TerrainG
 /// scale, claw capsule radius + bridged `CLAW_DOWN_BUFFER` (`net::sim`) ≈
 /// 0.1 m in these metres: 0.2 stays ~2× that, so exploration can plausibly
 /// discover the grab.
-pub(crate) const REACH_RADIUS: f32 = 0.2;
+pub const REACH_RADIUS: f32 = 0.2;
 
 /// THE touch predicate — a claw tip within [`REACH_RADIUS`] of the target —
 /// one source, so "touched" cannot drift between surfaces.

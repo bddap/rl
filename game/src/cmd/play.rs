@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::Parser;
-use iroh::EndpointId;
 use net::render::{GameConfig, Launch, run_game};
 
 use crab_world::RenderArgs;
@@ -25,8 +24,6 @@ pub(crate) struct Args {
     discover_secs: u64,
     #[arg(long, default_value_t = super::shared::DEFAULT_EXPECT)]
     expect: usize,
-    #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
-    telemetry: Option<EndpointId>,
 
     #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV, value_parser = crab_world::absolute_dir)]
     nn_crab_checkpoint: Vec<std::path::PathBuf>,
@@ -47,7 +44,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
     };
     run_game(GameConfig {
         launch,
-        telemetry: args.telemetry,
         nn_crab_checkpoints: args.nn_crab_checkpoint,
         view: args.render,
         asset_root: crab_world::assets::native_asset_root(),

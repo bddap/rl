@@ -10,7 +10,6 @@ use super::scene::{
 };
 use super::*;
 use crate::net_loop::NetDriver;
-use crab_world::controls::ControlsOverrides;
 use crab_world::screenshot::{self, ShotProgress, ShotTarget};
 use std::time::Duration;
 
@@ -19,7 +18,6 @@ pub fn build_screenshot_app(
     cfg: ScreenshotConfig,
     nn_crab: Option<crab_world::policy::Policy>,
     view: crab_world::BootView,
-    controls: ControlsOverrides<GcrControls>,
     pack: Input,
 ) -> App {
     let mut app = offscreen_app_scaffold(view);
@@ -30,7 +28,7 @@ pub fn build_screenshot_app(
     if let Some((policy, spawns)) = armed_crab {
         install_armed_nn_crab(&mut app, vec![policy], spawns);
     }
-    finish_offscreen_app(&mut app, cfg, view.render_mode, controls);
+    finish_offscreen_app(&mut app, cfg, view.render_mode);
     app
 }
 
@@ -40,14 +38,13 @@ pub fn build_net_screenshot_app(
     cfg: ScreenshotConfig,
     nn_crab: crab_world::policy::Policy,
     view: crab_world::BootView,
-    controls: ControlsOverrides<GcrControls>,
 ) -> App {
     let mut app = offscreen_app_scaffold(view);
     let spawns = seed_round_crabs(&mut client, 1);
     let coord = coordinator(Some(net), client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
     install_armed_nn_crab(&mut app, vec![nn_crab], spawns);
-    finish_offscreen_app(&mut app, cfg, view.render_mode, controls);
+    finish_offscreen_app(&mut app, cfg, view.render_mode);
     app
 }
 
@@ -75,13 +72,8 @@ fn offscreen_app_scaffold(view: crab_world::BootView) -> App {
 
 /// Wire the offscreen screenshot systems + render-mode onto a scaffolded app whose round is
 /// already installed — shared by both builders so the capture path can't drift.
-fn finish_offscreen_app(
-    app: &mut App,
-    cfg: ScreenshotConfig,
-    render_mode: super::RenderMode,
-    controls: ControlsOverrides<GcrControls>,
-) {
-    crab_world::controls::install_overlay(app, &controls);
+fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super::RenderMode) {
+    app.add_plugins(crab_world::controls::ControlsOverlayPlugin::<GcrControls>::default());
     crab_world::chord::install_chords::<GcrControls>(app);
     // The rl#358 combo map, unpersisted by default — an evidence shot must never
     // write the real save; `--chord-map-file` overrides the resource after build.
@@ -114,8 +106,7 @@ fn finish_offscreen_app(
                 apply_transforms,
                 place_extraction_pillar,
                 apply_shot_cam_offset,
-                // Keeps the controls context live like the windowed app. A shot that PINNED
-                // a context is unaffected: ActiveContext::sync is a no-op while pinned.
+                // Keeps the controls context live like the windowed app.
                 sync_controls_context.before(update_controls_ui::<GcrControls>),
                 capture_when_settled,
             )

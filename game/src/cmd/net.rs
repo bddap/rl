@@ -2,10 +2,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use iroh::EndpointId;
 use net::client::ClientSim;
 use net::sim::{Input, PlayerId, TICK_DT, TICK_HZ};
-use net::telemetry::{TelemetryEvent, next_sample_tick};
 use net::{formation, net_loop, transport};
 use tracing::{info, warn};
 
@@ -19,8 +17,6 @@ pub(crate) struct Args {
     run_secs: u64,
     #[arg(long, default_value_t = super::shared::DEFAULT_EXPECT)]
     expect: usize,
-    #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
-    telemetry: Option<EndpointId>,
     #[arg(long, value_name = "FILE")]
     hash_log: Option<std::path::PathBuf>,
     /// Form as an interactive-lobby HOST (auto-Start once `--expect` peers are in)
@@ -35,8 +31,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let mut session = transport::start_session()?;
     let my_eid = session.endpoint_id();
     info!("game endpoint id: {my_eid}");
-
-    let tel = net_loop::connect_telemetry(&session, args.telemetry);
 
     // Crabless STAMP (a rest-pose statue serves the poses, not a bound brain):
     // windowed peers refuse this harness on the crabs axis (rl#114/rl#286).
@@ -55,19 +49,19 @@ pub(crate) fn run(args: Args) -> Result<()> {
             if driver.roster().len() >= args.expect {
                 driver.set_starting();
             }
-            if let Some(out) = driver.pump(&mut session, tel.as_ref()) {
+            if let Some(out) = driver.pump(&mut session) {
                 break out;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
     } else {
         formation::FormationDriver::discovering(&session, args.discover_secs, args.expect, stamp)
-            .pump_blocking(&mut session, tel.as_ref())
+            .pump_blocking(&mut session)
     };
     let frozen = match formed? {
         formation::Formation::Agreed(frozen) => frozen,
         formation::Formation::Alone => {
-            net::net_loop::shutdown(&session, tel);
+            session.close();
             return run_solo_round(args.run_secs);
         }
     };
@@ -109,8 +103,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let end = Instant::now() + Duration::from_secs(args.run_secs);
     let mut snapshots_io = 0usize;
     let mut next_report_tick = TICK_HZ;
-    let mut next_tel_tick = next_sample_tick(0);
-    let mut reported_outcome = false;
     let mut hash_log = args
         .hash_log
         .as_ref()
@@ -157,9 +149,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
         let t = client.next_tick() as f32 * 0.1;
         let input = Input::from_axes(t.cos(), t.sin());
         let msg = client.submit_local_input(input, None);
-        // The telemetry stamp is the ISSUE tick — on a remote client `client.next_tick()` (the
-        // snapshot-apply cursor) trails it by the transit lag.
-        let issue_tick = msg.issue_tick;
 
         if let Some((srv, host_world)) = server.as_mut() {
             // HOST: file remote clients' inputs into their per-player streams, then assemble +
@@ -176,7 +165,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             // stream + roster entry (nothing ever waits on it). This harness sends no refusals,
             // so the returned departed endpoints go unused.
             let connected = session.connected_peers();
-            let _ = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected, tel.as_ref());
+            let _ = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected);
             srv.advance(msg);
             for stepped in host_world.step_ready_ticks(srv) {
                 let snap = net::snapshot::CoreSnapshot::from_bytes(&stepped.snapshot)
@@ -195,7 +184,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
                 }
             }
             // Chronic input-starvation surface (rl#213) — the one shared drain policy.
-            net::telemetry::surface_starvation(Some(srv), tel.as_ref());
+            net_loop::surface_starvation(Some(srv));
         } else {
             session.send(server_eid, &msg);
             // The adopt callback can't `?`; collect the per-adopt observations and write them after,
@@ -235,22 +224,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
                 client.sim().state_hash(),
             );
         }
-
-        if let Some(t) = tel.as_ref() {
-            if client.sim().tick() >= next_tel_tick {
-                next_tel_tick = next_sample_tick(client.sim().tick());
-                t.send(TelemetryEvent::tick(
-                    client.sim(),
-                    client.sim().players().count(),
-                ));
-                // The scripted CLI client never pilots.
-                t.send(TelemetryEvent::input(issue_tick, input, None));
-            }
-            if !reported_outcome && client.sim().outcome() != net::sim::Outcome::Ongoing {
-                reported_outcome = true;
-                t.send(TelemetryEvent::round_decided(client.sim()));
-            }
-        }
     }
 
     info!(
@@ -260,12 +233,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
         if am_host { "broadcast" } else { "adopted" },
         client.sim().state_hash()
     );
-    if let Some(t) = tel.as_ref() {
-        t.send(TelemetryEvent::tick(
-            client.sim(),
-            client.sim().players().count(),
-        ));
-    }
     if all_ids.len() > 1 && client.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(TICK_HZ)
     {
         warn!(
@@ -278,7 +245,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
         use std::io::Write as _;
         w.flush().context("flushing hash log")?;
     }
-    // close drains queued telemetry before the endpoint — no flush-sleep needed.
-    net::net_loop::shutdown(&session, tel);
+    session.close();
     Ok(())
 }

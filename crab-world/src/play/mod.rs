@@ -21,8 +21,6 @@ use crate::bot::body::CrabCarapace;
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
 use crate::policy::RigDims;
-/// The demo's control scheme — the ONE source of its bindings AND its legend. Public so the
-/// entrypoint can resolve `--show-controls-context` against it at t=0 (rl#275).
 pub use controls::DemoControls;
 pub use render_video::RenderVideoPlugin;
 pub use rig_pose::RigPosePart;
@@ -56,46 +54,21 @@ impl Default for DemoRng {
     }
 }
 
-/// The rl-demo knobs shared by every play mode, parsed at the entrypoint (rl#272):
-/// which seed drives the demo RNG, whether a rest-bound policy load drives a random
-/// diagnostic brain instead, and whether the target ball holds a pinned position.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PlayOverrides {
-    pub seed: Option<u64>,
-    pub random_policy: bool,
-    pub target_ball_at: Option<Vec3>,
-}
-
-impl PlayOverrides {
-    fn apply_rng_and_ball(&self, app: &mut App) {
-        app.insert_resource(DemoRng::seeded(self.seed));
-        app.insert_resource(target_ball::TargetBallAt(self.target_ball_at));
-    }
-}
-
 pub struct DemoPlugin {
     pub checkpoint_dir: PathBuf,
     pub live_checkpoint_dir: Option<PathBuf>,
     pub manual_control: bool,
-    pub overrides: PlayOverrides,
+    pub seed: Option<u64>,
     /// Show the joint-trace graph overlay from launch.
     pub graph: bool,
-    /// Capture the graph overlay to this path once its traces fill.
-    pub graph_shot: Option<PathBuf>,
-    pub controls: crate::controls::ControlsOverrides<DemoControls>,
 }
 
 impl Plugin for DemoPlugin {
     fn build(&self, app: &mut App) {
-        add_inference(
-            app,
-            &self.checkpoint_dir,
-            self.live_checkpoint_dir.clone(),
-            self.overrides.random_policy,
-        );
-        graph::register(app, self.graph, self.graph_shot.clone());
-        self.overrides.apply_rng_and_ball(app);
-        crate::controls::install_overlay(app, &self.controls);
+        add_inference(app, &self.checkpoint_dir, self.live_checkpoint_dir.clone());
+        graph::register(app, self.graph);
+        app.insert_resource(DemoRng::seeded(self.seed));
+        app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default());
         // Chord-code command input (rl#330): the capture and every discrete verb's
         // dispatch edge. No reset gate — the demo has no phase transitions to smuggle
         // taps across. NOTE the demo has NO chord display since the rl#358 pick: the
@@ -145,14 +118,13 @@ pub struct ScreenshotPlugin {
     pub settle: u32,
     pub width: u32,
     pub height: u32,
-    pub overrides: PlayOverrides,
+    pub seed: Option<u64>,
     /// Spawn the chase target ball (the demo/video modes always have one).
     pub target_ball: bool,
     pub rig_pose: Option<(f32, RigPosePart)>,
     /// Fixed `(eye, look-at)` for the shot camera instead of the crab-tracking
     /// close-up — vista framing for the rl#281 terrain taste loop.
     pub shot_view: Option<(Vec3, Vec3)>,
-    pub controls: crate::controls::ControlsOverrides<DemoControls>,
 }
 
 #[derive(Resource)]
@@ -166,12 +138,7 @@ pub(in crate::play) struct ShotConfig {
 
 impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
-        add_inference(
-            app,
-            &self.checkpoint_dir,
-            None,
-            self.overrides.random_policy,
-        );
+        add_inference(app, &self.checkpoint_dir, None);
         app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
         if let Some((angle, part)) = self.rig_pose {
             app.insert_resource(rig_pose::RigPose::new(angle, part))
@@ -181,7 +148,7 @@ impl Plugin for ScreenshotPlugin {
                 );
         }
         if self.target_ball {
-            self.overrides.apply_rng_and_ball(app);
+            app.insert_resource(DemoRng::seeded(self.seed));
             app.add_systems(Startup, spawn_target_ball)
                 .add_systems(FixedUpdate, target_ball.after(BotSet::Sense));
         }
@@ -198,7 +165,7 @@ impl Plugin for ScreenshotPlugin {
             Update,
             (track_offscreen_camera, capture_when_settled).chain(),
         );
-        crate::controls::install_overlay(app, &self.controls);
+        app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default());
     }
 }
 

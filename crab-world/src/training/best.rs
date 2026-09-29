@@ -130,7 +130,7 @@ impl Progress {
 }
 
 /// The chase-eval seam. Production is [`crate::eval::run_eval`] — THE far-ball metric
-/// every gate shares (bddap/bothouse#134); tests inject canned reports so gate
+/// every gate shares; tests inject canned reports so gate
 /// decisions are testable without a bevy world per case.
 type Evaluator = Box<dyn FnMut(&Path) -> Result<EvalReport, String>>;
 

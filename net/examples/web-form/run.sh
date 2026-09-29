@@ -7,9 +7,7 @@
 # adopted-snapshot log: byte-identical state that could only exist if the browser's
 # inputs reached the host and the host's authority reached the browser.
 #
-# The formation-level sibling of net-link/examples/web-echo (the transport canary) —
-# rerun on lobby/bind/relay changes. Toolchain gotchas (unwrapped clang for ring,
-# wasm-bindgen CLI == lock) are the same; see that script.
+# Rerun on lobby/bind/relay changes and iroh bumps.
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # net/
 

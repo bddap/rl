@@ -6,7 +6,6 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use iroh::EndpointId;
 
 use super::app::{Boot, build_windowed_app};
 #[cfg(not(target_family = "wasm"))]
@@ -21,8 +20,6 @@ pub const CHECKPOINT_ENV: &str = "RL_CRAB_CHECKPOINT_DIR";
 /// Everything the windowed game needs to launch, platform inputs already resolved.
 pub struct GameConfig {
     pub launch: Launch,
-    /// Telemetry collector to dial (fleet launchers pass one).
-    pub telemetry: Option<EndpointId>,
     /// Checkpoint dirs, one armed crab each; empty = the default weights under the
     /// asset root.
     pub nn_crab_checkpoints: Vec<PathBuf>,
@@ -41,7 +38,7 @@ pub enum Launch {
     /// A CLI affordance — native-only (it blocks on the sync formation pacer).
     #[cfg(not(target_family = "wasm"))]
     Lobby {
-        dial: Option<EndpointId>,
+        dial: Option<iroh::EndpointId>,
         /// LAN-discovery window.
         discover_secs: u64,
         /// Peers to wait for before the discovery window may close early.
@@ -58,10 +55,7 @@ pub fn run_game(config: GameConfig) -> Result<()> {
     // pinned seed instead.
     let seed = crate::sim::random_match_seed();
     let boot = match config.launch {
-        Launch::Menu => Boot::Menu {
-            seed,
-            telemetry: config.telemetry,
-        },
+        Launch::Menu => Boot::Menu { seed },
         #[cfg(not(target_family = "wasm"))]
         Launch::Lobby {
             dial,
@@ -72,10 +66,7 @@ pub fn run_game(config: GameConfig) -> Result<()> {
                 seed,
                 discover_secs,
                 expect,
-                net_loop::DialTargets {
-                    host: dial,
-                    collector: config.telemetry,
-                },
+                dial,
                 crate::SyncStamp::local(nn_crabs.len() as u8),
             )?;
             match result {

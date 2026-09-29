@@ -27,7 +27,7 @@ prey-distance lines carried the only trace of the flight).
 
 Fix: craft samples in the same ~10 Hz batch, same emit path — crab samples keep
 `"c":<env>`, craft samples carry `"veh":<pilot>,"kind":<wire byte>` (1 plane,
-2 ship). Bothouse-side `telemetry/sally-track-plot.py` groups per body key.
+2 ship). A plotter groups per body key.
 
 ## Verification (offscreen lavapipe, this build)
 

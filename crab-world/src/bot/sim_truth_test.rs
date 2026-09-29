@@ -930,44 +930,6 @@ fn airborne_contact_free_thrash_stays_below_known_leak() {
     }
 }
 
-/// NOT a regression test — a measurement INSTRUMENT (rl#20 stage 2/3), `#[ignore]`d
-/// so suites never gate on it. Open-loop square-wave flail (the net ship-wiggle
-/// drive: every channel ±1, period 10 ticks) — a policy-FREE gait whose pace
-/// depends only on the body's mechanics, so running it on two baked tables
-/// separates "this body is mechanically degraded" (the rl#277 fear) from "the old
-/// policy is overfit to its contact geometry" (retrain territory). Prints
-/// SCRIPTED_FLAIL with the pace in m/s and body-heights/s.
-#[test]
-#[ignore = "rl#20 measurement instrument — run explicitly with --ignored --nocapture"]
-fn scripted_flail_gait_pace() {
-    use super::body::CrabCarapace;
-
-    let mut app = headless_app();
-    tick(&mut app, 300);
-    let carapace_xz = |app: &mut App| {
-        let mut q = app
-            .world_mut()
-            .query_filtered::<&Transform, With<CrabCarapace>>();
-        let t = q.single(app.world()).expect("one carapace").translation;
-        Vec2::new(t.x, t.z)
-    };
-    let start = carapace_xz(&mut app);
-    let ticks = 640u32;
-    for t in 0..ticks {
-        let w = if (t / 5) % 2 == 0 { 1.0 } else { -1.0 };
-        let _ = app.world_mut().resource_mut::<CrabActions>().fill(0, w);
-        tick(&mut app, 1);
-    }
-    let dist = (carapace_xz(&mut app) - start).length();
-    let secs = ticks as f32 / 64.0;
-    let height = crate::bot::rig::natural_body_height().unwrap_or(f32::NAN);
-    println!(
-        "SCRIPTED_FLAIL dist={dist:.3} m over {secs:.1} s -> {:.4} m/s = {:.4} heights/s (h={height:.4})",
-        dist / secs,
-        dist / secs / height,
-    );
-}
-
 /// bddap/rl#332 — the plant has air: an unactuated falling crab approaches the
 /// carapace-drag terminal velocity instead of integrating gravity unboundedly.
 /// Pre-drag this fall measured ~39 m/s at the window's end; with the coefficient

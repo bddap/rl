@@ -68,15 +68,6 @@ fn checkpoint_digest(dir: &Path) -> u64 {
     crate::fnv::fnv1a(&bytes)
 }
 
-/// What a rest-bound [`Policy::load`] arms when no usable checkpoint loads.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RestFallback {
-    /// Hold the zero-action rest pose (the default).
-    Rest,
-    /// DIAGNOSTIC: drive an untrained random brain (rl-demo `--random-policy`).
-    RandomBrain,
-}
-
 pub(crate) fn dims_fit_rig(obs: usize, action: usize) -> bool {
     (obs, action) == (OBS_SIZE, ACTION_SIZE)
 }
@@ -341,6 +332,17 @@ fn loaded_state(
 }
 
 impl Policy {
+    /// An untrained, randomly initialised brain: a live forward pass with no checkpoint.
+    pub fn untrained() -> Self {
+        Self {
+            state: PolicyState::Diagnostic {
+                brain: AnyBrain::<InferBackend>::init(ArchId::DEFAULT, &NdArrayDevice::Cpu),
+                normalizer: ObsNormalizer::new(NORMALIZER_CLIP),
+            },
+            ..Self::rest()
+        }
+    }
+
     /// The explicit zero-action rest-pose policy — for tests and neutral-pose
     /// inspection. Arming paths never construct this; they go through [`load_armed`],
     /// whose failure is a refusal, not a quiet statue (bddap/rl#241).
@@ -363,14 +365,10 @@ impl Policy {
     /// QUIETLY to the zero-action rest pose so the app still launches (useful before the
     /// first checkpoint exists, and to inspect the body's neutral pose); a present-but-
     /// unusable one (wrong rig, or envelope-refused — corrupt/legacy/wrong-arch) is
-    /// refused LOUDLY and also rests. `fallback` picks what a rest-bound load arms
-    /// instead — an explicit caller decision, never ambient process state (rl#272).
-    pub fn load(checkpoint_dir: &Path, fallback: RestFallback) -> Self {
+    /// refused LOUDLY and also rests.
+    pub fn load(checkpoint_dir: &Path) -> Self {
         let device = NdArrayDevice::Cpu;
         let loaded = load_brain_normalizer(checkpoint_dir, &device);
-        // The loud refusals fire FIRST, unconditionally — the diagnostic override below
-        // must not swallow the reason (a corrupt/legacy/wrong-rig checkpoint is exactly
-        // what an operator debugging with the random brain needs to see).
         match &loaded {
             Loaded::Mismatch(dims) => log_rig_mismatch("play", checkpoint_dir, *dims),
             Loaded::Refused(why) => log_checkpoint_refusal("play", checkpoint_dir, why),
@@ -380,19 +378,6 @@ impl Policy {
             Loaded::Fit(brain, normalizer) => {
                 info!("play: loaded checkpoint from {}", checkpoint_dir.display());
                 loaded_state(brain, normalizer, checkpoint_digest(checkpoint_dir))
-            }
-            Loaded::Absent | Loaded::Mismatch(_) | Loaded::Refused(_)
-                if fallback == RestFallback::RandomBrain =>
-            {
-                warn!(
-                    "play: --random-policy — driving with an untrained random brain \
-                     (no usable checkpoint at {})",
-                    checkpoint_dir.display()
-                );
-                PolicyState::Diagnostic {
-                    brain: AnyBrain::<InferBackend>::init(ArchId::DEFAULT, &device),
-                    normalizer: ObsNormalizer::new(NORMALIZER_CLIP),
-                }
             }
             Loaded::Absent => {
                 warn!(
@@ -803,7 +788,7 @@ mod tests {
             .unwrap();
         std::fs::write(CheckpointDir::new(&dir).brain_file(), raw).unwrap();
 
-        let policy = Policy::load(&dir, RestFallback::Rest);
+        let policy = Policy::load(&dir);
         assert!(
             !policy.is_loaded(),
             "a legacy untagged brain.bin must not load — the loader has no untagged path"
@@ -819,42 +804,6 @@ mod tests {
             _ => panic!("a legacy checkpoint must classify as Refused, not Missing/Ok"),
         }
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    #[ignore = "fixture generator, run manually on a deliberate format change or arch cull"]
-    fn regenerate_enveloped_golden_fixture() {
-        let dir = golden_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths = CheckpointDir::new(&dir);
-        let device = NdArrayDevice::Cpu;
-        let brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
-        let bytes = brain
-            .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
-            .unwrap();
-        crate::training::envelope::write_v1_envelope(
-            &paths.brain_file(),
-            ArtifactKind::Brain,
-            brain.arch(),
-            bytes,
-        )
-        .unwrap();
-        crate::training::envelope::write_v1_envelope(
-            &paths.normalizer_path(),
-            ArtifactKind::ObsNormalizer,
-            brain.arch(),
-            bincode::serialize(&ObsNormalizer::new(NORMALIZER_CLIP).snapshot()).unwrap(),
-        )
-        .unwrap();
-
-        let policy = Policy::load(&dir, RestFallback::Rest);
-        assert!(policy.is_loaded(), "the fixture just written must load");
-        let bits: Vec<String> = policy
-            .act(&golden_obs())
-            .iter()
-            .map(|v| format!("{:08x}", v.to_bits()))
-            .collect();
-        std::fs::write(dir.join("actions.hex"), bits.join("\n") + "\n").unwrap();
     }
 
     /// bddap/rl#214 WIRING guard (the pure `check_body_identity` matrix is unit-tested
@@ -893,7 +842,7 @@ mod tests {
             .save(ArchId::DEFAULT, &paths.normalizer_path(), 21)
             .unwrap();
 
-        let policy = Policy::load(&dir, RestFallback::Rest);
+        let policy = Policy::load(&dir);
         assert!(!policy.is_loaded(), "a wrong-body checkpoint must not arm");
         match checkpoint_fits_rig(&dir) {
             Err(CheckpointUnusable::Refused(why)) => assert!(
@@ -938,7 +887,7 @@ mod tests {
             .save(ArchId::DEFAULT, &paths.normalizer_path(), 21)
             .unwrap();
 
-        let policy = Policy::load(&dir, RestFallback::Rest);
+        let policy = Policy::load(&dir);
         assert!(
             !policy.is_loaded(),
             "a wrong-layout checkpoint must not arm"
@@ -962,7 +911,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
         std::fs::create_dir_all(&empty).unwrap();
 
-        let mut policy = Policy::load(&empty, RestFallback::Rest);
+        let mut policy = Policy::load(&empty);
         assert!(
             !policy.is_loaded(),
             "empty checkpoint dir should give an unloaded policy"
@@ -1022,7 +971,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut policy = Policy::load(&empty, RestFallback::Rest);
+        let mut policy = Policy::load(&empty);
         policy.live_dir = Some(live.clone());
         assert!(
             !policy.try_hot_reload(),
@@ -1086,7 +1035,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut policy = Policy::load(&empty, RestFallback::Rest);
+        let mut policy = Policy::load(&empty);
         policy.live_dir = Some(live.clone());
         assert!(
             !policy.try_hot_reload(),
@@ -1188,7 +1137,7 @@ mod tests {
 
         save_brain_with_obs_dim(&dir, OBS_SIZE + 4);
 
-        let policy = Policy::load(&dir, RestFallback::Rest);
+        let policy = Policy::load(&dir);
         assert!(
             !policy.is_loaded(),
             "a dim-mismatched checkpoint must fall back to unloaded, not load"
@@ -1218,7 +1167,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         save_nan_brain(&dir);
 
-        let policy = Policy::load(&dir, RestFallback::Rest);
+        let policy = Policy::load(&dir);
         assert!(
             policy.is_loaded(),
             "the NaN brain is shape-valid, so the dim gates must load it"
@@ -1288,7 +1237,7 @@ mod tests {
 
         assert_eq!(brain_slots(&root), vec![root.clone(), root.join("best")]);
 
-        let mut policy = Policy::load(&root, RestFallback::Rest);
+        let mut policy = Policy::load(&root);
         assert!(policy.is_loaded());
         let boot_label = policy.brain_label();
         assert!(
@@ -1321,7 +1270,7 @@ mod tests {
 
         // Roster of one: nothing to swap to.
         std::fs::remove_dir_all(root.join("best")).unwrap();
-        let mut solo = Policy::load(&root, RestFallback::Rest);
+        let mut solo = Policy::load(&root);
         assert!(!solo.cycle_brain());
 
         let _ = std::fs::remove_dir_all(&root);

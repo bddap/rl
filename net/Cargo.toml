@@ -52,22 +52,15 @@ n0-future.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 
-# The native-only slice (rl#411): the telemetry sender/collector own a tokio
-# runtime + mDNS discovery, screenshot filenames stamp via chrono. None of these
-# exist on wasm — the modules that use them are cfg'd native, and scoping the deps
-# here is what keeps the wasm build honest (a new native-only use in shared code
-# fails to COMPILE instead of panicking in a browser).
+# Native-only: screenshot filenames stamp via chrono, which has no clock on
+# wasm; scoping the dep keeps a native-only use in shared code a compile error.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-tokio.workspace = true
-iroh-mdns-address-lookup.workspace = true
-# Screenshot filenames (rl#405). Already in the tree via bevy's dep graph.
 chrono = { version = "0.4", default-features = false, features = [
     "clock",
 ], optional = true }
 
-# The browser↔native cross-play verify probe (examples/web-form, rl#412) — the
-# formation-level sibling of net-link's echo probe; rerun it when touching the lobby
-# bind seam, relay posture, or bumping iroh.
+# The browser↔native cross-play verify probe (examples/web-form, rl#412); rerun it
+# when touching the lobby bind seam, relay posture, or bumping iroh.
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

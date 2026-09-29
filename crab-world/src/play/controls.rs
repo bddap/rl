@@ -133,19 +133,6 @@ impl ControlScheme for DemoControls {
         }
     }
 
-    fn context_id(ctx: DemoContext) -> &'static str {
-        match ctx {
-            DemoContext::Inspect => "inspect",
-        }
-    }
-
-    fn context_from_id(id: &str) -> Option<DemoContext> {
-        match id {
-            "inspect" => Some(DemoContext::Inspect),
-            _ => None,
-        }
-    }
-
     fn reveal_action() -> DemoAction {
         DemoAction::RevealControls
     }

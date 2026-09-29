@@ -18,7 +18,6 @@ use crate::formation::{Frozen, early_peer_msgs};
 use crate::server::{JoinRequest, Refusal, Server, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
-use crate::telemetry::{TelemetryEvent, TelemetrySender};
 use crate::transport;
 use crate::transport::{PeerWire, Session};
 
@@ -32,7 +31,7 @@ const DEPARTED_CAP: usize = crate::membership::MAX_MEMBERS;
 /// Sustained mid-game join-attempt rate the host processes, and the burst headroom over
 /// it (a party joining at once). Joins are rare human actions; anything past this is a
 /// flood — excess requests are dropped BEFORE admission (rl#350), bounding the
-/// spawn/despawn, log, and telemetry work a sybil dialer can force. Per-source limits
+/// spawn/despawn and log work a sybil dialer can force. Per-source limits
 /// don't hold here (a fresh keypair per attempt is free), so the budget is global.
 const JOIN_RATE_PER_SEC: f64 = 2.0;
 const JOIN_BURST: f64 = 8.0;
@@ -73,9 +72,9 @@ impl JoinBudget {
 }
 
 /// One peer's transport-side round state: the live [`Session`] (which owns its own
-/// runtime) and the roster bookkeeping (endpoint↔player map, departures, telemetry,
+/// runtime) and the roster bookkeeping (endpoint↔player map, departures,
 /// the formation sync verdict). Built only by [`connect_and_form_dialing`] /
-/// [`joined_from_frozen`] / [`connect_and_join`]; driven only through [`Coordinator`].
+/// [`joined_from_frozen`] / [`JoinDriver`]; driven only through [`Coordinator`].
 pub struct NetDriver {
     session: Session,
     me: PlayerId,
@@ -88,7 +87,6 @@ pub struct NetDriver {
     /// [`UNROSTERED_GRACE_MS`] eviction. Keyed off the live connection set each pump, so it
     /// is bounded by the transport's link cap.
     unrostered_since: BTreeMap<EndpointId, u64>,
-    telemetry: Option<TelemetrySender>,
     /// The shared-asset verdict this round was formed (or admitted) under — computed by
     /// the ONE arbiter, [`crate::SyncVerdict::between`].
     sync: crate::SyncVerdict,
@@ -126,19 +124,11 @@ impl std::fmt::Display for ServerDown {
 
 impl Drop for NetDriver {
     fn drop(&mut self) {
-        // Graceful close (telemetry drained, then the endpoint) — Session's own Drop only
-        // backstops the endpoint half.
-        shutdown(&self.session, self.telemetry.take());
+        self.session.close();
     }
 }
 
 impl NetDriver {
-    /// The live-telemetry handle, if this client is streaming to a collector (`None` when
-    /// launched without `--telemetry`).
-    pub fn telemetry(&self) -> Option<&TelemetrySender> {
-        self.telemetry.as_ref()
-    }
-
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
         self.sync
     }
@@ -206,13 +196,7 @@ impl NetDriver {
             self.admit_joiner(server, eid, req);
         }
         let connected = self.session.connected_peers();
-        let gone = depart_gone_peers(
-            server,
-            &mut self.id_map,
-            self.me,
-            &connected,
-            self.telemetry.as_ref(),
-        );
+        let gone = depart_gone_peers(server, &mut self.id_map, self.me, &connected);
         self.departed.extend(gone);
         if self.departed.len() > DEPARTED_CAP {
             // Reset rather than evict by set order — pop_first would evict the SMALLEST
@@ -261,13 +245,6 @@ impl NetDriver {
                     adm.pid,
                     adm.effective_tick
                 );
-                if let Some(t) = &self.telemetry {
-                    t.send(TelemetryEvent::Admitted {
-                        player: adm.pid.0,
-                        endpoint: eid.fmt_short().to_string(),
-                        effective_tick: adm.effective_tick,
-                    });
-                }
             }
             Err(refusal) => {
                 // warn, not error: a refused join is a protocol outcome, not a host fault
@@ -275,11 +252,6 @@ impl NetDriver {
                 // fleet alerting at joiner-controlled rate (rl#350).
                 tracing::warn!("refused mid-game joiner {}: {refusal}", eid.fmt_short());
                 self.refuse(eid, Refusal::Admission(refusal));
-                if let Some(t) = &self.telemetry {
-                    t.send(TelemetryEvent::RosterFailed {
-                        reason: format!("join refused: {refusal}"),
-                    });
-                }
             }
         }
     }
@@ -441,14 +413,6 @@ impl Coordinator {
             Mode::Client { .. } => None,
         }
     }
-
-    pub fn telemetry(&self) -> Option<&TelemetrySender> {
-        match &self.0 {
-            Mode::Server { net, .. } => net.as_ref(),
-            Mode::Client { net } => Some(net),
-        }
-        .and_then(NetDriver::telemetry)
-    }
 }
 
 pub fn depart_gone_peers(
@@ -456,7 +420,6 @@ pub fn depart_gone_peers(
     id_map: &mut BTreeMap<EndpointId, PlayerId>,
     me: PlayerId,
     connected: &[EndpointId],
-    telemetry: Option<&TelemetrySender>,
 ) -> Vec<EndpointId> {
     let gone: Vec<(EndpointId, PlayerId)> = id_map
         .iter()
@@ -470,12 +433,6 @@ pub fn depart_gone_peers(
             "player {pid:?} ({}) departed — continuing without them",
             eid.fmt_short()
         );
-        if let Some(t) = telemetry {
-            t.send(TelemetryEvent::Departed {
-                player: pid.0,
-                endpoint: eid.fmt_short().to_string(),
-            });
-        }
         server.depart(pid);
         eids.push(eid);
     }
@@ -488,17 +445,6 @@ pub enum MatchResult {
     /// solo round (see [`crate::formation`]'s solo fallback).
     Alone,
     Cancelled,
-}
-
-/// The optional peers a formation/join launch dials — named fields so the two same-typed
-/// endpoint ids cannot be transposed at a call site (dialing the collector as the host
-/// compiles fine and fails only at runtime).
-#[derive(Default, Clone, Copy)]
-pub struct DialTargets {
-    /// A known host/peer to dial directly (a join code), besides LAN discovery.
-    pub host: Option<EndpointId>,
-    /// The live-telemetry collector to stream to.
-    pub collector: Option<EndpointId>,
 }
 
 /// How long the Alone arm waits for a still-pending dial verdict before erroring
@@ -515,27 +461,26 @@ pub fn connect_and_form_dialing(
     seed: u64,
     discover_secs: u64,
     expect: usize,
-    targets: DialTargets,
+    host: Option<EndpointId>,
     stamp: crate::SyncStamp,
 ) -> Result<MatchResult> {
     let mut session = transport::start_session()?;
     let my_eid = session.endpoint_id();
     println!("fp client endpoint id: {my_eid}");
     let mut dial_verdict = None;
-    if let Some(host) = targets.host {
+    if let Some(host) = host {
         if host == my_eid {
             tracing::warn!("join code is our own endpoint id — ignoring the self-dial");
         } else {
             dial_verdict = Some(session.dial(host));
         }
     }
-    let telemetry = connect_telemetry(&session, targets.collector);
     let formed = FormationDriver::discovering(&session, discover_secs, expect, stamp)
-        .pump_blocking(&mut session, telemetry.as_ref());
+        .pump_blocking(&mut session);
     let frozen = match formed {
         Ok(Formation::Agreed(frozen)) => frozen,
         Ok(Formation::Alone) => {
-            shutdown(&session, telemetry);
+            session.close();
             // An explicit dial's failure is not fatal while discovery may still find the
             // host on the LAN — but ending up ALONE after one means the join failed, and
             // must be a hard error, never a silent solo round the player didn't ask for.
@@ -561,12 +506,12 @@ pub fn connect_and_form_dialing(
             return Ok(MatchResult::Alone);
         }
         Err(e) => {
-            shutdown(&session, telemetry);
+            session.close();
             return Err(e);
         }
     };
     Ok(MatchResult::Joined(joined_from_frozen(
-        session, telemetry, frozen, seed, stamp,
+        session, frozen, seed, stamp,
     )))
 }
 
@@ -574,7 +519,6 @@ pub fn connect_and_form_dialing(
 /// CLI path above and the menu lobby end through.
 pub(crate) fn joined_from_frozen(
     session: Session,
-    telemetry: Option<TelemetrySender>,
     frozen: Frozen,
     seed: u64,
     stamp: crate::SyncStamp,
@@ -603,7 +547,6 @@ pub(crate) fn joined_from_frozen(
         departed: Default::default(),
         join_budget,
         unrostered_since: Default::default(),
-        telemetry,
         sync: frozen.sync,
         stamp,
     };
@@ -624,14 +567,11 @@ pub enum JoinResult {
 /// client booting from the host's next authoritative snapshot — the host spawns us into
 /// its LIVE round at `effective_tick`), refused (the host's [`Refusal`] relayed LOUDLY —
 /// never a silent wrong/fake-crab), or unreachable. No thread, no blocking: the windowed
-/// menu pumps it per frame (Rejoin), the CLI pumps it paced ([`connect_and_join`]) —
-/// one driver, two pacers. Deadlines ride the session's own [`Session::now_ms`] axis.
+/// menu pumps it per frame (Rejoin). Deadlines ride the session's own
+/// [`Session::now_ms`] axis.
 pub struct JoinDriver {
     /// Consumed on resolution: into the [`NetDriver`] when admitted, closed otherwise.
     session: Option<Session>,
-    /// `None` until the dial lands — telemetry only spins up for a host we reached.
-    telemetry: Option<TelemetrySender>,
-    collector: Option<EndpointId>,
     host: EndpointId,
     seed: u64,
     stamp: crate::SyncStamp,
@@ -655,16 +595,9 @@ impl JoinDriver {
     /// Kick off the session bind — non-blocking and platform-free; pump for the
     /// outcome (the dial fires once the bind lands). `seed` is the shared
     /// [`crate::sim`] match constant every peer holds.
-    pub fn begin(
-        seed: u64,
-        host: EndpointId,
-        collector: Option<EndpointId>,
-        stamp: crate::SyncStamp,
-    ) -> Self {
+    pub fn begin(seed: u64, host: EndpointId, stamp: crate::SyncStamp) -> Self {
         Self {
             session: None,
-            telemetry: None,
-            collector,
             host,
             seed,
             stamp,
@@ -706,7 +639,6 @@ impl JoinDriver {
                 deadline_ms,
             } => match verdict.try_recv() {
                 Ok(Ok(())) => {
-                    self.telemetry = connect_telemetry(session, self.collector);
                     session.send(self.host, &JoinRequest { stamp: self.stamp });
                     self.state = JoinState::AwaitingWelcome {
                         deadline_ms: now_ms + JOIN_WELCOME_TIMEOUT.as_millis() as u64,
@@ -737,8 +669,7 @@ impl JoinDriver {
                         PeerWire::Welcome(adm) => return Some(self.resolve_admitted(adm)),
                         PeerWire::Refuse(verdict) => {
                             tracing::error!("host refused our join: {verdict}");
-                            let (session, telemetry) = self.take_resolved();
-                            shutdown(&session, telemetry);
+                            self.take_resolved().close();
                             return Some(Ok(JoinResult::Refused(verdict)));
                         }
                         _ => continue,
@@ -749,19 +680,17 @@ impl JoinDriver {
         }
     }
 
-    fn take_resolved(&mut self) -> (Session, Option<TelemetrySender>) {
-        let session = self.session.take().expect("checked live in pump");
-        (session, self.telemetry.take())
+    fn take_resolved(&mut self) -> Session {
+        self.session.take().expect("checked live in pump")
     }
 
     fn resolve_unreachable(&mut self) -> JoinResult {
-        let (session, telemetry) = self.take_resolved();
-        shutdown(&session, telemetry);
+        self.take_resolved().close();
         JoinResult::Unreachable
     }
 
     fn resolve_admitted(&mut self, adm: crate::server::Admission) -> Result<JoinResult> {
-        let (session, telemetry) = self.take_resolved();
+        let session = self.take_resolved();
         let me = adm.pid;
         println!(
             "admitted as {me:?}; joining at tick {} over roster {:?}",
@@ -801,7 +730,6 @@ impl JoinDriver {
             departed: Default::default(),
             join_budget,
             unrostered_since: Default::default(),
-            telemetry,
             sync,
             stamp: self.stamp,
         };
@@ -811,66 +739,18 @@ impl JoinDriver {
 
 impl Drop for JoinDriver {
     fn drop(&mut self) {
-        // A join abandoned mid-flight (the menu cancels without another pump) still
-        // tears down gracefully — telemetry drained, endpoint closed.
         if let Some(session) = self.session.take() {
-            shutdown(&session, self.telemetry.take());
+            session.close();
         }
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
-/// [`JoinDriver`] pumped to completion on the calling thread — the pacer for callers
-/// with no frame loop of their own (the CLI join path).
-pub fn connect_and_join(
-    seed: u64,
-    host: EndpointId,
-    collector: Option<EndpointId>,
-    stamp: crate::SyncStamp,
-) -> Result<JoinResult> {
-    let mut driver = JoinDriver::begin(seed, host, collector, stamp);
-    loop {
-        if let Some(outcome) = driver.pump() {
-            return outcome;
-        }
-        std::thread::sleep(crate::formation::FORM_POLL);
+/// Reports are rate-limited server-side (≤1 per player per cooldown), so each is a line.
+pub fn surface_starvation(server: Option<&mut Server>) {
+    let Some(server) = server else { return };
+    for r in server.take_starvation_reports() {
+        tracing::warn!("{r}");
     }
-}
-
-#[cfg(not(target_family = "wasm"))]
-pub fn connect_telemetry(
-    session: &Session,
-    collector: Option<iroh::EndpointId>,
-) -> Option<TelemetrySender> {
-    let collector = collector?;
-    let my_eid = session.endpoint_id();
-    // Non-blocking: the sender is self-contained (its own I/O thread + runtime), so
-    // wiring telemetry costs the frame path nothing (rl#411 stage 4).
-    Some(TelemetrySender::start(collector, *my_eid.as_bytes()))
-}
-
-/// [`connect_telemetry`] on a platform whose [`TelemetrySender`] is uninhabited:
-/// statically `None`. Compiled (not cfg'd at the call sites) so the poll-driven
-/// drivers stay platform-free; a collector id reaching a browser is a wiring bug the
-/// warn makes visible.
-#[cfg(target_family = "wasm")]
-pub fn connect_telemetry(
-    _session: &Session,
-    collector: Option<iroh::EndpointId>,
-) -> Option<TelemetrySender> {
-    if collector.is_some() {
-        tracing::warn!("telemetry collector ignored — the sender is native-only");
-    }
-    None
-}
-
-/// End a round's I/O pair in order — telemetry drained first, then the link closed.
-/// Session's own `Drop` only backstops the endpoint half.
-pub fn shutdown(session: &Session, telemetry: Option<TelemetrySender>) {
-    if let Some(t) = telemetry {
-        t.close();
-    }
-    session.close();
 }
 
 fn server_endpoint(id_map: &BTreeMap<EndpointId, PlayerId>) -> EndpointId {

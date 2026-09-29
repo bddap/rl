@@ -5,7 +5,6 @@ use crate::client::ClientSim;
 use crate::formation::{self, FormationDriver};
 use crate::membership::Role;
 use crate::net_loop::{self, MatchResult, NetDriver};
-use crate::telemetry::TelemetrySender;
 use crate::transport::Session;
 
 #[derive(Debug, Clone)]
@@ -24,13 +23,11 @@ enum FormState {
     Binding {
         pending: crate::transport::PendingSession,
         role: Role,
-        collector: Option<EndpointId>,
     },
     Live {
         session: Session,
         // Boxed for variant-size parity with Binding (clippy::large_enum_variant).
         driver: Box<FormationDriver>,
-        telemetry: Option<TelemetrySender>,
     },
 }
 
@@ -53,11 +50,8 @@ impl Formation {
         self.state.as_ref()?;
         if self.cancelled {
             println!("lobby cancelled by the player");
-            if let Some(FormState::Live {
-                session, telemetry, ..
-            }) = self.state.take()
-            {
-                net_loop::shutdown(&session, telemetry);
+            if let Some(FormState::Live { session, .. }) = self.state.take() {
+                session.close();
             }
             // A cancelled Binding state needs no teardown call: dropping the pending
             // drops its eventual Session, whose own Drop closes the endpoint.
@@ -65,51 +59,34 @@ impl Formation {
         }
         if let Some(FormState::Binding { pending, .. }) = self.state.as_mut() {
             let bound = pending.poll()?;
-            let Some(FormState::Binding {
-                role, collector, ..
-            }) = self.state.take()
-            else {
+            let Some(FormState::Binding { role, .. }) = self.state.take() else {
                 unreachable!("matched Binding above")
             };
             match bound {
                 Ok(session) => {
                     // Same frame: fall through and pump the fresh lobby below.
-                    self.state = Some(open_lobby(
-                        session,
-                        role,
-                        self.dial_code,
-                        collector,
-                        self.stamp,
-                    ));
+                    self.state = Some(open_lobby(session, role, self.dial_code, self.stamp));
                 }
                 Err(e) => return Some(Err(e.context("binding the lobby session"))),
             }
         }
-        let Some(FormState::Live {
-            session,
-            driver,
-            telemetry,
-        }) = self.state.as_mut()
-        else {
+        let Some(FormState::Live { session, driver }) = self.state.as_mut() else {
             unreachable!("Binding resolved above, and an empty state returned early")
         };
-        let outcome = driver.pump(session, telemetry.as_ref())?;
-        let Some(FormState::Live {
-            session, telemetry, ..
-        }) = self.state.take()
-        else {
+        let outcome = driver.pump(session)?;
+        let Some(FormState::Live { session, .. }) = self.state.take() else {
             unreachable!("matched Live above")
         };
         Some(match outcome {
             Ok(formation::Formation::Agreed(frozen)) => Ok(MatchResult::Joined(
-                net_loop::joined_from_frozen(session, telemetry, frozen, self.seed, self.stamp),
+                net_loop::joined_from_frozen(session, frozen, self.seed, self.stamp),
             )),
             Ok(formation::Formation::Alone) => {
-                net_loop::shutdown(&session, telemetry);
+                session.close();
                 Ok(MatchResult::Alone)
             }
             Err(e) => {
-                net_loop::shutdown(&session, telemetry);
+                session.close();
                 Err(e)
             }
         })
@@ -170,14 +147,8 @@ impl Formation {
 
 impl Drop for Formation {
     fn drop(&mut self) {
-        // A formation abandoned mid-lobby (the menu drops it on cancel without another
-        // poll) still tears down gracefully — telemetry drained, endpoint closed. An
-        // abandoned Binding state tears itself down (see the cancel arm in poll).
-        if let Some(FormState::Live {
-            session, telemetry, ..
-        }) = self.state.take()
-        {
-            net_loop::shutdown(&session, telemetry);
+        if let Some(FormState::Live { session, .. }) = self.state.take() {
+            session.close();
         }
     }
 }
@@ -186,12 +157,7 @@ impl Drop for Formation {
 /// non-blocking and platform-free (the web bind rides the JS event loop; native's
 /// resolves on the first poll). Errors, including a failed bind, surface through
 /// [`Formation::poll`].
-pub fn begin(
-    choice: &StartChoice,
-    seed: u64,
-    telemetry: Option<EndpointId>,
-    stamp: crate::SyncStamp,
-) -> Formation {
+pub fn begin(choice: &StartChoice, seed: u64, stamp: crate::SyncStamp) -> Formation {
     let (role, join) = match choice {
         StartChoice::Host => (Role::Host, None),
         StartChoice::Join(host) => (Role::Joiner, *host),
@@ -200,7 +166,6 @@ pub fn begin(
         state: Some(FormState::Binding {
             pending: crate::transport::bind_session(),
             role,
-            collector: telemetry,
         }),
         dial_code: join,
         cancelled: false,
@@ -210,13 +175,11 @@ pub fn begin(
     }
 }
 
-/// The bound-session half of [`begin`]: fire the join dial, wire telemetry, open the
-/// formation core.
+/// The bound-session half of [`begin`]: fire the join dial, open the formation core.
 fn open_lobby(
     session: Session,
     role: Role,
     join: Option<EndpointId>,
-    collector: Option<EndpointId>,
     stamp: crate::SyncStamp,
 ) -> FormState {
     if let Some(host) = join {
@@ -228,13 +191,8 @@ fn open_lobby(
             let _ = session.dial(host);
         }
     }
-    let telemetry = net_loop::connect_telemetry(&session, collector);
     let driver = Box::new(FormationDriver::lobby(&session, role, NET_EXPECT, stamp));
-    FormState::Live {
-        session,
-        driver,
-        telemetry,
-    }
+    FormState::Live { session, driver }
 }
 
 pub struct ReadyMatch {
@@ -502,7 +460,7 @@ mod tests {
     /// Share the host's code, join by it, and wait for both rosters to see 2 peers —
     /// the lobby state every scenario below starts from.
     fn two_peer_lobby() -> (Formation, Formation) {
-        let mut host = begin(&StartChoice::Host, 7, None, SyncStamp::ZERO);
+        let mut host = begin(&StartChoice::Host, 7, SyncStamp::ZERO);
         assert!(host.hosting, "Host formation is flagged hosting");
         // The bind is pollable (rl#412): the join code appears once the session lands —
         // on native, the first poll.
@@ -515,7 +473,7 @@ mod tests {
             host.display_code()
         });
 
-        let mut join = begin(&StartChoice::Join(Some(code)), 7, None, SyncStamp::ZERO);
+        let mut join = begin(&StartChoice::Join(Some(code)), 7, SyncStamp::ZERO);
         assert!(!join.hosting, "Join formation is not hosting");
         assert_eq!(
             join.display_code(),
@@ -541,7 +499,6 @@ mod tests {
     /// exactly the objects `render::menu` holds: share the host's code, join by it,
     /// both rosters fill, only the host's Start forms the match (rl#94 liveness).
     #[test]
-    #[ignore = "binds real iroh UDP endpoints via begin(); run explicitly with --ignored"]
     fn two_peer_lobby_forms_one_match_on_host_start() {
         let _serial = crate::real_net_serial();
         let (mut host, mut join) = two_peer_lobby();
@@ -594,7 +551,6 @@ mod tests {
     /// Cancel from either role resolves that peer's formation as Cancelled (no round) —
     /// which `ready_from` maps back to the chooser.
     #[test]
-    #[ignore = "binds real iroh UDP endpoints via begin(); run explicitly with --ignored"]
     fn cancel_leaves_the_lobby_cleanly() {
         let _serial = crate::real_net_serial();
         let (mut host, mut join) = two_peer_lobby();

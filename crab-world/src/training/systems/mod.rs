@@ -3,9 +3,8 @@ mod state;
 mod step;
 mod trace;
 
-/// Re-exported for `reward`'s calibration tests and for `rl-train`'s eval `--ticks`
-/// default (one episode horizon); `finalize_transitions` uses the [`lifecycle`]-local
-/// constant directly.
+/// Re-exported for `reward`'s calibration tests and `rl-train`'s eval horizon (one
+/// episode).
 pub use lifecycle::MAX_EPISODE_TICKS;
 pub(crate) use lifecycle::reset_crab;
 pub use state::STEPS_PER_ROLLOUT;

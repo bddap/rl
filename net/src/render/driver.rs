@@ -59,7 +59,6 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
         dt_window: DtWindow::default(),
         prev,
         reported_outcome: false,
-        next_tel_tick: next_sample_tick(0),
         snap_buf: std::collections::VecDeque::new(),
         art_buf: std::collections::VecDeque::new(),
         stalled: false,
@@ -179,22 +178,12 @@ pub(super) fn teardown_round(world: &mut World) {
     }
 }
 
-fn end_round_server_down(
-    world: &mut World,
-    down: crate::net_loop::ServerDown,
-    tel: Option<&crate::telemetry::TelemetrySender>,
-) {
+fn end_round_server_down(world: &mut World, down: crate::net_loop::ServerDown) {
     let message = down.to_string();
     // WARN, not ERROR: from the client's side losing the host is an expected round
     // ending (host quit) or the client's own link dying (deck suspend) — not a fault
-    // in this process, and ERROR-severity deck logs page fleet-error on every normal
-    // host quit. The Fault telemetry event below keeps the durable record.
+    // in this process.
     warn!("leaving the round — {message}");
-    if let Some(t) = tel {
-        t.send(TelemetryEvent::Fault {
-            msg: format!("client server-down (rl#203): {message}"),
-        });
-    }
     if world.get_resource::<super::app::BootedWithMenu>().is_some() {
         let host = world
             .non_send::<GameState>()
@@ -341,10 +330,6 @@ pub(super) struct GameState {
     /// rl#204). Lives here — not a system `Local` — so a new round starts unlatched by
     /// construction (rl#210).
     reported_outcome: bool,
-    /// The next telemetry sampling boundary ([`next_sample_tick`]), in this ROUND's ticks.
-    /// Per-round for the same reason: a fresh ClientSim restarts at tick 0, so a surviving
-    /// watermark would suppress tick telemetry until the counter climbed past it (rl#210).
-    next_tel_tick: u64,
     snap_buf: std::collections::VecDeque<crate::snapshot::CoreSnapshot>,
     art_buf: std::collections::VecDeque<crate::articulation::CrabArticulation>,
     /// Snapshot-stall latch (rl#273): the last remote-adopt drain iteration consumed a tick
@@ -788,9 +773,6 @@ fn take_local_control(world: &mut World) -> LocalControl {
 
 /// What one [`Coordinator::exchange`] round-trip produced for the rest of the frame.
 struct TickOutcome {
-    /// The tick this input was ISSUED as — the telemetry stamp. On a remote client this
-    /// differs from `client.next_tick()` (the snapshot-apply cursor) by the transit lag.
-    issue_tick: u64,
     /// The adopt-arm articulation to publish this tick (remote client only).
     articulation: Option<crate::articulation::CrabArticulation>,
     server_down: Option<crate::net_loop::ServerDown>,
@@ -809,7 +791,6 @@ fn exchange_tick(world: &mut World, role: PeerRole, local: &LocalControl) -> Tic
     let msg = state
         .client
         .submit_local_input(local.sim_input(), local.pilot_intent());
-    let issue_tick = msg.issue_tick;
     if let Some(bot) = scripted_pack
         && let Some(server) = state.coord.server_mut()
     {
@@ -868,7 +849,6 @@ fn exchange_tick(world: &mut World, role: PeerRole, local: &LocalControl) -> Tic
         }
     }
     TickOutcome {
-        issue_tick,
         articulation,
         server_down,
     }
@@ -1059,100 +1039,10 @@ fn complete_pending_pump(world: &mut World, me: PilotId, armed: bool) {
     }
 }
 
-/// Emit the per-tick telemetry sample when the tick counter crosses the boundary, and —
-/// on a sampling tick — drain the crab-rescue counters into per-window Fault events.
-fn sample_telemetry(
-    world: &mut World,
-    t: &crate::telemetry::TelemetrySender,
-    roster_len: usize,
-    issue_tick: u64,
-    sim_input: Input,
-    pilot: Option<crate::client::PilotIntent>,
-) {
-    let due = {
-        let mut state = world.non_send_mut::<GameState>();
-        let due = state.client.sim().tick() >= state.next_tel_tick;
-        if due {
-            state.next_tel_tick = next_sample_tick(state.client.sim().tick());
-            t.send(TelemetryEvent::tick(state.client.sim(), roster_len));
-            t.send(TelemetryEvent::input(issue_tick, sim_input, pilot.as_ref()));
-        }
-        due
-    };
-    // Aggregated rescue surface: drain the window's `rescue_lost_crabs`
-    // tally into per-window Fault events carrying the count + last offending body,
-    // so a frame-by-frame blowup shows on the hub feed as a filtered per-window
-    // count instead of a per-step flood. One event PER REASON — a legitimate
-    // hard-hit tunneling rescue (rl#283) reported as "going non-finite" would be a
-    // false rl#137 alarm. A stable solo Sally never enters this branch (every
-    // counter stays 0) — a nonzero count IS the alarm.
-    if due
-        && let Some(mut stats) = world.get_resource_mut::<crab_world::bot::RescueStats>()
-        && (stats.since_nonfinite > 0
-            || stats.since_below_terrain > 0
-            || stats.since_buried > 0
-            || stats.since_escaped > 0)
-    {
-        let (nf, bt, bu, es) = (
-            stats.since_nonfinite,
-            stats.since_below_terrain,
-            stats.since_buried,
-            stats.since_escaped,
-        );
-        // `last_body` is reason-blind, so name it only when one reason fired —
-        // else the rl#137 event could name a below-terrain offender or vice versa.
-        let last = match stats.last_body {
-            Some(b) if [nf, bt, bu, es].iter().filter(|&&n| n > 0).count() == 1 => {
-                format!(" (last offender: {b})")
-            }
-            _ => String::new(),
-        };
-        stats.since_nonfinite = 0;
-        stats.since_below_terrain = 0;
-        stats.since_buried = 0;
-        stats.since_escaped = 0;
-        if nf > 0 {
-            t.send(TelemetryEvent::Fault {
-                msg: format!(
-                    "crab rescue: {nf} non-finite respawn(s) this telemetry \
-                     window{last} — armed Sally is going non-finite (rl#137)"
-                ),
-            });
-        }
-        if bt > 0 {
-            t.send(TelemetryEvent::Fault {
-                msg: format!(
-                    "crab rescue: {bt} below-terrain respawn(s) this telemetry \
-                     window{last} — fell below the terrain surface, tunneled or \
-                     off the tile edge (rl#283 y-floor)"
-                ),
-            });
-        }
-        if bu > 0 {
-            t.send(TelemetryEvent::Fault {
-                msg: format!(
-                    "crab rescue: {bu} buried-carapace respawn(s) this telemetry \
-                     window{last} — carapace pinned under the one-sided \
-                     heightfield sheet (rl#303)"
-                ),
-            });
-        }
-        if es > 0 {
-            t.send(TelemetryEvent::Fault {
-                msg: format!(
-                    "crab rescue: {es} escaped-crab respawn(s) this telemetry \
-                     window{last} — carapace flung clear off the terrain tile \
-                     (rl#339 escape backstop)"
-                ),
-            });
-        }
-    }
-}
-
 /// Log each player's status edge exactly once per transition, on every peer, and report
 /// the round's decided outcome once per decision (the latch clears per Ongoing tick in
 /// the drain arms — a RESTART revives a decided round, rl#204).
-fn log_round_edges(world: &mut World, tel: Option<&crate::telemetry::TelemetrySender>) {
+fn log_round_edges(world: &mut World) {
     let mut state = world.non_send_mut::<GameState>();
     let state = &mut *state;
     for (pid, p) in state.client.sim().players() {
@@ -1188,9 +1078,6 @@ fn log_round_edges(world: &mut World, tel: Option<&crate::telemetry::TelemetrySe
     if !state.reported_outcome && outcome != Outcome::Ongoing {
         state.reported_outcome = true;
         info!("round decided: {outcome:?}");
-        if let Some(t) = tel {
-            t.send(TelemetryEvent::round_decided(state.client.sim()));
-        }
     }
 }
 
@@ -1227,12 +1114,6 @@ fn advance_frame(world: &mut World, dt: f64) {
         .is_some();
     let role = PeerRole::of(world.non_send::<GameState>());
     let me = local_pilot(world.non_send::<GameState>());
-    let (tel, roster_len) = {
-        let state = world.non_send::<GameState>();
-        let tel = state.coord.telemetry().cloned();
-        (tel, state.client.sim().players().count())
-    };
-
     world.non_send_mut::<GameState>().accumulator += dt;
 
     apply_vehicle_request(world);
@@ -1262,7 +1143,7 @@ fn advance_frame(world: &mut World, dt: f64) {
             adopt_wire_articulation(world, &art, me);
         }
         if let Some(down) = tick.server_down {
-            end_round_server_down(world, down, tel.as_ref());
+            end_round_server_down(world, down);
             return;
         }
 
@@ -1274,17 +1155,6 @@ fn advance_frame(world: &mut World, dt: f64) {
         record_tick_trace(world);
 
         super::net_track::sample(world, role == PeerRole::ServerAuth, sim_input);
-
-        if let Some(t) = &tel {
-            sample_telemetry(
-                world,
-                t,
-                roster_len,
-                tick.issue_tick,
-                sim_input,
-                local.pilot_intent(),
-            );
-        }
     }
 
     // A frame that crossed no tick pays one deferred physics step instead (rl#396) —
@@ -1316,17 +1186,14 @@ fn advance_frame(world: &mut World, dt: f64) {
     // Chronic input-starvation surface (rl#213): reports appear at most once per second per
     // player, so once per frame — after the tick drain — is plenty. A remote-adopt client has
     // no server and drains nothing.
-    crate::telemetry::surface_starvation(
-        world.non_send_mut::<GameState>().server_mut(),
-        tel.as_ref(),
-    );
+    crate::net_loop::surface_starvation(world.non_send_mut::<GameState>().server_mut());
 
     if applied == MAX_TICKS_PER_FRAME {
         let mut state = world.non_send_mut::<GameState>();
         state.accumulator = state.accumulator.min(TICK_DT);
     }
 
-    log_round_edges(world, tel.as_ref());
+    log_round_edges(world);
 
     // Once per tick: every crossing completes the tick before it starts its own.
     if applied > 0 && world.non_send::<GameState>().pending_pump.is_some() {

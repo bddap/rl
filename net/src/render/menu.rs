@@ -19,7 +19,6 @@ use crate::net_loop::{self, JoinResult};
 
 pub struct MenuPlugin {
     pub seed: u64,
-    pub telemetry: Option<EndpointId>,
     pub stamp: crate::SyncStamp,
 }
 
@@ -43,7 +42,7 @@ impl Plugin for MenuPlugin {
         app.world_mut()
             .resource_mut::<EguiGlobalSettings>()
             .auto_create_primary_context = false;
-        app.insert_non_send(MenuState::new(self.seed, self.telemetry, self.stamp))
+        app.insert_non_send(MenuState::new(self.seed, self.stamp))
             .add_systems(
                 OnEnter(AppPhase::Menu),
                 // consume_round_over first: it feeds last_host, which reset_menu_nav reads.
@@ -92,7 +91,6 @@ pub(super) fn despawn_menu_camera(mut commands: Commands, cams: Query<Entity, Wi
 
 struct MenuState {
     seed: u64,
-    telemetry: Option<EndpointId>,
     stamp: crate::SyncStamp,
     nav: MenuNav,
     stick_latched: bool,
@@ -104,10 +102,9 @@ struct MenuState {
 }
 
 impl MenuState {
-    fn new(seed: u64, telemetry: Option<EndpointId>, stamp: crate::SyncStamp) -> Self {
+    fn new(seed: u64, stamp: crate::SyncStamp) -> Self {
         Self {
             seed,
-            telemetry,
             stamp,
             nav: MenuNav::new(),
             stick_latched: false,
@@ -358,12 +355,7 @@ fn apply_action(
             state.error = None;
             // Poll-driven: begin kicks off the bind, the dial fires when it lands,
             // poll_rejoin pumps it per frame — no thread (rl#411/rl#412).
-            state.rejoining = Some(net_loop::JoinDriver::begin(
-                state.seed,
-                host,
-                state.telemetry,
-                state.stamp,
-            ));
+            state.rejoining = Some(net_loop::JoinDriver::begin(state.seed, host, state.stamp));
             next.set(AppPhase::Connecting);
             true
         }
@@ -466,12 +458,7 @@ fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextSta
     state.error = None;
     // Infallible: the session bind is pollable (rl#412) — a bind failure surfaces
     // through poll_formation's error arm.
-    state.forming = Some(menu::begin(
-        choice,
-        state.seed,
-        state.telemetry,
-        state.stamp,
-    ));
+    state.forming = Some(menu::begin(choice, state.seed, state.stamp));
     next.set(AppPhase::Connecting);
 }
 

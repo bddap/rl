@@ -13,26 +13,8 @@ use crate::training::algorithm::NormalizedValue;
 use crate::training::reward::{action_effort, planar_dist};
 use crate::training::targets::{closest_tip_dists, seed_target};
 
-use super::lifecycle::{EnvEpisode, EnvPhase};
+use super::lifecycle::EnvPhase;
 use super::state::WorkerState;
-
-fn log_effort_probe(envs: &[EnvEpisode], steps: &[EnvStep], effort_weight: f32) {
-    let mut count = 0usize;
-    let mut effort_sum = 0.0f32;
-    for (ep, step) in envs.iter().zip(steps) {
-        if matches!(ep.phase, EnvPhase::Recording) {
-            count += 1;
-            effort_sum += step.effort;
-        }
-    }
-    if count > 0 {
-        let mean_effort = effort_sum / count as f32;
-        info!(
-            "EFFORTLOG n={count} mean_effort={mean_effort:.3} mean_tax={:.4}",
-            effort_weight * mean_effort,
-        );
-    }
-}
 
 struct SampledAction {
     drive: [f32; ACTION_SIZE],
@@ -386,9 +368,6 @@ pub(crate) fn brain_step(
         &mut clamp_candidates,
     );
 
-    if training.mode.log_effort {
-        log_effort_probe(&training.mode.envs, &steps, training.mode.effort_weight);
-    }
     training.accumulate_drift(&steps);
 
     training.mode.total_steps += 1;

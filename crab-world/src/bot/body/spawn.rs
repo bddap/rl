@@ -14,8 +14,7 @@ pub const SPAWN_HEIGHT: f32 = 0.05;
 const FRICTION_RAMP: f32 = 4.0;
 
 /// Foot (carpus tip) contact friction. Not free-standing: it Average-pairs with
-/// [`crate::physics::world::GROUND_FRICTION`] to the μ≈2.0 the rl#318 slope-hold
-/// acceptance is tuned against (`slope_hold_test`) — retune BOTH or the crab
+/// [`crate::physics::world::GROUND_FRICTION`] to μ≈2.0 — retune BOTH or the crab
 /// toboggans again. Deliberately NOT raised (nor `Max`-combined) to do the ground's
 /// job.
 const FOOT_FRICTION: Friction = Friction::coefficient(1.5);

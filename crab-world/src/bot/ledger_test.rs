@@ -7,9 +7,7 @@
 //! flip-drives swing at the drive's own rate, indistinguishable from injection.
 
 use bevy::prelude::*;
-use bevy_rapier3d::plugin::context::{
-    RapierContextJoints, RapierContextSimulation, RapierRigidBodySet,
-};
+use bevy_rapier3d::plugin::context::RapierRigidBodySet;
 use bevy_rapier3d::prelude::{MultibodyJoint, RapierRigidBodyHandle, Velocity};
 
 use super::actuator::{ACTION_SIZE, CrabActions, applied_torque};
@@ -18,9 +16,7 @@ use super::headless::{HeadlessStack, WorldRole, headless_stack, tick};
 use super::sensor::CrabObservation;
 use crate::Visuals;
 use crate::physics::PHYSICS_DT;
-use crate::physics::snapshot::{
-    LEDGER_SLACK_J, LEDGER_WINDOW, SpringCoefficients, is_kick, mech_energy,
-};
+use crate::physics::snapshot::{LEDGER_SLACK_J, LEDGER_WINDOW, is_kick, mech_energy};
 
 fn crab_mech_energy(app: &mut App) -> f32 {
     let handles: Vec<_> = {
@@ -81,17 +77,6 @@ fn max_stop_sag(app: &mut App) -> f32 {
     sag
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Variant {
-    iterations: Option<(usize, usize, usize)>,
-    limit: Option<SpringCoefficients<f32>>,
-}
-
-const SHIPPED: Variant = Variant {
-    iterations: None,
-    limit: None,
-};
-
 #[derive(Debug)]
 struct Audit {
     worst_over_budget: (f32, usize),
@@ -100,7 +85,7 @@ struct Audit {
     max_sag: f32,
 }
 
-fn drive_and_audit(v: Variant) -> Audit {
+fn drive_and_audit() -> Audit {
     let grid = crate::terrain::TerrainGrid::test_grid(
         12,
         8,
@@ -124,23 +109,6 @@ fn drive_and_audit(v: Variant) -> Audit {
         visuals: Visuals(false),
     });
     tick(&mut app, 2);
-    if let Some((outer, pgs, stab)) = v.iterations {
-        let mut q = app.world_mut().query::<&mut RapierContextSimulation>();
-        let mut sim = q.single_mut(app.world_mut()).expect("rapier context");
-        sim.integration_parameters.num_solver_iterations = outer;
-        sim.integration_parameters.num_internal_pgs_iterations = pgs;
-        sim.integration_parameters
-            .num_internal_stabilization_iterations = stab;
-    }
-    if let Some(soft) = v.limit {
-        let mut q = app.world_mut().query::<&mut RapierContextJoints>();
-        let mut joints = q.single_mut(app.world_mut()).expect("rapier context");
-        let handles: Vec<_> = joints.multibody_joints.iter().map(|(h, ..)| h).collect();
-        for h in handles {
-            let (mb, link_id) = joints.multibody_joints.get_mut(h).expect("joint");
-            mb.link_mut(link_id).expect("link").joint.data.softness = soft;
-        }
-    }
     tick(&mut app, 62);
 
     const DRIVEN_TICKS: usize = 768;
@@ -192,8 +160,7 @@ fn drive_and_audit(v: Variant) -> Audit {
         }
     }
     println!(
-        "driven ledger {:?}: worst window {:+.1} J vs budget (ending tick {}), max part speed {:.2} m/s, max stop sag {:.3} rad, kicks {}{}",
-        v,
+        "driven ledger: worst window {:+.1} J vs budget (ending tick {}), max part speed {:.2} m/s, max stop sag {:.3} rad, kicks {}{}",
         audit.worst_over_budget.0,
         audit.worst_over_budget.1,
         audit.max_speed,
@@ -210,7 +177,7 @@ fn drive_and_audit(v: Variant) -> Audit {
 
 #[test]
 fn driven_crab_energy_ledger_holds_on_shipped_solver() {
-    let audit = drive_and_audit(SHIPPED);
+    let audit = drive_and_audit();
     assert!(
         audit.worst_over_budget.0 <= 0.0,
         "solver injected {:.1} J past the actuator budget over one {LEDGER_WINDOW}-tick window \
@@ -218,66 +185,4 @@ fn driven_crab_energy_ledger_holds_on_shipped_solver() {
         audit.worst_over_budget.0,
         audit.worst_over_budget.1
     );
-}
-
-/// Data, not a gate: the same audit across the solver/limit-spring variants the
-/// rl#332 one-tick replay matrix discriminated.
-#[test]
-#[ignore = "variant matrix — run explicitly (rl#332)"]
-fn solver_variant_matrix() {
-    let soft = |hz: f32, zeta: f32| {
-        Some(SpringCoefficients {
-            natural_frequency: hz,
-            damping_ratio: zeta,
-        })
-    };
-    for v in [
-        SHIPPED,
-        Variant {
-            iterations: Some((2, 2, 3)),
-            limit: None,
-        },
-        Variant {
-            iterations: Some((2, 4, 3)),
-            limit: None,
-        },
-        Variant {
-            iterations: Some((3, 2, 3)),
-            limit: None,
-        },
-        Variant {
-            iterations: Some((4, 2, 3)),
-            limit: None,
-        },
-        Variant {
-            iterations: Some((2, 6, 3)),
-            limit: None,
-        },
-        Variant {
-            iterations: Some((2, 8, 3)),
-            limit: None,
-        },
-        Variant {
-            iterations: Some((2, 12, 3)),
-            limit: None,
-        },
-        Variant {
-            iterations: Some((2, 16, 3)),
-            limit: None,
-        },
-        Variant {
-            iterations: Some((2, 8, 2)),
-            limit: None,
-        },
-        Variant {
-            iterations: Some((1, 8, 3)),
-            limit: None,
-        },
-        Variant {
-            iterations: None,
-            limit: soft(40.0, 2.0),
-        },
-    ] {
-        drive_and_audit(v);
-    }
 }

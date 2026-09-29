@@ -87,11 +87,10 @@ fn finalize_pending_step(
     min_tip_dist: Option<f32>,
     over_cap: bool,
     next_value: NormalizedValue,
-    effort_weight: f32,
 ) -> StepFinalize {
     let distance_closed = pending.target_dist.zip(d_now).map(|(prev, now)| prev - now);
     let progress_glitch = is_progress_glitch(distance_closed);
-    let mut reward = compute_reward(distance_closed, pending.effort, effort_weight);
+    let mut reward = compute_reward(distance_closed, pending.effort);
 
     let grabbed = min_tip_dist.is_some_and(tip_touch);
     if grabbed {
@@ -186,14 +185,8 @@ impl WorkerState {
                 );
                 let d_now = carapace_target_dist(step, targets, e);
                 let over_cap = self.mode.envs[e].steps > MAX_EPISODE_TICKS;
-                let fin = finalize_pending_step(
-                    &pending,
-                    d_now,
-                    step.min_tip_dist,
-                    over_cap,
-                    step.value,
-                    self.mode.effort_weight,
-                );
+                let fin =
+                    finalize_pending_step(&pending, d_now, step.min_tip_dist, over_cap, step.value);
                 if fin.progress_glitch {
                     self.mode.telemetry.progress_glitch_drops += 1;
                 }
@@ -369,7 +362,6 @@ pub(crate) fn reset_crab(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::training::reward::EFFORT_WEIGHT_DEFAULT;
     use crate::training::targets::REACH_RADIUS;
 
     /// A planar fixture grid, big enough for band sampling (≥ edge margin + band) —
@@ -553,29 +545,15 @@ mod tests {
         let far_tip = Some(REACH_RADIUS * 4.0);
         let succ_v = NormalizedValue(0.5);
 
-        let r = finalize_pending_step(
-            &pend(0.0, Some(1.25)),
-            Some(1.0),
-            far_tip,
-            false,
-            succ_v,
-            EFFORT_WEIGHT_DEFAULT,
-        );
+        let r = finalize_pending_step(&pend(0.0, Some(1.25)), Some(1.0), far_tip, false, succ_v);
         assert_eq!(r.transition.end, StepEnd::Continues);
         assert!(!r.ended);
         assert_eq!(
             r.transition.reward.to_bits(),
-            compute_reward(Some(0.25), 0.0, EFFORT_WEIGHT_DEFAULT).to_bits()
+            compute_reward(Some(0.25), 0.0).to_bits()
         );
 
-        let r = finalize_pending_step(
-            &pend(0.0, Some(1.0)),
-            Some(1.0),
-            Some(0.0),
-            false,
-            succ_v,
-            EFFORT_WEIGHT_DEFAULT,
-        );
+        let r = finalize_pending_step(&pend(0.0, Some(1.0)), Some(1.0), Some(0.0), false, succ_v);
         assert_eq!(
             r.transition.end,
             StepEnd::Terminal,
@@ -584,17 +562,10 @@ mod tests {
         assert!(r.ended);
         assert_eq!(
             r.transition.reward.to_bits(),
-            (compute_reward(Some(0.0), 0.0, EFFORT_WEIGHT_DEFAULT) + GRAB_REWARD).to_bits()
+            (compute_reward(Some(0.0), 0.0) + GRAB_REWARD).to_bits()
         );
 
-        let r = finalize_pending_step(
-            &pend(0.0, Some(1.0)),
-            Some(1.0),
-            far_tip,
-            true,
-            succ_v,
-            EFFORT_WEIGHT_DEFAULT,
-        );
+        let r = finalize_pending_step(&pend(0.0, Some(1.0)), Some(1.0), far_tip, true, succ_v);
         assert_eq!(
             r.transition.end,
             StepEnd::Truncated { next_value: succ_v },
@@ -602,21 +573,14 @@ mod tests {
         );
         assert!(r.ended);
 
-        let r = finalize_pending_step(
-            &pend(0.0, Some(2.0)),
-            Some(0.0),
-            far_tip,
-            false,
-            succ_v,
-            EFFORT_WEIGHT_DEFAULT,
-        );
+        let r = finalize_pending_step(&pend(0.0, Some(2.0)), Some(0.0), far_tip, false, succ_v);
         assert!(
             r.progress_glitch,
             "a > 0.5 m/tick delta is a progress glitch"
         );
         assert_eq!(
             r.transition.reward.to_bits(),
-            compute_reward(None, 0.0, EFFORT_WEIGHT_DEFAULT).to_bits(),
+            compute_reward(None, 0.0).to_bits(),
             "the glitched progress is dropped to zero (effort tax only)"
         );
     }

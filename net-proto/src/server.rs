@@ -40,14 +40,13 @@ const STARVATION_REPORT_COOLDOWN: u64 = 10 * crate::sim::TICK_HZ;
 /// At most this many un-drained [`StarvationReport`]s are held on the [`Server`]; beyond it,
 /// new ones are dropped WITHOUT arming the player's cooldown, so a capped-out player retries
 /// at the next boundary once the driver drains. Only a driver that never drains could hit it —
-/// the bound exists so telemetry bookkeeping can never grow without limit.
+/// the bound exists so report bookkeeping can never grow without limit.
 const STARVATION_REPORT_CAP: usize = 16;
 
 /// One chronic input-starvation observation (rl#213): `pid` filled `starved` of the `window`
 /// assembled ticks closing at `tick` with holds/neutral. Produced by [`Server::advance`] at
 /// window boundaries (rate-limited per player), drained by the driver via
-/// [`Server::take_starvation_reports`] and surfaced as telemetry
-/// ([`crate::telemetry::surface_starvation`]). Pure observability — the hold itself already
+/// [`Server::take_starvation_reports`] and logged. Pure observability — the hold itself already
 /// keeps the sim correct and bounded (95d3c7b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StarvationReport {
@@ -432,7 +431,7 @@ impl Server {
     }
 
     /// Drain the pending chronic-starvation observations (rl#213) for the driver to surface
-    /// (telemetry + log). Empty in the healthy case at zero cost; un-drained reports are
+    /// as a log line. Empty in the healthy case at zero cost; un-drained reports are
     /// bounded at [`STARVATION_REPORT_CAP`], so a driver that never calls this leaks nothing.
     pub fn take_starvation_reports(&mut self) -> Vec<StarvationReport> {
         std::mem::take(&mut self.starvation_reports)

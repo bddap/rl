@@ -1,7 +1,6 @@
 //! Sally flight recorder (bddap/rl#332): continuous ~10 Hz kinematics from every live
 //! surface, shipped over the process' existing OTLP pipe so the next "Sally
 //! flying" sighting can be reconstructed from a real track instead of soak proxies.
-//! Bothouse-side extraction/plotting: `bothouse/telemetry/sally-track`.
 //!
 //! Two body kinds per batch, discriminated by key (rl#401): crab samples carry
 //! `"c":<env>`, craft samples carry `"veh":<pilot>,"kind":<wire byte>`. Crafts are in

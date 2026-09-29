@@ -5307,7 +5307,6 @@ dependencies = [
  "net",
  "otel",
  "test-watchdog",
- "tokio",
  "tracing",
 ]
 
@@ -7764,7 +7763,6 @@ dependencies = [
  "console_error_panic_hook",
  "crab-world",
  "iroh",
- "iroh-mdns-address-lookup",
  "n0-future",
  "net-link",
  "net-proto",
@@ -7774,7 +7772,6 @@ dependencies = [
  "rapier3d",
  "serde",
  "test-watchdog",
- "tokio",
  "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -7787,17 +7784,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
- "console_error_panic_hook",
  "iroh",
  "iroh-mdns-address-lookup",
- "js-sys",
  "n0-future",
  "net-proto",
  "tokio",
  "tracing",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

@@ -10,10 +10,7 @@ use super::scene::{
 use super::*;
 
 pub enum Boot {
-    Menu {
-        seed: u64,
-        telemetry: Option<crate::menu::EndpointId>,
-    },
+    Menu { seed: u64 },
     Round(Box<(ClientSim, Option<NetDriver>)>),
 }
 
@@ -34,16 +31,14 @@ pub fn build_windowed_app(
 ) -> anyhow::Result<App> {
     // NO determinism pin, on ANY boot (rl#199): only the solo/host peer steps the float NN
     // crab — a remote client adopts snapshots and steps nothing — so no runtime path compares
-    // float state across peers (hash-log/telemetry hashes are offline diagnostics).
+    // float state across peers (hash logs are offline diagnostics).
     // Single-thread pinning lives where reproducibility is actually consumed: the trainer,
     // eval, and the headless probe ([`crab_world::bot::headless::pin_single_thread_pools`]).
     let mut app = App::new();
     let window = Window {
         title: "Giant Crab Rescue".into(),
-        // Fullscreen is the single source of truth for every GCR launch target. The Deck
-        // shows fullscreen only because gamescope forces it; on a plain desktop/TV (bothouse)
-        // a Windowed app stayed windowed. BorderlessFullscreen makes the app itself own the
-        // policy, so bothouse matches the Deck with no separate per-host window-config path.
+        // gamescope forces fullscreen on the Deck but a plain desktop leaves a Windowed app
+        // windowed; BorderlessFullscreen makes the app own the policy on every target.
         mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
         ..default()
     };
@@ -72,10 +67,8 @@ pub fn build_windowed_app(
 
     // The controls hint/overlay is app-global chrome (rl#117): the plugin owns its whole
     // lifecycle, and the per-phase sync systems below only retarget its ActiveContext
-    // (Menu ↔ vehicles). No force-knobs — the windowed client exposes none, so live state
-    // drives the legend; it goes through the one installer anyway so there is no second
-    // wiring of the overlay to drift.
-    crab_world::controls::install_overlay::<GcrControls>(&mut app, &Default::default());
+    // (Menu ↔ vehicles).
+    app.add_plugins(crab_world::controls::ControlsOverlayPlugin::<GcrControls>::default());
     crab_world::chord::install_chords::<GcrControls>(&mut app);
     // The d-pad combo map (rl#358): discovered-only, persisted per save.
     super::chord_map::install(&mut app, super::chord_map::default_save_path());
@@ -177,13 +170,9 @@ pub fn build_windowed_app(
                 .resource_mut::<NextState<AppPhase>>()
                 .set(AppPhase::Playing);
         }
-        Boot::Menu { seed, telemetry } => {
+        Boot::Menu { seed } => {
             app.insert_resource(BootedWithMenu);
-            app.add_plugins(menu::MenuPlugin {
-                seed,
-                telemetry,
-                stamp,
-            });
+            app.add_plugins(menu::MenuPlugin { seed, stamp });
             {
                 let policies = nn_crabs;
                 let mut throwaway = crate::formation::solo_client_for(seed);
