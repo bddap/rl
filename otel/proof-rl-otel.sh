@@ -42,16 +42,16 @@ for i in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/14318)2>/dev/null && { exec
 
 echo "== run the rl otel SDK smoke example through the tunnel =="
 cd "$WT"
-DECK_ID=ablaised OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:14318 \
+DECK_ID=testdeck OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:14318 \
   taskset -c 0-13 nix-shell --run "cargo run -q -p otel --example smoke" 2>&1 | tail -5
 cd "$WORK"
 
-SINK="$WORK/sink/otlp-ablaised.jsonl"
+SINK="$WORK/sink/otlp-testdeck.jsonl"
 for i in $(seq 1 40); do [ -s "$SINK" ] && grep -q hello-otel-from-rust-LOG "$SINK" && grep -q rl_otel_smoke_counter "$SINK" && grep -q smoke_span "$SINK" && break; sleep 0.3; done
 echo "sink: $SINK"; ls -l "$WORK/sink/" 2>/dev/null
 ok=0
 for n in smoke_span hello-otel-from-rust-LOG rl_otel_smoke_counter; do
   if grep -q "$n" "$SINK" 2>/dev/null; then echo "  FOUND  $n"; ok=$((ok+1)); else echo "  MISSING $n"; fi
 done
-[ -f "$SINK" ] && echo "  partition tag confirmed: file named for DECK_ID host.name=ablaised"
+[ -f "$SINK" ] && echo "  partition tag confirmed: file named for DECK_ID host.name=testdeck"
 [ "$ok" -eq 3 ] && echo "RESULT: PASS — rl Rust SDK emitted all 3 OTLP signals through iroh, tagged by deck." || { echo "RESULT: FAIL ($ok/3)"; tail -20 otelcol.log; exit 1; }

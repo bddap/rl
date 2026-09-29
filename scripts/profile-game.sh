@@ -7,7 +7,7 @@ PERF=0
 CORES="14-23"
 OUT=""
 LOG=""
-GAME_DIR=/home/a/rl-game
+GAME_DIR=${RL_GAME_DIR:-$HOME/rl-game}
 declare -a LAUNCH_CMD=()
 
 usage() { awk 'NR>1{ if(!/^#/)exit; sub(/^# ?/,""); print }' "$0"; exit "${1:-0}"; }
