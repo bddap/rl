@@ -1,66 +1,42 @@
-# AGENTS.md
-
-## Dev environment
-`shell.nix` pins the Rust toolchain and Bevy's system deps; run cargo inside it
-(`nix-shell shell.nix --run 'cargo build'`).
-
-## How to work
+# Working on rl
 
 Edit by subtraction: resolve a problem by deleting code; a tactical patch over a symptom is not accepted. One implementation per thing, never two alive.
-Question designs. Treat the structure of this project as mutable — don't assume the existing
-code is right. Large refactors are welcome; there's no stable API to maintain. Unit-test what
-you can. Delete freely.
 
-See something wrong, fix it.
+Question designs and propose better ones. Large refactors are welcome; there is no
+stable API to preserve. Fix problems you find and unit-test behavior where practical.
+This is a learning project; explain disagreements directly, with dry humor welcome.
 
-Your human is knowledgeable, but not infinitely so. Question him, teach him — this project is
-for fun and learning. Call out his designs, push back on plans, suggest better solutions than
-the one he asked for; he appreciates the pushback. Dry sass too.
+Delete code comments; keep only a why the code cannot show.
 
-## Pre-submission checks
+## Checks
+
+Run Cargo inside [shell.nix](shell.nix). Before submitting code:
+
 - `cargo fmt --check`
-- `cargo clippy --quiet --all-targets -- --deny warnings` (`--all-targets` lints test/bench/example code too, so test-only lints can't slip in)
-- `cargo test -q` (on a contended build host add `-- --test-threads=2`: the live trainer saturates the cores and the heavy physics tests hang at default parallelism). The sim suites arm `test-watchdog` — a rare 0%-CPU wedge under trainer load (rl#282) aborts loudly after ~2 min instead of hanging; rerun on a quieter box.
+- `cargo clippy --quiet --all-targets -- --deny warnings`
+- `cargo test -q -- --test-threads=2`
 
-No `#[ignore]` tests: a test runs in the test map or is deleted.
+[test-map.json](test-map.json) selects covering suites. A test runs in the map or is
+deleted; do not use `#[ignore]`. Simulation tests use `test-watchdog` to abort hangs.
+If contention trips it, rerun with fewer threads or on a less loaded machine.
 
-## Checkpoints for probes/screenshots
-Need NN-crab weights for `rl-demo` / `game fp-screenshot` on the release host? Use the
-release store's live pointer: `~/.local/state/rl-releases/latest/checkpoints` —
-always the current tagged-envelope checkpoint with terrain provenance. Do NOT
-copy checkpoints into ad-hoc `~/.cache` dirs: stale copies outlive format
-migrations (pre-envelope rl#200, flat-plant rl#293) and every launch against
-one fails.
+## Probes and profiling
 
-## Profiling
-"Why is the game slow?" → `scripts/profile-game.sh` instead of rediscovering the
-toolchain. `--pid N` attaches to a running process (read-only — safe against a live
-session); with no `--pid` it launches a target (default the deployed game, pinned to
-the build-free cores 14-23) and kills it after. `--perf` adds a flamegraph-style
-frame breakdown (needs `perf` + privilege; skipped if absent). Run the whole script
-as user `a` for the real Vulkan client.
+Use the release store's live checkpoint pointer for probes and screenshots. Keep
+the tagged envelope and terrain provenance; do not make ad-hoc checkpoint copies
+that can outlive format migrations.
 
-It reports the signals that localize a bottleneck: render **backend** (Vulkan/NVIDIA
-= GPU, llvmpipe/lavapipe = software fallback, from the bevy `AdapterInfo` log line);
-**GPU util** over time (idle while slow ⇒ NOT GPU-bound); **per-thread CPU** via
-`top -H` (one thread ~100% ⇒ serial bottleneck; whole proc ~1 core while loadavg ≫
-cores ⇒ preemption starvation, corroborated by nonvoluntary context switches); and
-the optional perf frame breakdown. FPS only shows if the target logs it (add bevy
-`FrameTimeDiagnosticsPlugin` + `LogDiagnosticsPlugin`). The 2026-06-28 GCR slideshow
-was GPU-idle + ~1-core-capped at loadavg ~31 = host CPU oversubscription, not game
-code.
-
-**You don't need a quiet box, and shouldn't wait for one.** You usually can't stop the
-trainer or other jobs to profile, and blocking for exclusivity risks deadlocking
-against them. `--pid`-attach the running target or pin to the build-free cores, profile
-*under* contention, and note loadavg as context — a profile taken under load (that GCR
-read was at ~31) still localizes the bottleneck. When in doubt, just profile anyway.
-
-## Comments
-
-Standing directive: endeavor to remove code comments — removing comments is good in
-itself. The rare survivor states a why the code cannot show, never what the code does.
+For slow frames, use [scripts/profile-game.sh](scripts/profile-game.sh).
+`--pid N` observes a running process; without it the script launches and later kills
+a target. `--perf` adds a breakdown when available. Run as the graphical-session
+user for the real Vulkan client. Profile under contention without stopping other
+jobs or waiting for exclusivity, and record load average. Inspect the backend,
+GPU utilization and per-thread CPU before attributing a bottleneck.
 
 ## Boundaries
 
-This rl repository names only its own components. Name another project only as a declared, versioned dependency, never through its internals. Give a needed shared service a neutral name owned by this project. Do not import the environment of machines running agents: hostnames, addresses, paths outside the repository, service or queue names, credentials, camera frames, or renders of private places. No person's name, schedule or presence enters the repository. Before landing, grep the diff for other projects' names and host details. Remove host details and undeclared project references; dependency declarations expose only the dependency's name and version.
+Keep this project independent. Reference other projects only as declared, versioned
+dependencies, exposing names and versions rather than internals. Give shared services
+neutral project-owned names. Exclude deployment-specific paths, addresses, service
+or queue names, credentials, camera frames and private renders. Before landing,
+inspect the diff for undeclared project references and deployment details.
