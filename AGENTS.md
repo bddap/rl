@@ -5,6 +5,8 @@
 (`nix-shell shell.nix --run 'cargo build'`).
 
 ## How to work
+
+Edit by subtraction: resolve a problem by deleting code; a tactical patch over a symptom is not accepted. One implementation per thing, never two alive.
 Question designs. Treat the structure of this project as mutable — don't assume the existing
 code is right. Large refactors are welcome; there's no stable API to maintain. Unit-test what
 you can. Delete freely.
