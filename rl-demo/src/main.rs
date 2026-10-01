@@ -38,8 +38,8 @@ struct Common {
     otel: otel::OtelArgs,
 
     /// Waive the checkpoint's `arena terrain` record requirement (rl#293): view a
-    /// pre-terrain/recordless checkpoint on the canonical tile anyway. Terrain is the
-    /// only ground — this flag no longer picks one, it only unlocks archive viewing.
+    /// pre-terrain/recordless checkpoint on the canonical tile anyway.
+    /// Diagnostic render ground is selected separately by --rollout-terrain.
     #[arg(long)]
     terrain: bool,
 
@@ -150,6 +150,20 @@ struct RenderVideoArgs {
     /// Length of the render in simulated seconds.
     #[arg(long, default_value_t = 8.0)]
     seconds: f32,
+
+    /// Diagnostic rollout ground; match the trainer's --terrain.
+    #[arg(long, value_enum, default_value_t = crab_world::TrainTerrain::Gcr)]
+    rollout_terrain: crab_world::TrainTerrain,
+
+    /// Diagnostic target band; match the trainer's --band-max-m.
+    #[arg(long, value_parser = crab_world::parse_band_max,
+          default_value_t = crab_world::training::targets::BAND_MAX_M)]
+    band_max_m: f32,
+
+    /// Use the trainer's OU exploration at this log-std floor instead of action means.
+    #[arg(long, allow_negative_numbers = true, value_parser = parse_finite_f32,
+          requires = "seed")]
+    exploration_log_std_floor: Option<f32>,
 }
 
 fn parse_vec3(s: &str) -> Result<Vec3, String> {
@@ -289,7 +303,23 @@ fn run_screenshot(args: ScreenshotArgs) {
 
 fn run_render_video(args: RenderVideoArgs) {
     let (mut app, _otel) = boot(&args.common, Driver::Offscreen(Duration::ZERO));
+    eprintln!(
+        "RENDER_ROLLOUT terrain={:?} band_max_m={} seed={:?} exploration_log_std_floor={:?}",
+        args.rollout_terrain, args.band_max_m, args.common.seed, args.exploration_log_std_floor,
+    );
+    if args.rollout_terrain != crab_world::TrainTerrain::Gcr
+        || args.band_max_m != crab_world::training::targets::BAND_MAX_M
+        || args.exploration_log_std_floor.is_some()
+    {
+        app.insert_resource(bot::CrabRescueIsFault);
+    }
+    app.insert_resource(play::RenderRollout::new(
+        args.band_max_m,
+        args.exploration_log_std_floor,
+        args.common.seed.unwrap_or(0),
+    ));
     app.add_plugins(play::RenderVideoPlugin {
+        rollout_terrain: args.rollout_terrain,
         checkpoint_dir: args.common.checkpoint.checkpoint_dir,
         path: args.path,
         seconds: args.seconds,
@@ -316,6 +346,32 @@ mod tests {
     fn cli_is_well_formed() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn diagnostic_render_flags_are_bounded_and_seeded() {
+        let base = ["rl-demo", "render-video", "test.mp4"];
+        for extra in [
+            vec!["--band-max-m", "nan"],
+            vec!["--band-max-m", "1"],
+            vec!["--exploration-log-std-floor", "-1"],
+            vec!["--exploration-log-std-floor", "nan", "--seed", "351"],
+        ] {
+            assert!(Cli::try_parse_from(base.iter().copied().chain(extra)).is_err());
+        }
+        assert!(
+            Cli::try_parse_from(base.iter().copied().chain([
+                "--rollout-terrain",
+                "flat",
+                "--band-max-m",
+                "9",
+                "--exploration-log-std-floor",
+                "-1",
+                "--seed",
+                "351",
+            ]))
+            .is_ok()
+        );
     }
 
     /// The deployed launch shapes must keep parsing (deck + TV launchers, the

@@ -360,7 +360,7 @@ impl TrainConfig {
     }
 }
 
-fn parse_band_max(s: &str) -> Result<f32, String> {
+pub fn parse_band_max(s: &str) -> Result<f32, String> {
     let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
     // Below BAND_START_MIN the log-uniform draw's range inverts; above the canonical
     // edge the sampling clamp's edge margin (sized from the CONST) no longer bounds it.

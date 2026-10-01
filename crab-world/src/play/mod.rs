@@ -7,6 +7,7 @@ mod manual_control;
 mod policy;
 mod render_video;
 mod rig_pose;
+mod rollout;
 mod target_ball;
 
 use std::path::PathBuf;
@@ -24,6 +25,7 @@ use crate::policy::RigDims;
 pub use controls::DemoControls;
 pub use render_video::RenderVideoPlugin;
 pub use rig_pose::RigPosePart;
+pub use rollout::RenderRollout;
 
 pub fn rig_dims() -> RigDims {
     RigDims {

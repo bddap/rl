@@ -6,7 +6,7 @@ use burn::backend::ndarray::NdArrayDevice;
 use burn::tensor::Tensor;
 
 use crate::bot::actuator::ACTION_SIZE;
-use crate::bot::arch::{AnyBrain, ArchId};
+use crate::bot::arch::{AnyBrain, ArchId, GaussianHead};
 use crate::bot::sensor::OBS_SIZE;
 use crate::training::InferBackend;
 use crate::training::checkpoint::{BrainLoadError, CheckpointDir, load_brain_file};
@@ -621,6 +621,14 @@ impl Policy {
     }
 
     pub fn act(&self, raw_obs: &[f32; OBS_SIZE]) -> [f32; ACTION_SIZE] {
+        self.act_with_noise(raw_obs, None)
+    }
+
+    pub(crate) fn act_with_noise(
+        &self,
+        raw_obs: &[f32; OBS_SIZE],
+        exploration: Option<([f32; ACTION_SIZE], f32)>,
+    ) -> [f32; ACTION_SIZE] {
         let (brain, normalizer) = match &self.state {
             PolicyState::Loaded {
                 brain, normalizer, ..
@@ -631,8 +639,14 @@ impl Policy {
         let obs = normalizer.normalize_frozen(raw_obs);
         let input =
             Tensor::<InferBackend, 1>::from_floats(obs.as_slice(), &self.device).unsqueeze();
-        let (means, _log_std) = brain.policy(input);
-        let flat: Vec<f32> = means.flatten::<1>(0, 1).to_data().to_vec().unwrap();
+        let raw = brain.policy(input);
+        let drives = match exploration {
+            Some((noise, floor)) => GaussianHead::new(raw, floor).sample(
+                Tensor::<InferBackend, 1>::from_floats(noise.as_slice(), &self.device).unsqueeze(),
+            ),
+            None => raw.0,
+        };
+        let flat: Vec<f32> = drives.flatten::<1>(0, 1).to_data().to_vec().unwrap();
 
         flat.try_into()
             .expect("policy mean count == ACTION_SIZE (the rig gates refuse mismatched brains)")

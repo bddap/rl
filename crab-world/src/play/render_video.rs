@@ -19,6 +19,7 @@ pub const VIDEO_FPS: u32 = (1.0 / crate::physics::PHYSICS_DT) as u32;
 const VIDEO_SETTLE_FRAMES: u32 = 60;
 
 pub struct RenderVideoPlugin {
+    pub rollout_terrain: crate::TrainTerrain,
     pub checkpoint_dir: PathBuf,
     pub path: PathBuf,
     pub seconds: f32,
@@ -66,6 +67,7 @@ impl Plugin for RenderVideoPlugin {
             panic!("render-video: cannot create frame dir {frame_dir:?}: {e}");
         }
 
+        app.insert_resource(crate::terrain::Terrain::new(self.rollout_terrain.grid()));
         add_inference(app, &self.checkpoint_dir, None);
         app.insert_resource(super::DemoRng::seeded(self.seed));
         app.insert_resource(ShotConfig {
@@ -85,6 +87,10 @@ impl Plugin for RenderVideoPlugin {
         .init_resource::<DriveStats>()
         .add_systems(FixedUpdate, policy_step.in_set(BotSet::Think))
         .add_systems(FixedUpdate, accumulate_drive_stats.after(BotSet::Think))
+        .add_systems(
+            FixedUpdate,
+            trace_rollout.after(target_ball).after(BotSet::Think),
+        )
         .add_systems(Startup, (spawn_offscreen_camera, spawn_target_ball))
         .add_systems(FixedUpdate, target_ball.after(BotSet::Sense))
         .add_systems(
@@ -211,6 +217,36 @@ fn encode(cfg: &VideoConfig) {
             "render-video: could not run ffmpeg ({e}); frames kept at {:?}",
             cfg.frame_dir
         ),
+    }
+}
+
+fn trace_rollout(
+    rollout: Option<Res<super::RenderRollout>>,
+    progress: Res<VideoProgress>,
+    cfg: Res<VideoConfig>,
+    mut ticks: Local<u64>,
+    targets: Res<crate::bot::sensor::CrabTargets>,
+    carapace: Query<&Transform, With<crate::bot::body::CrabCarapace>>,
+    tips: Query<(&crate::bot::body::CrabEnvId, &Transform), With<crate::bot::body::CrabClawTip>>,
+) {
+    if rollout.is_none() || progress.frames < cfg.settle || progress.done {
+        return;
+    }
+    *ticks += 1;
+    if !ticks.is_multiple_of(crate::physics::PHYSICS_HZ) {
+        return;
+    }
+    if let (Ok(body), Some(target)) = (carapace.single(), targets.get(0)) {
+        let tip_distance = crate::training::targets::closest_tip_dist(0, target, &tips);
+        eprintln!(
+            "ROLLOUT_TRACE video_tick={} body={:?} target={:?} distance_m={:.5} tip_distance_m={:?} upright={:.5}",
+            *ticks,
+            body.translation,
+            target,
+            (body.translation - target).xz().length(),
+            tip_distance,
+            (body.rotation * Vec3::Y).y,
+        );
     }
 }
 

@@ -40,28 +40,20 @@ pub(super) fn target_ball(
     claw_tips_q: Query<(&body::CrabEnvId, &Transform), With<CrabClawTip>>,
     mut ball_q: Query<&mut Transform, (With<TargetBall>, Without<CrabClawTip>)>,
     mut rng: ResMut<super::DemoRng>,
+    rollout: Option<Res<super::RenderRollout>>,
 ) {
     let origin = spawns.origin(0);
+    let band_max = rollout
+        .as_ref()
+        .map_or(crate::training::targets::BAND_MAX_M, |r| r.band_max_m);
 
     let mut target = match targets.get(0) {
         Some(t) => t,
-        None => sample_target(
-            origin,
-            DEMO_CLOSE_FRAC,
-            crate::training::targets::BAND_MAX_M,
-            &mut rng.0,
-            &terrain,
-        ),
+        None => sample_target(origin, DEMO_CLOSE_FRAC, band_max, &mut rng.0, &terrain),
     };
 
     if closest_tip_dist(0, target, &claw_tips_q).is_some_and(tip_touch) {
-        target = sample_target(
-            origin,
-            DEMO_CLOSE_FRAC,
-            crate::training::targets::BAND_MAX_M,
-            &mut rng.0,
-            &terrain,
-        );
+        target = sample_target(origin, DEMO_CLOSE_FRAC, band_max, &mut rng.0, &terrain);
     }
 
     if let Some(slot) = targets.envs.first_mut() {
@@ -79,6 +71,29 @@ mod tests {
     use crate::bot::body::CrabCarapace;
     use crate::bot::headless::{flat_headless_app, tick};
     use crate::bot::sensor::CrabObservation;
+
+    #[test]
+    fn diagnostic_targets_stay_in_the_requested_band() {
+        let mut app = flat_headless_app();
+        app.insert_resource(super::super::DemoRng::seeded(Some(351)));
+        app.insert_resource(super::super::RenderRollout::new(9.0, None, 351));
+        app.add_systems(FixedUpdate, target_ball.after(BotSet::Sense));
+        tick(&mut app, 1);
+        let mut max_distance = 0.0_f32;
+        for _ in 0..64 {
+            app.world_mut().resource_mut::<CrabTargets>().envs[0] = None;
+            tick(&mut app, 1);
+            let origin = app.world().resource::<CrabSpawns>().origin(0);
+            let target = app.world().resource::<CrabTargets>().get(0).unwrap();
+            let distance = (target - origin).xz().length();
+            assert!(
+                distance <= 9.001,
+                "target {target:?} is {distance} m from {origin:?}"
+            );
+            max_distance = max_distance.max(distance);
+        }
+        assert!(max_distance > crate::training::targets::BAND_START_MIN);
+    }
 
     /// Env 0's carapace transform, read straight off the world.
     fn carapace(app: &mut App) -> Transform {
