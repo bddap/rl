@@ -15,6 +15,8 @@ use super::step::{EnvStep, MaxPartSpeed};
 
 pub const MAX_EPISODE_TICKS: u32 = 1500;
 
+pub(crate) const INTEGRITY_VIOLATION: &str = "physics-integrity violation";
+
 /// `next_value` is this tick's critic value — V of the state the pending action
 /// produced — which a cap truncation must carry for its GAE bootstrap.
 fn classify_step_end(grabbed: bool, over_cap: bool, next_value: NormalizedValue) -> StepEnd {
@@ -60,7 +62,7 @@ fn assert_physics_integrity(
             })
             .collect();
         panic!(
-            "physics-integrity violation in training (rl#343): env {env} tick {tick} \
+            "{INTEGRITY_VIOLATION} in training (rl#343): env {env} tick {tick} \
              episode-step {ep_step}: {tripped} — height {height} m, fastest part \
              {part} at lin {} m/s ang {} rad/s (bound tests lin.max(ang/3) = {} m/s), \
              all parts past 50: [{}], drive row {drives:?}. Training does not recover \

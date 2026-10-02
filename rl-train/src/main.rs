@@ -24,8 +24,9 @@ enum Command {
     /// The chase eval: drive a checkpoint at a far ball and report metres closed.
     Eval(EvalArgs),
 
-    /// Roll a frozen checkpoint through the training worlds until a tick budget is
-    /// spent or an rl#343 integrity violation trips (rl#351). Exit 3 = reproduced.
+    /// Roll a frozen checkpoint through the training worlds until each worker has
+    /// spent `--ticks` or tripped an rl#343 integrity violation (rl#351). Exit 3 =
+    /// reproduced.
     Repro(ReproArgs),
 }
 
@@ -53,8 +54,6 @@ struct LearnArgs {
 
 #[derive(Parser, Debug, Clone)]
 struct ReproArgs {
-    /// `--ticks` is the budget PER WORKER, so a worker's stream is the same for any
-    /// `--workers`.
     #[command(flatten)]
     train: TrainConfig,
 
@@ -64,17 +63,7 @@ struct ReproArgs {
     #[arg(long, default_value_t = STEPS_PER_ROLLOUT as u64)]
     horizon: u64,
 
-    /// Roll only this worker index (its seed stream), e.g. to replay a hit.
-    #[arg(long)]
-    only_worker: Option<usize>,
-
-    /// Save a plant snapshot of this env every tick from `--capture-from-tick`.
-    #[arg(long, requires_all = ["only_worker", "capture_from_tick", "capture_dir"])]
-    capture_env: Option<usize>,
-
-    #[arg(long)]
-    capture_from_tick: Option<u64>,
-
+    /// Save each near miss's pre-step plant snapshot here, for `sally-replay`.
     #[arg(long)]
     capture_dir: Option<std::path::PathBuf>,
 }
@@ -154,24 +143,15 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 }
 
 fn repro(r: ReproArgs) -> Result<ExitCode, String> {
-    let capture = match (r.capture_env, r.capture_from_tick, r.capture_dir) {
-        (Some(env), Some(from_tick), Some(dir)) => {
-            std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            Some(training::inproc::repro::Capture {
-                env,
-                from_tick,
-                dir,
-            })
-        }
-        _ => None,
-    };
+    if let Some(dir) = &r.capture_dir {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
     let outcomes = training::inproc::repro::run_repro(
         &r.train,
         training::inproc::default_workers(r.workers),
-        r.only_worker,
         r.horizon,
         r.train.ticks,
-        capture,
+        r.capture_dir,
     )?;
     let mut hits = 0;
     for o in &outcomes {
@@ -184,10 +164,7 @@ fn repro(r: ReproArgs) -> Result<ExitCode, String> {
             }
         }
     }
-    println!(
-        "REPRO_RESULT workers {} violations {hits}",
-        outcomes.len()
-    );
+    println!("REPRO_RESULT workers {} violations {hits}", outcomes.len());
     Ok(if hits > 0 {
         ExitCode::from(3)
     } else {

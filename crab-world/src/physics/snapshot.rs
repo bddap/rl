@@ -13,8 +13,8 @@ use bevy_rapier3d::plugin::context::{
 use bevy_rapier3d::prelude::{MultibodyJoint, RapierRigidBodyHandle};
 pub use bevy_rapier3d::rapier::dynamics::SpringCoefficients;
 use bevy_rapier3d::rapier::dynamics::{
-    CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
-    RigidBodyHandle, RigidBodySet,
+    CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, JointAxesMask,
+    MultibodyJointSet, RigidBodyHandle, RigidBodySet,
 };
 pub use bevy_rapier3d::rapier::geometry::Shape;
 use bevy_rapier3d::rapier::geometry::{
@@ -212,6 +212,27 @@ impl PlantSnapshot {
                     && let Some(link) = mb.link_mut(link_id)
                 {
                     link.joint.data.softness = soft;
+                }
+            }
+        }
+        if let Some(id) = cfg.free_limits {
+            let child = s
+                .joints
+                .iter()
+                .find(|j| j.id == id)
+                .expect("snapshot holds every joint")
+                .child;
+            let handles: Vec<_> = s
+                .multibody_joints
+                .iter()
+                .filter(|(.., link)| link.rigid_body_handle() == child)
+                .map(|(h, ..)| h)
+                .collect();
+            for h in handles {
+                if let Some((mb, link_id)) = s.multibody_joints.get_mut(h)
+                    && let Some(link) = mb.link_mut(link_id)
+                {
+                    link.joint.data.limit_axes = JointAxesMask::empty();
                 }
             }
         }
@@ -526,6 +547,8 @@ pub struct ReplayConfig {
     pub substeps: usize,
     /// Joint limit spring override; `None` keeps the snapshot's springs.
     pub limit_softness: Option<SpringCoefficients<f32>>,
+    /// This joint's limits removed; `None` keeps every limit.
+    pub free_limits: Option<CrabJointId>,
     pub shape: ShapeVariant,
 }
 

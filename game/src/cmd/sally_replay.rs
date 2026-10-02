@@ -1,16 +1,17 @@
 use anyhow::Result;
 use clap::Parser;
 
-use crab_world::bot::body::LIMIT_SOFTNESS;
+use crab_world::bot::body::{CrabJointId, LIMIT_SOFTNESS, Side};
 use crab_world::physics::CONTACT_SOFTNESS;
 use crab_world::physics::snapshot::{
     PlantSnapshot, ReplayConfig, ReplayOutcome, ShapeVariant, SpringCoefficients,
 };
 
-/// rl#332 T1: replay ONE tick from each `sally-soak --dump-state-at` snapshot,
-/// varying ONE lever at a time against the shipped configuration — drives, solver
-/// counts, joint limit spring, link collider shape — and print whether the recorded
-/// kick survives. The first row is the self-check: shipped configuration, recorded
+/// rl#332 T1: replay ONE tick from each `sally-soak --dump-state-at` or
+/// `rl-train repro --capture-dir` snapshot, varying ONE lever at a time against the
+/// shipped configuration — drives, solver counts, joint limit spring, one claw
+/// joint's limits, link collider shape — and print whether the recorded kick
+/// survives. The first row is the self-check: shipped configuration, recorded
 /// drives — it must reproduce the original run.
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -29,6 +30,7 @@ fn rows() -> Vec<Row> {
         iterations: crab_world::physics::SOLVER_ITERATIONS,
         substeps: crab_world::physics::PHYSICS_SUBSTEPS,
         limit_softness: None,
+        free_limits: None,
         shape: ShapeVariant::AsIs,
     };
     let row = |label: &str, cfg: ReplayConfig| Row {
@@ -59,6 +61,11 @@ fn rows() -> Vec<Row> {
         ((2, 12, 3), 4),
         ((8, 4, 4), 4),
         ((32, 8, 8), 8),
+        ((2, 11, 3), 2),
+        ((2, 13, 3), 2),
+        ((2, 12, 0), 2),
+        ((2, 12, 2), 2),
+        ((2, 12, 4), 2),
     ] {
         rows.push(row(
             &format!("solver {iterations:?}×{substeps}"),
@@ -86,6 +93,21 @@ fn rows() -> Vec<Row> {
             ..shipped
         },
     ));
+    for id in [Side::Left, Side::Right].into_iter().flat_map(|side| {
+        [
+            CrabJointId::ClawShoulder(side),
+            CrabJointId::ClawWrist(side),
+            CrabJointId::ClawPincer(side),
+        ]
+    }) {
+        rows.push(row(
+            &format!("limits off: {id:?}"),
+            ReplayConfig {
+                free_limits: Some(id),
+                ..shipped
+            },
+        ));
+    }
     for (label, shape) in [
         ("capsule radius ×1.5", ShapeVariant::CapsuleRadius(1.5)),
         ("capsule radius ×0.5", ShapeVariant::CapsuleRadius(0.5)),
