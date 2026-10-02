@@ -50,7 +50,8 @@ pub struct PlantSnapshot {
     pub broad_phase: DefaultBroadPhase,
     pub narrow_phase: NarrowPhase,
     pub ccd_solver: CCDSolver,
-    /// Env 0's crab, carapace first.
+    pub env: usize,
+    /// Env `env`'s crab, carapace first.
     pub parts: Vec<RigidBodyHandle>,
     pub joints: Vec<SnapJoint>,
     pub drag_coeff: f32,
@@ -64,7 +65,7 @@ pub struct PlantSnapshot {
 impl PlantSnapshot {
     /// Physics state at the end of `tick`; `actions`/`expected` are filled by
     /// [`Self::finish`] once the next tick has run.
-    pub fn capture(world: &mut World, tick: u64) -> Self {
+    pub fn capture(world: &mut World, tick: u64, env: usize) -> Self {
         let (parts, joints, drag_coeff) = {
             let mut q = world.query_filtered::<(
                 Entity,
@@ -76,7 +77,7 @@ impl PlantSnapshot {
             ), With<CrabBodyPart>>();
             let rows: Vec<_> = q
                 .iter(world)
-                .filter(|(_, _, env, ..)| env.0 == 0)
+                .filter(|(_, _, id, ..)| id.0 == env)
                 .map(|(e, h, _, cara, drag, joint)| {
                     (
                         e,
@@ -148,6 +149,7 @@ impl PlantSnapshot {
             broad_phase: sim.broad_phase.clone(),
             narrow_phase: sim.narrow_phase.clone(),
             ccd_solver: sim.ccd_solver.clone(),
+            env,
             parts,
             joints,
             drag_coeff,
@@ -159,7 +161,7 @@ impl PlantSnapshot {
     /// Records what the original run did on tick `tick + 1`: the drive row it
     /// applied and the velocities it ended with.
     pub fn finish(&mut self, world: &mut World) {
-        self.actions = world.resource::<CrabActions>().rows()[0].to_vec();
+        self.actions = world.resource::<CrabActions>().rows()[self.env].to_vec();
         let set = world
             .query::<&RapierRigidBodySet>()
             .single(world)

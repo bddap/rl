@@ -23,6 +23,10 @@ enum Command {
 
     /// The chase eval: drive a checkpoint at a far ball and report metres closed.
     Eval(EvalArgs),
+
+    /// Roll a frozen checkpoint through the training worlds until a tick budget is
+    /// spent or an rl#343 integrity violation trips (rl#351). Exit 3 = reproduced.
+    Repro(ReproArgs),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -45,6 +49,34 @@ struct LearnArgs {
 
     #[arg(long, default_value_t = 0)]
     iters: u64,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct ReproArgs {
+    /// `--ticks` is the budget PER WORKER, so a worker's stream is the same for any
+    /// `--workers`.
+    #[command(flatten)]
+    train: TrainConfig,
+
+    #[arg(long)]
+    workers: Option<usize>,
+
+    #[arg(long, default_value_t = STEPS_PER_ROLLOUT as u64)]
+    horizon: u64,
+
+    /// Roll only this worker index (its seed stream), e.g. to replay a hit.
+    #[arg(long)]
+    only_worker: Option<usize>,
+
+    /// Save a plant snapshot of this env every tick from `--capture-from-tick`.
+    #[arg(long, requires_all = ["only_worker", "capture_from_tick", "capture_dir"])]
+    capture_env: Option<usize>,
+
+    #[arg(long)]
+    capture_from_tick: Option<u64>,
+
+    #[arg(long)]
+    capture_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -109,6 +141,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Eval(e)) => eval(e),
+        Some(Command::Repro(r)) => repro(r),
         None => {
             eprintln!(
                 "no mode selected. Train with `rl-train learn` (the sole trainer); the mesh-fit \
@@ -118,6 +151,48 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             Ok(ExitCode::from(2))
         }
     }
+}
+
+fn repro(r: ReproArgs) -> Result<ExitCode, String> {
+    let capture = match (r.capture_env, r.capture_from_tick, r.capture_dir) {
+        (Some(env), Some(from_tick), Some(dir)) => {
+            std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            Some(training::inproc::repro::Capture {
+                env,
+                from_tick,
+                dir,
+            })
+        }
+        _ => None,
+    };
+    let outcomes = training::inproc::repro::run_repro(
+        &r.train,
+        training::inproc::default_workers(r.workers),
+        r.only_worker,
+        r.horizon,
+        r.train.ticks,
+        capture,
+    )?;
+    let mut hits = 0;
+    for o in &outcomes {
+        match &o.violation {
+            None => println!("REPRO_WORKER {} ticks {} clean", o.worker, o.ticks),
+            Some(msg) => {
+                hits += 1;
+                let head = msg.lines().next().unwrap_or_default();
+                println!("REPRO_WORKER {} VIOLATION {head}", o.worker);
+            }
+        }
+    }
+    println!(
+        "REPRO_RESULT workers {} violations {hits}",
+        outcomes.len()
+    );
+    Ok(if hits > 0 {
+        ExitCode::from(3)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 fn eval(e: EvalArgs) -> Result<ExitCode, String> {

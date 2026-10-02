@@ -542,7 +542,7 @@ pub fn run_flight_soak(
             .is_none_or(|w| overlap.depth > w.1)
         {
             report.worst_overlap = Some((tick, overlap.depth, overlap.a, overlap.b));
-            worst_overlap_state = Some(PlantSnapshot::capture(world, tick));
+            worst_overlap_state = Some(PlantSnapshot::capture(world, tick, 0));
         }
         if power_w.is_finite() {
             ledger.push_back((energy, power_w));
@@ -573,7 +573,7 @@ pub fn run_flight_soak(
             ledger.clear();
         }
         if dump_state_at.contains(&tick) {
-            pending_snapshot = Some(PlantSnapshot::capture(world, tick));
+            pending_snapshot = Some(PlantSnapshot::capture(world, tick, 0));
         } else if let Some(mut snap) = pending_snapshot.take() {
             snap.finish(world);
             let path = out_dir.join(format!("state-{}.bin", snap.tick));

@@ -240,14 +240,21 @@ fn rollout_thread_main(
     // learner's recv on the closed channel fails, and the RUN dies loud. Silently
     // rebuilding the world and continuing is the recovery class rl#343 bans.
     while let Ok(req) = request_rx.recv() {
-        let result = roll_one_horizon(&mut app, &req, horizon);
+        let result = roll_one_horizon(&mut app, &req, horizon, &mut |_| {});
         if result_tx.send(result).is_err() {
             break;
         }
     }
 }
 
-fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutcome {
+/// `before_tick` sees the world between ticks — the repro capture's only seam into the
+/// one horizon loop the trainer rolls.
+fn roll_one_horizon(
+    app: &mut App,
+    req: &RollRequest,
+    horizon: u64,
+    before_tick: &mut dyn FnMut(&mut App),
+) -> RollOutcome {
     {
         let mut st = app
             .world_mut()
@@ -265,6 +272,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
 
     let start = horizon_tick(app);
     while horizon_tick(app) - start < horizon {
+        before_tick(app);
         app.update();
     }
     let rolled = horizon_tick(app) - start;
@@ -301,6 +309,7 @@ fn warm_up_app(app: &mut App) {
 /// `wgpu` gate is written ONCE here instead of stamped on each of its items (#123).
 #[cfg(feature = "wgpu")]
 mod learner;
+pub mod repro;
 #[cfg(feature = "wgpu")]
 pub use learner::run_learner;
 
