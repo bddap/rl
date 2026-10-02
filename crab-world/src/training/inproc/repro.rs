@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bevy::prelude::With;
-use bevy_rapier3d::prelude::RapierRigidBodyHandle;
+use bevy::prelude::{App, With};
+use bevy_rapier3d::prelude::{RapierRigidBodyHandle, Velocity};
 use bevy_rapier3d::rapier::dynamics::RigidBodyHandle;
 
 use crate::TrainConfig;
@@ -46,7 +46,7 @@ fn read_u64(dir: &Path, name: &str) -> Result<u64, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Rolls `workers` (default `0..k`) for `ticks_per_worker` each. Refuses anything but a
+/// Rolls workers `0..k` for `ticks_per_worker` each. Refuses anything but a
 /// warm, plant-matched checkpoint: a reproduction on a cold or foreign brain is noise.
 pub fn run_repro(
     config: &TrainConfig,
@@ -159,15 +159,13 @@ fn roll_worker(
     let envs = config.num_envs();
     let mut last: Vec<Option<PlantSnapshot>> = vec![None; envs];
     let digest = std::cell::Cell::new(Fnv::new());
-    let mut parts = app.world_mut().query_filtered::<(
-        &CrabEnvId,
-        &bevy_rapier3d::prelude::Velocity,
-        Option<&CrabJoint>,
-    ), With<CrabBodyPart>>();
+    let mut parts = app
+        .world_mut()
+        .query_filtered::<(&CrabEnvId, &Velocity, Option<&CrabJoint>), With<CrabBodyPart>>();
     let mut carapaces = app
         .world_mut()
         .query_filtered::<(&CrabEnvId, &RapierRigidBodyHandle), With<CrabCarapace>>();
-    let mut before_tick = |app: &mut bevy::app::App| {
+    let mut before_tick = |app: &mut App| {
         let tick = app
             .world()
             .get_non_send::<WorkerState>()

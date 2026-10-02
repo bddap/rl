@@ -247,8 +247,7 @@ fn rollout_thread_main(
     }
 }
 
-/// `before_tick` sees the world between ticks — the repro capture's only seam into the
-/// one horizon loop the trainer rolls.
+/// `before_tick` lets the repro observe between ticks without a second horizon loop.
 fn roll_one_horizon(
     app: &mut App,
     req: &RollRequest,
