@@ -2,21 +2,29 @@ use anyhow::Result;
 use clap::Parser;
 
 use crab_world::bot::body::{CrabJointId, LIMIT_SOFTNESS, Side};
-use crab_world::physics::CONTACT_SOFTNESS;
 use crab_world::physics::snapshot::{
-    PlantSnapshot, ReplayConfig, ReplayOutcome, ShapeVariant, SpringCoefficients,
+    ContactsOff, FreeLimits, PlantSnapshot, ReplayConfig, ReplayOutcome, ShapeVariant,
+    SpringCoefficients,
 };
+use crab_world::physics::{CONTACT_SOFTNESS, SHIPPED_SOLVER, SolverCounts};
 
 /// rl#332 T1: replay ONE tick from each `sally-soak --dump-state-at` or
 /// `rl-train repro --capture-dir` snapshot, varying ONE lever at a time against the
-/// shipped configuration — drives, solver counts, joint limit spring, one claw
-/// joint's limits, link collider shape — and print whether the recorded kick
-/// survives. The first row is the self-check: shipped configuration, recorded
+/// baseline configuration — drives, solver counts, joint limit spring, one claw
+/// joint's or every joint's limits, terrain or all contacts, link collider shape
+/// (masses pinned; the `massΔ` column proves it) — and print whether the recorded kick
+/// survives. The first row is the self-check: baseline configuration, recorded
 /// drives — it must reproduce the original run.
 #[derive(Parser)]
 pub(crate) struct Args {
     #[arg(long, value_name = "FILE", required = true, num_args = 1..)]
     state: Vec<std::path::PathBuf>,
+
+    /// The solver the captures ran under (`rl-train repro --solver`): the self-check
+    /// row and every other lever's base. A snapshot stores the counts but not the
+    /// substeps, so this names both.
+    #[arg(long, default_value_t = SHIPPED_SOLVER)]
+    solver: SolverCounts,
 }
 
 struct Row {
@@ -24,13 +32,13 @@ struct Row {
     cfg: ReplayConfig,
 }
 
-fn rows() -> Vec<Row> {
-    let shipped = ReplayConfig {
+fn rows(base: SolverCounts) -> Vec<Row> {
+    let baseline = ReplayConfig {
         drive_scale: 1.0,
-        iterations: crab_world::physics::SOLVER_ITERATIONS,
-        substeps: crab_world::physics::PHYSICS_SUBSTEPS,
+        solver: base,
         limit_softness: None,
-        free_limits: None,
+        free_limits: FreeLimits::None,
+        contacts_off: ContactsOff::None,
         shape: ShapeVariant::AsIs,
     };
     let row = |label: &str, cfg: ReplayConfig| Row {
@@ -43,13 +51,13 @@ fn rows() -> Vec<Row> {
             damping_ratio: zeta,
         })
     };
-    let mut rows = vec![row("self-check (shipped)", shipped)];
+    let mut rows = vec![row(&format!("self-check ({base})"), baseline)];
     for (label, scale) in [("drives zeroed", 0.0), ("drives ×0.5", 0.5)] {
         rows.push(row(
             label,
             ReplayConfig {
                 drive_scale: scale,
-                ..shipped
+                ..baseline
             },
         ));
     }
@@ -67,20 +75,20 @@ fn rows() -> Vec<Row> {
         ((2, 12, 2), 2),
         ((2, 12, 4), 2),
     ] {
+        let solver = SolverCounts {
+            iterations,
+            substeps,
+        };
         rows.push(row(
-            &format!("solver {iterations:?}×{substeps}"),
-            ReplayConfig {
-                iterations,
-                substeps,
-                ..shipped
-            },
+            &format!("solver {solver}"),
+            ReplayConfig { solver, ..baseline },
         ));
     }
     rows.push(row(
         "limit spring 40 Hz",
         ReplayConfig {
             limit_softness: soft(40.0, LIMIT_SOFTNESS.damping_ratio),
-            ..shipped
+            ..baseline
         },
     ));
     rows.push(row(
@@ -90,7 +98,7 @@ fn rows() -> Vec<Row> {
                 CONTACT_SOFTNESS.natural_frequency,
                 CONTACT_SOFTNESS.damping_ratio,
             ),
-            ..shipped
+            ..baseline
         },
     ));
     for id in [Side::Left, Side::Right].into_iter().flat_map(|side| {
@@ -103,19 +111,36 @@ fn rows() -> Vec<Row> {
         rows.push(row(
             &format!("limits off: {id:?}"),
             ReplayConfig {
-                free_limits: Some(id),
-                ..shipped
+                free_limits: FreeLimits::Joint(id),
+                ..baseline
+            },
+        ));
+    }
+    rows.push(row(
+        "all joint limits off",
+        ReplayConfig {
+            free_limits: FreeLimits::All,
+            ..baseline
+        },
+    ));
+    for (label, contacts_off) in [
+        ("terrain contact off", ContactsOff::Terrain),
+        ("all contacts off", ContactsOff::All),
+    ] {
+        rows.push(row(
+            label,
+            ReplayConfig {
+                contacts_off,
+                ..baseline
             },
         ));
     }
     for (label, shape) in [
-        ("capsule radius ×1.5", ShapeVariant::CapsuleRadius(1.5)),
-        ("capsule radius ×0.5", ShapeVariant::CapsuleRadius(0.5)),
         ("cuboids → capsules", ShapeVariant::CuboidsToCapsules),
         ("all links thin balls", ShapeVariant::Balls { fat: false }),
         ("all links fat balls", ShapeVariant::Balls { fat: true }),
     ] {
-        rows.push(row(label, ReplayConfig { shape, ..shipped }));
+        rows.push(row(label, ReplayConfig { shape, ..baseline }));
     }
     rows
 }
@@ -134,7 +159,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .iter()
         .map(|p| PlantSnapshot::load(p).map_err(anyhow::Error::from))
         .collect::<Result<_>>()?;
-    let rows = rows();
+    let rows = rows(args.solver);
     let results: Vec<Vec<ReplayOutcome>> = rows
         .iter()
         .map(|r| snaps.iter().map(|s| s.replay(&r.cfg)).collect())
@@ -176,14 +201,27 @@ pub(crate) fn run(args: Args) -> Result<()> {
     println!(
         "cell = kick count on the replayed tick + kicked/max part speed after (m/s); '–' = no kick"
     );
-    print!("{:<30} {:>9}", "variant (one lever vs shipped)", "survives");
+    print!(
+        "{:<30} {:>9} {:>7}",
+        "variant (one lever vs base)", "survives", "massΔ"
+    );
     for s in &snaps {
         print!(" {:>10}", format!("t{}", s.tick + 1));
     }
     println!();
     for (r, outs) in rows.iter().zip(&results) {
         let survived = outs.iter().filter(|o| o.kicks > 0).count();
-        print!("{:<30} {:>5}/{:<3}", r.label, survived, outs.len());
+        let mass_dev = outs
+            .iter()
+            .map(|o| o.max_mass_props_dev)
+            .fold(0.0, f32::max);
+        print!(
+            "{:<30} {:>5}/{:<3} {:>7.1e}",
+            r.label,
+            survived,
+            outs.len(),
+            mass_dev
+        );
         for o in outs {
             print!(" {:>10}", cell(o));
         }

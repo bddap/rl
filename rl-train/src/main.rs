@@ -25,8 +25,8 @@ enum Command {
     Eval(EvalArgs),
 
     /// Roll a frozen checkpoint through the training worlds until each worker has
-    /// spent `--ticks` or tripped an rl#343 integrity violation (rl#351). Exit 3 =
-    /// reproduced.
+    /// spent `--ticks`, counting rl#343 integrity trips; a trip rebuilds that
+    /// worker's world on a fresh seed (rl#351). Exit 3 = at least one trip.
     Repro(ReproArgs),
 }
 
@@ -60,12 +60,22 @@ struct ReproArgs {
     #[arg(long)]
     workers: Option<usize>,
 
+    /// The first worker id: a worker's id sets its seed stream, so N processes of
+    /// `--workers 1 --first-worker i` roll the same streams as one `--workers N`
+    /// process, without the cross-worker contention that slows a shared process ~4×.
+    #[arg(long, default_value_t = 0)]
+    first_worker: usize,
+
     #[arg(long, default_value_t = STEPS_PER_ROLLOUT as u64)]
     horizon: u64,
 
     /// Save each near miss's pre-step plant snapshot here, for `sally-replay`.
     #[arg(long)]
     capture_dir: Option<std::path::PathBuf>,
+
+    /// Solver counts for the rolled ticks, `OUTER,PGS,STAB[xSUBSTEPS]`; default shipped.
+    #[arg(long, default_value_t = crab_world::physics::SHIPPED_SOLVER)]
+    solver: crab_world::physics::SolverCounts,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -146,26 +156,44 @@ fn repro(r: ReproArgs) -> Result<ExitCode, String> {
     if let Some(dir) = &r.capture_dir {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    let outcomes = training::inproc::repro::run_repro(
+    let started = std::time::Instant::now();
+    let report = training::inproc::repro::run_repro(
         &r.train,
-        training::inproc::default_workers(r.workers),
+        r.first_worker..r.first_worker + training::inproc::default_workers(r.workers),
         r.horizon,
         r.train.ticks,
         r.capture_dir,
+        r.solver,
     )?;
-    let mut hits = 0;
-    for o in &outcomes {
-        match &o.violation {
-            None => println!("REPRO_WORKER {} ticks {} clean", o.worker, o.ticks),
-            Some(msg) => {
-                hits += 1;
-                let head = msg.lines().next().unwrap_or_default();
-                println!("REPRO_WORKER {} VIOLATION {head}", o.worker);
-            }
+    let wall = started.elapsed().as_secs_f64();
+    for o in &report.workers {
+        println!(
+            "REPRO_WORKER {} ticks {} trips {}",
+            o.worker,
+            o.ticks,
+            o.trips.len()
+        );
+        for t in &o.trips {
+            println!(
+                "REPRO_TRIP worker {} {}",
+                o.worker,
+                t.lines().next().unwrap_or_default()
+            );
         }
     }
-    println!("REPRO_RESULT workers {} violations {hits}", outcomes.len());
-    Ok(if hits > 0 {
+    let ticks: u64 = report.workers.iter().map(|o| o.ticks).sum();
+    let trips: usize = report.workers.iter().map(|o| o.trips.len()).sum();
+    println!(
+        "REPRO_RESULT solver {} workers {} ticks {ticks} trips {trips} per_M_ticks {:.3} \
+         wall_s {wall:.0} cpu_s {:.0} ticks_per_wall_s {:.1} ticks_per_cpu_s {:.1}",
+        r.solver,
+        report.workers.len(),
+        trips as f64 * 1e6 / ticks.max(1) as f64,
+        report.cpu_secs,
+        ticks as f64 / wall,
+        ticks as f64 / report.cpu_secs,
+    );
+    Ok(if trips > 0 {
         ExitCode::from(3)
     } else {
         ExitCode::SUCCESS

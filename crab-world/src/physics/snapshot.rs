@@ -18,7 +18,7 @@ use bevy_rapier3d::rapier::dynamics::{
 };
 pub use bevy_rapier3d::rapier::geometry::Shape;
 use bevy_rapier3d::rapier::geometry::{
-    ColliderHandle, ColliderSet, DefaultBroadPhase, NarrowPhase, SharedShape,
+    ColliderHandle, ColliderSet, DefaultBroadPhase, InteractionGroups, NarrowPhase, SharedShape,
 };
 pub use bevy_rapier3d::rapier::math::Pose;
 use bevy_rapier3d::rapier::parry::shape::Capsule;
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::bot::actuator::{CrabActions, applied_torque};
 use crate::bot::aero::{CarapaceDrag, drag_force};
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
-use crate::physics::{PHYSICS_DT, PHYSICS_GRAVITY};
+use crate::physics::{PHYSICS_DT, PHYSICS_GRAVITY, SolverCounts};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SnapJoint {
@@ -201,10 +201,10 @@ impl PlantSnapshot {
     /// Replay tick `tick + 1` once under `cfg`, on a copy of the state.
     pub fn replay(&self, cfg: &ReplayConfig) -> ReplayOutcome {
         let mut s = self.clone();
-        s.params.num_solver_iterations = cfg.iterations.0;
-        s.params.num_internal_pgs_iterations = cfg.iterations.1;
-        s.params.num_internal_stabilization_iterations = cfg.iterations.2;
-        s.params.dt = PHYSICS_DT / cfg.substeps as f32;
+        s.params.num_solver_iterations = cfg.solver.iterations.0;
+        s.params.num_internal_pgs_iterations = cfg.solver.iterations.1;
+        s.params.num_internal_stabilization_iterations = cfg.solver.iterations.2;
+        s.params.dt = PHYSICS_DT / cfg.solver.substeps as f32;
         if let Some(soft) = cfg.limit_softness {
             let handles: Vec<_> = s.multibody_joints.iter().map(|(h, ..)| h).collect();
             for h in handles {
@@ -215,26 +215,48 @@ impl PlantSnapshot {
                 }
             }
         }
-        if let Some(id) = cfg.free_limits {
-            let child = s
-                .joints
-                .iter()
-                .find(|j| j.id == id)
-                .expect("snapshot holds every joint")
-                .child;
-            let handles: Vec<_> = s
-                .multibody_joints
-                .iter()
-                .filter(|(.., link)| link.rigid_body_handle() == child)
-                .map(|(h, ..)| h)
-                .collect();
-            for h in handles {
-                if let Some((mb, link_id)) = s.multibody_joints.get_mut(h)
-                    && let Some(link) = mb.link_mut(link_id)
-                {
-                    link.joint.data.limit_axes = JointAxesMask::empty();
-                }
+        let freed: Vec<RigidBodyHandle> = match cfg.free_limits {
+            FreeLimits::None => Vec::new(),
+            FreeLimits::Joint(id) => vec![
+                s.joints
+                    .iter()
+                    .find(|j| j.id == id)
+                    .expect("snapshot holds every joint")
+                    .child,
+            ],
+            FreeLimits::All => s.joints.iter().map(|j| j.child).collect(),
+        };
+        let handles: Vec<_> = s
+            .multibody_joints
+            .iter()
+            .filter(|(.., link)| freed.contains(&link.rigid_body_handle()))
+            .map(|(h, ..)| h)
+            .collect();
+        for h in handles {
+            if let Some((mb, link_id)) = s.multibody_joints.get_mut(h)
+                && let Some(link) = mb.link_mut(link_id)
+            {
+                link.joint.data.limit_axes = JointAxesMask::empty();
             }
+        }
+        let unsolved: Vec<ColliderHandle> = s
+            .colliders
+            .iter()
+            .filter(|(_, co)| match cfg.contacts_off {
+                ContactsOff::None => false,
+                ContactsOff::Terrain => co
+                    .parent()
+                    .and_then(|b| s.bodies.get(b))
+                    .is_none_or(|rb| rb.is_fixed()),
+                ContactsOff::All => true,
+            })
+            .map(|(h, _)| h)
+            .collect();
+        for h in unsolved {
+            s.colliders
+                .get_mut(h)
+                .expect("collider listed above")
+                .set_solver_groups(InteractionGroups::none());
         }
 
         let link_colliders: Vec<(ColliderHandle, usize)> = s
@@ -294,7 +316,7 @@ impl PlantSnapshot {
             .collect();
         let e0 = s.energy();
         let mut pipeline = PhysicsPipeline::new();
-        for _ in 0..cfg.substeps {
+        for _ in 0..cfg.solver.substeps {
             pipeline.step(
                 PHYSICS_GRAVITY,
                 &s.params,
@@ -330,6 +352,18 @@ impl PlantSnapshot {
             kicks: 0,
             worst_kick: (0, 0.0, 0.0),
             max_dev_from_original: 0.0,
+            max_mass_props_dev: self
+                .parts
+                .iter()
+                .map(|h| {
+                    let mp = |set: &RigidBodySet| {
+                        let m = set.get(*h).expect("snapshot part").mass_properties();
+                        (m.local_mprops.mass(), m.local_mprops.principal_inertia())
+                    };
+                    let ((m0, i0), (m1, i1)) = (mp(&self.bodies), mp(&s.bodies));
+                    ((m1 - m0).abs() / m0).max(((i1 - i0).abs() / i0).max_element())
+                })
+                .fold(0.0, f32::max),
             worst_kick_contacts: Vec::new(),
         };
         for (i, ((v0, w0), (v1, w1))) in before.iter().zip(&after).enumerate() {
@@ -450,8 +484,6 @@ impl PlantSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ShapeVariant {
     AsIs,
-    /// Capsule radius × factor; cuboids and hulls untouched.
-    CapsuleRadius(f32),
     /// Every oriented cuboid becomes the capsule along its longest axis.
     CuboidsToCapsules,
     /// Every link becomes a ball at its centre: radius = its capsule radius / the
@@ -471,10 +503,6 @@ impl ShapeVariant {
         };
         match self {
             Self::AsIs => None,
-            Self::CapsuleRadius(k) => {
-                let (a, b, r) = capsule_of(shape.as_capsule()?);
-                Some(SharedShape::capsule(a, b, r * k))
-            }
             Self::CuboidsToCapsules => {
                 let (pose, half) = cuboid_of(shape)?;
                 let k = if half.x >= half.y && half.x >= half.z {
@@ -543,13 +571,30 @@ impl ShapeVariant {
 pub struct ReplayConfig {
     /// Multiplies the recorded drive row: 0 = zeroed, 1 = as recorded.
     pub drive_scale: f32,
-    pub iterations: (usize, usize, usize),
-    pub substeps: usize,
+    pub solver: SolverCounts,
     /// Joint limit spring override; `None` keeps the snapshot's springs.
     pub limit_softness: Option<SpringCoefficients<f32>>,
-    /// This joint's limits removed; `None` keeps every limit.
-    pub free_limits: Option<CrabJointId>,
+    pub free_limits: FreeLimits,
+    pub contacts_off: ContactsOff,
     pub shape: ShapeVariant,
+}
+
+/// Which crab joints lose their limits for the replayed tick.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FreeLimits {
+    None,
+    Joint(CrabJointId),
+    All,
+}
+
+/// Which colliders' contacts the solver ignores for the replayed tick: contacts are
+/// still detected, but carry no impulse, so masses and geometry stay put.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ContactsOff {
+    None,
+    /// Colliders on fixed bodies (the ground).
+    Terrain,
+    All,
 }
 
 /// One contact manifold on the worst-kicked link after the replayed tick.
@@ -577,6 +622,9 @@ pub struct ReplayOutcome {
     pub worst_kick: (usize, f32, f32),
     /// Largest |Δv| or |Δω| between this replay and the original run's tick.
     pub max_dev_from_original: f32,
+    /// Largest relative change of any part's mass or principal inertia across the
+    /// replay: a shape lever reading 0 moved geometry only.
+    pub max_mass_props_dev: f32,
     /// Contact manifolds on the worst-kicked link after the tick.
     pub worst_kick_contacts: Vec<ContactInfo>,
 }

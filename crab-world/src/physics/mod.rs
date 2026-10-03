@@ -103,10 +103,55 @@ pub const PHYSICS_SUBSTEPS: usize = 2;
 /// smoke's sleep bound (render graph, rl#406).
 pub const SOLVER_ITERATIONS: (usize, usize, usize) = (2, 12, 3);
 
-fn fixed_timestep() -> TimestepMode {
+/// One physics step's solver budget: [`SOLVER_ITERATIONS`]-shaped counts per substep
+/// and substeps per [`PHYSICS_DT`]. Diagnostics vary it (`sally-replay`, `rl-train
+/// repro --solver`); the plant ships [`SHIPPED_SOLVER`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SolverCounts {
+    pub iterations: (usize, usize, usize),
+    pub substeps: usize,
+}
+
+pub const SHIPPED_SOLVER: SolverCounts = SolverCounts {
+    iterations: SOLVER_ITERATIONS,
+    substeps: PHYSICS_SUBSTEPS,
+};
+
+impl std::fmt::Display for SolverCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (o, p, st) = self.iterations;
+        write!(f, "{o},{p},{st}x{}", self.substeps)
+    }
+}
+
+/// `OUTER,PGS,STAB[xSUBSTEPS]`, substeps defaulting to shipped; `Display` writes the
+/// full form.
+impl std::str::FromStr for SolverCounts {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let bad = || format!("solver {s:?}: want OUTER,PGS,STAB[xSUBSTEPS], e.g. 4,12,3x2");
+        let (counts, substeps) = match s.split_once('x') {
+            Some((c, n)) => (c, n.parse().map_err(|_| bad())?),
+            None => (s, PHYSICS_SUBSTEPS),
+        };
+        let n: Vec<usize> = counts
+            .split(',')
+            .map(|v| v.trim().parse().map_err(|_| bad()))
+            .collect::<Result<_, _>>()?;
+        match n[..] {
+            [o, p, st] if o > 0 && substeps > 0 => Ok(Self {
+                iterations: (o, p, st),
+                substeps,
+            }),
+            _ => Err(bad()),
+        }
+    }
+}
+
+pub fn solver_timestep(solver: SolverCounts) -> TimestepMode {
     TimestepMode::Fixed {
         dt: PHYSICS_DT,
-        substeps: PHYSICS_SUBSTEPS,
+        substeps: solver.substeps,
     }
 }
 
@@ -210,7 +255,7 @@ impl bevy::app::Plugin for CrabPhysicsPlugin {
     fn build(&self, app: &mut bevy::app::App) {
         use bevy::app::PostStartup;
         use bevy_rapier3d::plugin::{NoUserData, RapierPhysicsPlugin};
-        app.insert_resource(fixed_timestep())
+        app.insert_resource(solver_timestep(SHIPPED_SOLVER))
             .insert_resource(rapier_context_init())
             .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
             .add_systems(
@@ -332,6 +377,29 @@ mod tests {
             SOLVER_ITERATIONS,
             "solver iteration counts lost — init ordering broke"
         );
+    }
+
+    #[test]
+    fn solver_counts_parse_both_forms() {
+        assert_eq!(
+            SHIPPED_SOLVER.to_string().parse::<SolverCounts>(),
+            Ok(SHIPPED_SOLVER),
+            "the CLI default is the Display form; it must parse back"
+        );
+        assert_eq!(
+            "4,12,3x2".parse::<SolverCounts>(),
+            Ok(SolverCounts {
+                iterations: (4, 12, 3),
+                substeps: 2
+            })
+        );
+        assert_eq!(
+            "8,4,4".parse::<SolverCounts>().map(|s| s.substeps),
+            Ok(PHYSICS_SUBSTEPS)
+        );
+        for bad in ["", "2,12", "2,12,3,4", "0,12,3", "2,12,3x0", "a,b,c"] {
+            assert!(bad.parse::<SolverCounts>().is_err(), "{bad:?} parsed");
+        }
     }
 
     #[test]
