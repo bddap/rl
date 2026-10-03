@@ -154,14 +154,19 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 fn process_cpu_secs() -> f64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `ts` is a valid out-pointer for the duration of the call.
-    let rc = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
-    assert_eq!(rc, 0, "clock_gettime(CLOCK_PROCESS_CPUTIME_ID)");
-    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+    #[cfg(target_family = "wasm")]
+    return f64::NAN;
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `ts` is a valid out-pointer for the duration of the call.
+        let rc = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
+        assert_eq!(rc, 0, "clock_gettime(CLOCK_PROCESS_CPUTIME_ID)");
+        ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+    }
 }
 
 /// World 0 keeps the run's seed; later worlds hash the world index in, because the
