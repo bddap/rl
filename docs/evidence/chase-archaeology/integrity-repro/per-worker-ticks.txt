@@ -1,0 +1,12 @@
+w0 last=323584 tick 323648
+w1 last=585728 
+w2 last=581632 
+w3 last=581632 
+w4 last=581632 
+w5 last=585728 
+w6 last=413696 tick 414530
+w7 last=581632 
+w8 last=524288 tick 525126
+w9 last=331776 tick 334611
+w10 last=581632 
+w11 last=581632 

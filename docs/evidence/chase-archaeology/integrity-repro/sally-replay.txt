@@ -1,0 +1,40 @@
+state after tick 148847: E=12.7 J; original tick 148848 max part speed 80.39 m/s; self-check dev 0.000; worst kick part 3 (Some(LegCarpus(Left, 2))) 0.30→80.39 m/s
+state after tick 323647: E=13.2 J; original tick 323648 max part speed 195.47 m/s; self-check dev 0.000; worst kick part 36 (Some(LegMerus(Right, 3))) 0.86→179.41 m/s
+state after tick 19561: E=12.5 J; original tick 19562 max part speed 427.93 m/s; self-check dev 0.000; worst kick part 38 (Some(ClawWrist(Right))) 0.04→427.93 m/s
+    contact with terrain: 4 pts, penetration 0.0029 m, normal on kicked (+0.00,+1.00,+0.00), impulse 0.1737
+state after tick 414529: E=12.6 J; original tick 414530 max part speed 294.10 m/s; self-check dev 0.000; worst kick part 7 (Some(LegCarpus(Right, 2))) 0.46→294.10 m/s
+state after tick 92296: E=13.2 J; original tick 92297 max part speed 65.09 m/s; self-check dev 0.000; worst kick part 38 (Some(ClawWrist(Right))) 0.92→65.09 m/s
+state after tick 525125: E=12.7 J; original tick 525126 max part speed 4421.90 m/s; self-check dev 0.000; worst kick part 2 (Some(LegCarpus(Left, 1))) 0.32→4003.57 m/s
+state after tick 334610: E=12.6 J; original tick 334611 max part speed 110.68 m/s; self-check dev 0.000; worst kick part 38 (Some(ClawWrist(Right))) 0.42→110.68 m/s
+    contact with terrain: 4 pts, penetration 0.0048 m, normal on kicked (+0.00,+1.00,+0.00), impulse 0.0000
+
+cell = kick count on the replayed tick + kicked/max part speed after (m/s); '–' = no kick
+variant (one lever vs shipped)  survives    t148848    t323648     t19562    t414530     t92297    t525126    t334611
+self-check (shipped)               7/7    K39 80.39 K39 179.41 K38 427.93 K39 294.10  K23 65.09 K39 4003.57 K39 110.68
+drives zeroed                      3/7     –   0.67  K39 91.66   –   0.50  K32 15.52   –   0.97  K39 93.76   –   0.68
+drives ×0.5                        3/7     –   0.86 K39 134.60   –   0.73  K39 38.24   –   0.72 K39 67387.38   –   1.05
+solver (2, 2, 3)×2                 2/7     –   1.19  K38 19.49   –   1.26   –   1.02   K1  4.25   –   1.10   –   1.22
+solver (2, 24, 3)×2                4/7   K39 70058.40 K39 69395.74   –   0.87  K39 25.76   –   0.92  K39 95.01   –   1.46
+solver (2, 48, 3)×2                4/7   K39 8470132.00 K39 69485495058432.00   –   1.06 K39 6656781.50   –   0.86 K39 23576018.00   –   1.07
+solver (4, 12, 3)×2                1/7     –   0.77   K4  6.19   –   1.04   –   0.79   –   0.94   –   0.77   –   0.85
+solver (2, 12, 3)×4                2/7     –   0.91   K4  6.23   –   1.05  K24 10.48   –   1.02   –   0.35   –   0.79
+solver (8, 4, 4)×4                 0/7     –   0.52   –   1.57   –   0.85   –   0.51   –   0.86   –   0.58   –   0.74
+solver (32, 8, 8)×8                0/7     –   0.67   –   1.40   –   0.88   –   0.51   –   0.90   –   0.55   –   0.72
+solver (2, 11, 3)×2                4/7     –   0.69  K39 66.79   –   0.97  K39 84.29  K38 22.07   –   1.64  K39 28.77
+solver (2, 13, 3)×2                2/7     –   1.05 K39 627.43   –   1.57   –   1.00  K22 65.17   –   3.55   –   1.20
+solver (2, 12, 0)×2                4/7     –   1.35 K39 110.68   –   0.90  K39 52.51   –   1.10 K39 1096.04  K10 36.90
+solver (2, 12, 2)×2                5/7     –   1.15 K39 289.62 K38 803.96  K39 97.18  K24 33.51 K39 2394.84   –   1.31
+solver (2, 12, 4)×2                3/7     –   0.91 K39 742.42   –   0.87 K39 1489.87 K39 508.89   –   3.06   –   1.23
+limit spring 40 Hz                 3/7     –   1.45 K39 175.65   –   0.99 K39 357.87 K39 24949.34   –   0.90   –   0.83
+limit spring = contact class       5/7     –   0.54 K39 180.15   K2  4.23 K39 271.58 K39 1924.64   –   0.15  K38 28.47
+limits off: ClawShoulder(Left)     2/7     –   2.44 K39 183.38   –   2.07   –   2.18   –   2.46 K39 382.82   –   1.51
+limits off: ClawWrist(Left)        7/7    K39 80.21 K39 179.75 K38 423.60 K39 318.47  K19 54.05 K39 14927.74  K39 79.16
+limits off: ClawPincer(Left)       7/7    K39 79.97 K39 179.51 K38 431.10 K39 232.65  K19 58.91 K39 38148.06  K39 86.68
+limits off: ClawShoulder(Right)     6/7   K39 298.89 K39 361.09   –   1.09 K39 285.92  K23 65.09 K39 7985.11 K38 323.79
+limits off: ClawWrist(Right)       7/7    K39 80.62 K39 179.87 K38 427.93 K39 292.36  K23 63.12 K39 15801.49  K39 85.76
+limits off: ClawPincer(Right)      6/7    K39 81.49 K39 179.33   –   1.04 K39 588.41  K23 65.09 K39 93351.17  K38 48.72
+capsule radius ×1.5                7/7    K39 80.39 K39 179.41 K38 427.93 K39 294.10  K23 65.09 K39 4003.57 K39 110.68
+capsule radius ×0.5                7/7    K39 80.39 K39 179.41 K38 427.93 K39 294.10  K23 65.09 K39 4003.57 K39 110.68
+cuboids → capsules                 0/7     –   1.98   –   1.56   –   1.15   –   1.10   –   1.21   –   1.12   –   1.06
+all links thin balls               0/7     –   0.75   –   1.47   –   1.26   –   1.48   –   0.87   –   0.30   –   1.52
+all links fat balls                0/7     –   2.57   –   1.87   –   2.98   –   0.87   –   1.34   –   1.21   –   1.74
