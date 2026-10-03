@@ -66,3 +66,17 @@ Bisect probes (rl#351, post-shortlist):
   drives in 3/7, grows with more PGS iterations (to 7e13 m/s), ignores capsule
   radius and single claw-limit removal, and vanishes only under solver
   (8,4,4)×4 / (32,8,8)×8 or a whole-body shape swap.
+- `integrity-rate-ab/`: multibody-solve integrity rate A/B (rl#351, 2026-10-03).
+  This used the same frozen 34,240,512-tick checkpoint and config as `integrity-repro/`. The harness was `rl-train repro` at `114ab54` (binary sha256 in `rl-train.sha256`), run as 12 single-worker processes per arm (`--workers 1 --first-worker i --seed 3510 --ticks 786432`). That gives 9,437,184 ticks per arm, pre-registered. Each arm had 4 workers on each of three identical 32-vCPU VMs, with all arms running at once. A trip rebuilds the worker's world on a new seed, so every worker spends its full budget.
+
+  | arm | trips | per M ticks | ticks/CPU-s |
+  |---|---:|---:|---:|
+  | shipped (2,12,3)×2 | 1 | 0.106 | 62.4 |
+  | (4,12,3)×2 | 0 | 0 | 45.4 |
+  | (2,12,3)×4 | 2 | 0.212 | 38.9 |
+
+  Near misses (≥30 m/s) per arm were 18, 22 and 50 (`near-misses.txt`). The shipped arm's single trip is below the pre-registered ≥5, so no lever is convicted. Two of the three trips are the right claw wrist (`trips.txt`). `per-worker.txt` holds each worker's line and `summary.txt` the aggregates.
+
+  The three trip captures replay exactly (`sally-replay-trips.txt`, self-check dev 0.000; the sub4 captures under `--solver 2,12,3x4`). On those one-tick replays, both alternative solvers and terrain-off remove the kick. The (2,12,3)×4 arm still tripped twice at rate, so a one-tick removal does not predict a lower rate.
+
+  `integrity-repro/sally-replay.txt` is regenerated with three more lever rows (all joint limits off, terrain contact off, all contacts off) and a `massΔ` column. The capsule-radius rows were cut because they touched only the antenna links.

@@ -1,0 +1,72 @@
+# game sally-replay --state shipped-w3-r0-e0-t332677.bin
+state after tick 332677: E=12.6 J; original tick 332678 max part speed 104.06 m/s; self-check dev 0.000; worst kick part 38 (Some(ClawWrist(Right))) 0.05→104.06 m/s
+    contact with terrain: 4 pts, penetration 0.0041 m, normal on kicked (+0.00,+1.00,+0.00), impulse 0.0000
+
+cell = kick count on the replayed tick + kicked/max part speed after (m/s); '–' = no kick
+variant (one lever vs base)     survives   massΔ    t332678
+self-check (2,12,3x2)              1/1     0.0e0  K4 104.06
+drives zeroed                      0/1     0.0e0   –   0.50
+drives ×0.5                        0/1     0.0e0   –   0.79
+solver 2,2,3x2                     0/1     0.0e0   –   0.82
+solver 2,24,3x2                    0/1     0.0e0   –   1.25
+solver 2,48,3x2                    0/1     0.0e0   –   0.97
+solver 4,12,3x2                    0/1     0.0e0   –   0.75
+solver 2,12,3x4                    0/1     0.0e0   –   1.07
+solver 8,4,4x4                     0/1     0.0e0   –   0.81
+solver 32,8,8x8                    0/1     0.0e0   –   0.83
+solver 2,11,3x2                    1/1     0.0e0  K39 66.17
+solver 2,13,3x2                    0/1     0.0e0   –   1.33
+solver 2,12,0x2                    0/1     0.0e0   –   1.17
+solver 2,12,2x2                    0/1     0.0e0   –   0.94
+solver 2,12,4x2                    0/1     0.0e0   –   1.28
+limit spring 40 Hz                 0/1     0.0e0   –   0.84
+limit spring = contact class       0/1     0.0e0   –   0.84
+limits off: ClawShoulder(Left)     0/1     0.0e0   –   1.84
+limits off: ClawWrist(Left)        0/1     0.0e0   –   1.40
+limits off: ClawPincer(Left)       0/1     0.0e0   –   1.41
+limits off: ClawShoulder(Right)     0/1     0.0e0   –   0.92
+limits off: ClawWrist(Right)       1/1     0.0e0  K4 104.06
+limits off: ClawPincer(Right)      1/1     0.0e0 K13 183.29
+all joint limits off               1/1     0.0e0   K1  4.97
+terrain contact off                0/1     0.0e0   –   1.00
+all contacts off                   0/1     0.0e0   –   1.00
+cuboids → capsules                 0/1     0.0e0   –   0.82
+all links thin balls               0/1     0.0e0   –   1.00
+all links fat balls                0/1     0.0e0   –   1.28
+
+# game sally-replay --solver 2,12,3x4 --state sub4-w3-r0-e0-t226697.bin sub4-w9-r0-e1-t514914.bin
+state after tick 226697: E=12.6 J; original tick 226698 max part speed 130.48 m/s; self-check dev 0.000; worst kick part 38 (Some(ClawWrist(Right))) 0.13→130.48 m/s
+state after tick 514914: E=11.7 J; original tick 514915 max part speed 41.08 m/s; self-check dev 0.000; worst kick part 2 (Some(LegCarpus(Right, 2))) 4.61→41.08 m/s
+    contact with terrain: 5 pts, penetration 0.0000 m, normal on kicked (+0.00,+1.00,+0.00), impulse 0.0000
+
+cell = kick count on the replayed tick + kicked/max part speed after (m/s); '–' = no kick
+variant (one lever vs base)     survives   massΔ    t226698    t514915
+self-check (2,12,3x4)              2/2     0.0e0 K39 130.48   K3 41.08
+drives zeroed                      0/2     0.0e0   –   1.88   –   4.13
+drives ×0.5                        0/2     0.0e0   –   2.45   –  10.66
+solver 2,2,3x2                     0/2     0.0e0   –   2.76   –   6.24
+solver 2,24,3x2                    0/2     0.0e0   –   3.20   –   6.22
+solver 2,48,3x2                    0/2     0.0e0   –   3.00   –   6.22
+solver 4,12,3x2                    0/2     0.0e0   –   2.78   –   6.22
+solver 2,12,3x4                    2/2     0.0e0 K39 130.48   K3 41.08
+solver 8,4,4x4                     0/2     0.0e0   –   2.97   –   5.96
+solver 32,8,8x8                    0/2     0.0e0   –   2.99   –   5.96
+solver 2,11,3x2                    0/2     0.0e0   –   3.13   –   6.22
+solver 2,13,3x2                    0/2     0.0e0   –   3.11   –   6.22
+solver 2,12,0x2                    0/2     0.0e0   –   3.02   –   6.18
+solver 2,12,2x2                    0/2     0.0e0   –   3.00   –   6.22
+solver 2,12,4x2                    0/2     0.0e0   –   3.01   –   6.22
+limit spring 40 Hz                 1/2     0.0e0   –   3.01   K3 41.06
+limit spring = contact class       1/2     0.0e0   –   2.99   K3 41.07
+limits off: ClawShoulder(Left)     0/2     0.0e0   –   3.03   –   5.97
+limits off: ClawWrist(Left)        1/2     0.0e0   –   3.04   K3 41.19
+limits off: ClawPincer(Left)       1/2     0.0e0   –   3.08   K3 41.08
+limits off: ClawShoulder(Right)     2/2     0.0e0   K7 18.02   K3 41.08
+limits off: ClawWrist(Right)       2/2     0.0e0 K39 271.91   K3 41.08
+limits off: ClawPincer(Right)      1/2     0.0e0   –   3.03   K3 41.10
+all joint limits off               1/2     0.0e0   K1  4.30   –   6.76
+terrain contact off                0/2     0.0e0   –   2.77   –   6.12
+all contacts off                   0/2     0.0e0   –   2.77   –   6.12
+cuboids → capsules                 0/2     0.0e0   –   3.26   –   8.15
+all links thin balls               0/2     0.0e0   –   2.77   –   6.13
+all links fat balls                0/2     0.0e0   –   2.99   –   5.88
