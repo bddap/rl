@@ -361,7 +361,9 @@ impl PlantSnapshot {
                         (m.local_mprops.mass(), m.local_mprops.principal_inertia())
                     };
                     let ((m0, i0), (m1, i1)) = (mp(&self.bodies), mp(&s.bodies));
-                    ((m1 - m0).abs() / m0).max(((i1 - i0).abs() / i0).max_element())
+                    ((m1 - m0).abs() / m0).max(
+                        ((i1 - i0).abs() / i0.max(Vec3::splat(f32::MIN_POSITIVE))).max_element(),
+                    )
                 })
                 .fold(0.0, f32::max),
             worst_kick_contacts: Vec::new(),
@@ -592,7 +594,7 @@ pub enum FreeLimits {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ContactsOff {
     None,
-    /// Colliders on fixed bodies (the ground).
+    /// Colliders on no body or a fixed body (the ground).
     Terrain,
     All,
 }

@@ -159,6 +159,21 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .iter()
         .map(|p| PlantSnapshot::load(p).map_err(anyhow::Error::from))
         .collect::<Result<_>>()?;
+    for (path, s) in args.state.iter().zip(&snaps) {
+        let p = &s.params;
+        let counts = (
+            p.num_solver_iterations,
+            p.num_internal_pgs_iterations,
+            p.num_internal_stabilization_iterations,
+        );
+        if counts != args.solver.iterations {
+            println!(
+                "WARNING {} ran with counts {counts:?}, not --solver {}: its self-check will not reproduce",
+                path.display(),
+                args.solver
+            );
+        }
+    }
     let rows = rows(args.solver);
     let results: Vec<Vec<ReplayOutcome>> = rows
         .iter()

@@ -60,10 +60,11 @@ struct ReproArgs {
     #[arg(long)]
     workers: Option<usize>,
 
-    /// The first worker id: a worker's id sets its seed stream, so N processes of
-    /// `--workers 1 --first-worker i` roll the same streams as one `--workers N`
-    /// process, without the cross-worker contention that slows a shared process ~4×.
-    #[arg(long, default_value_t = 0)]
+    /// The first worker id: a worker's id picks its seed, so N processes of
+    /// `--workers 1 --first-worker i` under one `--seed` roll the same seeds as one
+    /// `--workers N` process, without the cross-worker contention that slows a
+    /// shared process ~4×.
+    #[arg(long, default_value_t = 0, requires = "seed")]
     first_worker: usize,
 
     #[arg(long, default_value_t = STEPS_PER_ROLLOUT as u64)]
