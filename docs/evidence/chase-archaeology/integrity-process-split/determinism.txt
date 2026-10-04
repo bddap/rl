@@ -1,0 +1,35 @@
+Same-seed determinism, rl-train d9bcadb, frozen 34,240,512-tick checkpoint, seed 3510.
+
+1. Single-worker processes are bit-reproducible across hosts. Each (ii) worker's action digest
+   (logged every 4,096 ticks) on the training host vs the burst VM:
+   w0 identical, 192 digests
+   w1 identical, 192 digests
+   w2 identical, 192 digests
+   w3 identical, 191 digests
+   w4 identical, 192 digests
+   w5 identical, 192 digests
+   w6 identical, 192 digests
+   w7 identical, 192 digests
+   w8 identical, 192 digests
+   w9 identical, 192 digests
+   w10 identical, 192 digests
+   w11 identical, 192 digests
+   Near-miss lines: identical (18 on each host).
+   The pre-trip snapshot of the one trip is byte-identical across this job's two hosts and job 6023's
+   VM build (rate A/B arm 'shipped', a different binary of the same source):
+   eec19e240461b9e5f48cba133092bc080a4b424d96d4db267e24b9f729121f24  training-host/split/w3/cap/w3-r0-e0-t332677.bin
+   eec19e240461b9e5f48cba133092bc080a4b424d96d4db267e24b9f729121f24  burst-vm/split/w3/cap/w3-r0-e0-t332677.bin
+   eec19e240461b9e5f48cba133092bc080a4b424d96d4db267e24b9f729121f24  docs/evidence/chase-archaeology/integrity-rate-ab/shipped-w3-r0-e0-t332677.bin
+
+2. In-process workers are not: action digest at 4,096 ticks, same seed, training host.
+   solo-run-1 worker 0 a8b13acd9dfc169a
+   solo-run-2 worker 0 a8b13acd9dfc169a
+   solo worker 1 da5790b1910d3fed
+   2-worker-run-1 worker 1 da5790b1910d3fed
+   2-worker-run-1 worker 0 2a6b998dbfefad10
+   2-worker-run-2 worker 0 2a6b998dbfefad10
+   2-worker-run-2 worker 1 da5790b1910d3fed
+   2-worker-run-3 worker 0 b77a4892a74edd0a
+   2-worker-run-3 worker 1 1b705d971770dcc7
+   A per-tick plant hash puts the first divergence at the second warm-up update (bddap/rl#431).
+   In-process near misses share no (worker, tick) with the split arm: the arms are independent samples.

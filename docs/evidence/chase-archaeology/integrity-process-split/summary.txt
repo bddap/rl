@@ -1,0 +1,8 @@
+(ii) split, training host (Ryzen 9 3900X): ticks 9437574 trips 1 per_M 0.106 cpu_s 151923 ticks/cpu_s 62.1 max_wall_s 22431
+(ii) split, burst VM (Xeon Platinum 8168): ticks 9437574 trips 1 per_M 0.106 cpu_s 215814 ticks/cpu_s 43.7 max_wall_s 17897
+(i) in-process, burst VM (Xeon Platinum 8168): ticks 9438092 trips 2 per_M 0.212 cpu_s 206500 ticks/cpu_s 45.7 max_wall_s 20169
+near misses (ii) training host: 18
+near misses (ii) burst VM: 18
+near misses (i) burst VM: 837
+(i) in-process, training host, STOPPED at 491520 logged ticks (lower bound): trips 0, near misses 0; host contention put the full budget at ~10 h more; supplemental, not pooled
+near-miss events (a new event = a (worker, world, env) near miss >64 ticks after its previous one): (ii) training host 14, (ii) burst VM 14, (i) burst VM 25
