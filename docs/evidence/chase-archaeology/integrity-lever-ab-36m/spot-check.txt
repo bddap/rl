@@ -1,0 +1,6 @@
+Spot-check: shipped worker 3 (a reused rate-A/B worker) re-run on the training host, rl-train a293b63 (sha256 1b68a13a7d1c99a0ff6921cc246b6b6849bee2cd325b9894a23843a050bcb558), --ticks 335872.
+Action digests at every 4,096-tick mark vs the recorded d9bcadb run: 81/81 identical.
+REPRO_TRIP worker 3 physics-integrity violation in training (rl#343): env 0 tick 332678 episode-step 599: blowing up (part speed > 100 m/s or non-finite pose) — height 0.66784555 m, fastest part ClawWrist(Right) at lin 104.06165 m/s ang 159.0468 rad/s (bound tests lin.max(ang/3) = 104.06165 m/s), all parts past 50: [ClawShoulder(Right) lin 47.4 ang 173.9; ClawWrist(Right) lin 104.1 ang 159.0; ClawPincer(Right) lin 99.2 ang 159.1]
+Pre-trip snapshot sha256 (this run / rate A/B capture):
+eec19e240461b9e5f48cba133092bc080a4b424d96d4db267e24b9f729121f24  spot/cap/w3-r0-e0-t332677.bin
+eec19e240461b9e5f48cba133092bc080a4b424d96d4db267e24b9f729121f24  integrity-rate-ab/shipped-w3-r0-e0-t332677.bin

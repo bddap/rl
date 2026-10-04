@@ -1,0 +1,19 @@
+game step-profile --ticks 1024 on the frozen hull checkpoint, training host (Ryzen 9 3900X), headless; base = main 3ed15e4 (2,12,3)x2, new = (4,12,3)x2; runs interleaved.
+base r1   step wall ms               p10   4.93  p50   6.81  p90   7.11  p99   7.69  max  10.24
+base r1   substep ms                 p10   1.36  p50   2.57  p90   2.63  p99   3.03  max   3.27
+base r1 step p50 split: wall 6.81 ms ≈ physics 5.14 + NN forward 0.779 + other 0.89 (sense/act/schedule)
+new r1   step wall ms               p10  10.12  p50  10.45  p90  10.70  p99  11.75  max  12.89
+new r1   substep ms                 p10   4.31  p50   4.35  p90   4.43  p99   5.11  max   6.29
+new r1 step p50 split: wall 10.45 ms ≈ physics 8.70 + NN forward 0.951 + other 0.80 (sense/act/schedule)
+base r2   step wall ms               p10   6.50  p50   6.78  p90   7.07  p99   7.58  max   8.98
+base r2   substep ms                 p10   2.52  p50   2.56  p90   2.62  p99   2.91  max   4.17
+base r2 step p50 split: wall 6.78 ms ≈ physics 5.13 + NN forward 0.885 + other 0.77 (sense/act/schedule)
+new r2   step wall ms               p10   9.44  p50  10.43  p90  10.70  p99  11.50  max  12.26
+new r2   substep ms                 p10   3.87  p50   4.35  p90   4.49  p99   4.83  max   5.47
+new r2 step p50 split: wall 10.43 ms ≈ physics 8.70 + NN forward 0.968 + other 0.76 (sense/act/schedule)
+base r3   step wall ms               p10   4.31  p50   6.81  p90   7.17  p99   7.72  max   9.51
+base r3   substep ms                 p10   1.30  p50   2.56  p90   2.74  p99   2.90  max   4.15
+base r3 step p50 split: wall 6.81 ms ≈ physics 5.13 + NN forward 0.824 + other 0.86 (sense/act/schedule)
+new r3   step wall ms               p10   5.57  p50  10.25  p90  10.97  p99  11.69  max  13.45
+new r3   substep ms                 p10   2.19  p50   4.33  p90   4.68  p99   5.03  max   6.22
+new r3 step p50 split: wall 10.25 ms ≈ physics 8.67 + NN forward 0.850 + other 0.73 (sense/act/schedule)

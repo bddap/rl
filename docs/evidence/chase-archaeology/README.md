@@ -80,3 +80,12 @@ Bisect probes (rl#351, post-shortlist):
   The three trip captures replay exactly (`sally-replay-trips.txt`, self-check dev 0.000; the sub4 captures under `--solver 2,12,3x4`). On those one-tick replays, both alternative solvers and terrain-off remove the kick. The (2,12,3)×4 arm still tripped twice at rate, so a one-tick removal does not predict a lower rate.
 
   `integrity-repro/sally-replay.txt` is regenerated with three more lever rows (all joint limits off, terrain contact off, all contacts off) and a `massΔ` column. The capsule-radius rows were cut because they touched only the antenna links.
+- `integrity-lever-ab-36m/`: re-sized multibody-solve lever A/B (rl#351, 2026-10-04). Same frozen checkpoint and config as `integrity-rate-ab/`, 46 × 786,432 = 36.2M ticks per arm. Workers 0–11 are the rate A/B's; this run adds workers 12–45, each a `--workers 1 --first-worker i` process, 17 per 32-vCPU VM on six identical VMs, every VM carrying all three arms. `spot-check.txt`: a rebuilt binary re-ran shipped worker 3 and matched all 81 recorded digests, the trip and its snapshot byte for byte.
+
+  | arm | trips (all 46 workers) | per M ticks | ticks/CPU-s (workers 12–45) |
+  |---|---:|---:|---:|
+  | shipped (2,12,3)×2 | 13 | 0.359 | 55.6 |
+  | (4,12,3)×2 | 2 | 0.055 | 41.8 |
+  | (2,12,3)×4 | 2 | 0.055 | 36.2 |
+
+  Each lever's share of its pair's trips (13–2) has one-sided ticks-weighted binomial p = 0.0037, so both pass the pre-registered rule (shipped ≥8, p < 0.01). (4,12,3)×2 is the cheaper, so main ships it. Near-miss events for workers 12–45 were 55, 44 and 21 (`near-misses-12-45.txt`; a new event is a (worker, world, env) near miss more than 64 ticks after its previous one). `trips.txt` lists every trip, and `shipped-*` / `outer4-*` are the pre-trip snapshots. `step-profile.txt` holds the game-side price: driven step p50 6.8 → 10.4 ms headless on the training host. `crab-world/tests/integrity_captures.rs` replays the 20 committed (2,12,3)×2 onsets on the shipped solver.

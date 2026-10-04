@@ -1,0 +1,706 @@
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: None lin 31.6 ang 299.1
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCoxa(Left, 0)) lin 53.9 ang 299.2
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegBasis(Left, 0)) lin 132.6 ang 349.6
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegMerus(Left, 0)) lin 247.9 ang 690.0
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCoxa(Left, 1)) lin 41.0 ang 182.5
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegBasis(Left, 1)) lin 53.7 ang 187.7
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegMerus(Left, 1)) lin 88.9 ang 232.4
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCoxa(Left, 2)) lin 124.9 ang 874.8
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegBasis(Left, 2)) lin 246.5 ang 1009.3
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegMerus(Left, 2)) lin 350.4 ang 942.3
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCoxa(Left, 3)) lin 43.6 ang 170.7
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegBasis(Left, 3)) lin 59.0 ang 207.4
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegMerus(Left, 3)) lin 105.2 ang 255.2
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(ClawShoulder(Left)) lin 57.0 ang 304.6
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(ClawWrist(Left)) lin 80.0 ang 297.6
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCoxa(Right, 0)) lin 58.2 ang 84.2
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegBasis(Right, 0)) lin 62.7 ang 84.2
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegMerus(Right, 0)) lin 59.2 ang 132.0
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCoxa(Right, 1)) lin 59.8 ang 141.0
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegBasis(Right, 1)) lin 110.9 ang 212.8
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegMerus(Right, 1)) lin 146.6 ang 106.6
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCoxa(Right, 2)) lin 72.6 ang 164.3
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegBasis(Right, 2)) lin 129.8 ang 241.2
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegMerus(Right, 2)) lin 207.1 ang 358.5
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCoxa(Right, 3)) lin 51.7 ang 93.4
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegBasis(Right, 3)) lin 60.7 ang 159.6
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegMerus(Right, 3)) lin 90.7 ang 181.2
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(ClawShoulder(Right)) lin 47.0 ang 280.8
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(ClawWrist(Right)) lin 41.5 ang 279.7
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(ClawPincer(Left)) lin 69.9 ang 297.0
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(ClawPincer(Right)) lin 42.2 ang 280.7
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCarpus(Left, 0)) lin 335.0 ang 714.2
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCarpus(Left, 1)) lin 125.9 ang 302.2
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCarpus(Left, 2)) lin 694.5 ang 3717.1
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCarpus(Left, 3)) lin 97.1 ang 257.4
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCarpus(Right, 0)) lin 43.2 ang 123.5
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCarpus(Right, 1)) lin 150.4 ang 114.2
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCarpus(Right, 2)) lin 242.1 ang 190.7
+shipped [repro] near-miss worker 12 world 0 env 1 tick 470215: Some(LegCarpus(Right, 3)) lin 85.0 ang 292.3
+shipped [repro] near-miss worker 12 world 1 env 0 tick 89514: Some(LegCarpus(Right, 2)) lin 15.6 ang 94.2
+shipped [repro] near-miss worker 24 world 0 env 1 tick 220715: Some(LegCarpus(Left, 3)) lin 13.3 ang 124.6
+shipped [repro] near-miss worker 24 world 0 env 1 tick 424413: Some(LegCarpus(Right, 3)) lin 18.7 ang 104.3
+shipped [repro] near-miss worker 30 world 0 env 0 tick 308545: Some(LegCarpus(Left, 2)) lin 15.5 ang 93.1
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: None lin 1685.1 ang 6613.3
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(ClawWrist(Right)) lin 13975.0 ang 21980.6
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(ClawShoulder(Right)) lin 6989.4 ang 30771.5
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegMerus(Right, 3)) lin 8389.3 ang 33469.1
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegBasis(Right, 3)) lin 5199.2 ang 14554.0
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCoxa(Right, 3)) lin 1886.3 ang 13981.9
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegMerus(Right, 2)) lin 1780.4 ang 3917.8
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegBasis(Right, 2)) lin 1467.5 ang 4273.7
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCoxa(Right, 2)) lin 1353.0 ang 4698.4
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegMerus(Right, 1)) lin 3650.2 ang 6923.0
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegBasis(Right, 1)) lin 2504.5 ang 6638.9
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCoxa(Right, 1)) lin 1150.3 ang 6129.4
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegMerus(Right, 0)) lin 1470.0 ang 8249.9
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegBasis(Right, 0)) lin 1399.4 ang 4524.8
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCoxa(Right, 0)) lin 1042.8 ang 4228.2
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(ClawWrist(Left)) lin 4253.5 ang 6832.0
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(ClawShoulder(Left)) lin 3261.8 ang 6958.1
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegMerus(Left, 3)) lin 5165.2 ang 4226.3
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegBasis(Left, 3)) lin 4113.4 ang 5317.1
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCoxa(Left, 3)) lin 2733.7 ang 4741.0
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegMerus(Left, 2)) lin 3308.6 ang 6356.8
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegBasis(Left, 2)) lin 2965.6 ang 4168.1
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCoxa(Left, 2)) lin 2491.3 ang 3833.0
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegMerus(Left, 1)) lin 2941.3 ang 8415.3
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegBasis(Left, 1)) lin 1919.4 ang 8473.5
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCoxa(Left, 1)) lin 2407.9 ang 3879.5
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegMerus(Left, 0)) lin 5472.8 ang 8339.6
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegBasis(Left, 0)) lin 3553.7 ang 6266.4
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCoxa(Left, 0)) lin 2086.3 ang 3203.8
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(ClawPincer(Right)) lin 16704.0 ang 21845.1
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(ClawPincer(Left)) lin 4564.7 ang 6964.3
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCarpus(Right, 3)) lin 13688.1 ang 37803.8
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCarpus(Right, 2)) lin 2332.2 ang 3919.4
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCarpus(Right, 1)) lin 5885.3 ang 18391.7
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCarpus(Right, 0)) lin 2007.0 ang 7254.1
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCarpus(Left, 3)) lin 5060.6 ang 4126.8
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCarpus(Left, 2)) lin 3769.0 ang 6434.8
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCarpus(Left, 1)) lin 5816.0 ang 33529.9
+shipped [repro] near-miss worker 36 world 0 env 0 tick 402059: Some(LegCarpus(Left, 0)) lin 6977.2 ang 9071.4
+shipped [repro] near-miss worker 42 world 0 env 1 tick 525835: Some(LegCarpus(Left, 2)) lin 18.2 ang 100.1
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: None lin 129.5 ang 517.4
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCoxa(Left, 0)) lin 151.1 ang 509.2
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegBasis(Left, 0)) lin 194.4 ang 597.8
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegMerus(Left, 0)) lin 253.5 ang 346.2
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCoxa(Left, 1)) lin 119.8 ang 518.8
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegBasis(Left, 1)) lin 166.7 ang 527.0
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegMerus(Left, 1)) lin 207.5 ang 530.3
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCoxa(Left, 2)) lin 170.2 ang 573.2
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegBasis(Left, 2)) lin 328.3 ang 715.3
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegMerus(Left, 2)) lin 390.4 ang 1152.0
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCoxa(Left, 3)) lin 149.1 ang 522.8
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegBasis(Left, 3)) lin 157.3 ang 556.5
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegMerus(Left, 3)) lin 204.4 ang 515.2
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(ClawShoulder(Left)) lin 267.7 ang 638.7
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(ClawWrist(Left)) lin 464.1 ang 638.7
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCoxa(Right, 0)) lin 164.9 ang 507.8
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegBasis(Right, 0)) lin 141.0 ang 507.6
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegMerus(Right, 0)) lin 163.5 ang 549.3
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCoxa(Right, 1)) lin 136.7 ang 523.2
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegBasis(Right, 1)) lin 107.0 ang 500.2
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegMerus(Right, 1)) lin 65.2 ang 806.6
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCoxa(Right, 2)) lin 114.3 ang 524.5
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegBasis(Right, 2)) lin 154.5 ang 532.5
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegMerus(Right, 2)) lin 193.5 ang 506.1
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCoxa(Right, 3)) lin 122.8 ang 507.1
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegBasis(Right, 3)) lin 179.5 ang 498.2
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegMerus(Right, 3)) lin 432.7 ang 2030.1
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(ClawShoulder(Right)) lin 112.8 ang 293.6
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(ClawWrist(Right)) lin 147.0 ang 696.6
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(ClawPincer(Left)) lin 464.0 ang 637.1
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(ClawPincer(Right)) lin 140.6 ang 705.0
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCarpus(Left, 0)) lin 275.6 ang 355.3
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCarpus(Left, 1)) lin 246.1 ang 586.8
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCarpus(Left, 2)) lin 317.0 ang 878.2
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCarpus(Left, 3)) lin 234.0 ang 531.2
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCarpus(Right, 0)) lin 197.8 ang 646.0
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCarpus(Right, 1)) lin 43.6 ang 233.1
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCarpus(Right, 2)) lin 154.5 ang 508.6
+shipped [repro] near-miss worker 13 world 0 env 1 tick 145407: Some(LegCarpus(Right, 3)) lin 847.8 ang 3493.4
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: None lin 224.0 ang 1742.9
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(ClawWrist(Right)) lin 440.3 ang 2386.2
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(ClawShoulder(Right)) lin 157.2 ang 1129.8
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegMerus(Right, 3)) lin 971.0 ang 1704.3
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegBasis(Right, 3)) lin 666.4 ang 1811.1
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCoxa(Right, 3)) lin 178.1 ang 1757.5
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegMerus(Right, 2)) lin 188.9 ang 1623.7
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegBasis(Right, 2)) lin 240.2 ang 1296.8
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCoxa(Right, 2)) lin 196.8 ang 1775.7
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegMerus(Right, 1)) lin 253.6 ang 1945.7
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegBasis(Right, 1)) lin 176.5 ang 1519.1
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCoxa(Right, 1)) lin 254.7 ang 1770.6
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegMerus(Right, 0)) lin 336.5 ang 1685.8
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegBasis(Right, 0)) lin 186.5 ang 1689.2
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCoxa(Right, 0)) lin 297.7 ang 1756.3
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(ClawWrist(Left)) lin 185.0 ang 1156.5
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(ClawShoulder(Left)) lin 218.8 ang 1170.2
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegMerus(Left, 3)) lin 395.5 ang 1548.7
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegBasis(Left, 3)) lin 184.5 ang 1547.3
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCoxa(Left, 3)) lin 235.7 ang 1782.3
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegMerus(Left, 2)) lin 1884.1 ang 3217.5
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegBasis(Left, 2)) lin 1232.8 ang 3245.7
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCoxa(Left, 2)) lin 298.3 ang 3282.7
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegMerus(Left, 1)) lin 167.8 ang 1243.6
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegBasis(Left, 1)) lin 147.4 ang 1219.2
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCoxa(Left, 1)) lin 102.7 ang 1788.7
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegMerus(Left, 0)) lin 566.9 ang 1882.9
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegBasis(Left, 0)) lin 258.0 ang 1808.3
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCoxa(Left, 0)) lin 193.4 ang 1810.1
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(ClawPincer(Right)) lin 416.7 ang 2392.4
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(ClawPincer(Left)) lin 256.1 ang 1161.2
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCarpus(Right, 3)) lin 980.8 ang 1983.3
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCarpus(Right, 2)) lin 362.8 ang 1630.5
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCarpus(Right, 1)) lin 85.8 ang 1544.4
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCarpus(Right, 0)) lin 535.2 ang 1586.5
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCarpus(Left, 3)) lin 294.5 ang 1546.8
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCarpus(Left, 2)) lin 1483.1 ang 2587.0
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCarpus(Left, 1)) lin 122.1 ang 1781.5
+shipped [repro] near-miss worker 19 world 0 env 1 tick 182157: Some(LegCarpus(Left, 0)) lin 754.3 ang 1351.9
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: None lin 800.0 ang 5268.9
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCoxa(Left, 0)) lin 1240.9 ang 5252.8
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegBasis(Left, 0)) lin 1901.4 ang 4898.9
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegMerus(Left, 0)) lin 2861.2 ang 33278.1
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCoxa(Left, 1)) lin 1094.9 ang 3102.2
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegBasis(Left, 1)) lin 5273.1 ang 22116.5
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegMerus(Left, 1)) lin 12059.9 ang 19831.1
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCoxa(Left, 2)) lin 1220.1 ang 3001.2
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegBasis(Left, 2)) lin 1641.6 ang 5050.7
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegMerus(Left, 2)) lin 2555.4 ang 2958.8
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCoxa(Left, 3)) lin 940.0 ang 3965.9
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegBasis(Left, 3)) lin 1050.3 ang 3029.9
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegMerus(Left, 3)) lin 1160.2 ang 2986.5
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(ClawShoulder(Left)) lin 2217.5 ang 7304.8
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(ClawWrist(Left)) lin 3654.4 ang 7082.7
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCoxa(Right, 0)) lin 1265.7 ang 4400.3
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegBasis(Right, 0)) lin 1715.9 ang 6663.2
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegMerus(Right, 0)) lin 3280.2 ang 6729.9
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCoxa(Right, 1)) lin 1211.5 ang 5931.4
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegBasis(Right, 1)) lin 1267.3 ang 6786.4
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegMerus(Right, 1)) lin 4809.7 ang 41141.1
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCoxa(Right, 2)) lin 1590.7 ang 5249.3
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegBasis(Right, 2)) lin 1138.7 ang 5873.5
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegMerus(Right, 2)) lin 953.0 ang 6711.7
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCoxa(Right, 3)) lin 1069.0 ang 4007.9
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegBasis(Right, 3)) lin 904.1 ang 3986.9
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegMerus(Right, 3)) lin 1363.3 ang 5308.5
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(ClawShoulder(Right)) lin 3943.0 ang 17916.8
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(ClawWrist(Right)) lin 8715.7 ang 30763.2
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(ClawPincer(Left)) lin 3837.4 ang 7082.6
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(ClawPincer(Right)) lin 8842.7 ang 30738.8
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCarpus(Left, 0)) lin 4622.5 ang 23156.7
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCarpus(Left, 1)) lin 14477.8 ang 19460.6
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCarpus(Left, 2)) lin 2960.9 ang 4627.3
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCarpus(Left, 3)) lin 1236.4 ang 2986.0
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCarpus(Right, 0)) lin 4383.3 ang 6692.3
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCarpus(Right, 1)) lin 4787.7 ang 38729.4
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCarpus(Right, 2)) lin 2212.5 ang 10848.0
+shipped [repro] near-miss worker 19 world 1 env 0 tick 459795: Some(LegCarpus(Right, 3)) lin 2330.2 ang 7636.2
+shipped [repro] near-miss worker 37 world 0 env 1 tick 95335: Some(LegMerus(Right, 0)) lin 12.6 ang 94.6
+shipped [repro] near-miss worker 37 world 0 env 1 tick 95335: Some(LegCarpus(Right, 0)) lin 30.9 ang 102.7
+shipped [repro] near-miss worker 37 world 0 env 1 tick 443811: Some(LegCarpus(Right, 2)) lin 20.2 ang 161.9
+shipped [repro] near-miss worker 37 world 0 env 1 tick 449931: Some(LegCarpus(Left, 2)) lin 11.6 ang 94.2
+shipped [repro] near-miss worker 37 world 0 env 1 tick 485054: Some(LegCarpus(Left, 1)) lin 16.6 ang 102.6
+shipped [repro] near-miss worker 43 world 0 env 0 tick 369401: Some(LegCarpus(Right, 2)) lin 25.4 ang 111.5
+shipped [repro] near-miss worker 14 world 0 env 0 tick 217524: Some(LegCarpus(Left, 2)) lin 31.9 ang 190.0
+shipped [repro] near-miss worker 14 world 0 env 1 tick 684342: Some(LegCarpus(Left, 3)) lin 28.8 ang 172.1
+shipped [repro] near-miss worker 14 world 0 env 1 tick 742584: Some(LegCarpus(Left, 1)) lin 25.4 ang 112.0
+shipped [repro] near-miss worker 20 world 0 env 0 tick 70520: Some(LegCarpus(Right, 1)) lin 13.6 ang 90.3
+shipped [repro] near-miss worker 20 world 0 env 0 tick 322063: Some(ClawWrist(Left)) lin 23.7 ang 99.2
+shipped [repro] near-miss worker 20 world 0 env 0 tick 322063: Some(ClawPincer(Left)) lin 18.4 ang 99.3
+shipped [repro] near-miss worker 20 world 0 env 1 tick 494451: Some(LegCarpus(Left, 0)) lin 24.8 ang 132.4
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: None lin 31.1 ang 225.5
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(ClawWrist(Right)) lin 198.2 ang 69.0
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(ClawShoulder(Right)) lin 116.6 ang 295.4
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegMerus(Right, 3)) lin 117.5 ang 314.7
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegBasis(Right, 3)) lin 74.9 ang 259.3
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCoxa(Right, 3)) lin 27.1 ang 269.8
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegMerus(Right, 2)) lin 60.6 ang 210.1
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegBasis(Right, 2)) lin 52.3 ang 221.3
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCoxa(Right, 2)) lin 33.9 ang 225.7
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegMerus(Right, 1)) lin 44.1 ang 215.9
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegBasis(Right, 1)) lin 40.2 ang 210.6
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCoxa(Right, 1)) lin 36.0 ang 208.7
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegMerus(Right, 0)) lin 103.7 ang 208.0
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegBasis(Right, 0)) lin 83.5 ang 209.4
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCoxa(Right, 0)) lin 52.9 ang 196.6
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(ClawWrist(Left)) lin 68.8 ang 219.4
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(ClawShoulder(Left)) lin 32.8 ang 220.4
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegMerus(Left, 3)) lin 62.5 ang 183.0
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegBasis(Left, 3)) lin 52.1 ang 179.4
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCoxa(Left, 3)) lin 37.4 ang 195.1
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegMerus(Left, 2)) lin 178.9 ang 256.5
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegBasis(Left, 2)) lin 124.8 ang 285.5
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCoxa(Left, 2)) lin 50.3 ang 231.7
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegMerus(Left, 1)) lin 53.4 ang 196.8
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegBasis(Left, 1)) lin 29.8 ang 197.0
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCoxa(Left, 1)) lin 33.7 ang 197.5
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegMerus(Left, 0)) lin 51.8 ang 189.7
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegBasis(Left, 0)) lin 48.1 ang 187.5
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCoxa(Left, 0)) lin 25.0 ang 230.8
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(ClawPincer(Right)) lin 197.9 ang 67.9
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(ClawPincer(Left)) lin 74.7 ang 221.4
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCarpus(Right, 3)) lin 112.6 ang 289.7
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCarpus(Right, 2)) lin 65.4 ang 210.1
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCarpus(Right, 1)) lin 63.3 ang 208.8
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCarpus(Right, 0)) lin 89.9 ang 199.9
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCarpus(Left, 3)) lin 59.9 ang 192.1
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCarpus(Left, 2)) lin 188.5 ang 146.1
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCarpus(Left, 1)) lin 81.2 ang 196.2
+shipped [repro] near-miss worker 32 world 0 env 0 tick 106935: Some(LegCarpus(Left, 0)) lin 22.3 ang 224.4
+shipped [repro] near-miss worker 32 world 1 env 1 tick 371114: Some(LegCarpus(Right, 3)) lin 19.4 ang 117.4
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: None lin 284.5 ang 3335.0
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(ClawWrist(Right)) lin 1816.6 ang 5676.1
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(ClawShoulder(Right)) lin 817.3 ang 4200.8
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegMerus(Right, 3)) lin 728.0 ang 4853.6
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegBasis(Right, 3)) lin 443.7 ang 3861.5
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCoxa(Right, 3)) lin 868.1 ang 3592.9
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegMerus(Right, 2)) lin 1435.4 ang 1648.0
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegBasis(Right, 2)) lin 1291.7 ang 1839.1
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCoxa(Right, 2)) lin 944.1 ang 3342.1
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegMerus(Right, 1)) lin 948.7 ang 3189.5
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegBasis(Right, 1)) lin 824.2 ang 1645.3
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCoxa(Right, 1)) lin 385.7 ang 3310.9
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegMerus(Right, 0)) lin 1807.3 ang 4093.8
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegBasis(Right, 0)) lin 967.5 ang 5467.9
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCoxa(Right, 0)) lin 606.7 ang 4422.4
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(ClawWrist(Left)) lin 4409.3 ang 5541.9
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(ClawShoulder(Left)) lin 2082.8 ang 6330.0
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegMerus(Left, 3)) lin 3294.0 ang 16815.0
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegBasis(Left, 3)) lin 1073.6 ang 6998.0
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCoxa(Left, 3)) lin 663.9 ang 3527.8
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegMerus(Left, 2)) lin 919.8 ang 3667.7
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegBasis(Left, 2)) lin 849.2 ang 4444.5
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCoxa(Left, 2)) lin 691.3 ang 4932.1
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegMerus(Left, 1)) lin 4042.1 ang 31076.4
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegBasis(Left, 1)) lin 1364.5 ang 5596.5
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCoxa(Left, 1)) lin 271.0 ang 4152.0
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegMerus(Left, 0)) lin 311.0 ang 3816.3
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegBasis(Left, 0)) lin 210.4 ang 4188.5
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCoxa(Left, 0)) lin 535.8 ang 3599.1
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(ClawPincer(Right)) lin 1690.9 ang 5623.0
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(ClawPincer(Left)) lin 4080.1 ang 5538.9
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCarpus(Right, 3)) lin 1212.2 ang 4420.5
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCarpus(Right, 2)) lin 2627.7 ang 11400.0
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCarpus(Right, 1)) lin 5852.9 ang 38295.1
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCarpus(Right, 0)) lin 1926.6 ang 3878.9
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCarpus(Left, 3)) lin 4010.6 ang 16789.5
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCarpus(Left, 2)) lin 1572.6 ang 10856.2
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCarpus(Left, 1)) lin 3899.1 ang 32763.2
+shipped [repro] near-miss worker 32 world 1 env 1 tick 482226: Some(LegCarpus(Left, 0)) lin 404.3 ang 3696.2
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: None lin 28.4 ang 140.9
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCoxa(Left, 0)) lin 27.8 ang 158.4
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegBasis(Left, 0)) lin 40.5 ang 154.6
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegMerus(Left, 0)) lin 72.0 ang 222.1
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCoxa(Left, 1)) lin 22.0 ang 137.0
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegBasis(Left, 1)) lin 22.4 ang 138.5
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegMerus(Left, 1)) lin 20.5 ang 140.7
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCoxa(Left, 2)) lin 22.4 ang 138.4
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegBasis(Left, 2)) lin 60.9 ang 186.2
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegMerus(Left, 2)) lin 107.1 ang 250.6
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCoxa(Left, 3)) lin 22.0 ang 133.9
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegBasis(Left, 3)) lin 27.3 ang 126.0
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegMerus(Left, 3)) lin 31.7 ang 123.1
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(ClawShoulder(Left)) lin 41.3 ang 135.5
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(ClawWrist(Left)) lin 67.5 ang 138.7
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCoxa(Right, 0)) lin 44.1 ang 132.6
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegBasis(Right, 0)) lin 49.1 ang 132.9
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegMerus(Right, 0)) lin 49.0 ang 145.4
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCoxa(Right, 1)) lin 31.8 ang 132.8
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegBasis(Right, 1)) lin 23.3 ang 131.9
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegMerus(Right, 1)) lin 22.0 ang 124.8
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCoxa(Right, 2)) lin 24.3 ang 138.0
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegBasis(Right, 2)) lin 26.0 ang 132.4
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegMerus(Right, 2)) lin 34.2 ang 112.0
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCoxa(Right, 3)) lin 24.9 ang 138.6
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegBasis(Right, 3)) lin 23.3 ang 133.6
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegMerus(Right, 3)) lin 26.7 ang 132.9
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(ClawShoulder(Right)) lin 50.5 ang 104.9
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(ClawWrist(Right)) lin 78.9 ang 29.9
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(ClawPincer(Left)) lin 72.6 ang 137.9
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(ClawPincer(Right)) lin 80.2 ang 30.3
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCarpus(Left, 0)) lin 55.0 ang 256.2
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCarpus(Left, 1)) lin 9.1 ang 140.6
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCarpus(Left, 2)) lin 133.2 ang 218.8
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCarpus(Left, 3)) lin 38.3 ang 124.9
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCarpus(Right, 0)) lin 29.2 ang 127.4
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCarpus(Right, 1)) lin 28.0 ang 124.9
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCarpus(Right, 2)) lin 44.7 ang 114.7
+shipped [repro] near-miss worker 38 world 0 env 0 tick 424456: Some(LegCarpus(Right, 3)) lin 29.4 ang 134.0
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: None lin 459.0 ang 2440.1
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(ClawWrist(Right)) lin 8759.2 ang 6422.1
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(ClawShoulder(Right)) lin 3888.1 ang 16090.6
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegMerus(Right, 3)) lin 923.7 ang 2707.6
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegBasis(Right, 3)) lin 722.6 ang 2219.5
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCoxa(Right, 3)) lin 588.5 ang 2055.7
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegMerus(Right, 2)) lin 293.3 ang 2919.7
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegBasis(Right, 2)) lin 298.2 ang 1967.3
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCoxa(Right, 2)) lin 719.4 ang 1786.0
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegMerus(Right, 1)) lin 1305.5 ang 3037.3
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegBasis(Right, 1)) lin 702.2 ang 2028.7
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCoxa(Right, 1)) lin 637.2 ang 1822.2
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegMerus(Right, 0)) lin 561.3 ang 2310.7
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegBasis(Right, 0)) lin 285.5 ang 1982.2
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCoxa(Right, 0)) lin 337.3 ang 2034.0
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(ClawWrist(Left)) lin 1049.4 ang 1882.9
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(ClawShoulder(Left)) lin 589.3 ang 1850.7
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegMerus(Left, 3)) lin 823.7 ang 1792.6
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegBasis(Left, 3)) lin 842.7 ang 1772.7
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCoxa(Left, 3)) lin 792.7 ang 1770.7
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegMerus(Left, 2)) lin 1116.1 ang 3040.7
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegBasis(Left, 2)) lin 996.0 ang 2599.0
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCoxa(Left, 2)) lin 692.4 ang 1782.4
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegMerus(Left, 1)) lin 1121.9 ang 2934.2
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegBasis(Left, 1)) lin 768.0 ang 1909.9
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCoxa(Left, 1)) lin 488.5 ang 1833.5
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegMerus(Left, 0)) lin 1102.8 ang 1014.8
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegBasis(Left, 0)) lin 754.5 ang 1750.3
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCoxa(Left, 0)) lin 306.2 ang 1773.9
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(ClawPincer(Right)) lin 8796.7 ang 6435.3
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(ClawPincer(Left)) lin 928.4 ang 1901.0
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCarpus(Right, 3)) lin 552.0 ang 2598.3
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCarpus(Right, 2)) lin 1010.6 ang 2962.8
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCarpus(Right, 1)) lin 1453.2 ang 2261.0
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCarpus(Right, 0)) lin 926.1 ang 2276.7
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCarpus(Left, 3)) lin 801.6 ang 1768.3
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCarpus(Left, 2)) lin 1395.9 ang 4072.1
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCarpus(Left, 1)) lin 872.7 ang 2388.8
+shipped [repro] near-miss worker 38 world 1 env 1 tick 197049: Some(LegCarpus(Left, 0)) lin 1332.2 ang 1295.8
+shipped [repro] near-miss worker 15 world 0 env 1 tick 169824: Some(LegCarpus(Left, 2)) lin 36.6 ang 210.7
+shipped [repro] near-miss worker 21 world 0 env 1 tick 619924: Some(LegCarpus(Left, 0)) lin 22.2 ang 126.5
+shipped [repro] near-miss worker 27 world 0 env 1 tick 663301: Some(ClawWrist(Right)) lin 83.7 ang 121.9
+shipped [repro] near-miss worker 27 world 0 env 1 tick 663301: Some(ClawShoulder(Right)) lin 37.7 ang 137.0
+shipped [repro] near-miss worker 27 world 0 env 1 tick 663301: Some(ClawPincer(Right)) lin 79.1 ang 122.0
+shipped [repro] near-miss worker 33 world 0 env 0 tick 26104: Some(LegMerus(Right, 3)) lin 21.1 ang 129.6
+shipped [repro] near-miss worker 33 world 0 env 0 tick 26104: Some(LegCarpus(Right, 3)) lin 33.6 ang 134.4
+shipped [repro] near-miss worker 33 world 0 env 1 tick 171060: Some(LegCarpus(Left, 1)) lin 28.4 ang 143.1
+shipped [repro] near-miss worker 33 world 0 env 0 tick 575388: Some(LegCarpus(Right, 3)) lin 17.3 ang 107.5
+shipped [repro] near-miss worker 39 world 0 env 1 tick 523254: Some(ClawWrist(Right)) lin 36.4 ang 59.3
+shipped [repro] near-miss worker 39 world 0 env 1 tick 523254: Some(ClawPincer(Right)) lin 34.7 ang 59.3
+shipped [repro] near-miss worker 39 world 0 env 1 tick 609000: Some(LegCarpus(Left, 2)) lin 35.2 ang 232.9
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: None lin 122.3 ang 642.6
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(ClawWrist(Right)) lin 6194.2 ang 13727.3
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(ClawShoulder(Right)) lin 2742.7 ang 10788.7
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegMerus(Right, 3)) lin 424.3 ang 917.6
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegBasis(Right, 3)) lin 228.1 ang 919.5
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCoxa(Right, 3)) lin 159.0 ang 633.8
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegMerus(Right, 2)) lin 437.7 ang 1348.9
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegBasis(Right, 2)) lin 191.4 ang 1179.0
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCoxa(Right, 2)) lin 70.0 ang 1138.4
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegMerus(Right, 1)) lin 312.0 ang 1427.3
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegBasis(Right, 1)) lin 65.0 ang 1202.8
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCoxa(Right, 1)) lin 118.5 ang 827.6
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegMerus(Right, 0)) lin 412.6 ang 899.7
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegBasis(Right, 0)) lin 282.8 ang 895.3
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCoxa(Right, 0)) lin 200.4 ang 776.4
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(ClawWrist(Left)) lin 259.0 ang 482.4
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(ClawShoulder(Left)) lin 178.6 ang 482.6
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegMerus(Left, 3)) lin 341.5 ang 448.1
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegBasis(Left, 3)) lin 271.0 ang 717.3
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCoxa(Left, 3)) lin 203.5 ang 729.8
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegMerus(Left, 2)) lin 708.5 ang 1708.1
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegBasis(Left, 2)) lin 517.4 ang 1834.3
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCoxa(Left, 2)) lin 191.9 ang 758.9
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegMerus(Left, 1)) lin 494.5 ang 1206.3
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegBasis(Left, 1)) lin 358.5 ang 1198.4
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCoxa(Left, 1)) lin 142.1 ang 1041.3
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegMerus(Left, 0)) lin 117.0 ang 784.4
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegBasis(Left, 0)) lin 150.9 ang 448.5
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCoxa(Left, 0)) lin 196.2 ang 638.9
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(ClawPincer(Right)) lin 5845.8 ang 13730.2
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(ClawPincer(Left)) lin 286.8 ang 486.3
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCarpus(Right, 3)) lin 447.1 ang 821.4
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCarpus(Right, 2)) lin 405.2 ang 1955.6
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCarpus(Right, 1)) lin 602.5 ang 1459.5
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCarpus(Right, 0)) lin 532.4 ang 1071.2
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCarpus(Left, 3)) lin 296.9 ang 833.9
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCarpus(Left, 2)) lin 740.9 ang 1825.6
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCarpus(Left, 1)) lin 597.0 ang 1276.7
+shipped [repro] near-miss worker 16 world 0 env 0 tick 347916: Some(LegCarpus(Left, 0)) lin 122.0 ang 710.1
+shipped [repro] near-miss worker 16 world 1 env 1 tick 382486: Some(LegCarpus(Right, 3)) lin 17.3 ang 101.9
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(ClawWrist(Right)) lin 36.2 ang 62.4
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(ClawWrist(Left)) lin 41.6 ang 77.0
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(LegMerus(Left, 2)) lin 67.8 ang 149.0
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(LegBasis(Left, 2)) lin 41.0 ang 123.2
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(LegMerus(Left, 0)) lin 42.2 ang 131.8
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(LegBasis(Left, 0)) lin 27.4 ang 96.2
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(ClawPincer(Right)) lin 36.5 ang 62.4
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(ClawPincer(Left)) lin 43.8 ang 76.9
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(LegCarpus(Right, 3)) lin 21.6 ang 95.1
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(LegCarpus(Right, 1)) lin 22.5 ang 111.3
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(LegCarpus(Left, 2)) lin 87.2 ang 136.7
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87892: Some(LegCarpus(Left, 0)) lin 32.1 ang 149.5
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87893: Some(ClawWrist(Right)) lin 33.2 ang 51.1
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87893: Some(ClawWrist(Left)) lin 35.7 ang 59.1
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87893: Some(LegMerus(Left, 2)) lin 39.6 ang 98.3
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87893: Some(ClawPincer(Right)) lin 35.6 ang 50.2
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87893: Some(ClawPincer(Left)) lin 36.7 ang 58.7
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87893: Some(LegCarpus(Left, 2)) lin 67.9 ang 127.5
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87894: Some(ClawWrist(Left)) lin 30.1 ang 51.0
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87894: Some(LegMerus(Left, 2)) lin 39.9 ang 51.6
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87894: Some(ClawPincer(Left)) lin 30.3 ang 49.3
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87894: Some(LegCarpus(Left, 2)) lin 50.5 ang 50.2
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87895: Some(LegMerus(Left, 2)) lin 35.7 ang 38.3
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87895: Some(LegCarpus(Right, 2)) lin 31.6 ang 37.4
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87895: Some(LegCarpus(Left, 2)) lin 43.7 ang 38.0
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87895: Some(LegCarpus(Left, 1)) lin 34.8 ang 46.2
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87896: Some(LegMerus(Left, 3)) lin 30.1 ang 41.2
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87896: Some(LegMerus(Left, 2)) lin 33.5 ang 31.7
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87896: Some(LegCarpus(Right, 2)) lin 31.0 ang 40.5
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87896: Some(LegCarpus(Left, 3)) lin 33.3 ang 44.8
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87896: Some(LegCarpus(Left, 2)) lin 39.4 ang 31.7
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87897: Some(LegMerus(Left, 3)) lin 30.7 ang 37.8
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87897: Some(LegMerus(Left, 2)) lin 31.9 ang 29.4
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87897: Some(LegCarpus(Right, 0)) lin 30.0 ang 39.9
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87897: Some(LegCarpus(Left, 3)) lin 33.8 ang 40.5
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87897: Some(LegCarpus(Left, 2)) lin 37.6 ang 28.2
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87898: Some(LegMerus(Left, 3)) lin 30.1 ang 35.7
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87898: Some(LegCarpus(Right, 3)) lin 33.0 ang 30.0
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87898: Some(LegCarpus(Right, 0)) lin 33.9 ang 39.0
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87898: Some(LegCarpus(Left, 3)) lin 33.4 ang 37.7
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87898: Some(LegCarpus(Left, 2)) lin 35.1 ang 25.6
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87899: Some(LegMerus(Right, 3)) lin 32.2 ang 29.0
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87899: Some(LegCarpus(Right, 3)) lin 34.8 ang 29.2
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87899: Some(LegCarpus(Right, 0)) lin 35.7 ang 35.7
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87899: Some(LegCarpus(Left, 3)) lin 31.7 ang 33.8
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87899: Some(LegCarpus(Left, 2)) lin 32.1 ang 24.4
+shipped [repro] near-miss worker 22 world 0 env 0 tick 87900: Some(LegCarpus(Left, 3)) lin 30.4 ang 32.3
+shipped [repro] near-miss worker 22 world 0 env 1 tick 177286: Some(LegMerus(Left, 3)) lin 8.8 ang 93.4
+shipped [repro] near-miss worker 22 world 0 env 0 tick 304198: Some(LegCarpus(Right, 2)) lin 27.4 ang 111.2
+shipped [repro] near-miss worker 22 world 0 env 0 tick 674660: Some(LegCarpus(Right, 3)) lin 15.7 ang 93.5
+shipped [repro] near-miss worker 28 world 0 env 1 tick 157530: Some(LegCarpus(Right, 2)) lin 15.1 ang 102.0
+shipped [repro] near-miss worker 28 world 0 env 0 tick 287386: Some(LegCarpus(Right, 3)) lin 17.3 ang 107.1
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: None lin 37.8 ang 128.1
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(ClawWrist(Right)) lin 103.2 ang 80.1
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(ClawShoulder(Right)) lin 74.6 ang 85.4
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegMerus(Right, 3)) lin 56.8 ang 128.0
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegBasis(Right, 3)) lin 43.2 ang 121.8
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCoxa(Right, 3)) lin 35.0 ang 129.0
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegMerus(Right, 2)) lin 50.0 ang 132.5
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegBasis(Right, 2)) lin 53.4 ang 131.4
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCoxa(Right, 2)) lin 43.4 ang 131.3
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegMerus(Right, 1)) lin 94.0 ang 127.2
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegBasis(Right, 1)) lin 70.8 ang 128.7
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCoxa(Right, 1)) lin 46.7 ang 122.2
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegMerus(Right, 0)) lin 76.2 ang 149.3
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegBasis(Right, 0)) lin 65.4 ang 127.6
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCoxa(Right, 0)) lin 57.3 ang 121.3
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(ClawWrist(Left)) lin 63.9 ang 128.6
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(ClawShoulder(Left)) lin 44.3 ang 128.7
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegMerus(Left, 3)) lin 62.7 ang 108.2
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegBasis(Left, 3)) lin 33.5 ang 144.0
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCoxa(Left, 3)) lin 13.9 ang 143.8
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegMerus(Left, 2)) lin 65.1 ang 39.1
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegBasis(Left, 2)) lin 35.6 ang 139.2
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCoxa(Left, 2)) lin 8.4 ang 120.9
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegMerus(Left, 1)) lin 68.2 ang 112.0
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegBasis(Left, 1)) lin 47.0 ang 111.7
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCoxa(Left, 1)) lin 27.9 ang 114.0
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegMerus(Left, 0)) lin 44.7 ang 101.7
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegBasis(Left, 0)) lin 35.5 ang 131.9
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCoxa(Left, 0)) lin 37.6 ang 114.7
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(ClawPincer(Right)) lin 100.1 ang 79.8
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(ClawPincer(Left)) lin 70.5 ang 128.6
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCarpus(Right, 3)) lin 62.1 ang 127.1
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCarpus(Right, 2)) lin 50.0 ang 132.3
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCarpus(Right, 1)) lin 114.3 ang 116.1
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCarpus(Right, 0)) lin 94.3 ang 149.3
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCarpus(Left, 3)) lin 55.6 ang 108.4
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCarpus(Left, 2)) lin 66.9 ang 35.0
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCarpus(Left, 1)) lin 86.0 ang 110.3
+shipped [repro] near-miss worker 34 world 0 env 0 tick 58602: Some(LegCarpus(Left, 0)) lin 31.9 ang 93.3
+shipped [repro] near-miss worker 40 world 0 env 1 tick 581593: Some(LegCarpus(Left, 1)) lin 22.0 ang 120.4
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: None lin 355.2 ang 1478.9
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(ClawWrist(Right)) lin 11190.4 ang 63767.9
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(ClawShoulder(Right)) lin 7841.4 ang 31288.2
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegMerus(Right, 3)) lin 534.7 ang 2578.9
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegBasis(Right, 3)) lin 111.7 ang 2289.2
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCoxa(Right, 3)) lin 342.4 ang 1605.3
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegMerus(Right, 2)) lin 729.9 ang 922.9
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegBasis(Right, 2)) lin 554.0 ang 1043.5
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCoxa(Right, 2)) lin 262.1 ang 1452.9
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegMerus(Right, 1)) lin 556.4 ang 1479.4
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegBasis(Right, 1)) lin 375.5 ang 1492.5
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCoxa(Right, 1)) lin 402.3 ang 1500.4
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegMerus(Right, 0)) lin 246.6 ang 1644.0
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegBasis(Right, 0)) lin 186.6 ang 1464.0
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCoxa(Right, 0)) lin 565.1 ang 1452.7
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(ClawWrist(Left)) lin 802.6 ang 1208.2
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(ClawShoulder(Left)) lin 524.8 ang 1194.7
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegMerus(Left, 3)) lin 853.5 ang 2153.6
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegBasis(Left, 3)) lin 784.5 ang 1838.8
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCoxa(Left, 3)) lin 410.5 ang 1452.4
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegMerus(Left, 2)) lin 1470.6 ang 2840.5
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegBasis(Left, 2)) lin 642.8 ang 3195.6
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCoxa(Left, 2)) lin 317.5 ang 1460.6
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegMerus(Left, 1)) lin 1022.7 ang 2309.0
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegBasis(Left, 1)) lin 524.6 ang 2271.6
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCoxa(Left, 1)) lin 305.6 ang 1571.0
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegMerus(Left, 0)) lin 898.1 ang 1809.6
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegBasis(Left, 0)) lin 646.9 ang 1283.8
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCoxa(Left, 0)) lin 514.2 ang 1464.0
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(ClawPincer(Right)) lin 15089.7 ang 63774.3
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(ClawPincer(Left)) lin 842.1 ang 1205.3
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCarpus(Right, 3)) lin 847.2 ang 2353.4
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCarpus(Right, 2)) lin 804.7 ang 673.3
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCarpus(Right, 1)) lin 722.8 ang 1265.1
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCarpus(Right, 0)) lin 506.1 ang 1324.7
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCarpus(Left, 3)) lin 687.2 ang 2119.6
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCarpus(Left, 2)) lin 2018.3 ang 2890.4
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCarpus(Left, 1)) lin 1336.9 ang 2372.2
+shipped [repro] near-miss worker 17 world 0 env 0 tick 130565: Some(LegCarpus(Left, 0)) lin 1115.7 ang 1661.8
+shipped [repro] near-miss worker 17 world 1 env 0 tick 457830: Some(LegCarpus(Right, 0)) lin 16.2 ang 132.6
+shipped [repro] near-miss worker 17 world 1 env 0 tick 600513: Some(LegCarpus(Right, 0)) lin 32.0 ang 95.0
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48437: Some(ClawWrist(Right)) lin 39.1 ang 33.7
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48437: Some(ClawWrist(Left)) lin 36.3 ang 55.5
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48437: Some(LegMerus(Left, 2)) lin 46.0 ang 93.4
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48437: Some(ClawPincer(Right)) lin 40.7 ang 33.6
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48437: Some(ClawPincer(Left)) lin 37.7 ang 54.8
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48437: Some(LegCarpus(Left, 2)) lin 55.9 ang 96.2
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48438: Some(LegCarpus(Left, 2)) lin 53.1 ang 114.6
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48439: Some(LegMerus(Left, 2)) lin 31.5 ang 59.4
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48439: Some(LegCarpus(Left, 2)) lin 45.4 ang 58.6
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48440: Some(LegMerus(Left, 2)) lin 32.1 ang 44.5
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48440: Some(LegCarpus(Right, 2)) lin 30.7 ang 34.5
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48440: Some(LegCarpus(Left, 2)) lin 42.5 ang 44.5
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48441: Some(LegMerus(Left, 2)) lin 33.1 ang 27.9
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48441: Some(LegCarpus(Right, 2)) lin 34.2 ang 42.3
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48441: Some(LegCarpus(Left, 2)) lin 40.3 ang 34.7
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48442: Some(LegMerus(Left, 3)) lin 32.6 ang 36.9
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48442: Some(LegMerus(Left, 2)) lin 32.2 ang 28.0
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48442: Some(LegCarpus(Left, 3)) lin 31.0 ang 34.8
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48442: Some(LegCarpus(Left, 2)) lin 38.6 ang 27.9
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48443: Some(LegMerus(Left, 3)) lin 33.2 ang 35.9
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48443: Some(LegMerus(Left, 2)) lin 30.5 ang 26.6
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48443: Some(LegCarpus(Left, 3)) lin 32.5 ang 33.2
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48443: Some(LegCarpus(Left, 2)) lin 36.6 ang 26.6
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48444: Some(LegMerus(Right, 3)) lin 30.2 ang 30.6
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48444: Some(LegMerus(Left, 3)) lin 31.4 ang 33.3
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48444: Some(LegCarpus(Right, 3)) lin 33.6 ang 31.1
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48444: Some(LegCarpus(Left, 3)) lin 31.3 ang 33.9
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48444: Some(LegCarpus(Left, 2)) lin 33.4 ang 20.9
+shipped [repro] near-miss worker 23 world 0 env 1 tick 48445: Some(LegCarpus(Left, 2)) lin 30.8 ang 17.8
+shipped [repro] near-miss worker 23 world 0 env 1 tick 407921: Some(LegCarpus(Left, 1)) lin 25.7 ang 105.9
+shipped [repro] near-miss worker 29 world 0 env 1 tick 274447: Some(LegCarpus(Right, 3)) lin 16.7 ang 100.0
+shipped [repro] near-miss worker 29 world 0 env 0 tick 421861: Some(LegCarpus(Right, 2)) lin 6.2 ang 114.1
+shipped [repro] near-miss worker 29 world 0 env 0 tick 515156: Some(LegCarpus(Right, 3)) lin 25.4 ang 142.2
+shipped [repro] near-miss worker 35 world 0 env 1 tick 94644: Some(LegCarpus(Right, 3)) lin 18.2 ang 106.5
+shipped [repro] near-miss worker 35 world 0 env 1 tick 589335: Some(LegCarpus(Left, 0)) lin 22.7 ang 142.6
+shipped [repro] near-miss worker 41 world 0 env 1 tick 256844: Some(ClawWrist(Left)) lin 25.8 ang 109.5
+shipped [repro] near-miss worker 41 world 0 env 1 tick 256844: Some(ClawPincer(Left)) lin 19.0 ang 109.5
+outer4 [repro] near-miss worker 16 world 0 env 1 tick 279996: Some(LegCarpus(Left, 2)) lin 25.5 ang 105.7
+outer4 [repro] near-miss worker 16 world 0 env 0 tick 537808: Some(LegMerus(Left, 1)) lin 26.2 ang 91.9
+outer4 [repro] near-miss worker 16 world 0 env 0 tick 537808: Some(LegCarpus(Left, 1)) lin 39.2 ang 171.7
+outer4 [repro] near-miss worker 22 world 0 env 0 tick 56744: Some(LegCarpus(Right, 3)) lin 20.0 ang 122.5
+outer4 [repro] near-miss worker 34 world 0 env 0 tick 666278: Some(ClawWrist(Right)) lin 269.1 ang 355.7
+outer4 [repro] near-miss worker 34 world 0 env 0 tick 666278: Some(ClawShoulder(Right)) lin 118.1 ang 445.5
+outer4 [repro] near-miss worker 34 world 0 env 0 tick 666278: Some(ClawPincer(Right)) lin 255.3 ang 355.6
+outer4 [repro] near-miss worker 34 world 1 env 0 tick 100115: Some(LegMerus(Right, 0)) lin 17.5 ang 105.7
+outer4 [repro] near-miss worker 34 world 1 env 0 tick 100115: Some(LegCarpus(Right, 0)) lin 36.1 ang 120.3
+outer4 [repro] near-miss worker 34 world 1 env 1 tick 115605: Some(LegCarpus(Left, 0)) lin 13.2 ang 90.5
+outer4 [repro] near-miss worker 17 world 0 env 0 tick 24896: Some(LegCarpus(Right, 2)) lin 14.6 ang 104.4
+outer4 [repro] near-miss worker 17 world 0 env 0 tick 256270: Some(LegCarpus(Right, 3)) lin 16.4 ang 102.1
+outer4 [repro] near-miss worker 23 world 0 env 1 tick 266734: Some(LegCarpus(Right, 3)) lin 16.8 ang 104.2
+outer4 [repro] near-miss worker 23 world 0 env 1 tick 266751: Some(LegCarpus(Right, 3)) lin 20.9 ang 128.0
+outer4 [repro] near-miss worker 35 world 0 env 0 tick 642761: Some(LegCarpus(Right, 2)) lin 22.6 ang 91.8
+outer4 [repro] near-miss worker 41 world 0 env 1 tick 682493: Some(LegCarpus(Right, 3)) lin 20.1 ang 117.3
+outer4 [repro] near-miss worker 18 world 0 env 0 tick 64602: Some(LegCarpus(Right, 3)) lin 31.7 ang 178.4
+outer4 [repro] near-miss worker 18 world 0 env 0 tick 76889: Some(LegMerus(Right, 3)) lin 24.3 ang 150.4
+outer4 [repro] near-miss worker 18 world 0 env 0 tick 76889: Some(LegCarpus(Right, 3)) lin 40.4 ang 176.8
+outer4 [repro] near-miss worker 18 world 0 env 0 tick 657961: Some(LegCarpus(Right, 3)) lin 22.2 ang 133.6
+outer4 [repro] near-miss worker 24 world 0 env 1 tick 614703: Some(LegCarpus(Right, 3)) lin 14.1 ang 92.5
+outer4 [repro] near-miss worker 24 world 0 env 0 tick 617655: Some(LegCarpus(Right, 3)) lin 19.6 ang 122.1
+outer4 [repro] near-miss worker 30 world 0 env 0 tick 714426: Some(LegCarpus(Left, 2)) lin 36.3 ang 180.9
+outer4 [repro] near-miss worker 30 world 0 env 1 tick 761884: Some(LegCarpus(Left, 2)) lin 15.6 ang 90.2
+outer4 [repro] near-miss worker 36 world 0 env 0 tick 29120: Some(LegCarpus(Right, 3)) lin 21.1 ang 129.5
+outer4 [repro] near-miss worker 36 world 0 env 0 tick 58437: Some(LegCarpus(Left, 1)) lin 13.1 ang 90.8
+outer4 [repro] near-miss worker 42 world 0 env 1 tick 344813: Some(LegCarpus(Right, 0)) lin 8.8 ang 97.0
+outer4 [repro] near-miss worker 42 world 0 env 1 tick 386178: Some(LegCarpus(Right, 3)) lin 16.5 ang 92.2
+outer4 [repro] near-miss worker 13 world 0 env 0 tick 250537: Some(LegCarpus(Right, 0)) lin 13.7 ang 90.1
+outer4 [repro] near-miss worker 13 world 0 env 0 tick 596145: Some(LegCarpus(Left, 2)) lin 38.1 ang 164.6
+outer4 [repro] near-miss worker 19 world 0 env 1 tick 176441: Some(LegCarpus(Right, 3)) lin 23.0 ang 146.5
+outer4 [repro] near-miss worker 19 world 0 env 1 tick 653141: Some(LegMerus(Left, 3)) lin 11.2 ang 97.8
+outer4 [repro] near-miss worker 19 world 0 env 1 tick 653141: Some(LegCarpus(Left, 3)) lin 18.9 ang 97.4
+outer4 [repro] near-miss worker 31 world 0 env 0 tick 472611: Some(LegCarpus(Left, 0)) lin 13.2 ang 93.2
+outer4 [repro] near-miss worker 31 world 0 env 0 tick 472633: Some(LegCarpus(Left, 0)) lin 12.2 ang 90.8
+outer4 [repro] near-miss worker 37 world 0 env 0 tick 176453: Some(LegCarpus(Left, 0)) lin 22.7 ang 151.5
+outer4 [repro] near-miss worker 43 world 0 env 1 tick 198736: Some(LegCarpus(Left, 1)) lin 28.1 ang 139.7
+outer4 [repro] near-miss worker 43 world 0 env 1 tick 455116: Some(LegMerus(Right, 3)) lin 17.3 ang 123.5
+outer4 [repro] near-miss worker 43 world 0 env 1 tick 455116: Some(LegCarpus(Right, 3)) lin 32.0 ang 178.0
+outer4 [repro] near-miss worker 43 world 0 env 1 tick 768154: Some(LegCarpus(Left, 1)) lin 17.0 ang 103.0
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 44473: Some(LegCarpus(Right, 3)) lin 14.8 ang 100.4
+outer4 [repro] near-miss worker 26 world 0 env 0 tick 372014: Some(LegCarpus(Left, 0)) lin 23.3 ang 128.5
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: None lin 171.9 ang 421.2
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(ClawWrist(Right)) lin 357.4 ang 1444.5
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(ClawShoulder(Right)) lin 183.9 ang 527.1
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegMerus(Right, 3)) lin 452.1 ang 837.0
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegBasis(Right, 3)) lin 299.4 ang 735.7
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCoxa(Right, 3)) lin 198.6 ang 759.2
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegMerus(Right, 2)) lin 256.6 ang 578.1
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegBasis(Right, 2)) lin 239.1 ang 189.3
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCoxa(Right, 2)) lin 213.6 ang 424.0
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegMerus(Right, 1)) lin 327.7 ang 533.4
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegBasis(Right, 1)) lin 271.1 ang 488.7
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCoxa(Right, 1)) lin 181.8 ang 522.3
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegMerus(Right, 0)) lin 320.5 ang 518.9
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegBasis(Right, 0)) lin 204.7 ang 513.6
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCoxa(Right, 0)) lin 116.5 ang 432.9
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(ClawWrist(Left)) lin 176.3 ang 205.4
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(ClawShoulder(Left)) lin 151.9 ang 217.9
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegMerus(Left, 3)) lin 106.7 ang 316.4
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegBasis(Left, 3)) lin 102.6 ang 388.9
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCoxa(Left, 3)) lin 161.4 ang 438.7
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegMerus(Left, 2)) lin 585.2 ang 1267.9
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegBasis(Left, 2)) lin 347.1 ang 1256.2
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCoxa(Left, 2)) lin 203.6 ang 890.5
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegMerus(Left, 1)) lin 92.6 ang 207.5
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegBasis(Left, 1)) lin 96.9 ang 131.4
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCoxa(Left, 1)) lin 164.9 ang 426.6
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegMerus(Left, 0)) lin 304.8 ang 593.1
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegBasis(Left, 0)) lin 197.1 ang 616.5
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCoxa(Left, 0)) lin 105.6 ang 576.0
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(ClawPincer(Right)) lin 321.2 ang 1445.4
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(ClawPincer(Left)) lin 167.6 ang 205.2
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCarpus(Right, 3)) lin 432.8 ang 920.1
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCarpus(Right, 2)) lin 134.4 ang 2451.0
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCarpus(Right, 1)) lin 305.1 ang 221.4
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCarpus(Right, 0)) lin 379.6 ang 518.9
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCarpus(Left, 3)) lin 120.1 ang 472.0
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCarpus(Left, 2)) lin 799.8 ang 2611.5
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCarpus(Left, 1)) lin 156.8 ang 479.5
+outer4 [repro] near-miss worker 26 world 0 env 1 tick 687381: Some(LegCarpus(Left, 0)) lin 240.6 ang 565.9
+outer4 [repro] near-miss worker 32 world 0 env 0 tick 135836: Some(LegCarpus(Right, 3)) lin 18.0 ang 110.0
+outer4 [repro] near-miss worker 38 world 0 env 1 tick 405359: Some(LegMerus(Right, 2)) lin 17.9 ang 92.7
+outer4 [repro] near-miss worker 38 world 0 env 1 tick 405359: Some(LegCarpus(Right, 2)) lin 44.1 ang 139.5
+outer4 [repro] near-miss worker 44 world 0 env 0 tick 513542: Some(LegCarpus(Left, 3)) lin 12.1 ang 95.9
+outer4 [repro] near-miss worker 15 world 0 env 1 tick 753148: Some(LegCarpus(Left, 0)) lin 12.0 ang 91.5
+outer4 [repro] near-miss worker 21 world 0 env 1 tick 744928: Some(LegMerus(Left, 3)) lin 7.5 ang 91.6
+outer4 [repro] near-miss worker 21 world 0 env 1 tick 744928: Some(LegCarpus(Left, 3)) lin 14.7 ang 91.1
+outer4 [repro] near-miss worker 27 world 0 env 1 tick 435640: Some(LegCarpus(Right, 2)) lin 29.8 ang 160.7
+outer4 [repro] near-miss worker 33 world 0 env 0 tick 557596: Some(LegCarpus(Left, 0)) lin 41.7 ang 223.2
+outer4 [repro] near-miss worker 39 world 0 env 0 tick 52542: Some(LegCarpus(Left, 1)) lin 29.0 ang 134.7
+outer4 [repro] near-miss worker 39 world 0 env 0 tick 750633: Some(LegCarpus(Left, 2)) lin 18.2 ang 118.3
+outer4 [repro] near-miss worker 45 world 0 env 1 tick 663297: Some(LegCarpus(Left, 2)) lin 45.5 ang 233.0
+sub4 [repro] near-miss worker 26 world 0 env 0 tick 506406: Some(LegCarpus(Right, 2)) lin 16.4 ang 98.7
+sub4 [repro] near-miss worker 26 world 0 env 0 tick 725414: Some(LegCarpus(Right, 3)) lin 21.4 ang 128.0
+sub4 [repro] near-miss worker 38 world 0 env 1 tick 376478: Some(LegCarpus(Right, 3)) lin 14.7 ang 93.5
+sub4 [repro] near-miss worker 15 world 0 env 0 tick 363969: Some(LegCarpus(Left, 0)) lin 12.8 ang 92.1
+sub4 [repro] near-miss worker 21 world 0 env 1 tick 567237: Some(LegCarpus(Right, 3)) lin 17.0 ang 110.9
+sub4 [repro] near-miss worker 27 world 0 env 0 tick 33774: Some(LegCarpus(Right, 3)) lin 28.6 ang 134.5
+sub4 [repro] near-miss worker 27 world 0 env 1 tick 292860: Some(LegCarpus(Right, 3)) lin 18.5 ang 151.1
+sub4 [repro] near-miss worker 45 world 0 env 0 tick 383859: Some(LegCarpus(Right, 3)) lin 14.0 ang 104.3
+sub4 [repro] near-miss worker 16 world 0 env 0 tick 298732: Some(LegCarpus(Right, 3)) lin 16.7 ang 110.0
+sub4 [repro] near-miss worker 34 world 0 env 0 tick 442811: Some(LegCarpus(Left, 3)) lin 13.5 ang 90.3
+sub4 [repro] near-miss worker 17 world 0 env 0 tick 91808: Some(LegCarpus(Left, 0)) lin 22.6 ang 137.3
+sub4 [repro] near-miss worker 41 world 0 env 1 tick 523794: Some(LegCarpus(Right, 3)) lin 18.0 ang 114.5
+sub4 [repro] near-miss worker 12 world 0 env 1 tick 613910: Some(LegCarpus(Right, 3)) lin 16.3 ang 104.2
+sub4 [repro] near-miss worker 12 world 0 env 0 tick 714937: Some(LegCarpus(Right, 2)) lin 22.6 ang 127.4
+sub4 [repro] near-miss worker 24 world 0 env 1 tick 36150: Some(LegCarpus(Right, 3)) lin 25.3 ang 137.4
+sub4 [repro] near-miss worker 36 world 0 env 0 tick 115160: Some(LegCarpus(Left, 0)) lin 17.1 ang 111.1
+sub4 [repro] near-miss worker 42 world 0 env 0 tick 545956: Some(LegCarpus(Right, 3)) lin 15.7 ang 100.3
+sub4 [repro] near-miss worker 19 world 0 env 0 tick 178014: Some(LegCarpus(Right, 3)) lin 14.4 ang 90.1
+sub4 [repro] near-miss worker 19 world 0 env 0 tick 199486: Some(LegCarpus(Right, 3)) lin 17.5 ang 110.0
+sub4 [repro] near-miss worker 31 world 0 env 0 tick 253726: Some(LegCarpus(Right, 2)) lin 21.2 ang 158.3
+sub4 [repro] near-miss worker 31 world 0 env 1 tick 717106: Some(LegCarpus(Left, 2)) lin 11.0 ang 98.2
