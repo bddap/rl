@@ -648,6 +648,48 @@ mod tests {
     }
 
     #[test]
+    fn recording_drive_is_sampled_not_the_policy_mean() {
+        let dir = std::env::temp_dir().join(format!("rl_test_explore_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = headless_training_app(&dir, 0x0E5C);
+
+        let recording = |app: &App| {
+            matches!(
+                app.world().non_send::<WorkerState>().mode.envs[0].phase,
+                EnvPhase::Recording
+            )
+        };
+        app.update();
+        for _ in 0..RESET_GRACE_TICKS {
+            if recording(&app) {
+                break;
+            }
+            app.update();
+        }
+        assert!(recording(&app), "env 0 must reach Recording");
+
+        app.world_mut()
+            .run_system_once(brain_step)
+            .expect("brain_step");
+        let drive = app.world().resource::<CrabActions>().rows()[0];
+
+        // brain_step folds this obs into the normalizer before normalizing, so the
+        // frozen normalize now reproduces the policy input it saw.
+        let st = app.world().non_send::<WorkerState>();
+        let obs = app.world().resource::<CrabObservation>();
+        let input = st.obs_normalizer.normalize_frozen(&obs.rows()[0]);
+        let (head, _) = forward_pass(st, &[input]);
+        let mean = sample_actions(&head, &[[0.0; ACTION_SIZE]], &st.device)[0].drive;
+        assert_ne!(
+            drive, mean,
+            "a recording env must drive an exploration sample — the deterministic \
+             (inference) action is the policy mean"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn reward_pairs_with_the_action_that_produced_it() {
         let checkpoint_dir =
             std::env::temp_dir().join(format!("rl_test_phase15_{}", std::process::id()));

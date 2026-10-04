@@ -143,6 +143,11 @@ pub(crate) struct EnvEpisode {
 }
 
 impl WorkerState {
+    #[cfg(test)]
+    pub(crate) fn is_recording(&self, e: usize) -> bool {
+        matches!(self.mode.envs[e].phase, EnvPhase::Recording)
+    }
+
     pub(super) fn finalize_transitions(
         &mut self,
         steps: &[EnvStep],

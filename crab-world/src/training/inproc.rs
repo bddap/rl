@@ -424,10 +424,31 @@ mod tests {
         let (config, dir) = scratch_config("rollout_env", m as u64);
 
         let mut app = build_rollout_app(0, &config, ArchId::DEFAULT);
-        // Past spawn + settle grace, into live recording.
+
+        // Only ticks that begin and end in Recording carry a sampled row: an episode
+        // ending in the window re-settles that env with rested actions (rl#429).
+        let mut was_recording = vec![false; m];
+        let mut live_ticks = vec![0u32; m];
         for _ in 0..(RESET_GRACE_TICKS + 24) {
             app.update();
+            let state = app.world().non_send::<WorkerState>();
+            let rows = app.world().resource::<CrabActions>().rows();
+            for e in 0..m {
+                let recording = state.is_recording(e);
+                if was_recording[e] && recording {
+                    assert!(
+                        rows[e].iter().any(|v| *v != 0.0),
+                        "env {e}: the training driver must be sampling live actions"
+                    );
+                    live_ticks[e] += 1;
+                }
+                was_recording[e] = recording;
+            }
         }
+        assert!(
+            live_ticks.iter().all(|&n| n > 0),
+            "every env must record live ticks: {live_ticks:?}"
+        );
 
         assert!(
             app.world().contains_resource::<VehicleControls>(),
@@ -440,22 +461,6 @@ mod tests {
         let mut envs: Vec<usize> = crabs.iter(app.world()).map(|e| e.0).collect();
         envs.sort_unstable();
         assert_eq!(envs, vec![0, 1], "one crab per env in the one world");
-
-        let actions = app.world().resource::<CrabActions>();
-        for e in 0..m {
-            assert!(
-                actions.rows()[e].iter().any(|v| *v != 0.0),
-                "env {e}: the training driver must be sampling live actions post-settle"
-            );
-        }
-        let first: Vec<_> = (0..m).map(|e| actions.rows()[e]).collect();
-        app.update();
-        let actions = app.world().resource::<CrabActions>();
-        assert!(
-            (0..m).any(|e| actions.rows()[e] != first[e]),
-            "consecutive steps must draw fresh exploration samples — an inference \
-             (deterministic) driver would repeat under a frozen obs"
-        );
 
         let spawns = app.world().resource::<crate::bot::CrabSpawns>();
         let targets = app.world().resource::<CrabTargets>();
@@ -480,19 +485,10 @@ mod tests {
     }
 
     pub(super) fn scratch_config(tag: &str, m: u64) -> (TrainConfig, std::path::PathBuf) {
-        use clap::Parser;
         let dir = std::env::temp_dir().join(format!("rl_test_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let config = TrainConfig::try_parse_from([
-            "rl",
-            "--checkpoint-dir",
-            dir.to_str().unwrap(),
-            "--envs",
-            &m.to_string(),
-        ])
-        .expect("parse scratch TrainConfig");
-        (config, dir)
+        (TrainConfig::scratch(&dir, m, 7), dir)
     }
 
     #[test]
