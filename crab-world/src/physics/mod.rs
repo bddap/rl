@@ -74,18 +74,18 @@ pub const PHYSICS_SUBSTEPS: usize = 2;
 /// phantom COM force across realization draws — straddling the rl#321 0.5
 /// ceiling and approaching the pre-fix 0.64 scale — while 2/2 measures
 /// 0.25–0.39 with real margin, for <1 ms/tick over 1/1 (4/4 buys nothing
-/// further; 2/2 is the knee). Outer 2 (down from rapier's default 4, rl#396
-/// stage 4): the driven-gait step is ~96% solver and outer count is its price —
-/// the rapier-profiler probe measured 5.4→3.5 ms/substep (vel-resolution
-/// 3.9→2.0 ms) for outer 4→2 on the GCR driven crab. The rl#396 stage-2 TV
-/// ruler put the step-carrying frame right AT the 16.7 ms vsync budget
-/// (~15 Hz of ~30 ms present pairs from just-missed frames); this shave is
-/// the margin that moves it inside. Outer 3 is NOT a milder option: it
-/// measured 4.5 vs 4.4 ms/substep against outer 4 — noise; the drop is at 2.
-/// The rl#321 phantom residual stayed at its noise floor and chase-eval did
-/// not regress (0.17→0.26 m mean pair progress, deployed release brain).
-/// Stabilization at 3 (not 2) buys back the CONTACT-DEPTH convergence the
-/// outer cut halved, and 3 is the whole corridor: at 2×(2/2/2) the rl#312
+/// further; 2/2 is the knee). Outer 4 (rl#351): on the frozen hull checkpoint
+/// the limit-saturated multibody solve (21–36 of 38 joints at a stop, on ground
+/// contact) blows up in one tick at outer 2 — 13 rl#343 trips in 36.2M rollout
+/// ticks against 2 at outer 4, matched seeds, one-sided p = 0.0037
+/// (`docs/evidence/chase-archaeology/integrity-lever-ab-36m`), and every trip
+/// hard-fails a training run. ×4 substeps also cut it to 2 trips, at 1.54× the
+/// rollout CPU per tick against outer 4's 1.33×. The price is the frame budget
+/// rl#396 stage 4 bought by dropping to outer 2 (5.4→3.5 ms/substep on the GCR
+/// driven crab, which had put the step-carrying TV frame at the 16.7 ms vsync
+/// line): the headless driven step p50 goes 6.8→10.4 ms on the training host.
+/// Stabilization at 3 (not 2) was measured at outer 2, where it bought back the
+/// CONTACT-DEPTH convergence the outer cut halved, and 3 was the whole corridor: at 2×(2/2/2) the rl#312
 /// actuator-load interpenetration residual crossed its 25 mm/60-tick caps
 /// (27.6 mm, 66 ticks — vs main's worst-observed 13.9 mm/8 ticks). The stab-4
 /// disqualifier ("REST crab creeps 12 m") is RETRACTED (rl#406): that ruler was
@@ -97,11 +97,10 @@ pub const PHYSICS_SUBSTEPS: usize = 2;
 /// nothing measured". Stab sweeps are nearly free (3.51→3.54 ms/substep for
 /// 2→4) because PGS+assembly own the solver's cost. A ZERO-DRIVE crab still
 /// gets `CRAB_SETTLE_EXTRA_ITERATIONS` ADDED to the outer count, so its
-/// settle total moved 16→14 — inside spawn.rs's measured bracket (awake at 8
-/// total, the floor was set against 16); sleep engagement is pinned by
+/// settle total is 16 — the total spawn.rs's floor was set against; sleep engagement is pinned by
 /// `resting_crab_falls_asleep` (headless graph) and the flat-ground armed
 /// smoke's sleep bound (render graph, rl#406).
-pub const SOLVER_ITERATIONS: (usize, usize, usize) = (2, 12, 3);
+pub const SOLVER_ITERATIONS: (usize, usize, usize) = (4, 12, 3);
 
 /// One physics step's solver budget: [`SOLVER_ITERATIONS`]-shaped counts per substep
 /// and substeps per [`PHYSICS_DT`]. Diagnostics vary it (`sally-replay`, `rl-train
