@@ -68,7 +68,25 @@ impl Plugin for RenderVideoPlugin {
         }
 
         app.insert_resource(crate::terrain::Terrain::new(self.rollout_terrain.grid()));
-        add_inference(app, &self.checkpoint_dir, None);
+        // A render is a read of one checkpoint (an rl#427 read mark above all): an
+        // absent or refused set fails here, never a quiet rest-pose stand-in.
+        let policy = crate::policy::load_armed(&self.checkpoint_dir).unwrap_or_else(|e| {
+            panic!(
+                "render-video: no usable checkpoint at {}: {e:?}",
+                self.checkpoint_dir.display()
+            )
+        });
+        eprintln!(
+            "RENDER_CHECKPOINT dir={} ticks={}",
+            self.checkpoint_dir.display(),
+            std::fs::read_to_string(
+                self.checkpoint_dir
+                    .join(crate::training::checkpoint::TICK_WATERMARK_FILENAME)
+            )
+            .map(|t| t.trim().to_owned())
+            .unwrap_or_else(|_| "unrecorded".into())
+        );
+        add_inference(app, policy);
         app.insert_resource(super::DemoRng::seeded(self.seed));
         app.insert_resource(ShotConfig {
             path: self.path.clone(),

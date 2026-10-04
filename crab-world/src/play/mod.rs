@@ -21,7 +21,7 @@ use crate::bot::BotSet;
 use crate::bot::body::CrabCarapace;
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
-use crate::policy::RigDims;
+use crate::policy::{Policy, RigDims};
 pub use controls::DemoControls;
 pub use render_video::RenderVideoPlugin;
 pub use rig_pose::RigPosePart;
@@ -67,7 +67,9 @@ pub struct DemoPlugin {
 
 impl Plugin for DemoPlugin {
     fn build(&self, app: &mut App) {
-        add_inference(app, &self.checkpoint_dir, self.live_checkpoint_dir.clone());
+        let mut policy = Policy::load(&self.checkpoint_dir);
+        policy.set_live_dir(self.live_checkpoint_dir.clone());
+        add_inference(app, policy);
         graph::register(app, self.graph);
         app.insert_resource(DemoRng::seeded(self.seed));
         app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default());
@@ -140,7 +142,7 @@ pub(in crate::play) struct ShotConfig {
 
 impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
-        add_inference(app, &self.checkpoint_dir, None);
+        add_inference(app, Policy::load(&self.checkpoint_dir));
         app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
         if let Some((angle, part)) = self.rig_pose {
             app.insert_resource(rig_pose::RigPose::new(angle, part))

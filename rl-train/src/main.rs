@@ -50,6 +50,12 @@ struct LearnArgs {
 
     #[arg(long, default_value_t = 0)]
     iters: u64,
+
+    /// A pre-registered read mark (repeatable): the set held when the odometer first
+    /// reaches TICKS is kept in `<checkpoint-dir>/marks/TICKS/` (rl#427).
+    #[arg(long = "read-mark", value_name = "TICKS",
+          value_parser = clap::value_parser!(u64).range(1..))]
+    read_marks: Vec<u64>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -137,6 +143,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 training::inproc::default_workers(l.workers),
                 l.horizon,
                 l.iters,
+                &l.read_marks,
             );
             Ok(ExitCode::SUCCESS)
         }

@@ -392,22 +392,29 @@ impl BestKeeper {
     /// optimizer paired with a new brain.
     fn snapshot(&self, progress: Progress) -> std::io::Result<()> {
         super::replace_dir_atomically(&self.checkpoint_dir.join(BEST_SUBDIR), |staging| {
-            for f in BEST_FILES {
-                let src = self.checkpoint_dir.join(f.name);
-                match std::fs::copy(&src, staging.join(f.name)) {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound && !f.required => {}
-                    Err(e) => {
-                        return Err(std::io::Error::new(
-                            e.kind(),
-                            format!("staging {} from {}: {e}", f.name, src.display()),
-                        ));
-                    }
-                }
-            }
+            stage_set(&self.checkpoint_dir, staging)?;
             write_progress_sidecar(staging, progress)
         })
     }
+}
+
+/// Copy the live set's members from `checkpoint_dir` into `staging`; a missing
+/// REQUIRED member is an error. Shared by `best/` and the read marks (rl#427).
+pub(super) fn stage_set(checkpoint_dir: &Path, staging: &Path) -> std::io::Result<()> {
+    for f in BEST_FILES {
+        let src = checkpoint_dir.join(f.name);
+        match std::fs::copy(&src, staging.join(f.name)) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !f.required => {}
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("staging {} from {}: {e}", f.name, src.display()),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_progress_sidecar(best_dir: &Path, progress: Progress) -> std::io::Result<()> {

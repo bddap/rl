@@ -39,10 +39,13 @@ fn snapshot_policy(state: &LearnerState, log_std_floor: f32) -> RollRequest {
 /// carried previous-generation `optimizer.bin` refuses at load by stamp — a resume
 /// then starts the moments cold rather than blocking every future checkpoint on a
 /// persistent optimizer-serialize fault.
-fn persist_checkpoint(state: &LearnerState, gpu_learner: &crate::training::gpu::GpuLearner) {
+fn persist_checkpoint(
+    state: &LearnerState,
+    gpu_learner: &crate::training::gpu::GpuLearner,
+) -> bool {
     state.save_checkpoint(|paths, save_stamp| {
         gpu_learner.save_adam_state(&paths.optimizer_path(), state.brain().arch(), save_stamp);
-    });
+    })
 }
 
 /// Phase 2 — roll one synchronous horizon across all threads: send each its request,
@@ -254,6 +257,7 @@ pub fn run_learner(
     k: usize,
     horizon: u64,
     iters: u64,
+    read_marks: &[u64],
 ) {
     // Before any world is built, so the rollout threads spawned below inherit it and a
     // foreground game preempts training.
@@ -364,6 +368,9 @@ pub fn run_learner(
     // while the demo/release — which mirror `best/` — hold the best-by-THE-metric gait.
     // Resumes the running bar from the sidecar.
     let mut best_keeper = crate::training::best::BestKeeper::new(&checkpoint_dir, config.terrain);
+    let mut read_marks =
+        crate::training::marks::ReadMarks::new(&checkpoint_dir, read_marks, total_ticks)
+            .unwrap_or_else(|e| panic!("[learner] {e}"));
 
     let compute_threads = bevy::tasks::ComputeTaskPool::get().thread_num();
     eprintln!(
@@ -413,7 +420,8 @@ pub fn run_learner(
         // 1) Capture the consistent per-iteration snapshot (weights + master normalizer,
         //    none half-updated) and persist a checkpoint.
         let request = snapshot_policy(&state, log_std_floor);
-        persist_checkpoint(&state, &gpu_learner);
+        let saved = persist_checkpoint(&state, &gpu_learner);
+        read_marks.keep_due(total_ticks, saved);
 
         // 2) Roll one synchronous horizon across all threads.
         let rollout_start = Instant::now();
@@ -507,7 +515,8 @@ pub fn run_learner(
     // and a later resume warm-starts the moments instead of refusing a stale stamp
     // (bddap/rl#215). The rollout threads are torn down by their Drop (channel close +
     // join) when `threads` drops.
-    persist_checkpoint(&state, &gpu_learner);
+    let saved = persist_checkpoint(&state, &gpu_learner);
+    read_marks.keep_due(total_ticks, saved);
     if timed_samples > 0 {
         let rollout_sps = timed_samples as f64 / timed_rollout_secs.max(1e-9);
         let e2e_sps = timed_samples as f64 / timed_wall_secs.max(1e-9);

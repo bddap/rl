@@ -26,6 +26,12 @@ Use the release store's live checkpoint pointer for probes and screenshots. Keep
 the tagged envelope and terrain provenance; do not make ad-hoc checkpoint copies
 that can outlive format migrations.
 
+A launch that registers reads at tick marks passes `rl-train learn --read-mark N`
+per mark, and the read renders `<checkpoint-dir>/marks/N/`, never the live set.
+`rl-demo render-video` refuses an absent set and prints the step it rendered on its
+`RENDER_CHECKPOINT` line. The trainer refuses to start past a mark it holds no set
+for, so delete `marks/` only after the run stops and the registering issue closes.
+
 For slow frames, use [scripts/profile-game.sh](scripts/profile-game.sh).
 `--pid N` observes a running process; without it the script launches and later kills
 a target. `--perf` adds a breakdown when available. Run as the graphical-session

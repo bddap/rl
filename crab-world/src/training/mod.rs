@@ -19,6 +19,7 @@ pub(crate) mod envelope;
 #[cfg(feature = "wgpu")]
 pub mod gpu;
 pub mod inproc;
+pub mod marks;
 pub mod normalizer;
 pub mod reward;
 pub mod systems;

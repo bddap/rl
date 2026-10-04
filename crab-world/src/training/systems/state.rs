@@ -278,7 +278,7 @@ impl LearnerState {
     /// The brain (the largest member, the one ENOSPC kills) is staged first so a full
     /// disk aborts before any cheap member is written. The #215 stamps stay as the
     /// load-time backstop for out-of-band copies.
-    pub(crate) fn save_checkpoint(&self, extra: impl FnOnce(&CheckpointDir, u64)) {
+    pub(crate) fn save_checkpoint(&self, extra: impl FnOnce(&CheckpointDir, u64)) -> bool {
         let arch = self.brain.train().arch();
         let save_stamp: u64 = rand::random();
         let staged = replace_dir_atomically(&self.mode.checkpoint_dir, |staging| {
@@ -296,15 +296,21 @@ impl LearnerState {
             hardlink_missing_entries(&self.mode.checkpoint_dir, staging)
         });
         match staged {
-            Ok(()) => info!(
-                "Saved checkpoint set to {}",
-                self.mode.checkpoint_dir.display()
-            ),
-            Err(e) => warn!(
-                "Failed to save checkpoint set to {}: {e} — the previous set stays \
-                 intact and coherent",
-                self.mode.checkpoint_dir.display()
-            ),
+            Ok(()) => {
+                info!(
+                    "Saved checkpoint set to {}",
+                    self.mode.checkpoint_dir.display()
+                );
+                true
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to save checkpoint set to {}: {e} — the previous set stays \
+                     intact and coherent",
+                    self.mode.checkpoint_dir.display()
+                );
+                false
+            }
         }
     }
 
