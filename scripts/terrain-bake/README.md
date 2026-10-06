@@ -8,7 +8,8 @@ the committed artifact under `crab-world/assets/terrain/`.
 Two pieces, split on the trust boundary:
 
 - `serve-model.sh` — clones + installs + runs the upstream model API inside
-  `run-untrusted -g` (no `$HOME`, GPU passed through). Downloads HF weights and
+  `run-untrusted -g -p PORT` (no `$HOME`, GPU passed through, the API port
+  forwarded from host loopback). Downloads HF weights and
   WorldClim rasters into its work dir (~1.5G); pass that dir back as
   `serve-model.sh <dir>` to reuse them.
 - `bake.py` — trusted client, runs outside the sandbox. Fetches an elevation
