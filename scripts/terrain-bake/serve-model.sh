@@ -4,11 +4,13 @@
 # 127.0.0.1:$PORT in the shared net namespace; bake.py talks to it from outside.
 #
 # usage: serve-model.sh [WORKDIR] [PORT]
-#   WORKDIR (default ~/.cache/terrain-bake) holds the upstream clone, venv,
-#   pip + huggingface caches. Everything untrusted stays inside it.
+#   WORKDIR (default: a fresh /tmp/untrusted.terrain-bake.*) holds the upstream
+#   clone, venv, pip + huggingface caches; pass a previous one back to reuse
+#   its downloads. The clone happens inside the sandbox: host git must never
+#   run in a tree untrusted code could write.
 set -euo pipefail
 
-WORK="${1:-$HOME/.cache/terrain-bake}"
+WORK="${1:-$(mktemp -d /tmp/untrusted.terrain-bake.XXXXXX)}"
 PORT="${2:-8017}"
 UPSTREAM=https://github.com/xandergos/terrain-diffusion
 # Pin: the artifact must be re-bakeable; a moving master is not a provenance.
@@ -17,13 +19,13 @@ UPSTREAM_REV="${UPSTREAM_REV:-82a0431281f21a6ec3d691a12ee61525de5b0790}"
 PY="$(nix-shell -p python312 --run 'command -v python3')"
 
 mkdir -p "$WORK"
-[ -d "$WORK/terrain-diffusion" ] || git clone "$UPSTREAM" "$WORK/terrain-diffusion"
-git -C "$WORK/terrain-diffusion" fetch -q origin
-git -C "$WORK/terrain-diffusion" checkout -q "$UPSTREAM_REV"
-
 cd "$WORK"
-cat > sandbox-entry.sh <<EOF
+echo "serve-model: work dir $WORK" >&2
+read -r -d '' ENTRY <<EOF || true
 set -euo pipefail
+[ -d terrain-diffusion ] || git clone -q $UPSTREAM terrain-diffusion
+git -C terrain-diffusion fetch -q origin
+git -C terrain-diffusion checkout -q $UPSTREAM_REV
 export LD_LIBRARY_PATH=/run/current-system/sw/share/nix-ld/lib:/run/opengl-driver/lib
 export PIP_CACHE_DIR=\$PWD/pipcache
 export HF_HOME=\$PWD/hf
@@ -42,4 +44,4 @@ cd terrain-diffusion
 exec ../venv/bin/python -m terrain_diffusion.inference.api \
   --no-compile --host 127.0.0.1 --port $PORT
 EOF
-exec run-untrusted -g bash sandbox-entry.sh
+exec run-untrusted -g bash -c "$ENTRY"

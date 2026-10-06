@@ -4,8 +4,10 @@ set -euo pipefail
 OTELCOL="${OTELCOL:?set OTELCOL to the otelcol-contrib store path}"
 TUNNEL="${TUNNEL:-$HOME/.local/bin/iroh-tunnel}"
 WT="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="$HOME/.local/state/telemetry/rl-proof"
-rm -rf "$WORK"; mkdir -p "$WORK/sink"; cd "$WORK"
+# Keys and tunnel logs stay out of the collector's sandbox, which could read or forge them.
+WORK="$(mktemp -d /tmp/rl-proof.XXXXXX)"
+SBX="$(mktemp -d /tmp/untrusted.rl-proof.XXXXXX)"
+mkdir -p "$SBX/sink"; cd "$SBX"
 
 cat > otelcol.yaml <<'YAML'
 receivers:
@@ -26,9 +28,10 @@ service:
   telemetry: { metrics: { level: none } }
 YAML
 
-pids=(); cleanup(){ for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null||true; done; }; trap cleanup EXIT
+pids=(); cleanup(){ for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null||true; done; rm -rf "$WORK" "$SBX"; }; trap cleanup EXIT
 
-run-untrusted "$OTELCOL/bin/otelcol-contrib" --config ./otelcol.yaml >otelcol.log 2>&1 & pids+=($!)
+run-untrusted "$OTELCOL/bin/otelcol-contrib" --config ./otelcol.yaml >"$WORK/otelcol.log" 2>&1 & pids+=($!)
+cd "$WORK"
 for i in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/4318)2>/dev/null && { exec 3>&-; break; }; sleep 0.2; done 2>/dev/null || true
 sleep 1
 
@@ -46,9 +49,9 @@ DECK_ID=testdeck OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:14318 \
   taskset -c 0-13 nix-shell --run "cargo run -q -p otel --example smoke" 2>&1 | tail -5
 cd "$WORK"
 
-SINK="$WORK/sink/otlp-testdeck.jsonl"
+SINK="$SBX/sink/otlp-testdeck.jsonl"
 for i in $(seq 1 40); do [ -s "$SINK" ] && grep -q hello-otel-from-rust-LOG "$SINK" && grep -q rl_otel_smoke_counter "$SINK" && grep -q smoke_span "$SINK" && break; sleep 0.3; done
-echo "sink: $SINK"; ls -l "$WORK/sink/" 2>/dev/null
+echo "sink: $SINK"; ls -l "$SBX/sink/" 2>/dev/null
 ok=0
 for n in smoke_span hello-otel-from-rust-LOG rl_otel_smoke_counter; do
   if grep -q "$n" "$SINK" 2>/dev/null; then echo "  FOUND  $n"; ok=$((ok+1)); else echo "  MISSING $n"; fi

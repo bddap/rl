@@ -9,7 +9,8 @@ Two pieces, split on the trust boundary:
 
 - `serve-model.sh` — clones + installs + runs the upstream model API inside
   `run-untrusted -g` (no `$HOME`, GPU passed through). Downloads HF weights and
-  WorldClim rasters into its work dir on first run (~1.5G).
+  WorldClim rasters into its work dir (~1.5G); pass that dir back as
+  `serve-model.sh <dir>` to reuse them.
 - `bake.py` — trusted client, runs outside the sandbox. Fetches an elevation
   tile (the API returns int16 meters), optionally adds a seeded FBM detail
   octave, writes the `.terrain` artifact + a shaded-relief preview PNG.
