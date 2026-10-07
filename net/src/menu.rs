@@ -22,7 +22,6 @@ enum FormState {
     /// The session is still binding; everything the lobby needs once it lands.
     Binding {
         pending: crate::transport::PendingSession,
-        role: Role,
     },
     Live {
         session: Session,
@@ -37,11 +36,10 @@ enum FormState {
 pub struct Formation {
     /// Consumed into the [`NetDriver`] when the match forms; `None` after resolution.
     state: Option<FormState>,
-    dial_code: Option<EndpointId>,
+    role: Role,
     cancelled: bool,
     seed: u64,
     stamp: crate::SyncStamp,
-    pub hosting: bool,
 }
 
 impl Formation {
@@ -59,13 +57,19 @@ impl Formation {
         }
         if let Some(FormState::Binding { pending, .. }) = self.state.as_mut() {
             let bound = pending.poll()?;
-            let Some(FormState::Binding { role, .. }) = self.state.take() else {
-                unreachable!("matched Binding above")
-            };
+            self.state = None;
             match bound {
                 Ok(session) => {
+                    if self.role
+                        == (Role::Joiner {
+                            host: Some(session.endpoint_id()),
+                        })
+                    {
+                        tracing::warn!("join code is our own endpoint id — ignoring the self-dial");
+                        self.role = Role::Joiner { host: None };
+                    }
                     // Same frame: fall through and pump the fresh lobby below.
-                    self.state = Some(open_lobby(session, role, self.dial_code, self.stamp));
+                    self.state = Some(open_lobby(session, self.role, self.stamp));
                 }
                 Err(e) => return Some(Err(e.context("binding the lobby session"))),
             }
@@ -112,11 +116,14 @@ impl Formation {
         self.live_session().map(Session::endpoint_id)
     }
 
+    pub fn hosting(&self) -> bool {
+        matches!(self.role, Role::Host)
+    }
+
     pub fn display_code(&self) -> Option<EndpointId> {
-        if self.hosting {
-            self.my_id()
-        } else {
-            self.dial_code
+        match self.role {
+            Role::Host => self.my_id(),
+            Role::Joiner { host } => host,
         }
     }
 
@@ -158,38 +165,27 @@ impl Drop for Formation {
 /// resolves on the first poll). Errors, including a failed bind, surface through
 /// [`Formation::poll`].
 pub fn begin(choice: &StartChoice, seed: u64, stamp: crate::SyncStamp) -> Formation {
-    let (role, join) = match choice {
-        StartChoice::Host => (Role::Host, None),
-        StartChoice::Join(host) => (Role::Joiner, *host),
+    let role = match choice {
+        StartChoice::Host => Role::Host,
+        StartChoice::Join(host) => Role::Joiner { host: *host },
     };
     Formation {
         state: Some(FormState::Binding {
             pending: crate::transport::bind_session(),
-            role,
         }),
-        dial_code: join,
+        role,
         cancelled: false,
         seed,
         stamp,
-        hosting: matches!(role, Role::Host),
     }
 }
 
 /// The bound-session half of [`begin`]: fire the join dial, open the formation core.
-fn open_lobby(
-    session: Session,
-    role: Role,
-    join: Option<EndpointId>,
-    stamp: crate::SyncStamp,
-) -> FormState {
-    if let Some(host) = join {
-        if host == session.endpoint_id() {
-            tracing::warn!("join code is our own endpoint id — ignoring the self-dial");
-        } else {
-            // Fire-and-forget: a failed dial surfaces as a lobby that never fills (the
-            // joiner cancels out), matching the discovery-may-still-find-them semantics.
-            let _ = session.dial(host);
-        }
+fn open_lobby(session: Session, role: Role, stamp: crate::SyncStamp) -> FormState {
+    if let Role::Joiner { host: Some(host) } = role {
+        // Fire-and-forget: a failed dial surfaces as a lobby that never fills (the
+        // joiner cancels out), matching the discovery-may-still-find-them semantics.
+        let _ = session.dial(host);
     }
     let driver = Box::new(FormationDriver::lobby(&session, role, NET_EXPECT, stamp));
     FormState::Live { session, driver }
@@ -461,7 +457,7 @@ mod tests {
     /// the lobby state every scenario below starts from.
     fn two_peer_lobby() -> (Formation, Formation) {
         let mut host = begin(&StartChoice::Host, 7, SyncStamp::ZERO);
-        assert!(host.hosting, "Host formation is flagged hosting");
+        assert!(host.hosting(), "Host formation is flagged hosting");
         // The bind is pollable (rl#412): the join code appears once the session lands —
         // on native, the first poll.
         let code = wait_for(15, "the host session to bind", || {
@@ -474,7 +470,7 @@ mod tests {
         });
 
         let mut join = begin(&StartChoice::Join(Some(code)), 7, SyncStamp::ZERO);
-        assert!(!join.hosting, "Join formation is not hosting");
+        assert!(!join.hosting(), "Join formation is not hosting");
         assert_eq!(
             join.display_code(),
             Some(code),

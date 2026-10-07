@@ -160,7 +160,7 @@ impl FormationDriver {
         agreement: net_proto::formation::Agreement,
         now_ms: u64,
     ) -> Result<Formation> {
-        let id_map = assign_player_ids(my_eid, &agreement.roster)?;
+        let id_map = assign_player_ids(agreement.server, &agreement.roster)?;
         let me = id_map[&my_eid];
         println!(
             "match formed: {} participant(s), barrier agreed in {:.1}s",

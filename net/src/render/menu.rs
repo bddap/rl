@@ -588,7 +588,7 @@ fn draw_lobby(ctx: &egui::Context, state: &MenuState, lobby: &[EndpointId]) -> O
         MenuNav::HostLobby { focus } => (true, focus),
         MenuNav::JoinLobby => (false, LobbyItem::Cancel),
         _ => (
-            state.forming.as_ref().is_some_and(|f| f.hosting),
+            state.forming.as_ref().is_some_and(|f| f.hosting()),
             LobbyItem::Cancel,
         ),
     };

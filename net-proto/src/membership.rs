@@ -22,12 +22,10 @@ pub const MAX_MEMBERS: usize = u8::MAX as usize + 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Beat {
     pub members: Vec<EndpointId>,
-    /// The host's synchronized-start command: `true` once the host has clicked Start,
-    /// commanding the round to begin on the roster carried in THIS same beat. A joiner
-    /// closes the barrier on a direct `start` beat whose roster hash equals its own —
-    /// so host and joiners freeze the byte-identical set the GO names. Always `false`
-    /// outside the host-triggered menu path.
-    pub start: bool,
+    /// A [`HostClaim::Started`] GO names the roster carried in THIS same beat: a joiner
+    /// closes only on its server's GO whose roster hash equals its own, so host and
+    /// joiners freeze the byte-identical set.
+    pub claim: HostClaim,
     /// The advertiser's world identity — see [`crate::SyncStamp`]. ONE shape shared
     /// with [`crate::server::JoinRequest`] and [`PeerView`], so a new identity axis
     /// cannot be added to one carrier and silently missed in another.
@@ -51,7 +49,16 @@ pub fn roster_hash(ids: &[EndpointId]) -> u64 {
     h.finish()
 }
 
-pub fn host_of(roster: &[EndpointId]) -> EndpointId {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostClaim {
+    None,
+    Open,
+    Started,
+}
+
+/// The timer path's server: every peer derives it from the frozen roster alone. The
+/// lobby path never elects — its server is the peer that pressed Host.
+fn host_of(roster: &[EndpointId]) -> EndpointId {
     *roster
         .iter()
         .min_by(|a, b| a.as_bytes().cmp(b.as_bytes()))
@@ -76,12 +83,6 @@ pub struct Membership {
     /// `live_set` in every mode (only the close *moment* differs), so determinism is
     /// untouched.
     lobby: LobbyMode,
-    /// Whether we've received a direct [`Beat`] with `start` set from a peer whose roster
-    /// hash equals our CURRENT one — the host's GO landing on a roster we agree with.
-    /// Recomputed each [`Membership::poll`] from peer views, so it can never latch on a
-    /// stale roster: a GO seen while our sets disagreed does not close us, and a set change
-    /// after a GO re-gates on the new hash. The joiner's sole close trigger in the lobby.
-    host_go_on_my_roster: bool,
     /// Whether ANY direct beat from a peer has ever arrived — unlike `peers`, this
     /// survives expiry, so it distinguishes "never saw anyone" from "saw someone and
     /// lost them". Gates the formation solo fallback.
@@ -91,19 +92,34 @@ pub struct Membership {
 
 /// How a [`Membership`] barrier decides to close. A sum type so the "only a host
 /// commands the start" rule is unrepresentable to violate (a [`LobbyMode::Joiner`] has
-/// no `starting` to set).
+/// no `go` to set).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LobbyMode {
     Off,
-    Host { started: bool },
-    Joiner,
+    Host {
+        go: HostGo,
+    },
+    /// `host` is the join code dialled; `None` (a LAN join with no code) follows the one
+    /// peer claiming to host.
+    Joiner {
+        host: Option<EndpointId>,
+    },
+}
+
+/// The host advertises its GO only once [`HostGo::Closed`]: a joiner that closed on an
+/// earlier GO could be left alone by a roster change that then holds the host open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostGo {
+    Waiting,
+    Pressed,
+    Closed,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct PeerView {
     last_direct: u64,
     advertised: Option<u64>,
-    started: bool,
+    claim: HostClaim,
     /// `None` until a direct beat arrives — a relay-only peer stays unverified on
     /// EVERY identity axis at once (the axes are only ever learned together).
     stamp: Option<crate::SyncStamp>,
@@ -111,15 +127,20 @@ struct PeerView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
-    Forming { live: usize },
-    Agreed { roster: Vec<EndpointId> },
+    Forming {
+        live: usize,
+    },
+    Agreed {
+        roster: Vec<EndpointId>,
+        server: EndpointId,
+    },
     Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Host,
-    Joiner,
+    Joiner { host: Option<EndpointId> },
 }
 
 impl Membership {
@@ -132,7 +153,6 @@ impl Membership {
             agreed_since: None,
             started: now_ms,
             lobby: LobbyMode::Off,
-            host_go_on_my_roster: false,
             heard_direct: false,
             local: crate::SyncStamp::ZERO,
         }
@@ -151,8 +171,10 @@ impl Membership {
     /// changes.
     pub fn host_triggered(role: Role, me: EndpointId, expect: usize, now_ms: u64) -> Self {
         let lobby = match role {
-            Role::Host => LobbyMode::Host { started: false },
-            Role::Joiner => LobbyMode::Joiner,
+            Role::Host => LobbyMode::Host {
+                go: HostGo::Waiting,
+            },
+            Role::Joiner { host } => LobbyMode::Joiner { host },
         };
         Self {
             lobby,
@@ -161,8 +183,10 @@ impl Membership {
     }
 
     pub fn set_starting(&mut self) {
-        if let LobbyMode::Host { started } = &mut self.lobby {
-            *started = true;
+        if let LobbyMode::Host { go } = &mut self.lobby
+            && *go == HostGo::Waiting
+        {
+            *go = HostGo::Pressed;
         }
     }
 
@@ -186,12 +210,12 @@ impl Membership {
                 let view = self.peers.entry(from).or_insert(PeerView {
                     last_direct: now_ms,
                     advertised: None,
-                    started: false,
+                    claim: HostClaim::None,
                     stamp: None,
                 });
                 view.last_direct = now_ms;
                 view.advertised = Some(beat.roster_hash());
-                view.started = beat.start;
+                view.claim = beat.claim;
                 view.stamp = Some(beat.stamp);
             }
         }
@@ -210,12 +234,16 @@ impl Membership {
                     PeerView {
                         last_direct: now_ms,
                         advertised: None,
-                        started: false,
+                        claim: HostClaim::None,
                         stamp: None,
                     },
                 );
             }
         }
+    }
+
+    pub fn is_live(&self, id: &EndpointId) -> bool {
+        *id == self.me || self.peers.contains_key(id)
     }
 
     pub fn live_set(&self) -> Vec<EndpointId> {
@@ -229,8 +257,34 @@ impl Membership {
     pub fn beat(&self) -> Beat {
         Beat {
             members: self.live_set(),
-            start: matches!(self.lobby, LobbyMode::Host { started: true }),
+            claim: match self.lobby {
+                LobbyMode::Host { go: HostGo::Closed } => HostClaim::Started,
+                LobbyMode::Host { .. } => HostClaim::Open,
+                LobbyMode::Off | LobbyMode::Joiner { .. } => HostClaim::None,
+            },
             stamp: self.local,
+        }
+    }
+
+    /// The peer that will serve the round: the timer path's [`host_of`], the lobby host
+    /// itself, or a joiner's join code. A code-less joiner follows the one peer heard
+    /// directly claiming to host, and has no server while that is ambiguous.
+    pub fn server(&self) -> Option<EndpointId> {
+        match self.lobby {
+            LobbyMode::Off => Some(host_of(&self.live_set())),
+            LobbyMode::Host { .. } => Some(self.me),
+            LobbyMode::Joiner { host: Some(host) } => Some(host),
+            LobbyMode::Joiner { host: None } => {
+                let mut claimants = self
+                    .peers
+                    .iter()
+                    .filter(|(_, v)| v.claim != HostClaim::None)
+                    .map(|(id, _)| *id);
+                match (claimants.next(), claimants.next()) {
+                    (Some(host), None) => Some(host),
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -242,12 +296,13 @@ impl Membership {
     /// count is judged against ITS — an unverified host, relay beat or no stamp yet,
     /// never arms).
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
-        let host = host_of(&self.live_set());
-        let host_stamp = if host == self.me {
-            Some(self.local)
-        } else {
-            self.peers.get(&host).and_then(|v| v.stamp)
-        };
+        let host_stamp = self.server().and_then(|host| {
+            if host == self.me {
+                Some(self.local)
+            } else {
+                self.peers.get(&host).and_then(|v| v.stamp)
+            }
+        });
         // Digest axes ONLY — the crabs axis is host-centric and judged separately below;
         // passing `|v| v.crabs` here would silently compute the wrong semantics.
         let across_peers = |axis: fn(crate::SyncVerdict) -> bool| {
@@ -284,12 +339,6 @@ impl Membership {
         let unanimous = self.peers.values().all(|v| v.advertised == Some(my_hash));
         let agreed_now = enough && unanimous;
 
-        // Recomputed, never latched — see `host_go_on_my_roster` for why.
-        self.host_go_on_my_roster = self
-            .peers
-            .values()
-            .any(|v| v.started && v.advertised == Some(my_hash));
-
         // Maintain the continuous-agreement timer — see `agreed_since` for why it is
         // keyed on the hash, not just a bool.
         self.agreed_since = match (agreed_now, self.agreed_since) {
@@ -301,16 +350,30 @@ impl Membership {
         let held = self
             .agreed_since
             .is_some_and(|(since, _)| now_ms.saturating_sub(since) >= STABLE_FOR_MS);
-        let close = held
-            && match self.lobby {
-                LobbyMode::Host { started } => started,
-                LobbyMode::Joiner => self.host_go_on_my_roster,
+        // A joiner's GO is recomputed each poll, never latched: a GO seen while our sets
+        // disagreed does not close us, and a set change after a GO re-gates on the new hash.
+        // A host with a rival claimant in its roster stays open: both would serve it.
+        let close_under = self.server().filter(|&server| {
+            held && match self.lobby {
+                LobbyMode::Host { go } => {
+                    go != HostGo::Waiting && self.peers.values().all(|v| v.claim == HostClaim::None)
+                }
+                LobbyMode::Joiner { .. } => self.peers.get(&server).is_some_and(|v| {
+                    v.claim == HostClaim::Started && v.advertised == Some(my_hash)
+                }),
                 LobbyMode::Off => true,
-            };
+            }
+        });
         let timed_out =
             self.lobby == LobbyMode::Off && now_ms.saturating_sub(self.started) >= JOIN_WINDOW_MS;
-        if close {
-            Status::Agreed { roster: live }
+        if let Some(server) = close_under {
+            if let LobbyMode::Host { go } = &mut self.lobby {
+                *go = HostGo::Closed;
+            }
+            Status::Agreed {
+                roster: live,
+                server,
+            }
         } else if timed_out {
             Status::Failed
         } else {
@@ -328,7 +391,11 @@ pub fn encode_beat(beat: &Beat) -> Vec<u8> {
     };
     let members = canon(&beat.members);
     let mut out = Vec::with_capacity(20 + 32 * members.len());
-    out.push(beat.start as u8);
+    out.push(match beat.claim {
+        HostClaim::None => 0,
+        HostClaim::Started => 1,
+        HostClaim::Open => 2,
+    });
     out.extend_from_slice(&(members.len() as u16).to_le_bytes());
     out.extend_from_slice(&beat.stamp.body_digest.to_le_bytes());
     out.extend_from_slice(&beat.stamp.plant_digest.to_le_bytes());
@@ -344,9 +411,14 @@ const MAX_BEAT_MEMBERS: usize = 256;
 pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     anyhow::ensure!(
         body.len() >= 20,
-        "barrier frame too short for start+count+body digest+plant digest+crab count"
+        "barrier frame too short for claim+count+body digest+plant digest+crab count"
     );
-    let start = body[0] != 0;
+    let claim = match body[0] {
+        0 => HostClaim::None,
+        1 => HostClaim::Started,
+        2 => HostClaim::Open,
+        other => anyhow::bail!("barrier frame has unknown host claim {other}"),
+    };
     let count = u16::from_le_bytes([body[1], body[2]]) as usize;
     anyhow::ensure!(
         count <= MAX_BEAT_MEMBERS,
@@ -371,7 +443,7 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     }
     Ok(Beat {
         members,
-        start,
+        claim,
         stamp: crate::SyncStamp {
             body_digest,
             plant_digest,
@@ -395,7 +467,7 @@ mod tests {
     fn bt(members: Vec<EndpointId>) -> Beat {
         Beat {
             members,
-            start: false,
+            claim: HostClaim::None,
             stamp: crate::SyncStamp::ZERO,
         }
     }
@@ -422,14 +494,18 @@ mod tests {
         assert_eq!(a.roster_hash(), b.roster_hash());
         let decoded = decode_beat(&encode_beat(&a)).unwrap();
         assert_eq!(decoded.members, sorted(&[eid(1), eid(2), eid(3)]));
-        assert!(!decoded.start, "a plain beat decodes with no start GO");
+        assert_eq!(
+            decoded.claim,
+            HostClaim::None,
+            "a plain beat decodes with no claim"
+        );
     }
 
     #[test]
     fn decode_rejects_garbage() {
         assert!(
             decode_beat(&[0]).is_err(),
-            "too short for start+count+digests"
+            "too short for claim+count+digests"
         );
         // A full 20-byte header claiming 5 members but carrying none — must trip the
         // length-vs-count check, not the header-size check.
@@ -449,21 +525,26 @@ mod tests {
     }
 
     #[test]
-    fn start_flag_roundtrips_without_perturbing_the_roster_hash() {
+    fn host_claim_roundtrips_without_perturbing_the_roster_hash() {
         let members = vec![eid(1), eid(2)];
         let plain = bt(members.clone());
         let go = Beat {
             members,
-            start: true,
+            claim: HostClaim::Started,
             stamp: crate::SyncStamp::ZERO,
         };
         assert_eq!(
             plain.roster_hash(),
             go.roster_hash(),
-            "the GO flag must not be part of the roster hash"
+            "the host claim must not be part of the roster hash"
         );
-        assert!(!decode_beat(&encode_beat(&plain)).unwrap().start);
-        assert!(decode_beat(&encode_beat(&go)).unwrap().start);
+        for claim in [HostClaim::None, HostClaim::Open, HostClaim::Started] {
+            let beat = Beat {
+                claim,
+                ..plain.clone()
+            };
+            assert_eq!(decode_beat(&encode_beat(&beat)).unwrap().claim, claim);
+        }
     }
 
     #[test]
@@ -478,7 +559,7 @@ mod tests {
     fn bt_ad(members: Vec<EndpointId>, body_digest: u64) -> Beat {
         Beat {
             members,
-            start: false,
+            claim: HostClaim::None,
             stamp: stamp(body_digest, 0, 1),
         }
     }
@@ -501,7 +582,7 @@ mod tests {
     fn crab_count_gate_is_host_keyed() {
         let beat_c = |members: Vec<EndpointId>, crab_count: u8| Beat {
             members,
-            start: false,
+            claim: HostClaim::None,
             stamp: stamp(0, 0, crab_count),
         };
         let decoded = decode_beat(&encode_beat(&beat_c(vec![eid(1)], 3))).unwrap();
@@ -590,7 +671,7 @@ mod tests {
         const PLANT: u64 = 0x7E44_A100_0BAD_5EED;
         let bt_plant = |members: Vec<EndpointId>, plant_digest: u64| Beat {
             members,
-            start: false,
+            claim: HostClaim::None,
             stamp: stamp(0, plant_digest, 0),
         };
 
@@ -946,7 +1027,7 @@ mod tests {
         let t0 = 0u64;
         let (idh, idj) = (eid(1), eid(2));
         let mut h = Membership::host_triggered(Role::Host, idh, 2, t0);
-        let mut j = Membership::host_triggered(Role::Joiner, idj, 2, t0);
+        let mut j = Membership::host_triggered(Role::Joiner { host: Some(idh) }, idj, 2, t0);
 
         let mut t = 0u64;
         while t <= STABLE_FOR_MS + 1000 {
@@ -1000,7 +1081,7 @@ mod tests {
         let t0 = 0u64;
         let (idh, idj) = (eid(1), eid(2));
         let mut h = Membership::host_triggered(Role::Host, idh, 2, t0);
-        let mut j = Membership::host_triggered(Role::Joiner, idj, 2, t0);
+        let mut j = Membership::host_triggered(Role::Joiner { host: Some(idh) }, idj, 2, t0);
 
         j.set_starting();
         let mut t = 0u64;
@@ -1018,15 +1099,125 @@ mod tests {
         }
     }
 
+    /// The lowest of `n` ids, and two others above it — so a test can put the
+    /// lowest-sorting id on a stranger and prove it confers nothing.
+    fn lowest_and_two_above(n: u8) -> (EndpointId, EndpointId, EndpointId) {
+        let mut ids: Vec<EndpointId> = (1..=n).map(eid).collect();
+        ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        (ids[0], ids[1], ids[2])
+    }
+
+    #[test]
+    fn only_the_joiners_host_can_start_it() {
+        let t0 = 0u64;
+        let (stranger, idh, idj) = lowest_and_two_above(20);
+        let all = vec![stranger, idh, idj];
+        let stranger_go = Beat {
+            members: all.clone(),
+            claim: HostClaim::Started,
+            stamp: crate::SyncStamp::ZERO,
+        };
+        for code in [Some(idh), None] {
+            let mut h = Membership::host_triggered(Role::Host, idh, 2, t0);
+            let mut j = Membership::host_triggered(Role::Joiner { host: code }, idj, 2, t0);
+            let mut t = 0u64;
+            while t <= STABLE_FOR_MS + 4000 {
+                let now = at(t0, t);
+                let (bh, bj) = (h.beat(), j.beat());
+                h.on_beat(idj, &bj, now);
+                h.on_beat(stranger, &stranger_go, now);
+                j.on_beat(idh, &bh, now);
+                j.on_beat(stranger, &stranger_go, now);
+                assert_eq!(h.poll(now), Status::Forming { live: 3 });
+                assert_eq!(
+                    j.poll(now),
+                    Status::Forming { live: 3 },
+                    "a stranger's GO must not close a joiner (code {code:?})"
+                );
+                t += 250;
+            }
+            let expect_server = code.map(|_| idh);
+            assert_eq!(
+                j.server(),
+                expect_server,
+                "a stranger never becomes the joiner's server"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rival_claimant_holds_the_host_and_its_joiners_open() {
+        let t0 = 0u64;
+        let (rival, idh, idj) = (eid(1), eid(2), eid(3));
+        let mut h = Membership::host_triggered(Role::Host, idh, 2, t0);
+        let mut j = Membership::host_triggered(Role::Joiner { host: Some(idh) }, idj, 2, t0);
+        h.set_starting();
+        let rival_go = Beat {
+            members: vec![rival, idh, idj],
+            claim: HostClaim::Started,
+            stamp: crate::SyncStamp::ZERO,
+        };
+        let mut t = 0u64;
+        while t <= STABLE_FOR_MS + 4000 {
+            let now = at(t0, t);
+            let (bh, bj) = (h.beat(), j.beat());
+            h.on_beat(idj, &bj, now);
+            h.on_beat(rival, &rival_go, now);
+            j.on_beat(idh, &bh, now);
+            j.on_beat(rival, &rival_go, now);
+            for m in [&mut h, &mut j] {
+                assert_eq!(
+                    m.poll(now),
+                    Status::Forming { live: 3 },
+                    "two servers for one roster would split the match"
+                );
+            }
+            t += 250;
+        }
+    }
+
+    #[test]
+    fn the_lobby_server_is_the_host_not_the_lowest_id() {
+        let t0 = 0u64;
+        let (low, idh, idj) = lowest_and_two_above(20);
+        let mut h = Membership::host_triggered(Role::Host, idh, 3, t0);
+        let mut j = Membership::host_triggered(Role::Joiner { host: Some(idh) }, idj, 3, t0);
+        let mut c = Membership::host_triggered(Role::Joiner { host: None }, low, 3, t0);
+        h.set_starting();
+        let mut froze: BTreeMap<u8, (Vec<EndpointId>, EndpointId)> = BTreeMap::new();
+        let mut t = 0u64;
+        while t <= 8000 && froze.len() < 3 {
+            let now = at(t0, t);
+            let (bh, bj, bc) = (h.beat(), j.beat(), c.beat());
+            h.on_beat(idj, &bj, now);
+            h.on_beat(low, &bc, now);
+            j.on_beat(idh, &bh, now);
+            j.on_beat(low, &bc, now);
+            c.on_beat(idh, &bh, now);
+            c.on_beat(idj, &bj, now);
+            for (id, m) in [(1u8, &mut h), (2, &mut j), (3, &mut c)] {
+                if let Status::Agreed { roster, server } = m.poll(now) {
+                    froze.entry(id).or_insert((roster, server));
+                }
+            }
+            t += 250;
+        }
+        assert_eq!(froze.len(), 3, "all three must freeze");
+        for (roster, server) in froze.values() {
+            assert_eq!(roster, &sorted(&[low, idh, idj]));
+            assert_eq!(*server, idh, "the Host serves, whatever the id order");
+        }
+    }
+
     #[test]
     fn host_go_on_a_mismatched_roster_does_not_close_a_joiner() {
         let t0 = 0u64;
         let (idh, idj) = (eid(1), eid(2));
-        let mut j = Membership::host_triggered(Role::Joiner, idj, 2, t0);
+        let mut j = Membership::host_triggered(Role::Joiner { host: Some(idh) }, idj, 2, t0);
 
         let host_go_on_partial = Beat {
             members: vec![idh],
-            start: true,
+            claim: HostClaim::Started,
             stamp: crate::SyncStamp::ZERO,
         };
         let mut t = 0u64;
@@ -1049,24 +1240,42 @@ mod tests {
     #[test]
     fn only_a_host_ever_advertises_the_start_go() {
         // The protocol guarantee the [`LobbyMode`] type ENFORCES: only a host can put
-        // `start` on the wire. A timer barrier and a JOINER both stay silent on the GO
+        // a claim on the wire. A timer barrier and a JOINER both stay silent on the GO
         // even after `set_starting`, so a joiner can never command a start it isn't
         // entitled to.
         let t0 = 0u64;
         for mut m in [
             Membership::new(eid(1), 1, t0),
-            Membership::host_triggered(Role::Joiner, eid(1), 2, t0),
+            Membership::host_triggered(Role::Joiner { host: Some(eid(2)) }, eid(1), 2, t0),
         ] {
             m.set_starting();
             assert!(
-                !m.beat().start,
+                m.beat().claim == HostClaim::None,
                 "only a Role::Host may advertise the start GO"
             );
         }
-        let mut host = Membership::host_triggered(Role::Host, eid(1), 2, t0);
-        assert!(!host.beat().start, "a host is silent before clicking Start");
+        let mut host = Membership::host_triggered(Role::Host, eid(1), 1, t0);
+        assert_eq!(
+            host.beat().claim,
+            HostClaim::Open,
+            "a host claims the lobby but is silent on the GO before clicking Start"
+        );
         host.set_starting();
-        assert!(host.beat().start, "a host advertises the GO after Start");
+        assert_eq!(host.poll(t0), Status::Forming { live: 1 });
+        assert_eq!(
+            host.beat().claim,
+            HostClaim::Open,
+            "a pressed host that has not itself closed must not send the GO"
+        );
+        assert!(matches!(
+            host.poll(at(t0, STABLE_FOR_MS)),
+            Status::Agreed { .. }
+        ));
+        assert_eq!(
+            host.beat().claim,
+            HostClaim::Started,
+            "the host's closing beat carries the GO"
+        );
     }
 
     #[test]
@@ -1074,8 +1283,8 @@ mod tests {
         let t0 = 0u64;
         let (idh, idj, idc) = (eid(1), eid(2), eid(3));
         let mut h = Membership::host_triggered(Role::Host, idh, 3, t0);
-        let mut j = Membership::host_triggered(Role::Joiner, idj, 3, t0);
-        let mut c = Membership::host_triggered(Role::Joiner, idc, 3, t0);
+        let mut j = Membership::host_triggered(Role::Joiner { host: Some(idh) }, idj, 3, t0);
+        let mut c = Membership::host_triggered(Role::Joiner { host: None }, idc, 3, t0);
         h.set_starting();
 
         let join_at = 1000u64;

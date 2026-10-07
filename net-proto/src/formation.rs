@@ -26,7 +26,9 @@ pub struct Frozen {
 
 pub struct FormationCore {
     m: Membership,
-    early: Vec<(EndpointId, TickMsg)>,
+    /// One early tick per live peer, later ticks absorbing earlier ones, so the buffer is
+    /// bounded by the roster cap however long the lobby stays open.
+    early: BTreeMap<EndpointId, TickMsg>,
     last_roster: Vec<EndpointId>,
     /// The epoch-aligned deadline for the next beat. A deadline (not a
     /// last-beat-plus-interval gap) so a poller's ms-level jitter can never skip a
@@ -60,6 +62,8 @@ pub enum Outcome {
 
 pub struct Agreement {
     pub roster: Vec<EndpointId>,
+    /// The peer that serves the round — [`assign_player_ids`] makes it `PlayerId(0)`.
+    pub server: EndpointId,
     pub early: Vec<(EndpointId, TickMsg)>,
     /// [`Membership::sync_verdict`] sampled at the close instant.
     pub sync: SyncVerdict,
@@ -101,7 +105,7 @@ impl FormationCore {
     fn build(m: Membership, alone_deadline_ms: Option<u64>, now_ms: u64) -> Self {
         Self {
             m,
-            early: Vec::new(),
+            early: BTreeMap::new(),
             last_roster: Vec::new(),
             next_beat_ms: now_ms,
             alone_deadline_ms,
@@ -119,15 +123,26 @@ impl FormationCore {
     /// A game tick that raced ahead of the barrier close — buffered and handed to the
     /// sim through [`Agreement::early`].
     pub fn on_early_tick(&mut self, from: EndpointId, msg: TickMsg) {
-        self.early.push((from, msg));
+        if !self.m.is_live(&from) {
+            return;
+        }
+        let kept = self.early.entry(from).or_insert(msg);
+        if msg.issue_tick > kept.issue_tick {
+            let earlier = std::mem::replace(kept, msg);
+            kept.input.absorb(earlier.input);
+        } else if msg.issue_tick < kept.issue_tick {
+            kept.input.absorb(msg.input);
+        }
     }
 
     pub fn step(&mut self, now_ms: u64) -> Step {
         let status = self.m.poll(now_ms);
+        self.early.retain(|id, _| self.m.is_live(id));
         let outcome = match status {
-            Status::Agreed { roster } => Some(Outcome::Agreed(Agreement {
+            Status::Agreed { roster, server } => Some(Outcome::Agreed(Agreement {
                 roster,
-                early: std::mem::take(&mut self.early),
+                server,
+                early: std::mem::take(&mut self.early).into_iter().collect(),
                 sync: self.m.sync_verdict(),
             })),
             Status::Failed => Some(
@@ -204,14 +219,21 @@ pub fn early_peer_msgs(frozen: &Frozen) -> Vec<PeerMsg> {
         .collect()
 }
 
+/// `server` is `PlayerId(0)`; the rest follow in endpoint-id order, so every peer that
+/// froze the same roster and server derives the same map.
 pub fn assign_player_ids(
-    me: EndpointId,
+    server: EndpointId,
     roster: &[EndpointId],
 ) -> Result<BTreeMap<EndpointId, PlayerId>> {
-    let mut all: Vec<EndpointId> = roster.to_vec();
-    all.push(me);
-    all.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-    all.dedup();
+    anyhow::ensure!(
+        roster.contains(&server),
+        "the server {} is not in the frozen roster",
+        server.fmt_short()
+    );
+    let mut rest: Vec<EndpointId> = roster.iter().copied().filter(|&id| id != server).collect();
+    rest.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    rest.dedup();
+    let all: Vec<EndpointId> = std::iter::once(server).chain(rest).collect();
     anyhow::ensure!(
         all.len() <= u8::MAX as usize + 1,
         "too many players: {}",
@@ -228,40 +250,75 @@ pub fn assign_player_ids(
 mod tests {
     use super::*;
     use crate::SyncStamp;
+    use crate::membership::HostClaim;
 
     fn eid(i: u8) -> EndpointId {
         iroh_base::SecretKey::from_bytes(&[i; 32]).public()
     }
 
-    #[test]
-    fn assign_player_ids_is_identical_regardless_of_roster_order() {
-        let me = eid(2);
-        let a = assign_player_ids(me, &[eid(1), eid(3), eid(2)]).unwrap();
-        let b = assign_player_ids(me, &[eid(3), eid(2), eid(1)]).unwrap();
-        assert_eq!(a, b, "id assignment must not depend on input order");
-        let mut ids = [eid(1), eid(2), eid(3)];
-        ids.sort_by(|x, y| x.as_bytes().cmp(y.as_bytes()));
-        for (i, id) in ids.iter().enumerate() {
-            assert_eq!(a[id], PlayerId(i as u8), "id at sort position {i}");
+    fn tick(issue_tick: u64) -> TickMsg {
+        TickMsg {
+            issue_tick,
+            input: crate::sim::Input::default(),
+            pilot: None,
         }
     }
 
     #[test]
-    fn assign_player_ids_dedups_self_in_roster() {
-        let me = eid(5);
-        let map = assign_player_ids(me, &[eid(5), eid(7)]).unwrap();
-        assert_eq!(map.len(), 2, "self must not be double-counted");
-        let mut got: Vec<PlayerId> = vec![map[&eid(5)], map[&eid(7)]];
-        got.sort();
-        assert_eq!(got, vec![PlayerId(0), PlayerId(1)]);
+    fn server_is_player_zero_and_the_rest_follow_in_id_order() {
+        let server = eid(2);
+        let a = assign_player_ids(server, &[eid(1), eid(3), eid(2)]).unwrap();
+        let b = assign_player_ids(server, &[eid(3), eid(2), eid(1), eid(1)]).unwrap();
+        assert_eq!(
+            a, b,
+            "id assignment must not depend on input order or repeats"
+        );
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[&server], PlayerId(0), "the server is PlayerId(0)");
+        let mut rest = [eid(1), eid(3)];
+        rest.sort_by(|x, y| x.as_bytes().cmp(y.as_bytes()));
+        assert_eq!(a[&rest[0]], PlayerId(1));
+        assert_eq!(a[&rest[1]], PlayerId(2));
     }
 
     #[test]
-    fn player_zero_is_host_of() {
-        let roster = [eid(9), eid(3), eid(6)];
-        let map = assign_player_ids(eid(3), &roster).unwrap();
-        let host = crate::membership::host_of(&roster);
-        assert_eq!(map[&host], PlayerId(0), "host_of must hold PlayerId(0)");
+    fn lobby_early_ticks_stay_bounded_to_one_per_live_peer() {
+        let (host, joiner, outsider) = (eid(1), eid(2), eid(3));
+        let mut c = FormationCore::host_triggered(Role::Host, host, 2, SyncStamp::ZERO, 0);
+        let joiner_beat = Beat {
+            members: vec![host, joiner],
+            claim: HostClaim::None,
+            stamp: SyncStamp::ZERO,
+        };
+        let mut t = 0;
+        for i in 0..100_000u64 {
+            if i % 50 == 0 {
+                c.on_beat(joiner, &joiner_beat, t);
+                assert!(c.step(t).outcome.is_none(), "Start was never pressed");
+                t += BEAT_EVERY_MS;
+            }
+            let mut msg = tick(i);
+            if i == 10 {
+                msg.input.buttons = crate::sim::buttons::ACTION;
+            }
+            c.on_early_tick(outsider, msg);
+            c.on_early_tick(joiner, msg);
+            assert!(c.early.len() <= 1, "only the live joiner is buffered");
+        }
+        let kept = c.early[&joiner];
+        assert_eq!(kept.issue_tick, 99_999);
+        assert_eq!(
+            kept.input.buttons,
+            crate::sim::buttons::ACTION,
+            "a superseded early tap carries into the kept tick"
+        );
+        assert!(
+            !c.early.contains_key(&outsider),
+            "a non-member is never buffered"
+        );
+
+        let _ = c.step(t + BEAT_EVERY_MS * 20);
+        assert!(c.early.is_empty(), "an expired peer's tick is dropped");
     }
 
     #[test]
@@ -342,7 +399,7 @@ mod tests {
 
     #[test]
     fn agreeing_step_always_beats_so_the_hosts_go_reaches_joiners() {
-        // The closing beat carries the host's start=true GO in lobby mode; if the
+        // The closing beat carries the host's GO in lobby mode; if the
         // terminal step could fall between beat deadlines and stay silent, a joiner
         // would never see the GO and lobby forever.
         let mut c = FormationCore::new(eid(1), 1, 1, SyncStamp::ZERO, 0);
@@ -433,12 +490,13 @@ mod tests {
     fn early_ticks_ride_the_agreement_out() {
         let me = eid(1);
         let mut c = FormationCore::new(me, 1, 1, SyncStamp::ZERO, 0);
-        let msg = TickMsg {
-            issue_tick: 7,
-            input: crate::sim::Input::default(),
-            pilot: None,
+        let beat = Beat {
+            members: vec![me, eid(2)],
+            claim: HostClaim::None,
+            stamp: SyncStamp::ZERO,
         };
-        c.on_early_tick(eid(2), msg);
+        c.on_beat(eid(2), &beat, 0);
+        c.on_early_tick(eid(2), tick(7));
         let mut t = 0;
         loop {
             if let Some(Outcome::Agreed(a)) = c.step(t).outcome {

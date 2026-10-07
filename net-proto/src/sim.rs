@@ -58,6 +58,13 @@ impl Input {
         self.buttons & bit != 0
     }
 
+    /// Carry a superseded input's one-shot parts (taps, look deltas) into this later one,
+    /// so dropping the earlier input loses no press and no turn.
+    pub fn absorb(&mut self, earlier: Input) {
+        self.buttons |= earlier.buttons;
+        self.look_yaw = self.look_yaw.saturating_add(earlier.look_yaw);
+    }
+
     /// The input the server substitutes for a tick where this player's stream is STARVED
     /// (transit lag): keep the held-state move axes, zero the rest — `look_yaw` is a per-tick
     /// DELTA (re-applying it would keep the avatar turning) and a re-fired button tap would

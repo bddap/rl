@@ -271,13 +271,11 @@ impl InputStream {
         self.queue.push_back(msg);
         while self.queue.len() > TARGET_BACKLOG {
             let dropped = self.queue.pop_front().expect("len > target");
-            let next = &mut self
-                .queue
+            self.queue
                 .front_mut()
                 .expect("len > target ⇒ still nonempty")
-                .input;
-            next.buttons |= dropped.input.buttons;
-            next.look_yaw = next.look_yaw.saturating_add(dropped.input.look_yaw);
+                .input
+                .absorb(dropped.input);
         }
         true
     }
