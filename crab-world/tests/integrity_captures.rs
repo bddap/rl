@@ -4,14 +4,14 @@
 
 use crab_world::physics::SHIPPED_SOLVER;
 use crab_world::physics::snapshot::{
-    ContactsOff, FreeLimits, PlantSnapshot, ReplayConfig, ShapeVariant,
+    ContactsOff, FreeLimits, PlantSnapshot, ReplayConfig, ShapeVariant, Vec3,
 };
 
 /// `rl-train repro`'s near-miss line, on the rl#343 bound's `lin.max(ang/3)`.
 const NEAR_MISS_M_S: f32 = 30.0;
 
 /// Bumped by hand with each onset committed, so a lost capture fails loudly.
-const ONSETS: usize = 26;
+const ONSETS: usize = 145;
 
 fn onsets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let entries = |dir: &std::path::Path| {
@@ -52,14 +52,18 @@ fn integrity_captures_replay_quiet() {
     for path in &captures {
         let name = path.strip_prefix(&root).unwrap_or(path).display();
         let snap = PlantSnapshot::load(path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let original = snap
+            .expected
+            .iter()
+            .map(|(v, w)| Vec3::from(*v).length().max(Vec3::from(*w).length() / 3.0))
+            .fold(0.0, f32::max);
         assert!(
-            snap.original_max_speed() > NEAR_MISS_M_S,
-            "{name}: not a blow-up onset ({:.1} m/s in the original run)",
-            snap.original_max_speed()
+            original > NEAR_MISS_M_S,
+            "{name}: not a blow-up onset ({original:.1} m/s in the original run)"
         );
         let out = snap.replay(&cfg);
         let speed = out.max_speed_after.max(out.max_angvel_after / 3.0);
-        println!("{name}: {:.1} -> {speed:.2} m/s", snap.original_max_speed());
+        println!("{name}: {original:.1} -> {speed:.2} m/s");
         if speed.is_nan() || speed >= NEAR_MISS_M_S {
             loud.push(format!("{name}: {speed:.1} m/s"));
         }

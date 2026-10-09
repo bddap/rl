@@ -1,0 +1,6 @@
+frozen checkpoint 48,172,032 ticks; repro --terrain flat --band-max-m 9 --envs 2 --horizon 512 --log-std-floor-end -1 --seed 4810 --workers 1 --first-worker 0..33 --ticks 786432; solver 4,12,3x2
+before (rl-train 6db62ecb, rapier 8f2af05): ticks 26738688 trips 0 near-miss lines 135 events 122 (peak 93.4 m/s by lin.max(ang/3)) cpu_s 685738 ticks/cpu_s 38.99
+after  (rl-train afc9ad7f, rapier 5ec3305): ticks 26738688 trips 0 near-miss lines 0 events 0 cpu_s 699414 ticks/cpu_s 38.23
+near-miss events, ticks-weighted one-sided binomial: 122 vs 0, p = 0.5^122 = 1.9e-37
+before-arm captures: 123; 119 reproduce their near miss on the old plant (111 exactly), all 123 replay <= 7.91 m/s on the fixed plant; the 119 are committed here
+host: four 32-vCPU VMs, 17 single-worker processes each (16-18), each VM carrying both arms
