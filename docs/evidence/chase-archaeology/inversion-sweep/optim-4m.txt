@@ -1,0 +1,13 @@
+ 0- 4M n=1302 reward20  -13.9 kl 0.0772 steps 2.16 steps<3  79% ent 0.599 bdiv 3.650 vloss 0.598
+ 4- 8M n=1302 reward20  -10.7 kl 0.0882 steps 1.83 steps<3  88% ent 0.427 bdiv 0.540 vloss 0.594
+ 8-12M n=1302 reward20   -9.8 kl 0.0769 steps 2.24 steps<3  71% ent 0.419 bdiv 0.480 vloss 0.642
+12-16M n=1302 reward20   -3.7 kl 0.0757 steps 2.39 steps<3  62% ent 0.419 bdiv 0.480 vloss 0.731
+16-20M n=1302 reward20   -2.6 kl 0.0803 steps 2.23 steps<3  71% ent 0.419 bdiv 0.475 vloss 0.628
+20-24M n=1302 reward20   -6.6 kl 0.0837 steps 2.07 steps<3  81% ent 0.419 bdiv 0.480 vloss 0.573
+24-28M n=1302 reward20   -1.8 kl 0.0809 steps 2.27 steps<3  67% ent 0.419 bdiv 0.479 vloss 0.554
+28-32M n=1302 reward20    5.1 kl 0.0821 steps 2.11 steps<3  75% ent 0.419 bdiv 0.480 vloss 0.662
+32-36M n=1302 reward20    4.1 kl 0.0777 steps 2.20 steps<3  74% ent 0.419 bdiv 0.482 vloss 0.490
+36-40M n=1302 reward20    8.5 kl 0.0784 steps 2.26 steps<3  70% ent 0.419 bdiv 0.482 vloss 0.486
+40-44M n=1302 reward20    3.4 kl 0.0869 steps 1.94 steps<3  86% ent 0.419 bdiv 0.479 vloss 0.517
+44-48M n=1302 reward20   -3.0 kl 0.0910 steps 1.85 steps<3  92% ent 0.419 bdiv 0.486 vloss 0.408
+48-52M n=  57 reward20  -12.0 kl 0.0805 steps 2.04 steps<3  91% ent 0.419 bdiv 0.468 vloss 0.391

@@ -1,0 +1,49 @@
+Mean-policy inversion sweep, frozen outer-4 checkpoints at 40,000,512 and 48,172,032 ticks.
+Pre-registered: https://github.com/bddap/rl/issues/351#issuecomment-6090384266
+
+Recipe: the pinned rl-demo (sha256 331ce5b274586c48eab5eabe6fa280e7d0f52ad552993bebca58b5c033d78f01, 73e7b88),
+mean policy, render-video --rollout-terrain flat --band-max-m 9 --seconds 20 --width 640 --height 360 --seed S,
+NVIDIA Vulkan, the run's plant asset root. Seeds 351-370 on each checkpoint: 40 renders, all exit 0.
+Checkpoints: ckpt-40000512 (brain 31052611...c539), ckpt-48172032 (brain 6ab9fb93...f1cffc).
+Recipe check: seeds 351-353 reproduce the committed outer4-cold-rerun-40m/ and outer4-continuation-48m/ traces byte for byte.
+Traces: traces/<ticks>-<seed>.txt (one ROLLOUT_TRACE per simulated second). Table: sweep.txt (analyze.py). Figure: inversion-sweep.png (plot.py).
+
+Definitions: inverted = upright < 0. Rights herself = an inverted sample followed by upright >= 0.5.
+Closes and holds = body-to-ball planar distance <= 0.5 m at every sample from some t <= 18 s to t = 20 s.
+
+                              40M        48.17M
+  inverted at 20 s            3/20       7/20
+  ever inverted               3/20       10/20
+  rights herself              0/3        3/10  (all three from shallow tilts, min upright -0.02/-0.17/-0.40;
+                                                 0 of 7 that reached upright < -0.5 recovered)
+  closes and holds (body)     2/20       0/20  (40M: 366 from 10 s, 368 from 14 s)
+  ever within 0.5 m (body)    7/20       1/20
+  holds on claw-tip distance  0/20       0/20
+  failures: inverted/upright  3 / 15     7 / 13
+  median distance closed      0.76 m     0.25 m
+
+Seed 366 at 40M (mean-40m-366*): walks to the ball and stays over it (body 0.04-0.26 m from 10 s), upright, claws not on it
+(tip >= 0.45 m). Seed 363 at 48M (mean-48m-363*): on her back by the first sample (about 2 s of control after an upright
+spawn) and stays there. 5 of the 10 inversions at 48M are in by the 2 s sample (352, 359, 360, 363, 367);
+all 3 at 40M are (351, 352, 355).
+
+Decision rule (pre-registered): inverted failures rose 3 -> 7 (+4 >= 3) => inversion-recovery change.
+Upright non-closers remain the majority on both checkpoints (15, 13).
+
+Reward and observation reading (source at 73e7b88; unchanged in crab-world/src through 8f368ae except physics/snapshot.rs):
+  reward = 24 * (planar carapace-to-ball distance closed) - 0.0006 * sum(drive^2) + 50 on a claw-tip grab (<= 0.2 m, terminal).
+  No term reads orientation: an inverted body is paid exactly as an upright one for the same displacement.
+  No termination or penalty on inversion (the fell terminal was deleted as a cold-start dying exploit).
+  Episodes truncate at 1500 ticks with a bootstrap. gamma 0.99, lambda 0.95 (~1.6 s horizon).
+  Observation: world-frame body quaternion (4), world-frame linvel/angvel, target in body frame, 76 joint channels,
+  25 yaw-frame terrain samples. Upright is readable only as 1 - 2(x^2 + z^2) of the quaternion; no body-frame gravity.
+  Training visits inverted states: ~12% of respawns start with upright < 0 (random_spawn_rotation, 20% heavy tilt
+  0.44..pi), plus her own flips. No shoves.
+  So the only pull toward righting is indirect: righting pays only through later progress, discounted over ~1.6 s.
+  An inverted body here barely moves (inverted seeds stall), so righting has value, but nothing points the
+  gradient at it, and the policy has not found it in 48M ticks despite ~12% inverted starts.
+
+Optimizer (optim-4m.txt, [learner] lines per 4M ticks): per-update KL 0.077-0.091 throughout, update stopped at
+<= 2 epochs on 62-92% of iterations, rising to 86-92% after 40M while reward(20) fell +8.5 -> +3.4 -> -3.0.
+Entropy pinned at 0.419 from 4M (log-std at the -1 floor). Recorded for the architecture/optimizer box that the
+upright non-closers will need if the inversion change does not move them.

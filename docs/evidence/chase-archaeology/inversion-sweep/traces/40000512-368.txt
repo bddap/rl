@@ -1,0 +1,23 @@
+loaded armed checkpoint from <run>/ckpt-40000512
+RENDER_CHECKPOINT dir=<run>/ckpt-40000512 ticks=40000512
+ROLLOUT_TRACE video_tick=64 body=Vec3(-0.14461842, 0.4277571, -0.07633441) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=1.66296 tip_distance_m=Some(2.2896397) upright=0.98768
+ROLLOUT_TRACE video_tick=128 body=Vec3(-0.21563843, 0.4420288, -0.23925744) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=1.48596 tip_distance_m=Some(2.100851) upright=0.96187
+ROLLOUT_TRACE video_tick=192 body=Vec3(-0.30749404, 0.41507912, -0.38901764) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=1.31572 tip_distance_m=Some(1.9401813) upright=0.95860
+ROLLOUT_TRACE video_tick=256 body=Vec3(-0.30591998, 0.43186626, -0.4495595) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=1.25819 tip_distance_m=Some(1.9122404) upright=0.97087
+ROLLOUT_TRACE video_tick=320 body=Vec3(-0.26431513, 0.41780633, -0.5054095) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=1.21838 tip_distance_m=Some(1.8495595) upright=0.95331
+ROLLOUT_TRACE video_tick=384 body=Vec3(-0.45594153, 0.47872174, -0.5772112) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=1.09709 tip_distance_m=Some(1.7815593) upright=0.81637
+ROLLOUT_TRACE video_tick=448 body=Vec3(-0.50298977, 0.4203596, -0.6916626) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.97578 tip_distance_m=Some(1.629545) upright=0.89824
+ROLLOUT_TRACE video_tick=512 body=Vec3(-0.58155465, 0.4041913, -0.76333684) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.89358 tip_distance_m=Some(1.4978596) upright=0.92906
+ROLLOUT_TRACE video_tick=576 body=Vec3(-0.6800289, 0.37981918, -0.8122264) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.83960 tip_distance_m=Some(1.3790144) upright=0.95449
+ROLLOUT_TRACE video_tick=640 body=Vec3(-0.66309005, 0.3863871, -0.85240483) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.79954 tip_distance_m=Some(1.3740337) upright=0.97773
+ROLLOUT_TRACE video_tick=704 body=Vec3(-0.5181762, 0.44463128, -0.9241466) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.74478 tip_distance_m=Some(1.3709869) upright=0.92079
+ROLLOUT_TRACE video_tick=768 body=Vec3(-0.56350505, 0.43651468, -1.0379239) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.62428 tip_distance_m=Some(1.2685908) upright=0.96176
+ROLLOUT_TRACE video_tick=832 body=Vec3(-0.44633663, 0.46052104, -1.1675686) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.53633 tip_distance_m=Some(1.1910601) upright=0.92291
+ROLLOUT_TRACE video_tick=896 body=Vec3(-0.49063203, 0.4503272, -1.253182) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.44000 tip_distance_m=Some(1.0907022) upright=0.94910
+ROLLOUT_TRACE video_tick=960 body=Vec3(-0.45896673, 0.45053574, -1.2842541) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.42730 tip_distance_m=Some(1.0687377) upright=0.95319
+ROLLOUT_TRACE video_tick=1024 body=Vec3(-0.52153665, 0.42967114, -1.3478774) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.34134 tip_distance_m=Some(1.0147228) upright=0.97952
+ROLLOUT_TRACE video_tick=1088 body=Vec3(-0.4519935, 0.42952582, -1.4167414) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.32532 tip_distance_m=Some(0.9402023) upright=0.97664
+ROLLOUT_TRACE video_tick=1152 body=Vec3(-0.4319163, 0.4334506, -1.4800035) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.29920 tip_distance_m=Some(0.8627125) upright=0.97645
+ROLLOUT_TRACE video_tick=1216 body=Vec3(-0.43693468, 0.43742764, -1.4754401) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.29779 tip_distance_m=Some(0.8433375) upright=0.97411
+ROLLOUT_TRACE video_tick=1280 body=Vec3(-0.3852442, 0.42861274, -1.5173249) target=Vec3(-0.6768686, 0.24070106, -1.6518215) distance_m=0.32115 tip_distance_m=Some(0.7897729) upright=0.98463
+DRIVE_STATS ticks=1280 mean_abs_drive=0.88084 mean_effort=31.43124 hard_ccd_crab_link_clamp_candidates=0
