@@ -1,5 +1,6 @@
-//! rl#351: rl#343 blow-up onsets captured under the old (2,12,3)×2 solver, replayed
-//! one tick on the shipped solver, stay below the near-miss line.
+//! rl#351: every rl#343 blow-up onset committed under
+//! `docs/evidence/chase-archaeology/integrity-*/`, replayed one tick on the shipped
+//! plant, stays below the near-miss line.
 
 use crab_world::physics::SHIPPED_SOLVER;
 use crab_world::physics::snapshot::{
@@ -9,39 +10,36 @@ use crab_world::physics::snapshot::{
 /// `rl-train repro`'s near-miss line, on the rl#343 bound's `lin.max(ang/3)`.
 const NEAR_MISS_M_S: f32 = 30.0;
 
-/// (2,12,3)×2 onsets: the reproduction hunt (trips and near misses), the rate A/B and process split's
-/// shipped arms, and the re-sized lever A/B's shipped arm. Left out:
-/// `integrity-process-split/inproc-vm-w0-r0-e0-t720366.bin`, a carpus spin trip that
-/// outer 4 does not remove (43 m/s, 286 rad/s): outer 4 lowers the trip rate, and its
-/// own arm still tripped twice in 36.2M ticks.
-const CAPTURES: &[&str] = &[
-    "integrity-repro/w0-e0-t148847.bin",
-    "integrity-repro/w0-e0-t323647.bin",
-    "integrity-repro/w4-e1-t19561.bin",
-    "integrity-repro/w6-e0-t414529.bin",
-    "integrity-repro/w6-e0-t92296.bin",
-    "integrity-repro/w8-e0-t525125.bin",
-    "integrity-repro/w9-e0-t334610.bin",
-    "integrity-rate-ab/shipped-w3-r0-e0-t332677.bin",
-    "integrity-process-split/inproc-vm-w5-r0-e0-t615836.bin",
-    "integrity-lever-ab-36m/shipped-w12-r0-e1-t470214.bin",
-    "integrity-lever-ab-36m/shipped-w13-r0-e1-t145406.bin",
-    "integrity-lever-ab-36m/shipped-w16-r0-e0-t347915.bin",
-    "integrity-lever-ab-36m/shipped-w17-r0-e0-t130564.bin",
-    "integrity-lever-ab-36m/shipped-w19-r0-e1-t182156.bin",
-    "integrity-lever-ab-36m/shipped-w19-r1-e0-t459794.bin",
-    "integrity-lever-ab-36m/shipped-w32-r0-e0-t106934.bin",
-    "integrity-lever-ab-36m/shipped-w32-r1-e1-t482225.bin",
-    "integrity-lever-ab-36m/shipped-w34-r0-e0-t58601.bin",
-    "integrity-lever-ab-36m/shipped-w36-r0-e0-t402058.bin",
-    "integrity-lever-ab-36m/shipped-w38-r0-e0-t424455.bin",
-    "integrity-lever-ab-36m/shipped-w38-r1-e1-t197048.bin",
-];
+/// Bumped by hand with each onset committed, so a lost capture fails loudly.
+const ONSETS: usize = 26;
+
+fn onsets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let entries = |dir: &std::path::Path| {
+        std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .map(|e| e.expect("readable evidence dir").path())
+            .collect::<Vec<_>>()
+    };
+    let mut out: Vec<_> = entries(root)
+        .into_iter()
+        .filter(|d| {
+            d.is_dir()
+                && d.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("integrity-"))
+        })
+        .flat_map(|d| entries(&d))
+        .filter(|p| p.extension().is_some_and(|x| x == "bin"))
+        .collect();
+    out.sort();
+    out
+}
 
 #[test]
 fn integrity_captures_replay_quiet() {
     let root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/evidence/chase-archaeology");
+    let captures = onsets(&root);
+    assert_eq!(captures.len(), ONSETS, "onsets under {}", root.display());
     let cfg = ReplayConfig {
         drive_scale: 1.0,
         solver: SHIPPED_SOLVER,
@@ -51,8 +49,9 @@ fn integrity_captures_replay_quiet() {
         shape: ShapeVariant::AsIs,
     };
     let mut loud = Vec::new();
-    for name in CAPTURES {
-        let snap = PlantSnapshot::load(&root.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+    for path in &captures {
+        let name = path.strip_prefix(&root).unwrap_or(path).display();
+        let snap = PlantSnapshot::load(path).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
             snap.original_max_speed() > NEAR_MISS_M_S,
             "{name}: not a blow-up onset ({:.1} m/s in the original run)",
@@ -67,6 +66,6 @@ fn integrity_captures_replay_quiet() {
     }
     assert!(
         loud.is_empty(),
-        "trip onsets still blow up on the shipped solver {SHIPPED_SOLVER}: {loud:?}"
+        "trip onsets still blow up on the shipped plant ({SHIPPED_SOLVER}): {loud:?}"
     );
 }
