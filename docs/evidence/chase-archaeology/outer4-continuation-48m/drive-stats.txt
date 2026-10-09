@@ -1,0 +1,3 @@
+mean-351 DRIVE_STATS ticks=1280 mean_abs_drive=0.87060 mean_effort=30.99014 hard_ccd_crab_link_clamp_candidates=40
+mean-352 DRIVE_STATS ticks=1280 mean_abs_drive=0.89702 mean_effort=32.10820 hard_ccd_crab_link_clamp_candidates=0
+mean-353 DRIVE_STATS ticks=1280 mean_abs_drive=0.83927 mean_effort=29.40010 hard_ccd_crab_link_clamp_candidates=2

@@ -1,0 +1,44 @@
+Outer-4 budget continuation, 40M -> 80M: stopped by an rl#343 hard-fail at 48,172,032 ticks.
+Chase NOT demonstrated; train reach peaked at 35-40M and fell after it.
+
+Run: the 40M outer-4 cold rerun (outer4-cold-rerun-40m/), warm-continued in place. The one change is
+--ticks 40000000 -> --ticks 80000000. Unchanged: rl-train at 73e7b88 (sha256
+6db62ecbdb7f9a066b849fcdf506159f1c60dbe7e47d06d22c8193f04f7416b8), solver (4,12,3)x2,
+learn --terrain flat --band-max-m 9 --arch mlp512x3 --workers 6 --envs 2 --horizon 512 --seed 351
+--log-std-floor-end -1, the same checkpoint dir and log.
+Resume 2026-10-09T05:04Z from 40,000,512: simulation identity 37e61920ac4ad672 in both checkpoint and
+build; brain, normalizer, return normalizer and Adam state restored. The sigma schedule is anneal
+epoch 0 over 5M ticks, so it was already at the -1 floor; --ticks does not enter it.
+Two process launches in the continuation (05:04Z, and 11:34Z after a TV-session pause), both warm, identity unchanged.
+
+Integrity: 1 rl#343 hard-fail, at 2026-10-09T12:29Z, rollout thread 5, env 0, tick 195602, episode step 22,
+at a run total of 48,172,032 ticks (last checkpoint, iter 381):
+  LegCarpus(Right, 3) lin 76.0 m/s, ang 345.8 rad/s (bound lin.max(ang/3) = 115.3 m/s), height 0.376 m.
+  The flight recorder shows that carpus at 3.4 m/s / 15.2 rad/s one tick earlier: a one-tick right-carpus
+  spin, the same shape as the residual inproc-vm-w0 t720366 named when (4,12,3)x2 landed.
+  The run exited 101 with no restart. Excerpt: hardfail-48172032.txt.
+  Totals for (4,12,3)x2 on this run: 0 trips in the first 40,000,512 ticks, 1 in the next 8,171,520.
+  60M and 80M were never reached.
+
+Reach, episode-weighted per 5M-tick bucket (reach5m.awk over [learner] iter lines, same ruler as 40M):
+  35-40M  0.1009 (6550 ep)   peak
+  40-45M  0.0948 (6771 ep)
+  45-50M  0.0663 (4266 ep, to 48.17M)
+At 2M resolution (outer4-2m-reward-reach.txt) reach is 0.127 at 38-40M, then 0.106, 0.103, 0.049,
+0.079. Mean reward(20) falls from +9.4 (38-40M) to -0.1 (42-44M) and -4.9 (44-46M).
+Reach plateaued and fell, so budget alone is not the missing ingredient on this recipe.
+
+Renders: the pinned rl-demo (sha256 331ce5b274586c48eab5eabe6fa280e7d0f52ad552993bebca58b5c033d78f01),
+mean policy, render-video --rollout-terrain flat --band-max-m 9 --seconds 20 --width 640 --height 360,
+seeds 351-353, NVIDIA Vulkan. They use the final checkpoint at 48,172,032 in place of the unreached 60M/80M marks.
+All three exit 0. The same recipe on the 40M checkpoint reproduces the committed 40M traces byte for byte.
+Checkpoint sha256:
+  6ab9fb9348853528c5f9d0b64d08b6d6e6948f12553785cad010236de9f1cffc  brain.bin
+  60033299ca9b1e9abf6dd7607461364d224a38b1a9ccc3c3b9e1aa9cae8b21e7  normalizer.bin
+  6068e37352dbece4becbc492a76a89c0c4fca9fa515dc39e1a8901b57a4e87c3  return_normalizer.bin
+Per-second trace (distance to ball m / upright):
+  mean-351: upright 0.66-0.87 throughout. Closes 2.20 -> 1.11 m by 12 s, then drifts back to 1.35 m. No hold.
+            (At 40M she flipped at 2 s; the flip is gone on this seed, the closing is not finished.)
+  mean-352: inverted from the start (-0.78), -0.93 from 7 s. Rolls 7.78 -> 6.53 m, then stalls on her back.
+  mean-353: upright 0.75-0.995. Creeps 5.91 -> 4.62 m by 13 s, then stops (0.07 m/s overall). No closing.
+Verdict: no mean render closes on the ball and holds it upright. Inversion persists on 352; 351 stays upright.
