@@ -4,7 +4,7 @@
 
 use crab_world::physics::SHIPPED_SOLVER;
 use crab_world::physics::snapshot::{
-    ContactsOff, FreeLimits, PlantSnapshot, ReplayConfig, ShapeVariant, Vec3,
+    ContactsOff, FreeLimits, PlantSnapshot, ReplayConfig, ShapeVariant, Vec3, nan_max,
 };
 
 /// `rl-train repro`'s near-miss line, on the rl#343 bound's `lin.max(ang/3)`.
@@ -56,13 +56,13 @@ fn integrity_captures_replay_quiet() {
             .expected
             .iter()
             .map(|(v, w)| Vec3::from(*v).length().max(Vec3::from(*w).length() / 3.0))
-            .fold(0.0, f32::max);
+            .fold(0.0, nan_max);
         assert!(
             original > NEAR_MISS_M_S,
             "{name}: not a blow-up onset ({original:.1} m/s in the original run)"
         );
         let out = snap.replay(&cfg);
-        let speed = out.max_speed_after.max(out.max_angvel_after / 3.0);
+        let speed = nan_max(out.max_speed_after, out.max_angvel_after / 3.0);
         println!("{name}: {original:.1} -> {speed:.2} m/s");
         if speed.is_nan() || speed >= NEAR_MISS_M_S {
             loud.push(format!("{name}: {speed:.1} m/s"));

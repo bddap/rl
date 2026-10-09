@@ -370,10 +370,10 @@ impl PlantSnapshot {
         };
         for (i, ((v0, w0), (v1, w1))) in before.iter().zip(&after).enumerate() {
             let (s0, s1) = (v0.length(), v1.length());
-            out.max_speed_before = out.max_speed_before.max(s0);
-            out.max_speed_after = out.max_speed_after.max(s1);
-            out.max_angvel_before = out.max_angvel_before.max(w0.length());
-            out.max_angvel_after = out.max_angvel_after.max(w1.length());
+            out.max_speed_before = nan_max(out.max_speed_before, s0);
+            out.max_speed_after = nan_max(out.max_speed_after, s1);
+            out.max_angvel_before = nan_max(out.max_angvel_before, w0.length());
+            out.max_angvel_after = nan_max(out.max_angvel_after, w1.length());
             if is_kick(s0, s1) {
                 out.kicks += 1;
                 if s1 / s0.max(KICK_FLOOR_M_S)
@@ -629,6 +629,16 @@ pub struct ReplayOutcome {
     pub max_mass_props_dev: f32,
     /// Contact manifolds on the worst-kicked link after the tick.
     pub worst_kick_contacts: Vec<ContactInfo>,
+}
+
+/// `f32::max` that keeps a NaN: a part the replay blew to non-finite must not read as
+/// the quietest one.
+pub fn nan_max(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else {
+        a.max(b)
+    }
 }
 
 /// A part below this speed is not a kick source: a 0.1→0.5 m/s solver-noise

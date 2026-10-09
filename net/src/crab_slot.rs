@@ -1407,27 +1407,27 @@ mod tests {
         );
 
         let mut tick = 0u64;
-        let mut snap = None;
         for _ in 0..100u64 {
-            snap = Some(server_tick(&mut app, &mut server, tick));
+            server_tick(&mut app, &mut server, tick);
             tick += 1;
         }
+        let mut moved = 0.0f32;
         for t in 0..300u64 {
             app.world_mut().resource_mut::<Wave>().0 = if (t / 5) % 2 == 0 { 1.0 } else { -1.0 };
-            snap = Some(server_tick(&mut app, &mut server, tick));
+            let at = server_tick(&mut app, &mut server, tick).crabs[0].pos();
+            let (dx, dz) = Pos {
+                x: at.x - spawn.x,
+                z: at.z - spawn.z,
+            }
+            .to_meters();
+            moved = moved.max((dx * dx + dz * dz).sqrt());
             tick += 1;
         }
 
-        let snap = snap.expect("ticks ran");
-        let end = snap.crabs[0].pos();
-        let (dx, dz) = Pos {
-            x: end.x - spawn.x,
-            z: end.z - spawn.z,
-        }
-        .to_meters();
-        let moved = (dx * dx + dz * dz).sqrt();
         // The bar pins the LINK (in-world motion reaches the decode), not a physics
-        // magnitude: how far the flail shuffles her is terrain-dependent at the
+        // magnitude, so it reads her largest excursion: a flail shuffles her back and
+        // forth, and where the window happens to end says nothing about the link. How
+        // far the flail shuffles her is terrain-dependent at the
         // seeded spawn locale, which is fixed (clearance is a taste constant, not
         // pin arithmetic — rl#397) — so it sits well above fixed-point noise and
         // well below any honest flail displacement there.
