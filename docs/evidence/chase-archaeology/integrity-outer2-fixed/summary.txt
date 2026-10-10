@@ -1,0 +1,10 @@
+rl-train repro --terrain flat --band-max-m 9 --envs 2 --horizon 512 --log-std-floor-end -1 --workers 1 --first-worker i --ticks 786432 --capture-dir cap --solver S; fixed plant (rapier 5ec3305); eight 32-vCPU VMs, 15-16 single-worker processes each, every VM carrying every arm
+o2c34 = (2,12,3)x2, checkpoint 34,240,512 (brain bc44ff79, normalizer 058ec69d), seed 3510, workers 0-45
+o4c34 = (4,12,3)x2, same checkpoint, seed and workers
+o2c48 = (2,12,3)x2, checkpoint 48,172,032 (brain 6ab9fb93, normalizer 60033299), seed 4810, workers 0-33
+o2c34 workers 46 ticks 36175872 trips 0 cpu_s 638165 ticks/cpu_s 56.69 near-miss lines 0
+o4c34 workers 46 ticks 36175872 trips 0 cpu_s 838230 ticks/cpu_s 43.16 near-miss lines 0
+o2c48 workers 34 ticks 26738688 trips 0 cpu_s 473049 ticks/cpu_s 56.52 near-miss lines 0
+control for o2c48: integrity-carpus-48m after arm, (4,12,3)x2, 26,738,688 ticks, 0 trips, 0 near-miss events
+pre-fix reference (integrity-lever-ab-36m): (2,12,3)x2 on o2c34's checkpoint and seed tripped 13 in 36,178,844
+outer-2 trips pooled: 0 in 62,914,560 ticks

@@ -1,0 +1,19 @@
+game step-profile --checkpoint <34,240,512 hull checkpoint> --ticks 1024, headless, training host (load avg ~8 from other work), main 510d48f with SOLVER_ITERATIONS (4,12,3) vs (2,12,3), runs interleaved
+outer4 r1 step wall ms               p10   6.01  p50  10.28  p90  11.63  p99  14.66  max  17.30
+outer4 r1 substep ms                 p10   2.33  p50   4.29  p90   4.72  p99   5.90  max   8.06
+outer4 r1 step p50 split: wall 10.28 ms ≈ physics 8.59 + NN forward 0.984 + other 0.71 (sense/act/schedule)
+outer2 r1 step wall ms               p10   4.38  p50   6.88  p90   7.81  p99  10.38  max  13.12
+outer2 r1 substep ms                 p10   1.38  p50   2.58  p90   2.78  p99   3.45  max   5.17
+outer2 r1 step p50 split: wall 6.88 ms ≈ physics 5.16 + NN forward 1.036 + other 0.69 (sense/act/schedule)
+outer4 r2 step wall ms               p10   6.25  p50  10.54  p90  12.05  p99  14.36  max  17.63
+outer4 r2 substep ms                 p10   2.33  p50   4.39  p90   4.82  p99   5.85  max   7.32
+outer4 r2 step p50 split: wall 10.54 ms ≈ physics 8.77 + NN forward 0.591 + other 1.17 (sense/act/schedule)
+outer2 r2 step wall ms               p10   3.94  p50   6.20  p90   7.57  p99   9.82  max  14.50
+outer2 r2 substep ms                 p10   1.37  p50   2.13  p90   2.77  p99   3.42  max   6.17
+outer2 r2 step p50 split: wall 6.20 ms ≈ physics 4.27 + NN forward 0.869 + other 1.07 (sense/act/schedule)
+outer4 r3 step wall ms               p10   6.01  p50   8.94  p90  11.50  p99  13.93  max  16.66
+outer4 r3 substep ms                 p10   2.34  p50   3.49  p90   4.73  p99   5.84  max   7.76
+outer4 r3 step p50 split: wall 8.94 ms ≈ physics 6.98 + NN forward 0.922 + other 1.04 (sense/act/schedule)
+outer2 r3 step wall ms               p10   3.96  p50   6.25  p90   7.67  p99  10.20  max  13.66
+outer2 r3 substep ms                 p10   1.37  p50   2.11  p90   2.77  p99   3.44  max   5.32
+outer2 r3 step p50 split: wall 6.25 ms ≈ physics 4.23 + NN forward 1.059 + other 0.96 (sense/act/schedule)
