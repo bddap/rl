@@ -6,7 +6,6 @@ use crate::bot::actuator::ACTION_SIZE;
 use crate::bot::sensor::OBS_SIZE;
 
 pub(crate) struct PpoConfig {
-    pub(crate) gamma: f32,
     pub(crate) lambda: f32,
     pub(crate) clip_epsilon: f32,
     pub(crate) entropy_coeff: f32,
@@ -26,13 +25,14 @@ impl PpoConfig {
     }
 }
 
+pub(crate) const GAMMA: f32 = 0.99;
+
 pub(crate) const LOG_STD_FLOOR_START: f32 = -0.7;
 pub(crate) const LOG_STD_ANNEAL_TICKS: u64 = 5_000_000;
 
 impl Default for PpoConfig {
     fn default() -> Self {
         Self {
-            gamma: 0.99,
             lambda: 0.95,
             clip_epsilon: 0.2,
             entropy_coeff: 0.001,

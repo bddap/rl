@@ -338,8 +338,9 @@ pub fn run_learner(
         anneal_epoch,
     );
     eprintln!(
-        "[learner] reward economy: effort_weight {}",
+        "[learner] reward economy: effort_weight {}, upright shaping k {} (--upright-shaping-k)",
         crate::training::reward::EFFORT_WEIGHT,
+        config.upright_shaping_k,
     );
     // Loud so train.log proves the rollout ground + band — the plant sidecar does NOT
     // track the diagnostic terrain override (see `crate::TrainTerrain`), so this line

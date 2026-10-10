@@ -1,6 +1,7 @@
 use bevy::prelude::Vec3;
 
 use crate::bot::actuator::ACTION_SIZE;
+use crate::training::algorithm::GAMMA;
 
 pub(crate) const EFFORT_WEIGHT: f32 = 0.0006;
 
@@ -35,6 +36,14 @@ pub(crate) fn compute_reward(distance_closed: Option<f32>, effort: f32) -> f32 {
     progress_reward(distance_closed) - EFFORT_WEIGHT * effort
 }
 
+/// Potential-based shaping γΦ(s′) − Φ(s), Φ = k·upright (rl#351). `None` is the
+/// grab's absorbing state, Φ = 0 (Ng et al. 1999): the −Φ(s) it pays refunds the
+/// shaping collected on the way, so every episode's return shifts by −Φ(s₀), grab
+/// or not. A real Φ(s′) there would add a γᵀ·k upright-grab bonus instead.
+pub(crate) fn upright_shaping(k: f32, upright: f32, upright_next: Option<f32>) -> f32 {
+    GAMMA * upright_next.map_or(0.0, |u| k * u) - k * upright
+}
+
 pub(crate) fn planar_dist(a: Vec3, b: Vec3) -> f32 {
     let d = a - b;
     (d.x * d.x + d.z * d.z).sqrt()
@@ -52,6 +61,36 @@ mod tests {
 
     fn per_tick_closed(v: f32) -> f32 {
         v * PHYSICS_DT
+    }
+
+    /// Policy invariance: over any path ending in the grab, the discounted shaping
+    /// sums to −Φ(s₀).
+    #[test]
+    fn upright_shaping_is_policy_invariant_through_the_grab() {
+        let k = 12.0;
+        for ups in [
+            &[-1.0_f32, -0.6, 0.2, -0.3, 0.8, 1.0, 0.95][..],
+            &[-1.0, -1.0, -0.99][..],
+            &[-1.0, 1.0][..],
+        ] {
+            let last = ups.len() - 1;
+            let discounted: f32 = (0..last)
+                .map(|t| {
+                    let next = (t + 1 < last).then_some(ups[t + 1]);
+                    GAMMA.powi(t as i32) * upright_shaping(k, ups[t], next)
+                })
+                .sum();
+            assert!(
+                (discounted + k * ups[0]).abs() < 1e-4,
+                "{ups:?}: Σγᵗ·shaping = {discounted}, want −Φ(s₀) = {}",
+                -k * ups[0]
+            );
+        }
+        assert_eq!(
+            upright_shaping(0.0, -1.0, Some(1.0)),
+            0.0,
+            "k = 0 is the unshaped reward"
+        );
     }
 
     #[test]

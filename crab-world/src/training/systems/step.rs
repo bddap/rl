@@ -51,6 +51,7 @@ pub(super) struct EnvStep {
     /// integrity bounds test. `None` while the env has no body.
     pub(super) height: Option<f32>,
     pub(super) carapace_pos: Option<Vec3>,
+    pub(super) upright: Option<f32>,
     /// Carapace planar drift from the spawn origin, for the drift telemetry.
     pub(super) drift: Option<f32>,
     pub(super) max_speed: MaxPartSpeed,
@@ -68,6 +69,7 @@ impl Default for EnvStep {
         Self {
             height: None,
             carapace_pos: None,
+            upright: None,
             drift: None,
             max_speed: MaxPartSpeed::default(),
             min_tip_dist: None,
@@ -229,6 +231,7 @@ fn scatter_body_readings(
             let t = transform.translation;
             step.height = Some(t.y - terrain.height(t.x, t.z));
             step.carapace_pos = Some(t);
+            step.upright = Some(crate::bot::body::upright(transform.rotation));
             step.drift = Some(planar_dist(t, spawns.origin(env.0)));
         }
     }

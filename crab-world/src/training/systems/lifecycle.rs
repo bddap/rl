@@ -7,7 +7,9 @@ use crate::bot::{
     CrabCcdClampCandidates, CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown,
 };
 use crate::training::algorithm::{NormalizedValue, StepEnd, Transition};
-use crate::training::reward::{GRAB_REWARD, compute_reward, is_progress_glitch, planar_dist};
+use crate::training::reward::{
+    GRAB_REWARD, compute_reward, is_progress_glitch, planar_dist, upright_shaping,
+};
 use crate::training::targets::{seed_target, tip_touch};
 
 use super::state::WorkerState;
@@ -85,19 +87,25 @@ struct StepFinalize {
 
 fn finalize_pending_step(
     pending: &Pending,
+    step: &EnvStep,
     d_now: Option<f32>,
-    min_tip_dist: Option<f32>,
     over_cap: bool,
-    next_value: NormalizedValue,
+    upright_shaping_k: f32,
 ) -> StepFinalize {
     let distance_closed = pending.target_dist.zip(d_now).map(|(prev, now)| prev - now);
     let progress_glitch = is_progress_glitch(distance_closed);
-    let mut reward = compute_reward(distance_closed, pending.effort);
-
-    let grabbed = min_tip_dist.is_some_and(tip_touch);
+    let grabbed = step.min_tip_dist.is_some_and(tip_touch);
+    let upright_now = step.upright.expect("a finalized step has a body");
+    let mut reward = compute_reward(distance_closed, pending.effort)
+        + upright_shaping(
+            upright_shaping_k,
+            pending.upright,
+            (!grabbed).then_some(upright_now),
+        );
     if grabbed {
         reward += GRAB_REWARD;
     }
+    let next_value = step.value;
     let end = classify_step_end(grabbed, over_cap, next_value);
     StepFinalize {
         transition: Transition {
@@ -131,6 +139,7 @@ pub(crate) struct Pending {
     log_prob: f32,
     effort: f32,
     target_dist: Option<f32>,
+    upright: f32,
 }
 
 #[derive(Clone, Default)]
@@ -192,8 +201,13 @@ impl WorkerState {
                 );
                 let d_now = carapace_target_dist(step, targets, e);
                 let over_cap = self.mode.envs[e].steps > MAX_EPISODE_TICKS;
-                let fin =
-                    finalize_pending_step(&pending, d_now, step.min_tip_dist, over_cap, step.value);
+                let fin = finalize_pending_step(
+                    &pending,
+                    step,
+                    d_now,
+                    over_cap,
+                    self.mode.upright_shaping_k,
+                );
                 if fin.progress_glitch {
                     self.mode.telemetry.progress_glitch_drops += 1;
                 }
@@ -216,6 +230,7 @@ impl WorkerState {
                     log_prob: step.log_prob,
                     effort: step.effort,
                     target_dist,
+                    upright: step.upright.expect("a recording step has a body"),
                 });
             }
 
@@ -369,6 +384,7 @@ pub(crate) fn reset_crab(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::training::algorithm::GAMMA;
     use crate::training::targets::REACH_RADIUS;
 
     /// A planar fixture grid, big enough for band sampling (≥ edge margin + band) —
@@ -388,6 +404,7 @@ mod tests {
         let step = EnvStep {
             height: Some(1.0),
             carapace_pos: Some(Vec3::ZERO),
+            upright: Some(1.0),
             min_tip_dist,
             ..EnvStep::default()
         };
@@ -433,6 +450,7 @@ mod tests {
             log_prob: 0.0,
             effort: 0.0,
             target_dist: None,
+            upright: 1.0,
         };
         assert!(
             !pre_touched_target(&ep(EnvPhase::Recording, Some(pending)), touching),
@@ -483,6 +501,7 @@ mod tests {
             log_prob: 0.0,
             effort: 0.0,
             target_dist: None,
+            upright: 1.0,
         });
         // An over-cap truncation ends the episode without needing a whole physics run.
         ts.mode.envs[0].steps = MAX_EPISODE_TICKS + 1;
@@ -548,11 +567,18 @@ mod tests {
             log_prob: 0.0,
             effort,
             target_dist,
+            upright: 1.0,
         };
-        let far_tip = Some(REACH_RADIUS * 4.0);
         let succ_v = NormalizedValue(0.5);
+        let step = |min_tip_dist: Option<f32>| EnvStep {
+            upright: Some(1.0),
+            min_tip_dist,
+            value: succ_v,
+            ..EnvStep::default()
+        };
+        let far = step(Some(REACH_RADIUS * 4.0));
 
-        let r = finalize_pending_step(&pend(0.0, Some(1.25)), Some(1.0), far_tip, false, succ_v);
+        let r = finalize_pending_step(&pend(0.0, Some(1.25)), &far, Some(1.0), false, 0.0);
         assert_eq!(r.transition.end, StepEnd::Continues);
         assert!(!r.ended);
         assert_eq!(
@@ -560,7 +586,8 @@ mod tests {
             compute_reward(Some(0.25), 0.0).to_bits()
         );
 
-        let r = finalize_pending_step(&pend(0.0, Some(1.0)), Some(1.0), Some(0.0), false, succ_v);
+        let grab = step(Some(0.0));
+        let r = finalize_pending_step(&pend(0.0, Some(1.0)), &grab, Some(1.0), false, 0.0);
         assert_eq!(
             r.transition.end,
             StepEnd::Terminal,
@@ -572,7 +599,7 @@ mod tests {
             (compute_reward(Some(0.0), 0.0) + GRAB_REWARD).to_bits()
         );
 
-        let r = finalize_pending_step(&pend(0.0, Some(1.0)), Some(1.0), far_tip, true, succ_v);
+        let r = finalize_pending_step(&pend(0.0, Some(1.0)), &far, Some(1.0), true, 0.0);
         assert_eq!(
             r.transition.end,
             StepEnd::Truncated { next_value: succ_v },
@@ -580,7 +607,7 @@ mod tests {
         );
         assert!(r.ended);
 
-        let r = finalize_pending_step(&pend(0.0, Some(2.0)), Some(0.0), far_tip, false, succ_v);
+        let r = finalize_pending_step(&pend(0.0, Some(2.0)), &far, Some(0.0), false, 0.0);
         assert!(
             r.progress_glitch,
             "a > 0.5 m/tick delta is a progress glitch"
@@ -590,6 +617,50 @@ mod tests {
             compute_reward(None, 0.0).to_bits(),
             "the glitched progress is dropped to zero (effort tax only)"
         );
+    }
+
+    /// Continuing and capped steps pay γΦ(s′) − Φ(s) on the real post-step body;
+    /// the grab pays γ·0 − Φ(s), its absorbing state's potential being zero.
+    #[test]
+    fn upright_shaping_reads_the_post_step_body_except_at_the_grab() {
+        let k = 12.0;
+        let pend = Pending {
+            obs: [0.0; OBS_SIZE],
+            action: [0.0; ACTION_SIZE],
+            value: NormalizedValue(0.0),
+            log_prob: 0.0,
+            effort: 0.0,
+            target_dist: Some(1.0),
+            upright: -0.5,
+        };
+        let v = NormalizedValue(0.0);
+        let far_tip = Some(REACH_RADIUS * 4.0);
+        let continuing = k * (GAMMA * 0.9 + 0.5);
+        for (tip, over_cap, end, shaping) in [
+            (far_tip, false, StepEnd::Continues, continuing),
+            (Some(0.0), false, StepEnd::Terminal, k * 0.5),
+            (
+                far_tip,
+                true,
+                StepEnd::Truncated { next_value: v },
+                continuing,
+            ),
+        ] {
+            let step = EnvStep {
+                upright: Some(0.9),
+                min_tip_dist: tip,
+                value: v,
+                ..EnvStep::default()
+            };
+            let r = finalize_pending_step(&pend, &step, Some(1.0), over_cap, k);
+            assert_eq!(r.transition.end, end);
+            let unshaped = finalize_pending_step(&pend, &step, Some(1.0), over_cap, 0.0);
+            let got = r.transition.reward - unshaped.transition.reward;
+            assert!(
+                (got - shaping).abs() < 1e-5,
+                "{end:?}: shaping {got}, want {shaping}"
+            );
+        }
     }
 
     /// rl#343: a broken physics state in training panics with the diagnostics (env,

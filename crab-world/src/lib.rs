@@ -309,6 +309,11 @@ pub struct TrainConfig {
     #[arg(long, env = "RL_BAND_MAX_M", value_parser = parse_band_max,
           default_value_t = training::targets::BAND_MAX_M)]
     pub band_max_m: f32,
+
+    /// DIAGNOSTIC (rl#351 A/B): k of the potential-based upright shaping
+    /// Φ = k·upright. 0 is the unshaped reward.
+    #[arg(long, value_parser = parse_finite_f32, default_value_t = 0.0)]
+    pub upright_shaping_k: f32,
 }
 
 /// [`TrainConfig::terrain`]'s values — the ONE production seam for non-canonical
