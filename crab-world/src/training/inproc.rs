@@ -255,8 +255,19 @@ fn roll_one_horizon(
     horizon: u64,
     before_tick: &mut dyn FnMut(&mut App),
 ) -> RollOutcome {
-    if !open_horizon(app, req) {
-        return RollOutcome::SnapshotLoadFailed;
+    {
+        let mut st = app
+            .world_mut()
+            .get_non_send_mut::<WorkerState>()
+            .expect("rollout WorkerState");
+        let opened = st.begin_horizon(HorizonRequest {
+            brain_bytes: &req.brain_bytes,
+            normalizer: (*req.normalizer).clone(),
+            log_std_floor: req.log_std_floor,
+        });
+        if !opened {
+            return RollOutcome::SnapshotLoadFailed;
+        }
     }
 
     let start = horizon_tick(app);
@@ -283,35 +294,13 @@ fn horizon_tick(app: &mut App) -> u64 {
         .unwrap_or(0)
 }
 
-#[must_use = "a failed horizon open must be refused, not rolled on a stale/mis-normalized policy"]
-fn open_horizon(app: &mut App, req: &RollRequest) -> bool {
-    app.world_mut()
-        .get_non_send_mut::<WorkerState>()
-        .expect("rollout WorkerState")
-        .begin_horizon(HorizonRequest {
-            brain_bytes: &req.brain_bytes,
-            normalizer: (*req.normalizer).clone(),
-            log_std_floor: req.log_std_floor,
-        })
-}
-
-/// Steps under `req`'s snapshot, never the worker's cold-init brain: that brain's
-/// weights come from burn's process-global RNG, so a plant it moved would start each
-/// same-seed world from a thread-timing-dependent state (rl#431).
-#[must_use = "a failed snapshot load leaves the app cold"]
+/// The spawn ticks roll under `req`'s snapshot and are discarded; the cold-init brain
+/// never drives the plant (rl#431).
 fn warm_up_app(app: &mut App, req: &RollRequest) -> bool {
-    if !open_horizon(app, req) {
-        return false;
-    }
-    for _ in 0..2 {
-        app.update();
-    }
-    let mut st = app
-        .world_mut()
-        .get_non_send_mut::<WorkerState>()
-        .expect("rollout WorkerState");
-    let _ = st.end_horizon();
-    true
+    matches!(
+        roll_one_horizon(app, req, 2, &mut |_| {}),
+        RollOutcome::Rolled { .. }
+    )
 }
 
 /// The learner loop ({snapshot → roll all → merge → GPU update}) — a child module so the
@@ -494,9 +483,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// rl#431: each world build draws its cold brain from burn's process-global RNG,
-    /// so two builds in one process get different weights. A warm-up that let that
-    /// brain drive would leave the same-seed plants apart.
+    /// rl#431: each build's cold brain is a different draw from burn's global RNG.
     #[test]
     fn same_seed_worlds_in_one_process_warm_up_to_identical_plants() {
         use crate::bot::body::{CrabBodyPart, CrabEnvId};

@@ -199,9 +199,9 @@ impl SeedRole {
 /// default) architecture. Only the learner seeds the process-global backend RNG: its
 /// cold-init draw is the one that becomes trained weights, while a worker's init
 /// brain never reaches the learner (every horizon begins by loading the learner
-/// snapshot, the `#[must_use]` refusal blocks rolling on a failed load, and warm-up
-/// steps under that snapshot too, rl#431) — per-build reseeding of the shared global just handed the
-/// last-built world the win (rl#394).
+/// snapshot, warm-up included, and the `#[must_use]` refusal blocks rolling on a failed
+/// load) — per-build reseeding of the shared global just handed the last-built world
+/// the win (rl#394).
 fn seeded_base(
     config: &TrainConfig,
     role: SeedRole,
