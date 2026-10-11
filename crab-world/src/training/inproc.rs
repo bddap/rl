@@ -298,7 +298,7 @@ fn horizon_tick(app: &mut App) -> u64 {
 /// never drives the plant (rl#431).
 fn warm_up_app(app: &mut App, req: &RollRequest) -> bool {
     matches!(
-        roll_one_horizon(app, req, 2, &mut |_| {}),
+        roll_one_horizon(app, req, 1, &mut |_| {}),
         RollOutcome::Rolled { .. }
     )
 }
