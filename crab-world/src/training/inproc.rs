@@ -233,13 +233,14 @@ fn rollout_thread_main(
     result_tx: Sender<RollOutcome>,
 ) {
     let mut app = build_rollout_app(id, &config, arch);
-    warm_up_app(&mut app);
+    let mut warm = false;
 
     // No catch_unwind here (rl#346, extending rl#343): a roll
     // panic — above all a physics-integrity violation — unwinds this thread, the
     // learner's recv on the closed channel fails, and the RUN dies loud. Silently
     // rebuilding the world and continuing is the recovery class rl#343 bans.
     while let Ok(req) = request_rx.recv() {
+        warm = warm || warm_up_app(&mut app, &req);
         let result = roll_one_horizon(&mut app, &req, horizon, &mut |_| {});
         if result_tx.send(result).is_err() {
             break;
@@ -254,19 +255,8 @@ fn roll_one_horizon(
     horizon: u64,
     before_tick: &mut dyn FnMut(&mut App),
 ) -> RollOutcome {
-    {
-        let mut st = app
-            .world_mut()
-            .get_non_send_mut::<WorkerState>()
-            .expect("rollout WorkerState");
-        let opened = st.begin_horizon(HorizonRequest {
-            brain_bytes: &req.brain_bytes,
-            normalizer: (*req.normalizer).clone(),
-            log_std_floor: req.log_std_floor,
-        });
-        if !opened {
-            return RollOutcome::SnapshotLoadFailed;
-        }
+    if !open_horizon(app, req) {
+        return RollOutcome::SnapshotLoadFailed;
     }
 
     let start = horizon_tick(app);
@@ -293,7 +283,26 @@ fn horizon_tick(app: &mut App) -> u64 {
         .unwrap_or(0)
 }
 
-fn warm_up_app(app: &mut App) {
+#[must_use = "a failed horizon open must be refused, not rolled on a stale/mis-normalized policy"]
+fn open_horizon(app: &mut App, req: &RollRequest) -> bool {
+    app.world_mut()
+        .get_non_send_mut::<WorkerState>()
+        .expect("rollout WorkerState")
+        .begin_horizon(HorizonRequest {
+            brain_bytes: &req.brain_bytes,
+            normalizer: (*req.normalizer).clone(),
+            log_std_floor: req.log_std_floor,
+        })
+}
+
+/// Steps under `req`'s snapshot, never the worker's cold-init brain: that brain's
+/// weights come from burn's process-global RNG, so a plant it moved would start each
+/// same-seed world from a thread-timing-dependent state (rl#431).
+#[must_use = "a failed snapshot load leaves the app cold"]
+fn warm_up_app(app: &mut App, req: &RollRequest) -> bool {
+    if !open_horizon(app, req) {
+        return false;
+    }
     for _ in 0..2 {
         app.update();
     }
@@ -302,6 +311,7 @@ fn warm_up_app(app: &mut App) {
         .get_non_send_mut::<WorkerState>()
         .expect("rollout WorkerState");
     let _ = st.end_horizon();
+    true
 }
 
 /// The learner loop ({snapshot → roll all → merge → GPU update}) — a child module so the
@@ -480,6 +490,57 @@ mod tests {
                  surface-relative convention, not the hunt feed's fixed claw height"
             );
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rl#431: each world build draws its cold brain from burn's process-global RNG,
+    /// so two builds in one process get different weights. A warm-up that let that
+    /// brain drive would leave the same-seed plants apart.
+    #[test]
+    fn same_seed_worlds_in_one_process_warm_up_to_identical_plants() {
+        use crate::bot::body::{CrabBodyPart, CrabEnvId};
+        use bevy_rapier3d::prelude::Velocity;
+
+        let (config, dir) = scratch_config("warm_up_identical", 2);
+        let state = LearnerState::new(&config, None);
+        let req = RollRequest {
+            brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
+            normalizer: Arc::new(state.normalizer_snapshot()),
+            log_std_floor: crate::bot::arch::LOG_STD_MIN,
+        };
+        let plant = |app: &mut App| {
+            let mut parts: Vec<Vec<u8>> = app
+                .world_mut()
+                .query_filtered::<(&CrabEnvId, &Transform, &Velocity), With<CrabBodyPart>>()
+                .iter(app.world())
+                .map(|(env, t, v)| {
+                    let floats = [
+                        t.translation.to_array().as_slice(),
+                        t.rotation.to_array().as_slice(),
+                        v.linear.to_array().as_slice(),
+                        v.angular.to_array().as_slice(),
+                    ]
+                    .concat();
+                    let mut row = env.0.to_le_bytes().to_vec();
+                    row.extend(floats.iter().flat_map(|f| f.to_bits().to_le_bytes()));
+                    row
+                })
+                .collect();
+            assert!(!parts.is_empty(), "the warmed world must have a plant");
+            parts.sort_unstable();
+            parts
+        };
+        let mut warmed = (0..2).map(|_| {
+            let mut app = build_rollout_app(0, &config, state.brain().arch());
+            assert!(warm_up_app(&mut app, &req), "the snapshot must load");
+            plant(&mut app)
+        });
+        let (a, b) = (warmed.next().unwrap(), warmed.next().unwrap());
+        assert!(
+            a == b,
+            "same-seed worlds must reach bit-identical plants after warm-up"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

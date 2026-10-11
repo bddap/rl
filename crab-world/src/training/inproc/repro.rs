@@ -277,7 +277,10 @@ fn roll_world(
     rolled: &std::cell::Cell<u64>,
 ) {
     let mut app = build_rollout_app(id, config, arch);
-    warm_up_app(&mut app);
+    assert!(
+        warm_up_app(&mut app, request),
+        "repro worker {id}: snapshot load failed"
+    );
     set_solver(&mut app, solver);
     let envs = config.num_envs();
     let mut last: Vec<Option<PlantSnapshot>> = vec![None; envs];
