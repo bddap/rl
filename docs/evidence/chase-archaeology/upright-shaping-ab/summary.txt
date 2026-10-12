@@ -1,0 +1,47 @@
+Upright-shaping A/B (inversion recovery), matched cold runs to 40M ticks: shaping REVERTED by the pre-registered rule.
+Pre-registered: https://github.com/bddap/rl/issues/351#issuecomment-6100998864
+
+Pin: main c19a393, one rl-train (sha256 054b4a8f2be346a2fc49dd851f319b17675424aafaa7febab7c1c356beb72a16) for both arms,
+rl-demo from the same tree (sha256 35e3e69cf7626fccfa730d9ce3cc7efe69bec2a52374ef8374143619c539aab0).
+Both: learn --terrain flat --band-max-m 9 --arch mlp512x3 --workers 6 --envs 2 --horizon 512 --seed 351
+--log-std-floor-end -1 --ticks 40000000 --read-mark 40000000, cold, solver (2,12,3)x2, hull plant (sally.glb 119d5a4f...bf0b),
+simulation=ac3ad4a12cc60fdc. Arms differ only by --upright-shaping-k 0 / 12 (each run's own launch + reward-economy lines:
+ctrl-provenance.txt, k12-provenance.txt). Run side by side, cold to "Tick budget reached (40000512 ticks)", exit 0.
+Read-mark brains (marks/40000000): brains.sha256.
+
+Shaping: r += gamma*Phi(s') - Phi(s), Phi = k*upright, gamma 0.99 (the GAE gamma); the grab is absorbing with Phi = 0;
+the cap truncation reads the real s'.
+
+1. rl#343 hard-fails: 0 on both arms.
+
+2. Reach, episode-weighted (reach5m.awk; 2M series in *-reach2m.txt):
+  bucket   control (episodes)   k=12 (episodes)
+  0-5M     0.0258 (6620)        0.0225 (6599)
+  5-10M    0.0543 (6721)        0.0782 (6755)
+  10-15M   0.0771 (6793)        0.0408 (6665)
+  15-20M   0.0687 (6753)        0.0406 (6666)
+  20-25M   0.0750 (6794)        0.1435 (6931)
+  25-30M   0.0824 (6764)        0.1044 (6789)
+  30-35M   0.0891 (6788)        0.1208 (6850)
+  35-40M   0.1114 (6901)        0.0589 (6691)   <- pre-registered bucket: k=12 below control, z = 10.9 (one-sided p << 0.05)
+k=12 swings far more than control: 0.210 at 22-24M, then 0.141 at 32-34M, falling to 0.067 and 0.040 over 36-40M.
+Pooled 20-40M: control 0.089, k=12 0.104.
+
+3. Mean-policy sweep at 40M (analyze.py, inversion-sweep/'s definitions unchanged; traces/<arm>-<seed>.txt; sweep.txt):
+                              control    k=12
+  inverted at 20 s            8/20       0/20
+  ever inverted               10/20      0/20
+  rights herself              2/10       -
+  closes <= 0.5 m and holds   0/20       1/20  (k=12 seed 358, from 16 s; body on the ball, tips 0.42 m min)
+  ever within 0.5 m           2/20       2/20
+  tip-hold                    1/20       0/20
+  failures: inverted/upright  8 / 12     0 / 19
+  median distance closed      0.06 m     1.35 m
+
+Decision (pre-registered): keep only if k=12 is inverted at 20 s on <= 1/20 and below control (0/20 vs 8/20: met),
+close-and-hold >= control (1 vs 0: met), and reach not below control (35-40M 0.059 vs 0.111, z = 10.9: FAILED).
+=> Shaping reverted on main; the flag and the term are deleted.
+
+What the run shows despite the verdict: shaping removed inversion from the mean policy entirely (0/20 ever inverted
+vs 10/20) and every seed moved toward the ball (median 1.35 m closed vs 0.06 m), but training reach under shaping is
+unstable and collapsed over the last 4M ticks. A single seed per arm cannot separate that late collapse from seed noise.

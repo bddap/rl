@@ -1,0 +1,10 @@
+ 0- 5M  reach 0.0225  episodes 6599
+ 5-10M  reach 0.0782  episodes 6755
+10-15M  reach 0.0408  episodes 6665
+15-20M  reach 0.0406  episodes 6666
+20-25M  reach 0.1435  episodes 6931
+25-30M  reach 0.1044  episodes 6789
+30-35M  reach 0.1208  episodes 6850
+35-40M  reach 0.0589  episodes 6691
+40-45M  reach 0.0000  episodes 6
+last tick 40000512
