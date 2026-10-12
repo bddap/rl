@@ -6,7 +6,7 @@ use rand::seq::SliceRandom;
 use tracing::error;
 
 use super::algorithm::{
-    PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer, Transition, compute_gae,
+    GAMMA, PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer, Transition, compute_gae,
 };
 use super::checkpoint::CrabOpt;
 use crate::bot::actuator::ACTION_SIZE;
@@ -48,7 +48,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
             if buf.transitions.is_empty() {
                 continue;
             }
-            let (a, r) = compute_gae(buf, config.gamma, config.lambda, &ret_norm_pre);
+            let (a, r) = compute_gae(buf, GAMMA, config.lambda, &ret_norm_pre);
             advantages.extend(a);
             returns.extend(r);
         }

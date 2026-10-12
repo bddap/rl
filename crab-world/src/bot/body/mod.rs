@@ -26,3 +26,8 @@ pub use spawn::{LIMIT_SOFTNESS, SPAWN_HEIGHT, link_collider, spawn_crab};
 
 #[cfg(feature = "render")]
 pub use debug_gizmos::{PivotGizmos, register_pivot_markers};
+
+/// The carapace up-axis · world Y: 1 upright, −1 on her back.
+pub(crate) fn upright(rotation: bevy::prelude::Quat) -> f32 {
+    (rotation * bevy::prelude::Vec3::Y).y
+}

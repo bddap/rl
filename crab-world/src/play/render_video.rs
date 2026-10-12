@@ -263,7 +263,7 @@ fn trace_rollout(
             target,
             (body.translation - target).xz().length(),
             tip_distance,
-            (body.rotation * Vec3::Y).y,
+            crate::bot::body::upright(body.rotation),
         );
     }
 }
