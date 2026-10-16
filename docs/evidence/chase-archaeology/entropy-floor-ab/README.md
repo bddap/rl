@@ -73,3 +73,22 @@ A hard-fail censors the experiment and prevents a keep decision.
 
 Also report KL, epochs and entropy in fixed 5M buckets as mechanism diagnostics;
 these do not override either decision gate.
+
+## First pair launched
+
+Seed 351 control and treatment both launched cold. [Launch telemetry](launch.txt)
+records their identical first update, cold optimizer moments, configured schedules,
+and simulation identity `ac3ad4a12cc60fdc`. Both saved initial checkpoints and
+advanced beyond 190,000 ticks with no panic recorded at this launch check. This is
+launch validation only; the 40M reads and seeds 352–353 remain outstanding.
+
+Source pin is `24b3c49`; the build worktree also contains the documentation-only
+pre-registration commit `c14e253`, with no source differences. Release builds both
+exited 0: trainer in 3m 14s, evaluator as recorded in `builds.txt`. The binaries are
+preserved for every subsequent run and read. Full SHA-256 digests:
+
+```
+7281ec601676b1ec288d84ac54e43522bae1453eb773c16447ea8aaa9c90d881  rl-train
+70746b5ec9bf34de11b1dc83d774709b3583b834d9122e153e7575f4df59bfe9  rl-demo
+119d5a4f9986f3739e01677910f9880ddc48a47b0a12a24236c1781426a7bf0b  sally.glb
+```

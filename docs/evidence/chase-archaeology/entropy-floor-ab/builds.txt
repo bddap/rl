@@ -1,0 +1,7 @@
+nix-shell --run 'cargo build --release -p rl-train'
+exit 0
+    Finished `release` profile [optimized] target(s) in 3m 14s
+
+nix-shell --run 'cargo build --release -p rl-demo'
+exit 0
+    Finished `release` profile [optimized] target(s) in 17m 45s

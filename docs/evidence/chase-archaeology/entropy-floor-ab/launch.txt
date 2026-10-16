@@ -1,0 +1,19 @@
+ctrl, training seed 351
+entropy floor arm ctrl seed 351 endpoint -1 launch: binary sha256=7281ec601676b1ec288d84ac54e43522bae1453eb773c16447ea8aaa9c90d881
+[learner] optimizer not warm-started: the brain cold-started — cold moments
+[learner] exploration-σ schedule: log_std floor -0.700 → -1.000 over 5000000 ticks (epoch @ 0 ticks)
+[learner] reward economy: effort_weight 0.0006
+[learner] rollout world: terrain Flat, band 1.5..9 m (--terrain/--band-max-m)
+simulation=ac3ad4a12cc60fdc
+[learner] in-process: K=6 threads × M=2 envs × H=512 ticks/iter → 6144 transitions/update | budget 40000000 ticks (0=∞), 0 iters (0=∞) | nice 10 | compute pool 1 thread(s), rayon pool 1 thread(s)
+[learner] iter 0 | 6144 samples | rollout 23.339s (3072 ticks) update 0.995s [gpu load 75ms + compute 907ms + store 11ms] | sps(iter rollout) 263 sps(steady rollout) 0 | total 6144 (3072 ticks) | reward(20) 0.000 | drift 0.50m | reach - over 0 ep | hard-CCD crab-link clamp candidates 0/0 ep (max 0) | ploss -0.029 vloss 1.282 ent 0.719 kl 0.8126 steps 1 bdiv 6.742
+
+floor07, training seed 351
+entropy floor arm floor07 seed 351 endpoint -0.7 launch: binary sha256=7281ec601676b1ec288d84ac54e43522bae1453eb773c16447ea8aaa9c90d881
+[learner] optimizer not warm-started: the brain cold-started — cold moments
+[learner] exploration-σ schedule: log_std floor -0.700 → -0.700 over 5000000 ticks (epoch @ 0 ticks)
+[learner] reward economy: effort_weight 0.0006
+[learner] rollout world: terrain Flat, band 1.5..9 m (--terrain/--band-max-m)
+simulation=ac3ad4a12cc60fdc
+[learner] in-process: K=6 threads × M=2 envs × H=512 ticks/iter → 6144 transitions/update | budget 40000000 ticks (0=∞), 0 iters (0=∞) | nice 10 | compute pool 1 thread(s), rayon pool 1 thread(s)
+[learner] iter 0 | 6144 samples | rollout 23.341s (3072 ticks) update 0.837s [gpu load 66ms + compute 763ms + store 7ms] | sps(iter rollout) 263 sps(steady rollout) 0 | total 6144 (3072 ticks) | reward(20) 0.000 | drift 0.50m | reach - over 0 ep | hard-CCD crab-link clamp candidates 0/0 ep (max 0) | ploss -0.029 vloss 1.282 ent 0.719 kl 0.8126 steps 1 bdiv 6.742
