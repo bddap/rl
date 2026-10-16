@@ -1,0 +1,9 @@
+ctrl seed 351: 30-40M reach 0.1003 over 13689 episodes (reached 1373)
+ctrl seed 352: 30-40M reach 0.0838 over 13585 episodes (reached 1139)
+ctrl seed 353: 30-40M reach 0.1233 over 13885 episodes (reached 1712)
+ctrl pooled 351-353: 0.1026 over 41159 episodes
+k12 seed 351: 30-40M reach 0.0902 over 13541 episodes (reached 1222)
+k12 seed 352: 30-40M reach 0.0887 over 13630 episodes (reached 1210)
+k12 seed 353: 30-40M reach 0.1587 over 14056 episodes (reached 2231)
+k12 pooled 351-353: 0.1131 over 41227 episodes
+one-sided H1 control > k12: z = -4.840, p = 1; k12 below control at p<0.05: False

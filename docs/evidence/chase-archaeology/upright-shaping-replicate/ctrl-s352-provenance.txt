@@ -1,0 +1,7 @@
+upright seed replicate arm ctrl seed 352 (k=0) launch: binary sha256=054b4a8f2be346a2fc49dd851f319b17675424aafaa7febab7c1c356beb72a16  canary-upright-rep-ctrl-s352-c19a393/rl-train
+[learner] reward economy: effort_weight 0.0006, upright shaping k 0 (--upright-shaping-k)
+[learner] rollout world: terrain Flat, band 1.5..9 m (--terrain/--band-max-m)
+[learner] plant: joint friction cap leg 0.04 / claw 0.04 N·m (default); rl#315 viscous joint damper (multibody-dof since rl#347), free rate 10 rad/s legs / 5 claws; arena terrain (canonical since rl#293) simulation=ac3ad4a12cc60fdc
+[learner] Tick budget reached (40000512 ticks) — stopping training.
+warm resumes (launch lines - 1): 136
+rl#343 hard-fails: 0

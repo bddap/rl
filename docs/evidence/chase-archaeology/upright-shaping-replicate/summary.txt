@@ -1,0 +1,51 @@
+Upright-shaping seed replicate, matched cold runs to 40M ticks on seeds 352 and 353: shaping REVERTED by the pre-registered rule.
+Pre-registered: https://github.com/bddap/rl/issues/351#issuecomment-6125902831
+Seed-351 pair: ../upright-shaping-ab/ (same binary, same recipe).
+
+Binary: the c19a393 rl-train (sha256 054b4a8f2be346a2fc49dd851f319b17675424aafaa7febab7c1c356beb72a16) for all four runs, the one that
+ran the seed-351 pair, so all six pooled runs differ only by seed and k. Sweep rl-demo from the same tree (sha256
+35e3e69cf7626fccfa730d9ce3cc7efe69bec2a52374ef8374143619c539aab0). Shaping re-landed on main in d7e9e61 for the trial.
+All: learn --terrain flat --band-max-m 9 --arch mlp512x3 --workers 6 --envs 2 --horizon 512 --log-std-floor-end -1
+--ticks 40000000 --read-mark 40000000, cold, solver (2,12,3)x2, hull plant (sally.glb 119d5a4f...bf0b), simulation=ac3ad4a12cc60fdc;
+--seed 352|353, --upright-shaping-k 0|12 (each run's own launch, reward-economy and budget lines: *-provenance.txt).
+Four runs side by side, each to "Tick budget reached (40000512 ticks)", exit 0; 125-136 warm resumes each (trainer yields).
+Read-mark brains (marks/40000000): brains.sha256.
+
+1. rl#343 hard-fails: 0 on all four runs.
+
+2. Reach, episode-weighted, 5M buckets (../upright-shaping-ab/reach5m.awk; *-buckets.txt):
+  bucket   ctrl s352  k12 s352   ctrl s353  k12 s353
+  0-5M     0.0254     0.0235     0.0344     0.0262
+  5-10M    0.0316     0.0402     0.0421     0.0534
+  10-15M   0.0328     0.0400     0.0713     0.0801
+  15-20M   0.0491     0.0469     0.0730     0.0957
+  20-25M   0.0693     0.0421     0.0931     0.1388
+  25-30M   0.0669     0.0716     0.1184     0.1865
+  30-35M   0.0859     0.0855     0.1261     0.1729
+  35-40M   0.0818     0.0920     0.1204     0.1444
+Pooled 30-40M over seeds 351-353 (pooled.py over each run's train.log; pooled.txt):
+  control 0.1026 (41159 episodes), k=12 0.1131 (41227 episodes); one-sided control > k=12: z = -4.84, not significant.
+  Per seed 30-40M: 351 0.100 / 0.090, 352 0.084 / 0.089, 353 0.123 / 0.159 (control / k=12).
+Seed 351's late collapse did not recur: on 352 and 353 k=12 tracks or beats control through 40M.
+
+3. Mean-policy sweep at 40M (sweep.sh renders, analyze.py = ../upright-shaping-ab/analyze.py with the arm list taken from argv,
+definitions unchanged; traces/<arm>-s<seed>-<eval seed>.txt; sweep.txt). All 80 renders exit 0 with 20 samples each.
+                              ctrl s352  k12 s352   ctrl s353  k12 s353   | seed 351: ctrl  k12
+  inverted at 20 s            9/20       6/20       10/20      2/20       |           8/20  0/20
+  ever inverted               10/20      7/20       10/20      2/20       |           10/20 0/20
+  closes <= 0.5 m and holds   5/20       0/20       1/20       1/20       |           0/20  1/20
+  ever within 0.5 m           5/20       0/20       5/20       8/20       |           2/20  2/20
+  tip-hold                    2/20       0/20       0/20       0/20       |           1/20  0/20
+  failures: inverted/upright  9 / 6      6 / 14     10 / 9     2 / 17     |           8/12  0/19
+  median distance closed      0.57 m     0.53 m     1.30 m     1.20 m     |           0.06  1.35 m
+
+Decision (pre-registered): keep only if pooled 30-40M reach is not below control (met: k=12 is above), and on EACH new seed the
+k=12 sweep is inverted at 20 s on <= 1/20 and below control, with close-and-hold >= control:
+  seed 352: inverted 6/20 (> 1/20: FAILED), close-and-hold 0 vs 5 (FAILED).
+  seed 353: inverted 2/20 (> 1/20: FAILED; below control's 10/20), close-and-hold 1 vs 1 (met).
+=> Shaping reverted on main again; the flag and the term are deleted.
+
+What the replicate shows: k=12 reduces inversion on every seed (pooled 8/60 vs 27/60 inverted at 20 s) and costs no train reach
+(pooled 0.113 vs 0.103), but it does not remove inversion (seed 352 keeps 6/20), and it does not make the mean policy close and
+hold: 2/60 holds against control's 6/60, all seeds ≤ 5/20. The dominant failure on the shaped arms is an upright body that does not
+close (50 of 58 failures). Inversion was not what kept the mean policy from chasing.
