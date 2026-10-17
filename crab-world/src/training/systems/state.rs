@@ -646,6 +646,7 @@ impl<M> TrainingState<M> {
 mod tests {
     use super::*;
     use crate::bot::sensor::OBS_SIZE;
+    use burn::module::{Module, ModuleMapper, Param};
     use burn::tensor::Tensor;
 
     #[test]
@@ -821,26 +822,27 @@ mod tests {
     fn inference_cache_is_bit_identical_and_refreshes_on_weight_change() {
         let device = NdArrayDevice::Cpu;
 
-        // The refresh assertions below need a fresh brain whose weights DIFFER from the
-        // previous one. Fresh inits draw from the backend's process-GLOBAL RNG, so under a
-        // parallel test run a sibling reseeding it (`brain_init_is_reproducible_…` below, or
-        // any learner/worker constructor) can make two draws straddling its reseed come back
-        // bit-identical (rl#207). Retry across that transient window — the dual of the
-        // sibling's same-seed retry: a race can only make fresh draws spuriously EQUAL, while
-        // an init that stopped drawing from the RNG never yields a differing pair, so the
-        // bound still bites.
-        let fresh_brain_differing_from = |prev: &[u32]| -> (AnyBrain<TrainBackend>, Vec<u32>) {
-            for _ in 0..16 {
-                let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
-                let bits = policy_bits(&brain.valid());
-                if bits != prev {
-                    return (brain, bits);
-                }
+        // Never a fresh init: inits share a process-global RNG that sibling tests reseed
+        // (rl#207), so two can come back bit-identical.
+        struct Shift;
+        impl ModuleMapper<TrainBackend> for Shift {
+            fn map_float<const D: usize>(
+                &mut self,
+                param: Param<Tensor<TrainBackend, D>>,
+            ) -> Param<Tensor<TrainBackend, D>> {
+                let (id, tensor, mapper) = param.consume();
+                Param::from_mapped_value(id, tensor.add_scalar(0.5), mapper)
             }
-            panic!(
-                "16 fresh inits all bit-identical to the previous brain — init is not drawing \
-                 fresh weights, so the refresh assertions cannot bite"
+        }
+        let differing_successor = |prev: &AnyBrain<TrainBackend>| {
+            let brain = prev.clone().map(&mut Shift);
+            let bits = policy_bits(&brain.valid());
+            assert_ne!(
+                bits,
+                policy_bits(&prev.valid()),
+                "a shifted brain must answer differently"
             );
+            (brain, bits)
         };
 
         let brain_a: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
@@ -850,11 +852,11 @@ mod tests {
         assert_eq!(cached.with_inference(policy_bits), want_a);
         assert_eq!(cached.with_inference(policy_bits), want_a);
 
-        let (brain_b, want_b) = fresh_brain_differing_from(&want_a);
+        let (brain_b, want_b) = differing_successor(cached.train());
         cached.set(brain_b);
         assert_eq!(cached.with_inference(policy_bits), want_b);
 
-        let (brain_c, want_c) = fresh_brain_differing_from(&want_b);
+        let (brain_c, want_c) = differing_successor(cached.train());
         *cached.train_mut() = brain_c;
         assert_eq!(cached.with_inference(policy_bits), want_c);
     }

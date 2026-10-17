@@ -120,6 +120,15 @@ impl FormationCore {
         self.m.on_beat(from, beat, now_ms);
     }
 
+    pub fn last_direct_beat(&self, peer: &EndpointId) -> Option<(u64, u64)> {
+        self.m.last_direct_beat(peer)
+    }
+
+    /// The beat [`Self::step`] would send now, for a caller that must resend it.
+    pub fn beat(&self) -> Beat {
+        self.m.beat()
+    }
+
     /// A game tick that raced ahead of the barrier close — buffered and handed to the
     /// sim through [`Agreement::early`].
     pub fn on_early_tick(&mut self, from: EndpointId, msg: TickMsg) {

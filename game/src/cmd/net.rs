@@ -41,6 +41,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             net::membership::Role::Host,
             args.expect,
             stamp,
+            session.now_ms(),
         );
         loop {
             // The scripted stand-in for the windowed host's Start press: arm the
@@ -49,14 +50,21 @@ pub(crate) fn run(args: Args) -> Result<()> {
             if driver.roster().len() >= args.expect {
                 driver.set_starting();
             }
-            if let Some(out) = driver.pump(&mut session) {
+            let now_ms = session.now_ms();
+            if let Some(out) = driver.pump(&mut session, now_ms) {
                 break out;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
     } else {
-        formation::FormationDriver::discovering(&session, args.discover_secs, args.expect, stamp)
-            .pump_blocking(&mut session)
+        formation::FormationDriver::discovering(
+            &session,
+            args.discover_secs,
+            args.expect,
+            stamp,
+            session.now_ms(),
+        )
+        .pump_blocking(&mut session)
     };
     let frozen = match formed? {
         formation::Formation::Agreed(frozen) => frozen,

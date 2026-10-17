@@ -77,7 +77,8 @@ impl Formation {
         let Some(FormState::Live { session, driver }) = self.state.as_mut() else {
             unreachable!("Binding resolved above, and an empty state returned early")
         };
-        let outcome = driver.pump(session)?;
+        let now_ms = session.now_ms();
+        let outcome = driver.pump(session, now_ms)?;
         let Some(FormState::Live { session, .. }) = self.state.take() else {
             unreachable!("matched Live above")
         };
@@ -187,7 +188,13 @@ fn open_lobby(session: Session, role: Role, stamp: crate::SyncStamp) -> FormStat
         // joiner cancels out), matching the discovery-may-still-find-them semantics.
         let _ = session.dial(host);
     }
-    let driver = Box::new(FormationDriver::lobby(&session, role, NET_EXPECT, stamp));
+    let driver = Box::new(FormationDriver::lobby(
+        &session,
+        role,
+        NET_EXPECT,
+        stamp,
+        session.now_ms(),
+    ));
     FormState::Live { session, driver }
 }
 
@@ -437,19 +444,19 @@ mod tests {
     use super::*;
     use crate::SyncStamp;
 
-    /// Poll `f` until it yields, or fail after `secs` — real-iroh lobby formation involves
-    /// endpoint binding, discovery, and the membership barrier, all wall-clock.
-    fn wait_for<T>(secs: u64, what: &str, mut f: impl FnMut() -> Option<T>) -> T {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    /// Poll `f` until it yields. Lobby mode has no solo fallback or join window, so its
+    /// wall-clock timers can delay a verdict here but never decide one.
+    fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+        let deadline = std::time::Instant::now() + crate::HANG_GUARD;
         loop {
             if let Some(v) = f() {
                 return v;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "timed out after {secs}s waiting for {what}"
+                "hung waiting for {what}"
             );
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(crate::formation::FORM_POLL);
         }
     }
 
@@ -460,7 +467,7 @@ mod tests {
         assert!(host.hosting(), "Host formation is flagged hosting");
         // The bind is pollable (rl#412): the join code appears once the session lands —
         // on native, the first poll.
-        let code = wait_for(15, "the host session to bind", || {
+        let code = wait_for("the host session to bind", || {
             match host.poll() {
                 None => (),
                 Some(Ok(_)) => panic!("host formation resolved while binding"),
@@ -478,7 +485,7 @@ mod tests {
         );
 
         // Resolving (either way) before the host presses Start is itself a failure.
-        wait_for(30, "both rosters to reach 2 peers", || {
+        wait_for("both rosters to reach 2 peers", || {
             for (f, who) in [(&mut host, "host"), (&mut join, "joiner")] {
                 match f.poll() {
                     None => (),
@@ -521,7 +528,7 @@ mod tests {
         // Resolve BOTH formations before touching either result: unwrapping one drops its
         // NetDriver (endpoint and all), and the other peer may still be mid-barrier.
         let mut results = (None, None);
-        wait_for(30, "both formations after Start", || {
+        wait_for("both formations after Start", || {
             if results.0.is_none() {
                 results.0 = host.poll();
             }
@@ -552,7 +559,7 @@ mod tests {
         let (mut host, mut join) = two_peer_lobby();
 
         join.cancel();
-        let result = wait_for(15, "the joiner's formation to resolve", || join.poll());
+        let result = wait_for("the joiner's formation to resolve", || join.poll());
         assert!(
             matches!(
                 result.expect("cancel is not an error"),
@@ -566,7 +573,7 @@ mod tests {
         );
 
         host.cancel();
-        let result = wait_for(15, "the host's formation to resolve", || host.poll());
+        let result = wait_for("the host's formation to resolve", || host.poll());
         assert!(
             matches!(
                 result.expect("cancel is not an error"),

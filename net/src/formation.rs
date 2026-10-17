@@ -26,9 +26,10 @@ pub enum Formation {
     Alone,
 }
 
-/// One formation attempt, pump-to-completion. The core's clock is injected millis —
-/// the SESSION's axis ([`Session::now_ms`](transport::Session::now_ms)), so the same
-/// driver runs wherever the link does (native tokio clock, browser performance.now).
+/// One formation attempt, pump-to-completion. The core's clock is injected millis from
+/// the caller — in production the session's axis
+/// ([`Session::now_ms`](transport::Session::now_ms)), so the same driver runs wherever
+/// the link does (native tokio clock, browser performance.now).
 pub struct FormationDriver {
     core: FormationCore,
     /// Session-axis ms at construction — for the human-facing "agreed in N s" print.
@@ -47,11 +48,11 @@ impl FormationDriver {
         discover_secs: u64,
         expect: usize,
         stamp: crate::SyncStamp,
+        now_ms: u64,
     ) -> Self {
         println!(
             "forming match on the LAN (need {expect} player(s), solo if alone after {discover_secs}s)…"
         );
-        let now_ms = session.now_ms();
         Self {
             core: FormationCore::new(session.endpoint_id(), expect, discover_secs, stamp, now_ms),
             born_ms: now_ms,
@@ -69,8 +70,8 @@ impl FormationDriver {
         role: Role,
         expect: usize,
         stamp: crate::SyncStamp,
+        now_ms: u64,
     ) -> Self {
-        let now_ms = session.now_ms();
         Self {
             core: FormationCore::host_triggered(role, session.endpoint_id(), expect, stamp, now_ms),
             born_ms: now_ms,
@@ -90,7 +91,8 @@ impl FormationDriver {
     #[cfg(not(target_family = "wasm"))]
     pub fn pump_blocking(mut self, session: &mut transport::Session) -> Result<Formation> {
         loop {
-            if let Some(outcome) = self.pump(session) {
+            let now_ms = session.now_ms();
+            if let Some(outcome) = self.pump(session, now_ms) {
                 return outcome;
             }
             std::thread::sleep(FORM_POLL);
@@ -104,9 +106,11 @@ impl FormationDriver {
     /// One pump: drain the session's inbox into the core, step it, send what it emits.
     /// Call at any cadence at or above the beat rate (frame rate is fine — the core's
     /// beat deadline is epoch-aligned, so faster polling never over-beats).
-    pub fn pump(&mut self, session: &mut transport::Session) -> Option<Result<Formation>> {
-        let now_ms = session.now_ms();
-
+    pub fn pump(
+        &mut self,
+        session: &mut transport::Session,
+        now_ms: u64,
+    ) -> Option<Result<Formation>> {
         while let Some(from) = session.try_recv() {
             match from.msg {
                 PeerWire::Beat(beat) => self.core.on_beat(from.from, &beat, now_ms),
@@ -217,55 +221,74 @@ mod tests {
     #[test]
     fn three_endpoints_form_the_identical_match_over_iroh() {
         let _serial = crate::real_net_serial();
+        use net_proto::membership::BEAT_EVERY_MS;
         use std::collections::BTreeMap;
+        use std::time::Instant;
 
-        let mut s0 = transport::start_session().expect("start s0");
-        let mut s1 = transport::start_session().expect("start s1");
-        let mut s2 = transport::start_session().expect("start s2");
-        let (a0, a1) = (s0.local_addr(), s1.local_addr());
-        let (e0, e1, e2) = (s0.endpoint_id(), s1.endpoint_id(), s2.endpoint_id());
+        let mut sessions = [(); 3].map(|()| transport::start_session().expect("start session"));
+        let ids = sessions.each_ref().map(|s| s.endpoint_id());
+        let (a0, a1) = (sessions[0].local_addr(), sessions[1].local_addr());
+        let form =
+            |s: &transport::Session, t| FormationDriver::discovering(s, 1, 3, SyncStamp::ZERO, t);
 
         // A dial can LOSE the crossed-dial dedup to the peer's concurrent discovery-dial
-        // (the kept link still serves — transport closes only the duplicate), so a dial
-        // error is benign here exactly as in production (`connect_and_form_inner` warns
-        // and proceeds); the formation assertions below are the real check. Fire-and-
-        // forget: the verdict channels go unpolled for the same reason.
-        let _d0 = s0.dial(a1.clone());
+        // (the kept link still serves), so a dial verdict is no signal.
+        let _ = sessions[0].dial(a1.clone());
 
-        let mut d0 = FormationDriver::discovering(&s0, 1, 3, SyncStamp::ZERO);
-        let mut d1 = FormationDriver::discovering(&s1, 1, 3, SyncStamp::ZERO);
-        // s2 joins late, by explicit dial, like a code-join straggler — its discovery
-        // window is wider so the 600ms-late dial can't race its own solo fallback on a
-        // loaded runner.
-        let late_at = std::time::Instant::now() + std::time::Duration::from_millis(600);
-        let mut s2_dialed = false;
-        let mut d2 = FormationDriver::discovering(&s2, 2, 3, SyncStamp::ZERO);
-
-        // Round-robin pump all three from one thread — the poll-driven interface needs
-        // no per-peer runtime or thread, which is the point of the seam.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let (mut r0, mut r1, mut r2) = (None, None, None);
-        while r0.is_none() || r1.is_none() || r2.is_none() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "formation did not converge in 30s"
-            );
-            if !s2_dialed && std::time::Instant::now() >= late_at {
-                s2_dialed = true;
-                let _ = s2.dial(a0.clone());
-                let _ = s2.dial(a1.clone());
+        // The formation clock is the test's own: it steps a beat only once every forming
+        // driver holds every other's current beat, arrived at the current step, so host
+        // speed can never fire a protocol timer. Until then each re-sends its beat: one sent
+        // before its link was up, or on a link a crossed dial replaced, is gone.
+        let hang_guard = Instant::now() + crate::HANG_GUARD;
+        let mut t = 0;
+        let mut drivers = [
+            Some(form(&sessions[0], t)),
+            Some(form(&sessions[1], t)),
+            None,
+        ];
+        let mut results: [Option<Result<Formation>>; 3] = [None, None, None];
+        while results.iter().any(Option::is_none) {
+            assert!(Instant::now() < hang_guard, "formation hung");
+            // s2 joins late, by explicit dial, like a code-join straggler: only once s0 and
+            // s1 already count each other live.
+            if drivers[2].is_none()
+                && drivers[..2]
+                    .iter()
+                    .all(|d| d.as_ref().is_some_and(|d| d.roster().len() == 2))
+            {
+                let _ = sessions[2].dial(a0.clone());
+                let _ = sessions[2].dial(a1.clone());
+                drivers[2] = Some(form(&sessions[2], t));
             }
-            for (r, d, s) in [
-                (&mut r0, &mut d0, &mut s0),
-                (&mut r1, &mut d1, &mut s1),
-                (&mut r2, &mut d2, &mut s2),
-            ] {
-                if r.is_none() {
-                    *r = d.pump(s);
+
+            let forming: Vec<usize> = (0..3)
+                .filter(|&i| drivers[i].is_some() && results[i].is_none())
+                .collect();
+            for &i in &forming {
+                if let Some(d) = drivers[i].as_mut() {
+                    results[i] = d.pump(&mut sessions[i], t);
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            let stepped = forming.iter().all(|&r| {
+                let core = &drivers[r].as_ref().expect("forming").core;
+                forming.iter().filter(|&&p| p != r).all(|&p| {
+                    let current = drivers[p].as_ref().expect("forming").core.beat();
+                    core.last_direct_beat(&ids[p]) == Some((t, current.roster_hash()))
+                })
+            });
+            if stepped {
+                t += BEAT_EVERY_MS;
+            } else {
+                for &i in forming.iter().filter(|&&i| results[i].is_none()) {
+                    let core = &drivers[i].as_ref().expect("forming").core;
+                    sessions[i].broadcast(&core.beat());
+                }
+            }
+            std::thread::sleep(FORM_POLL);
         }
+        let [r0, r1, r2] = results;
+        let [s0, s1, s2] = sessions;
+        let [e0, e1, e2] = ids;
         let unwrap_agreed =
             |r: Option<Result<Formation>>, who: &str| match r.expect("resolved").expect(who) {
                 Formation::Agreed(f) => f,

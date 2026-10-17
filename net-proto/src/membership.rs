@@ -246,6 +246,13 @@ impl Membership {
         *id == self.me || self.peers.contains_key(id)
     }
 
+    /// When `id`'s last direct beat arrived and the roster hash it carried; `None` for a
+    /// peer only relayed to us.
+    pub fn last_direct_beat(&self, id: &EndpointId) -> Option<(u64, u64)> {
+        let v = self.peers.get(id)?;
+        Some((v.last_direct, v.advertised?))
+    }
+
     pub fn live_set(&self) -> Vec<EndpointId> {
         let mut ids: Vec<EndpointId> = self.peers.keys().copied().collect();
         ids.push(self.me);

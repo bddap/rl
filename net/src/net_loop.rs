@@ -475,8 +475,9 @@ pub fn connect_and_form_dialing(
             dial_verdict = Some(session.dial(host));
         }
     }
-    let formed = FormationDriver::discovering(&session, discover_secs, expect, stamp)
-        .pump_blocking(&mut session);
+    let formed =
+        FormationDriver::discovering(&session, discover_secs, expect, stamp, session.now_ms())
+            .pump_blocking(&mut session);
     let frozen = match formed {
         Ok(Formation::Agreed(frozen)) => frozen,
         Ok(Formation::Alone) => {
