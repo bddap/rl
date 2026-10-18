@@ -1,0 +1,15 @@
+ctrl training seed 352
+entropy floor arm ctrl seed 352 endpoint -1 launch: binary sha256=7281ec601676b1ec288d84ac54e43522bae1453eb773c16447ea8aaa9c90d881
+[learner] optimizer not warm-started: the brain cold-started — cold moments
+[learner] exploration-σ schedule: log_std floor -0.700 → -1.000 over 5000000 ticks (epoch @ 0 ticks)
+[learner] rollout world: terrain Flat, band 1.5..9 m (--terrain/--band-max-m)
+[learner] in-process: K=6 threads × M=2 envs × H=512 ticks/iter → 6144 transitions/update | budget 40000000 ticks (0=∞), 0 iters (0=∞) | nice 10 | compute pool 1 thread(s), rayon pool 1 thread(s)
+[learner] iter 0 | 6144 samples | rollout 13.450s (3072 ticks) update 0.798s [gpu load 15ms + compute 775ms + store 8ms] | sps(iter rollout) 457 sps(steady rollout) 0 | total 6144 (3072 ticks) | reward(20) 0.000 | drift 0.62m | reach - over 0 ep | hard-CCD crab-link clamp candidates 0/0 ep (max 0) | ploss 0.122 vloss 1.229 ent 0.719 kl 0.6471 steps 1 bdiv 7.328
+
+floor07 training seed 352
+entropy floor arm floor07 seed 352 endpoint -0.7 launch: binary sha256=7281ec601676b1ec288d84ac54e43522bae1453eb773c16447ea8aaa9c90d881
+[learner] optimizer not warm-started: the brain cold-started — cold moments
+[learner] exploration-σ schedule: log_std floor -0.700 → -0.700 over 5000000 ticks (epoch @ 0 ticks)
+[learner] rollout world: terrain Flat, band 1.5..9 m (--terrain/--band-max-m)
+[learner] in-process: K=6 threads × M=2 envs × H=512 ticks/iter → 6144 transitions/update | budget 40000000 ticks (0=∞), 0 iters (0=∞) | nice 10 | compute pool 1 thread(s), rayon pool 1 thread(s)
+[learner] iter 0 | 6144 samples | rollout 13.391s (3072 ticks) update 0.723s [gpu load 18ms + compute 698ms + store 7ms] | sps(iter rollout) 459 sps(steady rollout) 0 | total 6144 (3072 ticks) | reward(20) 0.000 | drift 0.62m | reach - over 0 ep | hard-CCD crab-link clamp candidates 0/0 ep (max 0) | ploss 0.122 vloss 1.229 ent 0.719 kl 0.6471 steps 1 bdiv 7.328
