@@ -1,7 +1,8 @@
 # Entropy-floor A/B: pre-registration
 
-Status: in progress; [training seed 351 is complete](s351/README.md), and the
-[seed-352 pair has launched cold](launch-s352.txt). No pooled verdict yet.
+Status: in progress; training seeds [351](s351/README.md) and
+[352](s352/README.md) are complete. The [seed-353 pair has launched cold](launch-s353.txt).
+No pooled verdict yet.
 The protocol below was registered before launch. This is the architecture/optimizer
 increment of [#351](https://github.com/bddap/rl/issues/351).
 

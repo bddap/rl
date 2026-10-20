@@ -1,0 +1,14 @@
+arm=ctrl training_seed=352
+training_exit=0
+launches=4
+panic_lines=0
+mark=ckpt/marks/40000000
+mark_ticks=40000512
+[learner] DONE: rollout 645 samples/sec | end-to-end 627 samples/sec | 1551424 samples over 2472.8s (2405.5s rollout) | K=6 M=2 H=512
+[learner] Tick budget reached (40000512 ticks) — stopping training.
+f81560740bb91bf21c5f45ba8f7877af61211b5e7f86b007d875f6366ad24fad  brain.bin
+0da13afc9bd217db1f48371e22df318a6e877a2c02e8fd8457f1bc013664feb2  normalizer.bin
+6c9e095ed740544211b5776767574351743c8e7735428578483d85ebf7a4a367  optimizer.bin
+a2cbfe405747fc45b1c5873aec9bcd6ac222dbdd901aae30005ba8afa08cff04  return_normalizer.bin
+50c55d3d475b95d2f60973cad54945767ff8c6649399296a8c595cf1b81777ed  plant.txt
+b6d3ca9a890ee440aaf38713d202adbc4ab88274e48abac4ff52317fb1b59115  ticks.txt

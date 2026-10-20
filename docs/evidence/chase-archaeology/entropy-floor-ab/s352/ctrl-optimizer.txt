@@ -1,0 +1,9 @@
+Arithmetic means over logged updates, buckets [lo, hi); steps<=2 is a fraction.
+ 0- 5M n=1627 entropy=0.5691 KL=0.0818 epochs=1.998 epochs<=2=0.8390
+ 5-10M n=1628 entropy=0.4190 KL=0.1132 epochs=1.370 epochs<=2=0.9803
+10-15M n=1627 entropy=0.4190 KL=0.0943 epochs=1.741 epochs<=2=0.9269
+15-20M n=1628 entropy=0.4190 KL=0.0930 epochs=1.747 epochs<=2=0.9134
+20-25M n=1628 entropy=0.4190 KL=0.0975 epochs=1.617 epochs<=2=0.9490
+25-30M n=1627 entropy=0.4190 KL=0.0770 epochs=2.336 epochs<=2=0.6484
+30-35M n=1628 entropy=0.4190 KL=0.0862 epochs=1.967 epochs<=2=0.8569
+35-40M n=1627 entropy=0.4190 KL=0.0896 epochs=1.923 epochs<=2=0.8654
