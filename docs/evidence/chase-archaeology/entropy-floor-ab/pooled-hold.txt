@@ -1,0 +1,9 @@
+Control holds by training seed351–353: [1, 2, 1]; pooled 4/60
+Treatment holds by training seed351–353: [0, 0, 0]; pooled 0/60
+Control inverted@20s by seed: [8, 2, 10]; pooled 20/60
+Treatment inverted@20s by seed: [19, 11, 10]; pooled 40/60
+One-sided Fisher exact H1 treatment > control, conditioning on 4 total holds:
+p = sum(C(60,k)*C(60,4-k), k >= 0) / C(120,4)
+Exact numerator=8214570, denominator=8214570; p=1
+PMF integer sum equals denominator: PASS
+Closing gain at p<0.05: False
