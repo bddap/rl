@@ -1,0 +1,7 @@
+mode     spawn distance  n   ever<=0.5m  median closed in 20 s
+mean       0-2.5  m       51    15       0.14 m
+mean     2.5-4.5  m       28     1       0.35 m
+mean     4.5-10   m       41     0       0.66 m
+sampled    0-2.5  m       49    17       0.03 m
+sampled  2.5-4.5  m       31     0       0.73 m
+sampled  4.5-10   m       40     0       1.06 m

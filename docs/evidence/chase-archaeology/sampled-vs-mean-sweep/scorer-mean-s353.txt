@@ -1,0 +1,44 @@
+checkpoint ctrl:
+  351  d  2.00-> 1.25(min)-> 1.45  tip_min  0.88  upright first +0.96 min -0.92 end -0.92  first_inv  14s  inv20 1 righted 0 hold 0
+  352  d  7.99-> 7.99(min)-> 8.03  tip_min  7.53  upright first -0.76 min -0.92 end -0.90  first_inv   1s  inv20 1 righted 0 hold 0
+  353  d  5.95-> 3.62(min)-> 3.65  tip_min  3.07  upright first +0.48 min +0.48 end +0.92  first_inv    -  inv20 0 righted 0 hold 0
+  354  d  3.90-> 2.22(min)-> 2.22  tip_min  2.08  upright first +0.76 min +0.74 end +0.76  first_inv    -  inv20 0 righted 0 hold 0
+  355  d  4.99-> 3.72(min)-> 3.72  tip_min  3.39  upright first +0.74 min +0.74 end +0.74  first_inv    -  inv20 0 righted 0 hold 0
+  356  d  0.92-> 0.91(min)-> 1.53  tip_min  1.52  upright first +0.80 min +0.76 end +0.76  first_inv    -  inv20 0 righted 0 hold 0
+  357  d  0.22-> 0.11(min)-> 2.68  tip_min  0.20  upright first +0.97 min +0.97 end +0.97  first_inv    -  inv20 0 righted 0 hold 0
+  358  d  2.02-> 0.09(min)-> 0.49  tip_min  0.35  upright first +0.76 min +0.75 end +0.77  first_inv    -  inv20 0 righted 0 hold 1@12s
+  359  d  6.02-> 6.00(min)-> 6.46  tip_min  5.43  upright first -0.89 min -0.91 end -0.90  first_inv   1s  inv20 1 righted 0 hold 0
+  360  d  3.03-> 2.75(min)-> 2.75  tip_min  2.65  upright first -0.90 min -0.90 end -0.86  first_inv   1s  inv20 1 righted 0 hold 0
+  361  d  2.54-> 2.54(min)-> 3.39  tip_min  2.16  upright first +0.97 min +0.97 end +0.97  first_inv    -  inv20 0 righted 0 hold 0
+  362  d  1.13-> 1.13(min)-> 1.30  tip_min  0.71  upright first +0.03 min -0.87 end -0.87  first_inv   2s  inv20 1 righted 0 hold 0
+  363  d  3.38-> 3.26(min)-> 3.52  tip_min  2.71  upright first -0.83 min -0.90 end -0.87  first_inv   1s  inv20 1 righted 0 hold 0
+  364  d  2.92-> 2.88(min)-> 3.16  tip_min  2.25  upright first -0.72 min -0.90 end -0.89  first_inv   1s  inv20 1 righted 0 hold 0
+  365  d  5.08-> 4.08(min)-> 4.08  tip_min  3.77  upright first +0.79 min +0.74 end +0.74  first_inv    -  inv20 0 righted 0 hold 0
+  366  d  0.47-> 0.47(min)-> 0.73  tip_min  0.35  upright first -0.91 min -0.91 end -0.87  first_inv   1s  inv20 1 righted 0 hold 0
+  367  d  5.69-> 5.64(min)-> 5.96  tip_min  5.13  upright first -0.88 min -0.89 end -0.89  first_inv   1s  inv20 1 righted 0 hold 0
+  368  d  1.71-> 0.96(min)-> 1.12  tip_min  0.82  upright first +0.85 min -0.92 end -0.86  first_inv  16s  inv20 1 righted 0 hold 0
+  369  d  5.48-> 2.92(min)-> 2.92  tip_min  2.27  upright first +0.76 min +0.76 end +0.77  first_inv    -  inv20 0 righted 0 hold 0
+  370  d  2.38-> 2.38(min)-> 2.98  tip_min  1.98  upright first +0.97 min +0.97 end +0.97  first_inv    -  inv20 0 righted 0 hold 0
+  SUMMARY ctrl: inverted@20s 10/20  ever-inverted 10/20  righted 0/20 (0/10 of ever-inverted)  close-and-hold(body<=0.5m) 1/20  ever<=0.5m 3/20  tip-hold 1/20  failures: inverted 10 upright 9  median distance closed -0.09 m  mean 0.28 m
+checkpoint k12:
+  351  d  2.08-> 0.53(min)-> 0.79  tip_min  0.30  upright first +0.97 min +0.68 end +0.97  first_inv    -  inv20 0 righted 0 hold 0
+  352  d  8.50-> 8.04(min)-> 8.07  tip_min  8.04  upright first +0.61 min -0.95 end -0.95  first_inv   6s  inv20 1 righted 0 hold 0
+  353  d  5.56-> 3.61(min)-> 3.87  tip_min  3.64  upright first +0.84 min -0.98 end +0.01  first_inv   7s  inv20 0 righted 1 hold 0
+  354  d  4.81-> 1.34(min)-> 1.38  tip_min  1.04  upright first +0.66 min -0.77 end +0.96  first_inv   8s  inv20 0 righted 1 hold 0
+  355  d  4.80-> 4.50(min)-> 4.81  tip_min  4.30  upright first +0.12 min -0.96 end -0.95  first_inv   2s  inv20 1 righted 0 hold 0
+  356  d  0.65-> 0.49(min)-> 0.49  tip_min  0.38  upright first +0.86 min +0.81 end +0.89  first_inv    -  inv20 0 righted 0 hold 0
+  357  d  0.54-> 0.41(min)-> 1.57  tip_min  0.21  upright first +0.98 min +0.89 end +0.90  first_inv    -  inv20 0 righted 0 hold 0
+  358  d  2.85-> 1.46(min)-> 1.58  tip_min  0.96  upright first +0.92 min -0.26 end +0.99  first_inv   7s  inv20 0 righted 1 hold 0
+  359  d  6.32-> 5.02(min)-> 5.36  tip_min  4.45  upright first -0.22 min -0.98 end -0.97  first_inv   1s  inv20 1 righted 0 hold 0
+  360  d  2.84-> 2.43(min)-> 3.44  tip_min  1.97  upright first +0.18 min -0.98 end -0.98  first_inv   2s  inv20 1 righted 0 hold 0
+  361  d  1.74-> 1.59(min)-> 2.17  tip_min  1.37  upright first +0.87 min +0.77 end +0.97  first_inv    -  inv20 0 righted 0 hold 0
+  362  d  1.75-> 0.97(min)-> 0.97  tip_min  1.05  upright first +0.99 min +0.37 end +0.97  first_inv    -  inv20 0 righted 0 hold 0
+  363  d  4.14-> 2.36(min)-> 2.36  tip_min  2.22  upright first +0.65 min -0.98 end -0.93  first_inv   2s  inv20 1 righted 0 hold 0
+  364  d  3.40-> 2.93(min)-> 3.05  tip_min  2.65  upright first -0.96 min -0.96 end -0.95  first_inv   1s  inv20 1 righted 0 hold 0
+  365  d  4.68-> 4.50(min)-> 4.68  tip_min  4.33  upright first -0.27 min -0.95 end -0.94  first_inv   1s  inv20 1 righted 0 hold 0
+  366  d  1.56-> 0.59(min)-> 0.87  tip_min  0.71  upright first +0.69 min -0.99 end -0.98  first_inv   2s  inv20 1 righted 0 hold 0
+  367  d  6.56-> 5.88(min)-> 6.18  tip_min  5.65  upright first +0.63 min -0.95 end -0.94  first_inv   3s  inv20 1 righted 0 hold 0
+  368  d  1.44-> 0.12(min)-> 0.94  tip_min  0.68  upright first +0.82 min -0.99 end -0.99  first_inv   2s  inv20 1 righted 0 hold 0
+  369  d  5.83-> 3.79(min)-> 3.97  tip_min  3.65  upright first +0.97 min -0.12 end +0.15  first_inv  12s  inv20 0 righted 0 hold 0
+  370  d  1.87-> 1.41(min)-> 1.57  tip_min  0.98  upright first +0.82 min +0.82 end +0.85  first_inv    -  inv20 0 righted 0 hold 0
+  SUMMARY k12: inverted@20s 10/20  ever-inverted 14/20  righted 3/20 (3/14 of ever-inverted)  close-and-hold(body<=0.5m) 0/20  ever<=0.5m 3/20  tip-hold 1/20  failures: inverted 10 upright 10  median distance closed 0.47 m  mean 0.69 m

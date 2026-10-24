@@ -1,0 +1,9 @@
+training seed 351 control -1: close-and-hold mean 1/20 sampled 1/20
+training seed 351 floor -0.7: close-and-hold mean 0/20 sampled 1/20
+training seed 352 control -1: close-and-hold mean 2/20 sampled 0/20
+training seed 352 floor -0.7: close-and-hold mean 0/20 sampled 0/20
+training seed 353 control -1: close-and-hold mean 1/20 sampled 1/20
+training seed 353 floor -0.7: close-and-hold mean 0/20 sampled 1/20
+pooled close-and-hold: mean 4/120 sampled 4/120
+discordant pairs: sampled-only b=4 mean-only c=4; one-sided exact McNemar (H1 b>c) p=0.6367
+verdict: NOT LEARNED TO CLOSE
