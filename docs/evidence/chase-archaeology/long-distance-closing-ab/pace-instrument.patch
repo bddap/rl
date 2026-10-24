@@ -1,0 +1,105 @@
+diff --git a/crab-world/src/bot/sim_truth_test.rs b/crab-world/src/bot/sim_truth_test.rs
+index 698a5f5..2d39282 100644
+--- a/crab-world/src/bot/sim_truth_test.rs
++++ b/crab-world/src/bot/sim_truth_test.rs
+@@ -1135,3 +1135,100 @@ fn resting_crab_falls_asleep() {
+         );
+     }
+ }
++
++#[test]
++fn scripted_flail_gait_pace() {
++    use super::body::CrabCarapace;
++    for (label, mut app) in [("gcr", headless_app()), ("flat", flat_headless_app())] {
++        tick(&mut app, 300);
++        let carapace_xz = |app: &mut App| {
++            let mut q = app
++                .world_mut()
++                .query_filtered::<&Transform, With<CrabCarapace>>();
++            let t = q.single(app.world()).expect("one carapace").translation;
++            Vec2::new(t.x, t.z)
++        };
++        let start = carapace_xz(&mut app);
++        let ticks = 1280u32;
++        let mut max_r = 0.0f32;
++        for t in 0..ticks {
++            let w = if (t / 5) % 2 == 0 { 1.0 } else { -1.0 };
++            let _ = app.world_mut().resource_mut::<CrabActions>().fill(0, w);
++            tick(&mut app, 1);
++            if t == 639 {
++                let d10 = (carapace_xz(&mut app) - start).length();
++                println!(
++                    "SCRIPTED_FLAIL {label} dist={d10:.3} m over 10.0 s -> {:.4} m/s",
++                    d10 / 10.0
++                );
++            }
++            max_r = max_r.max((carapace_xz(&mut app) - start).length());
++        }
++        let dist = (carapace_xz(&mut app) - start).length();
++        let secs = ticks as f32 / crate::physics::PHYSICS_HZ as f32;
++        let height = crate::bot::rig::natural_body_height().unwrap_or(f32::NAN);
++        println!(
++            "SCRIPTED_FLAIL {label} dist={dist:.3} m over {secs:.1} s -> {:.4} m/s = {:.4} heights/s (h={height:.4}) max_radius={max_r:.3} m",
++            dist / secs,
++            dist / secs / height,
++        );
++    }
++}
++
++#[test]
++fn open_loop_gait_search() {
++    use super::actuator::ACTION_SIZE;
++    use super::body::CrabCarapace;
++    let mut s: u64 = 0x9e3779b97f4a7c15;
++    let mut rnd = move || {
++        s ^= s << 13;
++        s ^= s >> 7;
++        s ^= s << 17;
++        (s >> 11) as f32 / (1u64 << 53) as f32
++    };
++    let trials: usize = std::env::var("GAIT_TRIALS")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(96);
++    let periods = [6.0f32, 10.0, 16.0, 24.0, 32.0, 48.0, 64.0, 96.0];
++    let mut best = (0.0f32, String::new());
++    for i in 0..trials {
++        let period = periods[i % periods.len()];
++        let square = (i / periods.len()) % 2 == 1;
++        let amp: [f32; ACTION_SIZE] = std::array::from_fn(|_| if rnd() < 0.5 { -1.0 } else { 1.0 });
++        let phase: [f32; ACTION_SIZE] = std::array::from_fn(|_| rnd() * std::f32::consts::TAU);
++        let bias: [f32; ACTION_SIZE] = std::array::from_fn(|_| (rnd() - 0.5) * 0.6);
++        let mut app = flat_headless_app();
++        tick(&mut app, 300);
++        let carapace_xz = |app: &mut App| {
++            let mut q = app
++                .world_mut()
++                .query_filtered::<&Transform, With<CrabCarapace>>();
++            let t = q.single(app.world()).expect("one carapace").translation;
++            Vec2::new(t.x, t.z)
++        };
++        let start = carapace_xz(&mut app);
++        for t in 0..1280u32 {
++            let row: [f32; ACTION_SIZE] = std::array::from_fn(|j| {
++                let x = (std::f32::consts::TAU * t as f32 / period + phase[j]).sin();
++                let x = if square { x.signum() } else { x };
++                (amp[j] * x + bias[j]).clamp(-1.0, 1.0)
++            });
++            let _ = app
++                .world_mut()
++                .resource_mut::<CrabActions>()
++                .set_row(0, row);
++            tick(&mut app, 1);
++        }
++        let dist = (carapace_xz(&mut app) - start).length();
++        let tag = format!("trial={i} period={period} square={square}");
++        println!("GAIT {tag} dist20s={dist:.3}");
++        if dist > best.0 {
++            best = (dist, tag);
++        }
++    }
++    println!(
++        "GAIT_BEST dist20s={:.3} m ({}) over {trials} trials",
++        best.0, best.1
++    );
++}

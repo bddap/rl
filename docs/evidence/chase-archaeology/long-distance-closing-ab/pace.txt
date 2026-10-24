@@ -1,0 +1,5 @@
+SCRIPTED_FLAIL gcr dist=33.282 m over 10.0 s -> 3.3282 m/s
+SCRIPTED_FLAIL gcr dist=66.313 m over 20.0 s -> 3.3156 m/s = 5.4091 heights/s (h=0.6130) max_radius=66.313 m
+SCRIPTED_FLAIL flat dist=0.821 m over 10.0 s -> 0.0821 m/s
+SCRIPTED_FLAIL flat dist=1.512 m over 20.0 s -> 0.0756 m/s = 0.1233 heights/s (h=0.6130) max_radius=1.512 m
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 276 filtered out; finished in 768.95s
