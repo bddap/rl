@@ -1,6 +1,6 @@
 # Long-distance closing A/B: pre-registration
 
-Status: registered, runs in progress. This is the long-distance closing increment of [#351](https://github.com/bddap/rl/issues/351).
+Status: registered; all six runs launched cold on 2026-10-24 ([launch telemetry](launch.txt)); 40M reads outstanding. This is the long-distance closing increment of [#351](https://github.com/bddap/rl/issues/351).
 
 **Plant bound first.** At main `1ab752d`, on flat ground, 20 s from a 300-tick settle:
 

@@ -1,0 +1,60 @@
+ctrl, training seed 351
+long-distance closing arm ctrl seed 351 (band-draw log-uniform) launch: binary sha256=ba75f0450a046ee7ed76dd5815baeb22489900e02d11764d9f9f4366e99b9ec8  rl-train
+[learner] optimizer not warm-started: the brain cold-started — cold moments
+[learner] exploration-σ schedule: log_std floor -0.700 → -1.000 over 5000000 ticks (epoch @ 0 ticks)
+[learner] reward economy: effort_weight 0.0006
+[learner] rollout world: terrain Flat, band 1.5..9 m, draw LogUniform (--terrain/--band-max-m/--band-draw)
+simulation=ac3ad4a12cc60fdc
+[learner] in-process: K=6 threads × M=2 envs × H=512 ticks/iter → 6144 transitions/update | budget 40000000 ticks (0=∞), 0 iters (0=∞) | nice 10 | compute pool 1 thread(s), rayon pool 1 thread(s)
+[learner] iter 0 | 6144 samples | rollout 33.642s (3072 ticks) update 0.736s [gpu load 15ms + compute 714ms + store 7ms] | sps(iter rollout) 183 sps(steady rollout) 0 | total 6144 (3072 ticks) | reward(20) 0.000 | drift 0.52m | reach - over 0 ep | hard-CCD crab-link clamp candidates 0/0 ep (max 0) | ploss -0.104 vloss 1.075 ent 0.719 kl 1.1400 steps 1 bdiv 6.742
+
+uniform, training seed 351
+long-distance closing arm uniform seed 351 (band-draw uniform-distance) launch: binary sha256=ba75f0450a046ee7ed76dd5815baeb22489900e02d11764d9f9f4366e99b9ec8  rl-train
+[learner] optimizer not warm-started: the brain cold-started — cold moments
+[learner] exploration-σ schedule: log_std floor -0.700 → -1.000 over 5000000 ticks (epoch @ 0 ticks)
+[learner] reward economy: effort_weight 0.0006
+[learner] rollout world: terrain Flat, band 1.5..9 m, draw UniformDistance (--terrain/--band-max-m/--band-draw)
+simulation=ac3ad4a12cc60fdc
+[learner] in-process: K=6 threads × M=2 envs × H=512 ticks/iter → 6144 transitions/update | budget 40000000 ticks (0=∞), 0 iters (0=∞) | nice 10 | compute pool 1 thread(s), rayon pool 1 thread(s)
+[learner] iter 0 | 6144 samples | rollout 33.388s (3072 ticks) update 0.958s [gpu load 26ms + compute 909ms + store 23ms] | sps(iter rollout) 184 sps(steady rollout) 0 | total 6144 (3072 ticks) | reward(20) 0.000 | drift 0.53m | reach - over 0 ep | hard-CCD crab-link clamp candidates 0/0 ep (max 0) | ploss -0.092 vloss 1.300 ent 0.719 kl 0.8147 steps 1 bdiv 6.742
+
+ctrl, training seed 352
+long-distance closing arm ctrl seed 352 (band-draw log-uniform) launch: binary sha256=ba75f0450a046ee7ed76dd5815baeb22489900e02d11764d9f9f4366e99b9ec8  rl-train
+[learner] optimizer not warm-started: the brain cold-started — cold moments
+[learner] exploration-σ schedule: log_std floor -0.700 → -1.000 over 5000000 ticks (epoch @ 0 ticks)
+[learner] reward economy: effort_weight 0.0006
+[learner] rollout world: terrain Flat, band 1.5..9 m, draw LogUniform (--terrain/--band-max-m/--band-draw)
+simulation=ac3ad4a12cc60fdc
+[learner] in-process: K=6 threads × M=2 envs × H=512 ticks/iter → 6144 transitions/update | budget 40000000 ticks (0=∞), 0 iters (0=∞) | nice 10 | compute pool 1 thread(s), rayon pool 1 thread(s)
+[learner] iter 0 | 6144 samples | rollout 33.440s (3072 ticks) update 0.780s [gpu load 18ms + compute 729ms + store 33ms] | sps(iter rollout) 184 sps(steady rollout) 0 | total 6144 (3072 ticks) | reward(20) 0.000 | drift 0.66m | reach - over 0 ep | hard-CCD crab-link clamp candidates 0/0 ep (max 0) | ploss 0.162 vloss 1.154 ent 0.719 kl 0.6845 steps 1 bdiv 7.328
+
+uniform, training seed 352
+long-distance closing arm uniform seed 352 (band-draw uniform-distance) launch: binary sha256=ba75f0450a046ee7ed76dd5815baeb22489900e02d11764d9f9f4366e99b9ec8  rl-train
+[learner] optimizer not warm-started: the brain cold-started — cold moments
+[learner] exploration-σ schedule: log_std floor -0.700 → -1.000 over 5000000 ticks (epoch @ 0 ticks)
+[learner] reward economy: effort_weight 0.0006
+[learner] rollout world: terrain Flat, band 1.5..9 m, draw UniformDistance (--terrain/--band-max-m/--band-draw)
+simulation=ac3ad4a12cc60fdc
+[learner] in-process: K=6 threads × M=2 envs × H=512 ticks/iter → 6144 transitions/update | budget 40000000 ticks (0=∞), 0 iters (0=∞) | nice 10 | compute pool 1 thread(s), rayon pool 1 thread(s)
+[learner] iter 0 | 6144 samples | rollout 33.176s (3072 ticks) update 3.369s [gpu load 22ms + compute 3325ms + store 22ms] | sps(iter rollout) 185 sps(steady rollout) 0 | total 6144 (3072 ticks) | reward(20) 0.000 | drift 0.60m | reach - over 0 ep | hard-CCD crab-link clamp candidates 0/0 ep (max 0) | ploss 0.101 vloss 1.192 ent 0.719 kl 0.7128 steps 1 bdiv 7.328
+
+ctrl, training seed 353
+long-distance closing arm ctrl seed 353 (band-draw log-uniform) launch: binary sha256=ba75f0450a046ee7ed76dd5815baeb22489900e02d11764d9f9f4366e99b9ec8  rl-train
+[learner] optimizer not warm-started: the brain cold-started — cold moments
+[learner] exploration-σ schedule: log_std floor -0.700 → -1.000 over 5000000 ticks (epoch @ 0 ticks)
+[learner] reward economy: effort_weight 0.0006
+[learner] rollout world: terrain Flat, band 1.5..9 m, draw LogUniform (--terrain/--band-max-m/--band-draw)
+simulation=ac3ad4a12cc60fdc
+[learner] in-process: K=6 threads × M=2 envs × H=512 ticks/iter → 6144 transitions/update | budget 40000000 ticks (0=∞), 0 iters (0=∞) | nice 10 | compute pool 1 thread(s), rayon pool 1 thread(s)
+[learner] iter 0 | 6080 samples | rollout 33.567s (3072 ticks) update 22.857s [gpu load 63ms + compute 22771ms + store 23ms] | sps(iter rollout) 181 sps(steady rollout) 0 | total 6080 (3072 ticks) | reward(20) 41.586 | drift 0.40m | reach 1.00 over 2 ep | hard-CCD crab-link clamp candidates 0/2 ep (max 0) | ploss 0.019 vloss 0.429 ent 0.719 kl 0.6289 steps 1 bdiv 6.990
+
+uniform, training seed 353
+long-distance closing arm uniform seed 353 (band-draw uniform-distance) launch: binary sha256=ba75f0450a046ee7ed76dd5815baeb22489900e02d11764d9f9f4366e99b9ec8  rl-train
+[learner] optimizer not warm-started: the brain cold-started — cold moments
+[learner] exploration-σ schedule: log_std floor -0.700 → -1.000 over 5000000 ticks (epoch @ 0 ticks)
+[learner] reward economy: effort_weight 0.0006
+[learner] rollout world: terrain Flat, band 1.5..9 m, draw UniformDistance (--terrain/--band-max-m/--band-draw)
+simulation=ac3ad4a12cc60fdc
+[learner] in-process: K=6 threads × M=2 envs × H=512 ticks/iter → 6144 transitions/update | budget 40000000 ticks (0=∞), 0 iters (0=∞) | nice 10 | compute pool 1 thread(s), rayon pool 1 thread(s)
+[learner] iter 0 | 6144 samples | rollout 33.161s (3072 ticks) update 19.363s [gpu load 73ms + compute 19271ms + store 19ms] | sps(iter rollout) 185 sps(steady rollout) 0 | total 6144 (3072 ticks) | reward(20) 0.000 | drift 0.47m | reach - over 0 ep | hard-CCD crab-link clamp candidates 0/0 ep (max 0) | ploss 0.032 vloss 1.069 ent 0.719 kl 0.5149 steps 1 bdiv 7.005
+
