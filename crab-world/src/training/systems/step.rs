@@ -319,12 +319,13 @@ pub(crate) fn brain_step(
 
     for e in 0..n {
         if targets.get(e).is_none() {
-            let band_max_m = training.mode.band_max_m;
+            let (band_max_m, draw) = (training.mode.band_max_m, training.mode.band_draw);
             seed_target(
                 &mut targets,
                 &spawns,
                 e,
                 band_max_m,
+                draw,
                 &mut training.rng,
                 &terrain,
             );

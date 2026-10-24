@@ -94,12 +94,13 @@ pub fn run_repro(
         .log_std_floor(watermark.saturating_sub(epoch));
     eprintln!(
         "[repro] checkpoint {} @ {watermark} ticks, arch {arch:?}, log_std floor {log_std_floor:.3}, \
-         simulation={:016x}, solver {solver}, terrain {:?}, band ≤{} m, {} env(s)/worker, \
+         simulation={:016x}, solver {solver}, terrain {:?}, band ≤{} m {:?}, {} env(s)/worker, \
          horizon {horizon}, {ticks_per_worker} ticks/worker, seed {}",
         dir.display(),
         crate::simulation::simulation_identity(),
         config.terrain,
         config.band_max_m,
+        config.band_draw,
         config.num_envs(),
         config.seed.expect("resolved above"),
     );

@@ -46,14 +46,29 @@ pub(super) fn target_ball(
     let band_max = rollout
         .as_ref()
         .map_or(crate::training::targets::BAND_MAX_M, |r| r.band_max_m);
+    let draw = crate::training::targets::BandDraw::LogUniform;
 
     let mut target = match targets.get(0) {
         Some(t) => t,
-        None => sample_target(origin, DEMO_CLOSE_FRAC, band_max, &mut rng.0, &terrain),
+        None => sample_target(
+            origin,
+            DEMO_CLOSE_FRAC,
+            band_max,
+            draw,
+            &mut rng.0,
+            &terrain,
+        ),
     };
 
     if closest_tip_dist(0, target, &claw_tips_q).is_some_and(tip_touch) {
-        target = sample_target(origin, DEMO_CLOSE_FRAC, band_max, &mut rng.0, &terrain);
+        target = sample_target(
+            origin,
+            DEMO_CLOSE_FRAC,
+            band_max,
+            draw,
+            &mut rng.0,
+            &terrain,
+        );
     }
 
     if let Some(slot) = targets.envs.first_mut() {
