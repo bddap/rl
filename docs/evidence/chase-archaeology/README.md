@@ -1,5 +1,7 @@
 # Checkpoint archaeology — the last Sally that actually chased
 
+[history.md](history.md) is the full rl#351 record: the issue body before its rewrite and every comment, verbatim, with an index.
+
 Pre-terrain (< rl#281, 2026-07-16), pre-chase-eval (< 79d11ae, 2026-06-30) candidates,
 re-verified 2026-08-06 by rendering each under the archived era binary
 `rl-demo-3ddcf6f` (commit 3ddcf6f, 2026-07-01 — the newest binary that loads the
