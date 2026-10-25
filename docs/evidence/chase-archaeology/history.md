@@ -9,7 +9,7 @@ Everything [rl#351](https://github.com/bddap/rl/issues/351) recorded before its 
 | [1](#c1) | — | Report and directive (verbatim) |
 | [2](#c2) | 2026-08-07 | [xhigh bump is landing (job 2231, needs a hub restart). Stage 1 queued (2233): recover the Jun-28 training source — the era binary pin rl-demo-3ddcf6f is the …](https://github.com/bddap/rl/issues/351#issuecomment-5210606733) |
 | [3](#c3) | 2026-08-11 | [Probe A assess — verdict: **confounded (red-leaning)**](https://github.com/bddap/rl/issues/351#issuecomment-5247534132) |
-| [4](#c4) | 2026-08-11 | [Correction (owner review): the end-of-bound behavior is **falling**, not "drift" — and the render leg is off-distribution: this pin's `rl-demo` renders only …](https://github.com/bddap/rl/issues/351#issuecomment-5247638450) |
+| [4](#c4) | 2026-08-11 | [Correction (review): the end-of-bound behavior is **falling**, not "drift" — and the render leg is off-distribution: this pin's `rl-demo` renders only the ca…](https://github.com/bddap/rl/issues/351#issuecomment-5247638450) |
 | [5](#c5) | 2026-08-11 | [**Audit result (follow-up to the correction above): the eval instrument never saw the probe's terrain. The eval leg is struck; the verdict survives on the in…](https://github.com/bddap/rl/issues/351#issuecomment-5247672165) |
 | [6](#c6) | 2026-08-11 | [Probe B assess — verdict: **GREEN**](https://github.com/bddap/rl/issues/351#issuecomment-5247760466) |
 | [7](#c7) | 2026-08-12 | [Probe C assess — verdict: **RED**](https://github.com/bddap/rl/issues/351#issuecomment-5263261832) |
