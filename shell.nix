@@ -49,4 +49,8 @@ pkgs.mkShell {
     libxkbcommon
     wayland
   ]);
+
+  # The release builder GC-roots this pin: hourly nix-gc deleted the unrooted tarball
+  # source mid-evaluation (bothouse fleet-error, 2026-10-26).
+  passthru.nixpkgs = toString pkgs.path;
 }
