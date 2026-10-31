@@ -65,6 +65,8 @@ fn sync_ui_scale(
 /// - `None`: offscreen — no window but the GPU ON (render-to-image), winit disabled.
 ///   Callers pace frames with their own `ScheduleRunnerPlugin` cadence (the one thing
 ///   the offscreen surfaces genuinely differ on).
+///   `AudioPlugin` disabled: nothing offscreen is heard, and an opened device whose
+///   stream errors logs every ALSA poll — gigabytes per render on a headless host.
 pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
     // With LogPlugin gone, a caller that skipped `otel::init` would boot with NO
     // subscriber at all — every log silently dropped, the exact silent-fallback class
@@ -101,6 +103,7 @@ pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
                 ..default()
             })
             .disable::<bevy::winit::WinitPlugin>()
+            .disable::<bevy::audio::AudioPlugin>()
             .add(crate::sally_track::SallyTrackPlugin)
             // Offscreen too, so the fp-screenshot evidence path can capture the overlay —
             // but no collapse dump: offscreen renders are legitimately slower than realtime.

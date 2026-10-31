@@ -25,7 +25,7 @@
 //! entered the outside world ducks under it (`net`'s `ExternalBus` muffle), never the
 //! reverse.
 
-use bevy::audio::{AddAudioSource, Decodable, PlaybackSettings};
+use bevy::audio::{AddAudioSource, AudioPlugin, Decodable, PlaybackSettings};
 use bevy::prelude::*;
 
 use crate::chord::{ChordDir, Chords};
@@ -491,8 +491,12 @@ fn sound_chords<S: ControlScheme>(
 /// Wired by [`crate::chord::install_chords`] — not called directly. The per-scheme
 /// system installs per call; the shared parts once, keyed on `Assets<Phrase>` (what
 /// `add_audio_source` actually provides — a surface may legitimately insert its own
-/// [`InstrumentScheme`] before installing chords).
+/// [`InstrumentScheme`] before installing chords). An app without `AudioPlugin` (the
+/// offscreen surfaces, [`crate::app_boot::base_plugins`]) has no device to sound on.
 pub(crate) fn install<S: ControlScheme>(app: &mut App) {
+    if !app.is_plugin_added::<AudioPlugin>() {
+        return;
+    }
     if !app.world().contains_resource::<Assets<Phrase>>() {
         app.add_audio_source::<Phrase>();
     }
