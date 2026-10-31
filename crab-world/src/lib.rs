@@ -309,6 +309,12 @@ pub struct TrainConfig {
     #[arg(long, env = "RL_BAND_MAX_M", value_parser = parse_band_max,
           default_value_t = training::targets::BAND_MAX_M)]
     pub band_max_m: f32,
+
+    /// DIAGNOSTIC: `off` holds the gait clock channels at zero while training, the
+    /// control arm of rl#351's locomotion-discovery A/B. Its checkpoints need no
+    /// matching flag elsewhere: a channel that never varied normalizes to zero.
+    #[arg(long, env = "RL_GAIT_CLOCK", value_enum, default_value_t)]
+    pub gait_clock: bot::sensor::GaitClock,
 }
 
 /// [`TrainConfig::terrain`]'s values — the ONE production seam for non-canonical

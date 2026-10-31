@@ -43,7 +43,36 @@ const TARGET_LEN: usize = 3;
 
 const TARGET_SLOT: usize = CrabJointId::COUNT * JointObs::LEN + BodyObs::LEN;
 
-const TERRAIN_SLOT: usize = TARGET_SLOT + TARGET_LEN;
+const CLOCK_LEN: usize = 2;
+
+const CLOCK_SLOT: usize = TARGET_SLOT + TARGET_LEN;
+
+const TERRAIN_SLOT: usize = CLOCK_SLOT + CLOCK_LEN;
+
+/// Period of the gait clock's sin/cos pair. The travelling open-loop gaits the plant
+/// admits cycle in 16–32 ticks, so one 32-tick clock carries those periods and their
+/// harmonics without the policy having to discover a rhythm through per-tick noise.
+pub const GAIT_CLOCK_PERIOD_TICKS: u32 = 32;
+
+#[derive(Resource, clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GaitClock {
+    #[default]
+    On,
+    Off,
+}
+
+impl GaitClock {
+    fn phase(self, tick: u32) -> Vec2 {
+        match self {
+            Self::On => {
+                let turn = (tick % GAIT_CLOCK_PERIOD_TICKS) as f32 / GAIT_CLOCK_PERIOD_TICKS as f32;
+                let (sin, cos) = (turn * std::f32::consts::TAU).sin_cos();
+                Vec2::new(sin, cos)
+            }
+            Self::Off => Vec2::ZERO,
+        }
+    }
+}
 
 /// One terrain-scan sample: a polar offset in the crab's yaw frame — bearing 0 is the
 /// carapace forward axis (local +Z, the pincer side; the vehicle nose shares the
@@ -132,6 +161,7 @@ pub(crate) struct Observation {
     joints: [JointObs; CrabJointId::COUNT],
     body: BodyObs,
     target_local: Vec3,
+    clock: Vec2,
     /// Heightfield samples on the yaw-frame pattern, each `height(sample) − carapace.y`
     /// in raw meters (rl#295) — per-channel Welford normalization absorbs the scale.
     terrain: [f32; TERRAIN_SAMPLES],
@@ -143,6 +173,7 @@ impl Default for Observation {
             joints: [JointObs::default(); CrabJointId::COUNT],
             body: BodyObs::default(),
             target_local: Vec3::ZERO,
+            clock: Vec2::ZERO,
             terrain: [0.0; TERRAIN_SAMPLES],
         }
     }
@@ -165,6 +196,8 @@ impl Observation {
         i += BodyObs::LEN;
         v[i..i + TARGET_LEN].copy_from_slice(&self.target_local.to_array());
         i += TARGET_LEN;
+        v[i..i + CLOCK_LEN].copy_from_slice(&self.clock.to_array());
+        i += CLOCK_LEN;
         v[i..i + TERRAIN_SAMPLES].copy_from_slice(&self.terrain);
         v
     }
@@ -189,6 +222,9 @@ pub(super) fn obs_channel_labels() -> Vec<String> {
     for c in ["x", "y", "z"] {
         labels.push(format!("target:{c}"));
     }
+    for c in ["sin", "cos"] {
+        labels.push(format!("clock:{c}"));
+    }
     for s in terrain_scan_pattern() {
         labels.push(s.label());
     }
@@ -201,6 +237,7 @@ pub(super) fn obs_channel_labels() -> Vec<String> {
 #[derive(Resource, Default)]
 pub struct CrabObservation {
     envs: Vec<[f32; OBS_SIZE]>,
+    tick: u32,
 }
 
 impl CrabObservation {
@@ -265,6 +302,7 @@ impl CrabTargets {
 }
 
 pub fn build_observation(
+    clock: Res<GaitClock>,
     targets: Res<CrabTargets>,
     terrain: Res<crate::terrain::Terrain>,
     mut obs: ResMut<CrabObservation>,
@@ -278,7 +316,15 @@ pub fn build_observation(
         &Velocity,
     )>,
 ) {
-    let mut built = vec![Observation::default(); obs.envs.len()];
+    let phase = clock.phase(obs.tick);
+    obs.tick = obs.tick.wrapping_add(1);
+    let mut built = vec![
+        Observation {
+            clock: phase,
+            ..Observation::default()
+        };
+        obs.envs.len()
+    ];
 
     let mut motion: HashMap<Entity, (Quat, Vec3, Vec3)> = HashMap::new();
     for (e, _, _, _, t, vel) in joint_q.iter() {
@@ -372,6 +418,7 @@ mod tests {
         o.body.linvel = Vec3::new(4.0, 5.0, 6.0);
         o.body.angvel = Vec3::new(7.0, 8.0, 9.0);
         o.target_local = Vec3::new(-1.0, -2.0, -3.0);
+        o.clock = Vec2::new(0.6, -0.8);
         for (k, t) in o.terrain.iter_mut().enumerate() {
             *t = 100.0 + k as f32;
         }
@@ -404,6 +451,8 @@ mod tests {
             ("target:x", -1.0),
             ("target:y", -2.0),
             ("target:z", -3.0),
+            ("clock:sin", 0.6),
+            ("clock:cos", -0.8),
         ] {
             want[slot(name)] = v;
         }
@@ -418,8 +467,11 @@ mod tests {
     }
 
     #[test]
-    fn obs_size_is_unchanged() {
-        assert_eq!(OBS_SIZE, CrabJointId::COUNT * 2 + 10 + 3 + TERRAIN_SAMPLES);
+    fn obs_size_is_the_channel_sum() {
+        assert_eq!(
+            OBS_SIZE,
+            CrabJointId::COUNT * 2 + 10 + 3 + 2 + TERRAIN_SAMPLES
+        );
     }
 
     /// rl#311: the policy is position-invariant BY CONSTRUCTION — no obs channel may
@@ -467,6 +519,7 @@ mod tests {
         obs.resize(1);
         let mut targets = CrabTargets::default();
         targets.resize(1);
+        world.insert_resource(GaitClock::default());
         world.insert_resource(obs);
         world.insert_resource(targets);
         world.insert_resource(crate::terrain::Terrain::new(std::sync::Arc::new(grid)));
@@ -526,6 +579,7 @@ mod tests {
         want.body.linvel = body_vel.linear;
         want.body.angvel = body_vel.angular;
         want.target_local = body_rot.inverse() * (target - body_t.translation);
+        want.clock = GaitClock::On.phase(0);
         // Flat grid: every scan sample reads 0 − carapace.y.
         want.terrain = [-body_t.translation.y; TERRAIN_SAMPLES];
         assert_eq!(
@@ -635,6 +689,30 @@ mod tests {
             home, afar,
             "a world translation reached the obs — a position channel leaked back in (rl#311)"
         );
+    }
+
+    #[test]
+    fn gait_clock_cycles_once_per_period_and_off_holds_zero() {
+        let clock_at = |mode: GaitClock, builds: u32| {
+            let mut world = obs_world();
+            world.insert_resource(mode);
+            for _ in 0..builds {
+                world
+                    .run_system_once(build_observation)
+                    .expect("build observation");
+            }
+            let row = world.resource::<CrabObservation>().envs[0];
+            Vec2::new(row[CLOCK_SLOT], row[CLOCK_SLOT + 1])
+        };
+        let start = clock_at(GaitClock::On, 1);
+        assert_eq!(start, Vec2::new(0.0, 1.0));
+        let quarter = clock_at(GaitClock::On, 1 + GAIT_CLOCK_PERIOD_TICKS / 4);
+        assert!((quarter - Vec2::new(1.0, 0.0)).length() < 1e-6, "{quarter}");
+        let lap = clock_at(GaitClock::On, 1 + GAIT_CLOCK_PERIOD_TICKS);
+        assert!((lap - start).length() < 1e-6, "{lap}");
+        for builds in [1, 9, 1 + GAIT_CLOCK_PERIOD_TICKS / 4] {
+            assert_eq!(clock_at(GaitClock::Off, builds), Vec2::ZERO);
+        }
     }
 
     /// rl#242: a joint-parent motion miss must be LOUD, never a silent identity

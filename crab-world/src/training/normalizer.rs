@@ -136,7 +136,14 @@ impl ObsNormalizer {
                 normalized[i] = 0.0;
                 continue;
             }
-            let std = (self.welford.variance(i) as f32).sqrt().max(1e-6);
+            let var = self.welford.variance(i);
+            // A channel that never varied in training has no learned meaning, and
+            // its first-layer weights never saw a gradient.
+            if var == 0.0 {
+                normalized[i] = 0.0;
+                continue;
+            }
+            let std = (var as f32).sqrt().max(1e-6);
             let val = (raw - self.welford.mean[i] as f32) / std;
             normalized[i] = if val.is_nan() {
                 0.0
@@ -273,6 +280,22 @@ mod tests {
             inc.welford.count[3], 2,
             "a finite element is folded both times"
         );
+    }
+
+    #[test]
+    fn a_channel_that_never_varied_normalizes_to_zero() {
+        let mut norm = ObsNormalizer::new(5.0);
+        for i in 0..30 {
+            let mut obs = [0.0f32; OBS_SIZE];
+            obs[0] = i as f32;
+            norm.normalize(&obs);
+        }
+        let mut probe = [0.0f32; OBS_SIZE];
+        probe[0] = 1000.0;
+        probe[1] = 1.0;
+        let out = norm.normalize_frozen(&probe);
+        assert_eq!(out[0], 5.0, "a varied channel still scales and clips");
+        assert_eq!(out[1], 0.0, "a never-varied channel ignores its input");
     }
 
     #[test]

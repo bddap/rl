@@ -403,6 +403,7 @@ mod tests {
         let mut targets = CrabTargets::default();
         targets.resize(1);
         targets.envs[0] = target;
+        world.insert_resource(crate::bot::sensor::GaitClock::default());
         world.insert_resource(obs);
         world.insert_resource(targets);
         world.insert_resource(CrabSpawns::from_origins(vec![Vec3::ZERO]));
