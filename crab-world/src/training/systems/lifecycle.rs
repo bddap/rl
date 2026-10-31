@@ -174,8 +174,8 @@ impl WorkerState {
                     "Recording with no pending ⇒ virgin"
                 );
                 self.mode.envs[e].min_tip_dist = None;
-                let (band_max_m, draw) = (self.mode.band_max_m, self.mode.band_draw);
-                seed_target(targets, spawns, e, band_max_m, draw, &mut self.rng, terrain);
+                let band_max_m = self.mode.band_max_m;
+                seed_target(targets, spawns, e, band_max_m, &mut self.rng, terrain);
                 continue;
             }
 
@@ -237,8 +237,8 @@ impl WorkerState {
                     crate::eval::bearing_bin((t.z - origin.z).atan2(t.x - origin.x))
                 });
 
-                let (band_max_m, draw) = (self.mode.band_max_m, self.mode.band_draw);
-                seed_target(targets, spawns, e, band_max_m, draw, &mut self.rng, terrain);
+                let band_max_m = self.mode.band_max_m;
+                seed_target(targets, spawns, e, band_max_m, &mut self.rng, terrain);
 
                 let telemetry = &mut self.mode.telemetry;
                 let candidates = clamp_candidates.take(e);
@@ -334,13 +334,12 @@ pub(crate) fn reset_crab(
             // banded the target around the PREVIOUS locale — re-seed from the new
             // origin or every post-first episode would chase a point up to a tile
             // away (its obs/reward kilometers out of the trained band).
-            let (band_max_m, draw) = (training.mode.band_max_m, training.mode.band_draw);
+            let band_max_m = training.mode.band_max_m;
             seed_target(
                 &mut targets,
                 &spawns,
                 e,
                 band_max_m,
-                draw,
                 &mut training.rng,
                 &terrain,
             );

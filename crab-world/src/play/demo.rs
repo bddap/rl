@@ -7,7 +7,7 @@ use crate::bot::actuator::CrabActions;
 use crate::bot::body::{self, CrabAssets, CrabBodyPart, CrabCarapace};
 use crate::bot::sensor::CrabTargets;
 use crate::bot::{CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown};
-use crate::training::targets::{BAND_MAX_M, BandDraw, random_episode_origin, seed_target};
+use crate::training::targets::{random_episode_origin, seed_target};
 
 use crate::chord::Chords;
 
@@ -71,8 +71,7 @@ fn demo_respawn(
         targets,
         spawns,
         0,
-        BAND_MAX_M,
-        BandDraw::LogUniform,
+        crate::training::targets::BAND_MAX_M,
         rng,
         terrain,
     );

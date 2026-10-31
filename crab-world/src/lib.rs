@@ -309,12 +309,6 @@ pub struct TrainConfig {
     #[arg(long, env = "RL_BAND_MAX_M", value_parser = parse_band_max,
           default_value_t = training::targets::BAND_MAX_M)]
     pub band_max_m: f32,
-
-    /// DIAGNOSTIC: how training rollouts spread target distances up to
-    /// `--band-max-m`; renders and evals keep log-uniform so both arms of an A/B
-    /// are scored on one distribution.
-    #[arg(long, env = "RL_BAND_DRAW", value_enum, default_value_t)]
-    pub band_draw: training::targets::BandDraw,
 }
 
 /// [`TrainConfig::terrain`]'s values — the ONE production seam for non-canonical
@@ -368,7 +362,7 @@ impl TrainConfig {
 
 pub fn parse_band_max(s: &str) -> Result<f32, String> {
     let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
-    // Below BAND_START_MIN the band draw's range inverts; above the canonical
+    // Below BAND_START_MIN the log-uniform draw's range inverts; above the canonical
     // edge the sampling clamp's edge margin (sized from the CONST) no longer bounds it.
     if v.is_finite() && v > training::targets::BAND_START_MIN && v <= training::targets::BAND_MAX_M
     {

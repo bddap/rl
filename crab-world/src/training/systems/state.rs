@@ -118,8 +118,8 @@ pub(crate) struct WorkerMode {
     pub(super) rollouts: Vec<RolloutBuffer>,
     pub(super) explore_noise: OuNoise,
     pub(super) log_std_floor: f32,
+    /// Far edge of the target-band draw — `TrainConfig::band_max_m`.
     pub(super) band_max_m: f32,
-    pub(super) band_draw: crate::training::targets::BandDraw,
     pub(super) tick_budget: u64,
     pub(super) total_steps: u64,
     pub(super) reported_episodes: usize,
@@ -544,7 +544,6 @@ impl WorkerState {
                 explore_noise: OuNoise::new(n),
                 log_std_floor: crate::bot::arch::LOG_STD_MIN,
                 band_max_m: config.band_max_m,
-                band_draw: config.band_draw,
                 tick_budget: config.ticks,
                 total_steps: 0,
                 reported_episodes: 0,
