@@ -1,0 +1,72 @@
+ctrl training seed 351
+ 0- 5M  reach 0.0320  episodes 6626
+ 5-10M  reach 0.0501  episodes 6686
+10-15M  reach 0.0471  episodes 6682
+15-20M  reach 0.0460  episodes 6672
+20-25M  reach 0.0412  episodes 6636
+25-30M  reach 0.0562  episodes 6720
+30-35M  reach 0.0478  episodes 6680
+35-40M  reach 0.0795  episodes 6778
+40-45M  reach 0.1700  episodes 6
+last tick 40000512
+
+ctrl training seed 352
+ 0- 5M  reach 0.0322  episodes 6622
+ 5-10M  reach 0.0335  episodes 6642
+10-15M  reach 0.0562  episodes 6725
+15-20M  reach 0.0507  episodes 6700
+20-25M  reach 0.0740  episodes 6778
+25-30M  reach 0.1315  episodes 6990
+30-35M  reach 0.1106  episodes 6900
+35-40M  reach 0.0517  episodes 6694
+40-45M  reach 0.1700  episodes 6
+last tick 40000512
+
+ctrl training seed 353
+ 0- 5M  reach 0.0298  episodes 6625
+ 5-10M  reach 0.0336  episodes 6627
+10-15M  reach 0.0434  episodes 6658
+15-20M  reach 0.0525  episodes 6685
+20-25M  reach 0.0468  episodes 6681
+25-30M  reach 0.0418  episodes 6668
+30-35M  reach 0.0504  episodes 6673
+35-40M  reach 0.0457  episodes 6667
+40-45M  reach 0.2000  episodes 5
+last tick 40000512
+
+uniform training seed 351
+ 0- 5M  reach 0.0269  episodes 6608
+ 5-10M  reach 0.0309  episodes 6643
+10-15M  reach 0.0339  episodes 6628
+15-20M  reach 0.0498  episodes 6706
+20-25M  reach 0.0491  episodes 6694
+25-30M  reach 0.1066  episodes 6878
+30-35M  reach 0.0947  episodes 6845
+35-40M  reach 0.1188  episodes 6889
+40-45M  reach 0.0000  episodes 3
+last tick 40000512
+
+uniform training seed 352
+ 0- 5M  reach 0.0285  episodes 6621
+ 5-10M  reach 0.0315  episodes 6633
+10-15M  reach 0.0382  episodes 6648
+15-20M  reach 0.0419  episodes 6674
+20-25M  reach 0.0584  episodes 6728
+25-30M  reach 0.0443  episodes 6680
+30-35M  reach 0.0456  episodes 6690
+35-40M  reach 0.0637  episodes 6732
+40-45M  reach 0.0000  episodes 3
+last tick 40000512
+
+uniform training seed 353
+ 0- 5M  reach 0.0246  episodes 6597
+ 5-10M  reach 0.0304  episodes 6633
+10-15M  reach 0.0413  episodes 6660
+15-20M  reach 0.0504  episodes 6682
+20-25M  reach 0.0335  episodes 6649
+25-30M  reach 0.0587  episodes 6743
+30-35M  reach 0.0520  episodes 6704
+35-40M  reach 0.0726  episodes 6789
+40-45M  reach 0.0000  episodes 8
+last tick 40000512
+

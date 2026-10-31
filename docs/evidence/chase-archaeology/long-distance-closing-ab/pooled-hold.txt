@@ -1,0 +1,5 @@
+Control holds by training seed 351-353: [3, 0, 0]; pooled 3/60
+Treatment (uniform-distance) holds by training seed 351-353: [0, 0, 3]; pooled 3/60
+One-sided Fisher exact, H1 treatment > control, conditioning on 6 total holds:
+p = sum(C(60,k)*C(60,6-k), k >= 3) / C(120,6) = 2411876930/3652745460 = 0.6603
+Closing gain at p<0.05: False

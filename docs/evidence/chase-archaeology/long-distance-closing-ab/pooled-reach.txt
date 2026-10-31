@@ -1,0 +1,9 @@
+ctrl seed 351: 30-40M reach 0.0638 over 13458 episodes (reached 858)
+ctrl seed 352: 30-40M reach 0.0816 over 13594 episodes (reached 1109)
+ctrl seed 353: 30-40M reach 0.0481 over 13340 episodes (reached 641)
+ctrl pooled 351-353: 0.0646 over 40392 episodes
+uniform seed 351: 30-40M reach 0.1068 over 13734 episodes (reached 1466)
+uniform seed 352: 30-40M reach 0.0547 over 13422 episodes (reached 734)
+uniform seed 353: 30-40M reach 0.0624 over 13493 episodes (reached 842)
+uniform pooled 351-353: 0.0748 over 40649 episodes
+one-sided H1 control > uniform: z = -5.726, p = 1; uniform below control at p<0.05: False

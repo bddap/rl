@@ -1,0 +1,22 @@
+RENDER_ROLLOUT terrain=Flat band_max_m=9 seed=Some(369) exploration_log_std_floor=None
+RENDER_CHECKPOINT dir=ctrl-s352/ckpt/marks/40000000 ticks=40000512
+ROLLOUT_TRACE video_tick=64 body=Vec3(0.46075633, 0.4998997, 0.34799415) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=6.14639 tip_distance_m=Some(5.7032175) upright=0.80905
+ROLLOUT_TRACE video_tick=128 body=Vec3(0.51744723, 0.5098662, 0.4429111) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=6.04635 tip_distance_m=Some(5.7322335) upright=0.82176
+ROLLOUT_TRACE video_tick=192 body=Vec3(0.5351342, 0.50256777, 0.5613807) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=5.92674 tip_distance_m=Some(5.7670617) upright=0.80944
+ROLLOUT_TRACE video_tick=256 body=Vec3(0.5391482, 0.496213, 0.7534849) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=5.73512 tip_distance_m=Some(5.7517357) upright=0.80360
+ROLLOUT_TRACE video_tick=320 body=Vec3(0.49041867, 0.49291644, 0.93777466) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=5.55676 tip_distance_m=Some(5.730842) upright=0.80048
+ROLLOUT_TRACE video_tick=384 body=Vec3(0.41209197, 0.5295726, 1.1049155) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=5.39989 tip_distance_m=Some(5.8548183) upright=0.84772
+ROLLOUT_TRACE video_tick=448 body=Vec3(0.45908278, 0.54611284, 1.0636725) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=5.43516 tip_distance_m=Some(5.894867) upright=0.90251
+ROLLOUT_TRACE video_tick=512 body=Vec3(0.49026823, 0.5648636, 1.0548769) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=5.44037 tip_distance_m=Some(5.8910937) upright=0.94855
+ROLLOUT_TRACE video_tick=576 body=Vec3(0.44052434, 0.59944063, 1.0782987) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=5.42282 tip_distance_m=Some(5.8628526) upright=0.93157
+ROLLOUT_TRACE video_tick=640 body=Vec3(0.7672454, 0.5668966, 1.3087251) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=5.16347 tip_distance_m=Some(5.6286874) upright=0.58616
+ROLLOUT_TRACE video_tick=704 body=Vec3(1.1648552, 0.47231647, 2.2456186) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=4.21716 tip_distance_m=Some(3.683816) upright=-0.76482
+ROLLOUT_TRACE video_tick=768 body=Vec3(1.5938438, 0.3599055, 2.5567303) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=3.93778 tip_distance_m=Some(3.5304325) upright=-0.97909
+ROLLOUT_TRACE video_tick=832 body=Vec3(1.6088439, 0.35990414, 2.558734) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=3.93774 tip_distance_m=Some(3.4875124) upright=-0.97879
+ROLLOUT_TRACE video_tick=896 body=Vec3(1.6184238, 0.35902682, 2.5569215) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=3.94081 tip_distance_m=Some(3.4684312) upright=-0.97642
+ROLLOUT_TRACE video_tick=960 body=Vec3(1.628673, 0.35990676, 2.576311) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=3.92299 tip_distance_m=Some(3.439548) upright=-0.97633
+ROLLOUT_TRACE video_tick=1024 body=Vec3(1.6323959, 0.35856816, 2.607726) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=3.89239 tip_distance_m=Some(3.351919) upright=-0.97626
+ROLLOUT_TRACE video_tick=1088 body=Vec3(1.6778578, 0.36058876, 2.6470006) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=3.86017 tip_distance_m=Some(3.3070064) upright=-0.98282
+ROLLOUT_TRACE video_tick=1152 body=Vec3(1.6838913, 0.35964417, 2.6727402) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=3.83566 tip_distance_m=Some(3.261206) upright=-0.98337
+ROLLOUT_TRACE video_tick=1216 body=Vec3(1.6956469, 0.35928664, 2.7187634) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=3.79206 tip_distance_m=Some(3.2192464) upright=-0.97633
+ROLLOUT_TRACE video_tick=1280 body=Vec3(1.6823425, 0.36189198, 2.761871) target=Vec3(1.0897723, 0.6856829, 6.462112) distance_m=3.74739 tip_distance_m=Some(3.1744606) upright=-0.97427
