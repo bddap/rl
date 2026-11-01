@@ -65,6 +65,9 @@ fn sync_ui_scale(
 /// - `None`: offscreen — no window but the GPU ON (render-to-image), winit disabled.
 ///   Callers pace frames with their own `ScheduleRunnerPlugin` cadence (the one thing
 ///   the offscreen surfaces genuinely differ on).
+///   Pipelines compile synchronously: async compilation leaves a frame unrendered
+///   for as long as the host takes to compile, so a capture taken N frames in
+///   would depend on host load (rl#432).
 ///   `AudioPlugin` disabled: nothing offscreen is heard, and an opened device whose
 ///   stream errors logs every ALSA poll — gigabytes per render on a headless host.
 pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
@@ -100,6 +103,10 @@ pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(bevy::render::RenderPlugin {
+                synchronous_pipeline_compilation: true,
                 ..default()
             })
             .disable::<bevy::winit::WinitPlugin>()
