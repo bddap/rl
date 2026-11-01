@@ -14,7 +14,7 @@ use iroh_base::EndpointId;
 
 use crate::SyncVerdict;
 use crate::client::{ClientSim, PeerMsg, TickMsg};
-use crate::membership::{BEAT_EVERY_MS, Beat, Membership, Role, Status};
+use crate::membership::{BEAT_EVERY_MS, Beat, HostClaim, Membership, Role, Status};
 use crate::sim::PlayerId;
 
 pub struct Frozen {
@@ -120,7 +120,7 @@ impl FormationCore {
         self.m.on_beat(from, beat, now_ms);
     }
 
-    pub fn last_direct_beat(&self, peer: &EndpointId) -> Option<(u64, u64)> {
+    pub fn last_direct_beat(&self, peer: &EndpointId) -> Option<(u64, u64, HostClaim)> {
         self.m.last_direct_beat(peer)
     }
 
@@ -259,7 +259,6 @@ pub fn assign_player_ids(
 mod tests {
     use super::*;
     use crate::SyncStamp;
-    use crate::membership::HostClaim;
 
     fn eid(i: u8) -> EndpointId {
         iroh_base::SecretKey::from_bytes(&[i; 32]).public()

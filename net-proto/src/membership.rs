@@ -13,7 +13,7 @@ const MEMBER_TIMEOUT_MS: u64 = 3_000;
 
 pub const BEAT_EVERY_MS: u64 = 250;
 
-const STABLE_FOR_MS: u64 = 1_500;
+pub const STABLE_FOR_MS: u64 = 1_500;
 
 pub const JOIN_WINDOW_MS: u64 = 20_000;
 
@@ -246,11 +246,11 @@ impl Membership {
         *id == self.me || self.peers.contains_key(id)
     }
 
-    /// When `id`'s last direct beat arrived and the roster hash it carried; `None` for a
-    /// peer only relayed to us.
-    pub fn last_direct_beat(&self, id: &EndpointId) -> Option<(u64, u64)> {
+    /// When `id`'s last direct beat arrived, and the roster hash and claim it carried;
+    /// `None` for a peer only relayed to us.
+    pub fn last_direct_beat(&self, id: &EndpointId) -> Option<(u64, u64, HostClaim)> {
         let v = self.peers.get(id)?;
-        Some((v.last_direct, v.advertised?))
+        Some((v.last_direct, v.advertised?, v.claim))
     }
 
     pub fn live_set(&self) -> Vec<EndpointId> {

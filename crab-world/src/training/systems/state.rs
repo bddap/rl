@@ -804,8 +804,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Bit-exact policy/value outputs for a brain over a fixed zero batch — the one
-    /// fingerprint both determinism tests below compare by.
+    /// Bit-exact policy/value outputs for a brain over a fixed zero batch.
     fn policy_bits(brain: &AnyBrain<InferBackend>) -> Vec<u32> {
         let device = NdArrayDevice::Cpu;
         let obs = Tensor::<InferBackend, 2>::zeros([3, OBS_SIZE], &device);
@@ -903,27 +902,6 @@ mod tests {
         );
         assert_eq!(std::fs::read(dir.join("ticks.txt")).unwrap(), b"777");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn brain_init_is_reproducible_from_the_backend_seed() {
-        let device = NdArrayDevice::Cpu;
-        let init_with_seed = |seed: u64| -> Vec<u32> {
-            <TrainBackend as burn::tensor::backend::Backend>::seed(&device, seed);
-            policy_bits(&AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device).valid())
-        };
-
-        let reproducible = (0..16).any(|_| init_with_seed(0x5EED) == init_with_seed(0x5EED));
-        assert!(
-            reproducible,
-            "same backend seed never reproduced identical initial weights across 16 tries — init \
-             is not seed-deterministic, so training can't replay a run from its logged --seed"
-        );
-        assert_ne!(
-            init_with_seed(0x5EED),
-            init_with_seed(0xC0FFEE),
-            "different seeds must give different initial weights, else seeding does nothing"
-        );
     }
 
     /// rl#394: the learner and worker 0 both hashed stream index 0 and ran

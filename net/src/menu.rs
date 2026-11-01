@@ -45,6 +45,11 @@ pub struct Formation {
 impl Formation {
     /// One frame's pump. `None` while the lobby is still binding or forming.
     pub fn poll(&mut self) -> Option<Result<MatchResult>> {
+        self.poll_on(Session::now_ms)
+    }
+
+    /// [`Self::poll`] with the formation clock read through `clock`.
+    fn poll_on(&mut self, clock: impl Fn(&Session) -> u64) -> Option<Result<MatchResult>> {
         self.state.as_ref()?;
         if self.cancelled {
             println!("lobby cancelled by the player");
@@ -69,7 +74,8 @@ impl Formation {
                         self.role = Role::Joiner { host: None };
                     }
                     // Same frame: fall through and pump the fresh lobby below.
-                    self.state = Some(open_lobby(session, self.role, self.stamp));
+                    let now_ms = clock(&session);
+                    self.state = Some(open_lobby(session, self.role, self.stamp, now_ms));
                 }
                 Err(e) => return Some(Err(e.context("binding the lobby session"))),
             }
@@ -77,7 +83,7 @@ impl Formation {
         let Some(FormState::Live { session, driver }) = self.state.as_mut() else {
             unreachable!("Binding resolved above, and an empty state returned early")
         };
-        let now_ms = session.now_ms();
+        let now_ms = clock(session);
         let outcome = driver.pump(session, now_ms)?;
         let Some(FormState::Live { session, .. }) = self.state.take() else {
             unreachable!("matched Live above")
@@ -182,18 +188,14 @@ pub fn begin(choice: &StartChoice, seed: u64, stamp: crate::SyncStamp) -> Format
 }
 
 /// The bound-session half of [`begin`]: fire the join dial, open the formation core.
-fn open_lobby(session: Session, role: Role, stamp: crate::SyncStamp) -> FormState {
+fn open_lobby(session: Session, role: Role, stamp: crate::SyncStamp, now_ms: u64) -> FormState {
     if let Role::Joiner { host: Some(host) } = role {
         // Fire-and-forget: a failed dial surfaces as a lobby that never fills (the
         // joiner cancels out), matching the discovery-may-still-find-them semantics.
         let _ = session.dial(host);
     }
     let driver = Box::new(FormationDriver::lobby(
-        &session,
-        role,
-        NET_EXPECT,
-        stamp,
-        session.now_ms(),
+        &session, role, NET_EXPECT, stamp, now_ms,
     ));
     FormState::Live { session, driver }
 }
@@ -443,9 +445,9 @@ impl MenuNav {
 mod tests {
     use super::*;
     use crate::SyncStamp;
+    use net_proto::membership::{BEAT_EVERY_MS, HostClaim, STABLE_FOR_MS};
 
-    /// Poll `f` until it yields. Lobby mode has no solo fallback or join window, so its
-    /// wall-clock timers can delay a verdict here but never decide one.
+    /// Poll `f` until it yields, failing past the hang guard.
     fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
         let deadline = std::time::Instant::now() + crate::HANG_GUARD;
         loop {
@@ -460,15 +462,74 @@ mod tests {
         }
     }
 
+    /// The lobby clock is the test's own, as in the formation test: it steps a beat only
+    /// once every forming lobby holds every other's current beat, arrived at the current
+    /// step, and the GO of every host that closed, so host speed can never fire a
+    /// protocol timer. Until then each re-sends its beat.
+    #[derive(Default)]
+    struct Lockstep {
+        t: u64,
+        /// By lobby index, kept past resolution.
+        ids: Vec<Option<EndpointId>>,
+        closed_hosts: Vec<bool>,
+    }
+
+    impl Lockstep {
+        fn poll(&mut self, lobbies: &mut [&mut Formation]) -> Vec<Option<Result<MatchResult>>> {
+            self.ids.resize(lobbies.len(), None);
+            self.closed_hosts.resize(lobbies.len(), false);
+            let t = self.t;
+            let results: Vec<_> = lobbies.iter_mut().map(|f| f.poll_on(|_| t)).collect();
+            for (i, (f, r)) in lobbies.iter().zip(&results).enumerate() {
+                self.ids[i] = self.ids[i].or(f.my_id());
+                if f.hosting() && matches!(r, Some(Ok(MatchResult::Joined(_)))) {
+                    self.closed_hosts[i] = true;
+                }
+            }
+            let stepped = lobbies.iter().enumerate().all(|(r, f)| {
+                let Some(core) = f.live_driver().map(FormationDriver::core) else {
+                    return true;
+                };
+                (0..lobbies.len()).filter(|&p| p != r).all(|p| {
+                    let Some(id) = self.ids[p] else {
+                        return true;
+                    };
+                    match lobbies[p].live_driver() {
+                        Some(peer) => {
+                            crate::formation::holds_current_beat(core, &id, peer.core(), t)
+                        }
+                        None => {
+                            !self.closed_hosts[p]
+                                || core
+                                    .last_direct_beat(&id)
+                                    .is_some_and(|(_, _, claim)| claim == HostClaim::Started)
+                        }
+                    }
+                })
+            });
+            if stepped {
+                self.t += BEAT_EVERY_MS;
+            } else {
+                for f in lobbies.iter() {
+                    if let (Some(session), Some(driver)) = (f.live_session(), f.live_driver()) {
+                        session.broadcast(&driver.core().beat());
+                    }
+                }
+            }
+            results
+        }
+    }
+
     /// Share the host's code, join by it, and wait for both rosters to see 2 peers —
     /// the lobby state every scenario below starts from.
-    fn two_peer_lobby() -> (Formation, Formation) {
+    fn two_peer_lobby() -> (Lockstep, Formation, Formation) {
+        let mut clock = Lockstep::default();
         let mut host = begin(&StartChoice::Host, 7, SyncStamp::ZERO);
         assert!(host.hosting(), "Host formation is flagged hosting");
         // The bind is pollable (rl#412): the join code appears once the session lands —
         // on native, the first poll.
         let code = wait_for("the host session to bind", || {
-            match host.poll() {
+            match clock.poll(&mut [&mut host]).remove(0) {
                 None => (),
                 Some(Ok(_)) => panic!("host formation resolved while binding"),
                 Some(Err(e)) => panic!("host bind failed: {e:#}"),
@@ -486,8 +547,9 @@ mod tests {
 
         // Resolving (either way) before the host presses Start is itself a failure.
         wait_for("both rosters to reach 2 peers", || {
-            for (f, who) in [(&mut host, "host"), (&mut join, "joiner")] {
-                match f.poll() {
+            let results = clock.poll(&mut [&mut host, &mut join]);
+            for (r, who) in results.into_iter().zip(["host", "joiner"]) {
+                match r {
                     None => (),
                     Some(Ok(_)) => panic!("{who} formation resolved before Start"),
                     Some(Err(e)) => panic!("{who} formation failed: {e:#}"),
@@ -495,7 +557,7 @@ mod tests {
             }
             (host.roster().len() == 2 && join.roster().len() == 2).then_some(())
         });
-        (host, join)
+        (clock, host, join)
     }
 
     /// The full 2-peer lobby flow the egui menu drives, over real iroh on this box —
@@ -504,7 +566,7 @@ mod tests {
     #[test]
     fn two_peer_lobby_forms_one_match_on_host_start() {
         let _serial = crate::real_net_serial();
-        let (mut host, mut join) = two_peer_lobby();
+        let (mut clock, mut host, mut join) = two_peer_lobby();
 
         for (f, who) in [(&host, "host"), (&join, "joiner")] {
             let id = f.my_id().expect("bound at begin");
@@ -516,25 +578,31 @@ mod tests {
 
         // A joiner's Start press must arm nothing — the structural guard lives in the
         // core (`Membership::set_starting` no-ops outside host mode, unit-tested there);
-        // this presses it end-to-end (an immediate poll() couldn't falsify it alone —
-        // the barrier takes wall-clock time).
+        // this presses it end-to-end.
         join.request_start();
-        assert!(
-            host.poll().is_none() && join.poll().is_none(),
-            "nobody forms before the HOST presses Start"
-        );
+        let past_the_hold = clock.t + STABLE_FOR_MS + BEAT_EVERY_MS;
+        wait_for("the clock to pass the stability hold", || {
+            assert!(
+                clock
+                    .poll(&mut [&mut host, &mut join])
+                    .iter()
+                    .all(Option::is_none),
+                "nobody forms before the HOST presses Start"
+            );
+            (clock.t > past_the_hold).then_some(())
+        });
 
         host.request_start();
         // Resolve BOTH formations before touching either result: unwrapping one drops its
         // NetDriver (endpoint and all), and the other peer may still be mid-barrier.
         let mut results = (None, None);
         wait_for("both formations after Start", || {
-            if results.0.is_none() {
-                results.0 = host.poll();
-            }
-            if results.1.is_none() {
-                results.1 = join.poll();
-            }
+            let [h, j]: [_; 2] = clock
+                .poll(&mut [&mut host, &mut join])
+                .try_into()
+                .unwrap_or_else(|_| unreachable!("two lobbies polled"));
+            results.0 = results.0.take().or(h);
+            results.1 = results.1.take().or(j);
             (results.0.is_some() && results.1.is_some()).then_some(())
         });
         let sim_of = |r: Option<Result<MatchResult>>, who: &str| -> ClientSim {
@@ -556,10 +624,12 @@ mod tests {
     #[test]
     fn cancel_leaves_the_lobby_cleanly() {
         let _serial = crate::real_net_serial();
-        let (mut host, mut join) = two_peer_lobby();
+        let (mut clock, mut host, mut join) = two_peer_lobby();
 
         join.cancel();
-        let result = wait_for("the joiner's formation to resolve", || join.poll());
+        let result = wait_for("the joiner's formation to resolve", || {
+            clock.poll(&mut [&mut host, &mut join]).remove(1)
+        });
         assert!(
             matches!(
                 result.expect("cancel is not an error"),
@@ -573,7 +643,9 @@ mod tests {
         );
 
         host.cancel();
-        let result = wait_for("the host's formation to resolve", || host.poll());
+        let result = wait_for("the host's formation to resolve", || {
+            clock.poll(&mut [&mut host]).remove(0)
+        });
         assert!(
             matches!(
                 result.expect("cancel is not an error"),

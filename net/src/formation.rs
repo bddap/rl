@@ -103,6 +103,11 @@ impl FormationDriver {
         &self.roster
     }
 
+    #[cfg(test)]
+    pub(crate) fn core(&self) -> &FormationCore {
+        &self.core
+    }
+
     /// One pump: drain the session's inbox into the core, step it, send what it emits.
     /// Call at any cadence at or above the beat rate (frame rate is fine — the core's
     /// beat deadline is epoch-aligned, so faster polling never over-beats).
@@ -212,6 +217,18 @@ impl FormationDriver {
     }
 }
 
+/// The lockstep tests' step rule: `core` holds `peer`'s current beat, arrived at step `t`.
+#[cfg(test)]
+pub(crate) fn holds_current_beat(
+    core: &FormationCore,
+    peer_id: &EndpointId,
+    peer: &FormationCore,
+    t: u64,
+) -> bool {
+    let current = peer.beat();
+    core.last_direct_beat(peer_id) == Some((t, current.roster_hash(), current.claim))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,8 +289,12 @@ mod tests {
             let stepped = forming.iter().all(|&r| {
                 let core = &drivers[r].as_ref().expect("forming").core;
                 forming.iter().filter(|&&p| p != r).all(|&p| {
-                    let current = drivers[p].as_ref().expect("forming").core.beat();
-                    core.last_direct_beat(&ids[p]) == Some((t, current.roster_hash()))
+                    holds_current_beat(
+                        core,
+                        &ids[p],
+                        &drivers[p].as_ref().expect("forming").core,
+                        t,
+                    )
                 })
             });
             if stepped {
