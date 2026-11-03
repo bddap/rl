@@ -5,7 +5,7 @@ use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabRes
 use crate::bot::rig::PartId;
 
 #[derive(Component)]
-struct CrabSkin {
+pub(crate) struct CrabSkin {
     env: usize,
     phase: Pairing,
 }
@@ -84,13 +84,24 @@ pub(super) fn register(app: &mut App) {
     );
 }
 
+/// Run condition: every crab that will wear a skin shows it. A skinless build (no
+/// digest-matched model) is ready at once.
+pub(crate) fn skins_shown(model: Option<Res<super::CrabModel>>, skins: Query<&CrabSkin>) -> bool {
+    model.is_none()
+        || (!skins.is_empty() && skins.iter().all(|s| matches!(s.phase, Pairing::Paired)))
+}
+
 fn attach_skins(
     mut commands: Commands,
     model: Res<super::CrabModel>,
+    server: Res<AssetServer>,
     assets: Res<crate::bot::body::CrabAssets>,
     crabs: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
     skins: Query<&CrabSkin>,
 ) {
+    if let bevy::asset::LoadState::Failed(e) = server.load_state(&model.scene) {
+        panic!("crab skin failed to load: {e}");
+    }
     let hub = assets.hub_bind_world();
     for (env, t) in crabs.iter() {
         if skins.iter().any(|s| s.env == env.0) {
@@ -502,6 +513,32 @@ mod tests {
         assert!(visible(&app), "paired skin must become visible");
         tick(&mut app, 1);
         assert!(visible(&app), "paired skin must stay visible");
+    }
+
+    #[test]
+    fn skins_shown_waits_for_every_skin_to_pair() {
+        let mut world = World::new();
+        let shown = |world: &mut World| world.run_system_once(super::skins_shown).unwrap();
+        assert!(shown(&mut world), "a skinless build is ready at once");
+
+        world.insert_resource(super::super::CrabModel {
+            scene: Handle::default(),
+        });
+        assert!(!shown(&mut world), "a skin not yet attached is not shown");
+        let skin = world
+            .spawn(CrabSkin {
+                env: 0,
+                phase: Pairing::Spawning,
+            })
+            .id();
+        assert!(!shown(&mut world), "an unpaired skin is hidden");
+        world.spawn(CrabSkin {
+            env: 1,
+            phase: Pairing::Paired,
+        });
+        assert!(!shown(&mut world), "one paired skin of two is not enough");
+        world.get_mut::<CrabSkin>(skin).unwrap().phase = Pairing::Paired;
+        assert!(shown(&mut world), "every skin paired is shown");
     }
 
     enum Role {

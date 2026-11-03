@@ -6,6 +6,7 @@ use bevy::time::{Fixed, Virtual};
 
 use crate::bot::BotSet;
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
+use crate::bot::skin::skins_shown;
 use crate::screenshot::{self, ShotTarget};
 use crate::training::reward::action_effort;
 
@@ -111,13 +112,21 @@ impl Plugin for RenderVideoPlugin {
         )
         .add_systems(Startup, (spawn_offscreen_camera, spawn_target_ball))
         .add_systems(FixedUpdate, target_ball.after(BotSet::Sense))
+        // Sally's skin reveals only after it pairs (rl#436): until then the sim holds
+        // still and no frame counts, so her first captured frame is the clip's first.
         .add_systems(
             Update,
-            (track_offscreen_camera, capture_video_frame).chain(),
+            (
+                track_offscreen_camera,
+                capture_video_frame.run_if(skins_shown),
+            )
+                .chain(),
         )
         .add_systems(
             RunFixedMainLoop,
-            step_one_tick.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+            step_one_tick
+                .run_if(skins_shown)
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
         )
         .add_systems(Startup, pause_virtual_clock);
     }

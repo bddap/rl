@@ -4,9 +4,10 @@ mod pairing;
 mod weights;
 
 pub use pairing::CrabRenderPose;
+pub(crate) use pairing::skins_shown;
 
 #[derive(Resource)]
-struct CrabModel {
+pub(crate) struct CrabModel {
     scene: Handle<WorldAsset>,
 }
 
