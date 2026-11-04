@@ -22,6 +22,9 @@ enum Command {
     /// Offscreen still of the settled scene, written to PATH.
     Screenshot(ScreenshotArgs),
     /// Offscreen fixed-timestep video render, written to PATH.
+    ///
+    /// A seed repeats the trace only over one brain: compare renders whose
+    /// `RENDER_CHECKPOINT` brain digests match.
     RenderVideo(RenderVideoArgs),
 }
 

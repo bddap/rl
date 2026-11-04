@@ -78,8 +78,9 @@ impl Plugin for RenderVideoPlugin {
             )
         });
         eprintln!(
-            "RENDER_CHECKPOINT dir={} ticks={}",
+            "RENDER_CHECKPOINT dir={} brain={:?} ticks={}",
             self.checkpoint_dir.display(),
+            policy.brain_label(),
             std::fs::read_to_string(
                 self.checkpoint_dir
                     .join(crate::training::checkpoint::TICK_WATERMARK_FILENAME)
