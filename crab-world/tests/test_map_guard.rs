@@ -14,8 +14,7 @@ fn manifest_carries_the_full_landing_matrix() {
     for cmd in [
         "cargo fmt --check",
         "cargo clippy --quiet --all-targets -- --deny warnings",
-        "cargo build --release -p rl-train",
-        "cargo build --release -p rl-demo -p game -p rl-update-ui",
+        "cargo build --release -p game",
         "cargo test -q -- --test-threads=2",
         // The rl#411 platform-freedom check: game-web compiles the whole web leaf
         // (net + crab-world, render on) for wasm32; dropping it re-opens silent

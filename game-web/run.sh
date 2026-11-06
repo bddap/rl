@@ -13,16 +13,15 @@
 #   run.sh verify-live URL   — the same probe against an already-HOSTED bundle
 #
 # The baked asset root is ${BEVY_ASSET_ROOT:-crab-world/} — the SAME resolution
-# native launches use. dist needs the full tree there: committed glyphs plus
-# sally.glb + ambience (scripts/fetch-sally.sh, scripts/fetch-ambience.sh) and
-# trained weights under assets/weights/ — a partial tree refuses HERE, mirroring the
-# game's own boot refusal (rl#375), so a broken bundle never ships or serves.
+# native launches use. dist needs the full tree there: committed glyphs plus the
+# ambience beds (scripts/fetch-ambience.sh) — a partial tree refuses HERE, so a
+# broken bundle never ships or serves.
 #
 # The whole wasm toolchain — lld, the ring-needs-unwrapped-clang env, and the
 # wasm-bindgen CLI (which MUST match Cargo.lock's wasm-bindgen; game-web/Cargo.toml
 # pins the crate family to shell.nix's CLI version and the assert below keeps them
 # honest) — rides in ../shell.nix, so this script needs no channel/<nixpkgs> and runs
-# identically for a dev, CI, and the release builder. chromium (verify only) is the
+# identically for a dev and CI. chromium (verify only) is the
 # one remaining channel fetch.
 set -euo pipefail
 cd "$(dirname "$0")"   # game-web/
@@ -55,14 +54,11 @@ build() {
 # refuse loudly at packaging, never ship and degrade). The game's own boot chokepoint
 # stays the authority; this is the packaging-time mirror that fails minutes earlier.
 require_tree() {
-  local missing=0 f
-  for f in sally.glb weights/brain.bin weights/normalizer.bin; do
-    [ -f "$ASSETS_DIR/$f" ] || { echo "missing $ASSETS_DIR/$f" >&2; missing=1; }
-  done
+  local missing=0
   ls "$ASSETS_DIR"/ambience/*.wav >/dev/null 2>&1 || { echo "no ambience beds under $ASSETS_DIR/ambience/" >&2; missing=1; }
   ls "$ASSETS_DIR"/controls/*.png >/dev/null 2>&1 || { echo "no control glyphs under $ASSETS_DIR/controls/" >&2; missing=1; }
   [ "$missing" = 0 ] || {
-    echo "asset tree at $ASSETS_DIR is incomplete (set BEVY_ASSET_ROOT; fetch via scripts/fetch-sally.sh + scripts/fetch-ambience.sh; stage weights under assets/weights/)" >&2
+    echo "asset tree at $ASSETS_DIR is incomplete (set BEVY_ASSET_ROOT; fetch via scripts/fetch-ambience.sh)" >&2
     exit 1
   }
 }

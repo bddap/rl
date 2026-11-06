@@ -19,22 +19,9 @@ Run Cargo inside [shell.nix](shell.nix). Before submitting code:
 - `cargo test -q -- --test-threads=2`
 
 [test-map.json](test-map.json) selects covering suites. A test runs in the map or is
-deleted; do not use `#[ignore]`. Simulation tests use `test-watchdog` to abort hangs.
-If contention trips it, rerun with fewer threads or on a less loaded machine.
+deleted; do not use `#[ignore]`.
 
-## Probes and profiling
-
-Use the release store's live checkpoint pointer for probes and screenshots. Keep
-the tagged envelope and terrain provenance; do not make ad-hoc checkpoint copies
-that can outlive format migrations.
-
-A launch that registers reads at tick marks passes `rl-train learn --read-mark N`
-per mark, and the read renders `<checkpoint-dir>/marks/N/`, never the live set.
-`rl-demo render-video` refuses an absent set and prints the step and brain digest it
-rendered on its `RENDER_CHECKPOINT` line. A seed repeats a trace only between renders
-of one digest; a live set changes with every trainer save. The trainer refuses to
-start past a mark it holds no set for, so delete `marks/` only after the run stops and
-the registering issue closes.
+## Profiling
 
 For slow frames, use [scripts/profile-game.sh](scripts/profile-game.sh).
 `--pid N` observes a running process; without it the script launches and later kills

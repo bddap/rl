@@ -1,5 +1,5 @@
 // Static server for the assembled web bundle ($DIST_DIR): exactly what a real host
-// serves — index.html, pkg/, assets.pack. Dev/verify tool; deploy.sh owns hosting.
+// serves — index.html, pkg/, assets.pack. Dev/verify tool.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';

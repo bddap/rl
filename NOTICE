@@ -4,8 +4,7 @@ Third-party assets
 This project's own source code is licensed MIT OR Apache-2.0 (see LICENSE-MIT and
 LICENSE-APACHE), which covers the code only. Art assets the code loads are licensed
 separately by their authors: public-domain (CC0) assets are bundled and redistributed
-here (see Kenney Input Prompts below); license-restricted assets are NOT redistributed
-(see the Sally crab model below).
+here (see Kenney Input Prompts below).
 
 Kenney Input Prompts — control glyphs (crab-world/assets/controls/*.png)
 -----------------------------------------------------------------------
@@ -13,7 +12,7 @@ The keyboard/mouse/gamepad button icons shown by the in-game control overlay are
 subset of Kenney's "Input Prompts" pack (https://kenney.nl/assets/input-prompts),
 released under Creative Commons Zero (CC0 1.0, public domain:
 https://creativecommons.org/publicdomain/zero/1.0/). CC0 permits redistribution for
-any purpose, so — unlike the crab model — these PNGs ARE committed to this repo and
+any purpose, so these PNGs are committed to this repo and
 ship with the build. Crediting Kenney is appreciated but not required. Only the
 glyphs the control map actually uses are bundled.
 
@@ -43,19 +42,3 @@ Creative Commons 0 on their Freesound pages):
   https://freesound.org/people/Mozfoo/sounds/440163/
 - ship-thruster.wav — "Ominous Rumble - loopable (24bit flac)" by steaq,
   https://freesound.org/people/steaq/sounds/593785/
-
-Sally Lightfoot crab model (sally.glb / grapsus_grapsus_crab_280.blend)
------------------------------------------------------------------------
-Purchased from Superhive (Blender Market). Royalty-free for use in a shipped
-product, but redistribution of the source asset is not permitted — so it is not
-committed here. When the asset is absent the body falls back to a procedural
-capsule stand-in crab — same joints, sim, and training, shown as the Rapier debug
-wireframe — so `cargo build`, `cargo run`, and `cargo test` all work with no purchase.
-
-To use the model if you own it, fetch it into `assets/` (gitignored):
-
-    scripts/fetch-sally.sh        # pulls from the private bddap-bot/rl-assets release
-
-then run with `CRAB_MODEL_PATH=sally.glb`. The Steam demo binary may bake the
-model in (incorporated into the product, which the license allows); the loose
-file never enters this public repo.
