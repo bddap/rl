@@ -29,9 +29,8 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 /// competition entries, the rl#323 watershed unification (Designs A/B/C as
 /// parameter sets over one shader), and the rl#329 night-bloom parameter sets —
 /// and the live selection: `GroundLook` is BOTH the
-/// `--ground-look` value and the resource the in-game toggle cycles, the same
-/// shape [`crate::crab_view::RenderMode`] uses, so there is one field to write and
-/// no wrapper to keep in sync.
+/// `--ground-look` value and the resource the in-game toggle cycles, so there is one
+/// field to write and no wrapper to keep in sync.
 ///
 /// Each look is an `art()` MODULE in `src/ground_looks/` (the rl#333 flip): the
 /// one scaffold `ground.wgsl` owns `fn fragment`, builds the shared `GroundCtx`
@@ -513,17 +512,31 @@ pub fn apply_ground_anchor(
     }
 }
 
+/// How long the readout stays up after a toggle: long enough to read while cycling,
+/// gone from the frame you were judging.
+const READOUT_SECS: f32 = 2.5;
+
 /// The transient "Ground: <name>" readout.
 #[derive(Component)]
 struct GroundLookReadout(Timer);
 
 fn spawn_look_readout(mut commands: Commands) {
+    const FONT_SIZE: f32 = 18.0;
+    const MARGIN: f32 = 14.0;
     commands.spawn((
-        crate::crab_view::hud_corner_label(crate::crab_view::HudRow::GroundLook),
-        GroundLookReadout(Timer::from_seconds(
-            crate::crab_view::READOUT_SECS,
-            TimerMode::Once,
-        )),
+        Text::new(""),
+        TextFont {
+            font_size: FontSize::Px(FONT_SIZE),
+            ..default()
+        },
+        TextColor(Color::srgb(0.4, 1.0, 0.55)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(MARGIN),
+            right: Val::Px(MARGIN),
+            ..default()
+        },
+        GroundLookReadout(Timer::from_seconds(READOUT_SECS, TimerMode::Once)),
     ));
 }
 

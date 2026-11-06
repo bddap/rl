@@ -1,9 +1,0 @@
-off seed 351: 30-40M reach 0.1092 over 13780 episodes (reached 1505)
-off seed 352: 30-40M reach 0.0663 over 13457 episodes (reached 892)
-off seed 353: 30-40M reach 0.0497 over 13297 episodes (reached 661)
-off pooled 351-353: 0.0755 over 40534 episodes
-on seed 351: 30-40M reach 0.0835 over 13621 episodes (reached 1138)
-on seed 352: 30-40M reach 0.1019 over 13656 episodes (reached 1391)
-on seed 353: 30-40M reach 0.0593 over 13420 episodes (reached 796)
-on pooled 351-353: 0.0817 over 40697 episodes
-one-sided H1 control > treatment: z = -3.305, p = 0.9995; treatment below control at p<0.05: False

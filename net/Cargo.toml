@@ -77,6 +77,5 @@ crab-world = { path = "../crab-world" }
 # Native-only test plumbing: neither exists on wasm, and an unconditional dev-dep
 # would drag them into the wasm example build above.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
-test-watchdog = { path = "../test-watchdog" }
 # The net_track targets must match otel's constants (tracing wants literal targets).
 otel = { path = "../otel" }

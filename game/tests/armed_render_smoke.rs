@@ -29,7 +29,6 @@ use net::probe::run_headless_probe;
 // futex_wait, 45+ min) under trainer saturation — NOT a wgpu device request:
 // `headless_stack` passes `backends: None`, so bevy skips renderer init
 // entirely. The stall watchdog bounds it with a loud abort.
-test_watchdog::arm!();
 
 #[test]
 fn armed_visual_crab_stays_finite_and_grounded() {

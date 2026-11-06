@@ -6,26 +6,7 @@ use bevy_rapier3d::prelude::*;
 #[cfg(feature = "render")]
 use crate::ground::{GroundDetail, GroundLook, GroundMaterial, GroundMaterialPlugin};
 
-use crate::bot::body::ARENA_COLLISION;
 use crate::terrain::{Terrain, TerrainGrid};
-
-/// The plant sidecar's arena spelling — the one string a loadable checkpoint may
-/// record. Kept as the digest/sidecar preimage across the rl#293 flip so identical
-/// worlds never refuse-to-arm between peers on either side of it.
-pub(crate) const ARENA_TERRAIN_KEY: &str = "terrain";
-
-/// Parse a plant sidecar's `arena` value: `Ok(true)` = terrain, `Ok(false)` =
-/// `walled_box` (a real pre-flip record — it PARSES so adoption can refuse it with
-/// provenance intact, or the rl-demo `--terrain` waiver can view it; a parse-time
-/// refusal would rank honest flat records below recordless ones). Unknown spellings
-/// refuse: an unreadable plant must never load.
-pub(crate) fn parse_arena_key(raw: &str) -> Result<bool, String> {
-    match raw.trim() {
-        k if k == ARENA_TERRAIN_KEY => Ok(true),
-        "walled_box" => Ok(false),
-        other => Err(format!("unknown arena {other:?} (terrain | walled_box)")),
-    }
-}
 
 /// Plugin that lays the arena PHYSICS — the ground collider — and publishes the
 /// [`Terrain`] resource spawn-on-surface consumers sample. Since the rl#293 flip
@@ -91,15 +72,6 @@ impl Plugin for ArenaVisualsPlugin {
     }
 }
 
-/// Ground friction (rl#318). GCR ground is steep as the NORM — cell slopes run p50
-/// 26.6° / p90 43.5° / p99 54.6° — and rapier's default 0.5, averaged with the feet's
-/// `FOOT_FRICTION` 1.5, pairs to μ≈1.0, worth only ~35° after the solver's
-/// two-tangent cone approximation. 2.5 pairs feet to 2.0 (claw tips dig in —
-/// interlock, not bare material friction) and the whole body to ≥1.5.
-/// Crafts opt back OUT to the old pairing (`vehicle::VEHICLE_FRICTION`) — their
-/// ground feel was tuned before this existed.
-const GROUND_FRICTION: Friction = Friction::coefficient(2.5);
-
 /// Lay the ground collider — the one terrain heightfield. No meshes or lights (those
 /// are render-only — see [`setup_arena_visuals`]), so this is the one arena setup the
 /// headless trainer runs, touching no graphics types.
@@ -107,8 +79,6 @@ fn setup_ground(mut commands: Commands, terrain: Res<Terrain>) {
     commands.spawn((
         RigidBody::Fixed,
         terrain.collider(),
-        GROUND_FRICTION,
-        ARENA_COLLISION,
         Transform::IDENTITY,
     ));
 }

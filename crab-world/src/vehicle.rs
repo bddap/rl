@@ -1,7 +1,6 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use crate::bot::body::VEHICLE_COLLISION;
 
 const VEHICLE_HALF: Vec3 = Vec3::new(0.11, 0.035, 0.17);
 
@@ -297,8 +296,7 @@ impl Plugin for VehiclePlugin {
 /// known zero a fresh craft starts at; a removed entry despawns it. At most one body per pilot,
 /// provided bodies enter play only through this system (the headless gates spawn ram craft into
 /// worlds WITHOUT the plugin): a body only spawns for a pilot with no matching body. Each body is
-/// a dynamic box with the [`VEHICLE_COLLISION`] groups (arena + every crab), so it bounces off
-/// the walls and strikes Sally.
+/// a dynamic box.
 fn manage_vehicles(
     mut commands: Commands,
     controls: Res<VehicleControls>,
@@ -346,7 +344,6 @@ fn vehicle_bundle(
         VEHICLE_FRICTION,
         ColliderMassProperties::Density(VEHICLE_DENSITY),
         GravityScale(kind.gravity_scale()),
-        VEHICLE_COLLISION,
         transform,
         velocity,
         ExternalForce::default(),
@@ -760,7 +757,7 @@ const SLEEP_ANGULAR_THRESHOLD: f32 = 0.5;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bot::headless::{flat_headless_app, headless_app};
+    use crate::headless::{flat_headless_app, headless_app};
 
     /// The tests' one pilot (the server-authoritative local player's id).
     const P0: PilotId = PilotId(0);
@@ -830,165 +827,6 @@ mod tests {
     /// heads into the tile interior — from the positive corner it would cross the
     /// 512 m fixture edge mid-measurement and be parked by `rescue_lost_crafts`.
     const FAR: Vec3 = Vec3::new(-300.0, 300.0, -300.0);
-
-    /// rl#235: a vehicle overlapping a crab-grouped capsule registers a contact.
-    #[test]
-    fn vehicle_contacts_crab_collider() {
-        use crate::bot::body::CRAB_COLLISION;
-        use crate::bot::headless::tick;
-        use bevy_rapier3d::plugin::context::{RapierContextColliders, RapierContextSimulation};
-
-        let mut app = headless_app();
-        tick(&mut app, 1);
-
-        let coxa = app
-            .world_mut()
-            .spawn((
-                RigidBody::Dynamic,
-                Collider::capsule_y(0.03, 0.02),
-                CRAB_COLLISION,
-                Transform::from_translation(FAR),
-            ))
-            .id();
-        let vehicle = app
-            .world_mut()
-            .spawn(vehicle_bundle(
-                P0,
-                VehicleKind::Plane,
-                Transform::from_translation(FAR),
-                Velocity::default(),
-            ))
-            .id();
-        tick(&mut app, 2);
-
-        let mut q = app
-            .world_mut()
-            .query::<(&RapierContextColliders, &RapierContextSimulation)>();
-        let (cols, sim) = q.single(app.world()).expect("one rapier context");
-        let handle = |e: Entity| *cols.entity2collider().get(&e).expect("collider handle");
-        assert!(
-            sim.narrow_phase
-                .contact_pair(handle(vehicle), handle(coxa))
-                .is_some_and(|p| p.has_any_active_contact()),
-            "vehicle overlapping a coxa produced no contact — CRAB_COLLISION and \
-             VEHICLE_COLLISION must include each other's group (rl#235)"
-        );
-    }
-
-    /// rl#298 stage 1 (one world, shared construction): the crab `spawn_crab` builds —
-    /// the SAME construction code on the host and the trainer — exchanges momentum
-    /// with world content BOTH ways, not just registers a contact pair: a ramming
-    /// craft knocks her carapace back (the world pushes her), and the rammer leaves
-    /// the impact slower than it arrived (she pushes back). This reaches the armed
-    /// host by composition, not by rebuilding its whole assembly here: the physics
-    /// core and collision groups are the ones the host installs (net's
-    /// pump-equivalence test pins that this stack steps tick-for-tick what the client
-    /// pumps), the rammer is the production `vehicle_bundle`, the omitted bridge
-    /// never writes per-tick body poses (its recenter rebases spawn origins only),
-    /// and net's carapace-delta test pins that a carapace push folds 1:1 into her
-    /// game pose. Flat fixture grid — a zero-action ragdoll never settles on the GCR
-    /// origin slope, and aiming a ballistic ram needs a stationary target. No
-    /// `VehiclePlugin`, deliberately — a low-g Ship (gravity scale 0.30, rl#316)
-    /// with no flight forces is ballistic over this sub-second ram, so the only
-    /// thing that can bleed its speed is her body.
-    #[test]
-    fn ramming_craft_and_crab_exchange_momentum_both_ways() {
-        use crate::bot::body::CrabCarapace;
-        use crate::bot::headless::tick;
-
-        let mut app = flat_headless_app();
-        tick(&mut app, 192);
-
-        let carapace = |app: &mut App| -> Vec3 {
-            let mut q = app
-                .world_mut()
-                .query_filtered::<&Transform, With<CrabCarapace>>();
-            q.single(app.world()).expect("carapace").translation
-        };
-        // Net crab momentum along an axis: mass-weighted linvel summed over every
-        // dynamic body except `exclude` (the rammer; the ground is Fixed, so the
-        // remainder is exactly her multibody). Solver rest chatter is INTERNAL —
-        // links jiggle against each other and the sum stays near zero — while a
-        // ram deposits real net momentum, so this floor and this signal separate
-        // where a single link's peak speed cannot (rl#386).
-        let crab_momentum_x = |app: &mut App, exclude: Option<Entity>| -> f32 {
-            let mut q = app.world_mut().query::<&RapierRigidBodySet>();
-            let set = q.single(app.world()).expect("one rapier context");
-            let excluded = exclude.and_then(|e| set.entity2body().get(&e).copied());
-            set.bodies
-                .iter()
-                .filter(|(h, b)| b.is_dynamic() && Some(*h) != excluded)
-                .map(|(_, b)| b.mass() * b.linvel().x)
-                .sum()
-        };
-
-        // The zero-action mesh ragdoll never sits STILL — solver rest noise
-        // twitch-walks her decimeters over the settle (rl#340 stage 3 measured
-        // spawn-to-ram drift spanning x ±0.3 m across bit-level physics
-        // perturbations), so where and at what yaw the ram lands is draw-dependent:
-        // a signed displacement assert measures her wander, and a single link's
-        // peak SPEED is a hit-point lottery — rl#386's feature-unified build (a
-        // different bevy plugin set reorders entity/handle allocation, so the
-        // solver draws a different settle pose by construction) drew a graze that
-        // peaked her carapace at 0.56 m/s against a 0.55 wander burst. The push
-        // instrument is her net body momentum along the ram axis (see
-        // `crab_momentum_x`), asserted RELATIVE to the same-length pre-ram window
-        // — the live noise floor, so wander creeping up to the signal fails
-        // loudly instead of hollowing the instrument out. The clamp keeps the bar
-        // meaningful even if a future plant goes quieter.
-        const RAM_WINDOW: u32 = 60;
-        let mut wander_peak = 0.0f32;
-        for _ in 0..RAM_WINDOW {
-            tick(&mut app, 1);
-            wander_peak = wander_peak.max(crab_momentum_x(&mut app, None).abs());
-        }
-        let p0 = carapace(&mut app);
-
-        // 32 m/s, not a flyable ~8: the production craft is ~0.26 kg
-        // ([`VEHICLE_MASS`]) against her multi-kg multibody, so a slow ram's whole
-        // momentum budget (~2 kg·m/s) is comparable to her own twitch-walk CoM
-        // momentum (rl#386 measured wander peaks up to ~0.8 kg·m/s across feature
-        // configs) — the signal must outscale the walk, and speed is the one lever
-        // that leaves the production bundle untouched. Still well under tunneling:
-        // 32 m/s is 0.125 m per solver substep vs her ~0.3 m carapace.
-        const RAM_SPEED: f32 = 32.0;
-        let rammer = spawn_ram_vehicle(
-            app.world_mut(),
-            VehicleKind::Ship,
-            Transform::from_translation(p0 + Vec3::new(1.2, 0.0, 0.0)),
-            Velocity {
-                linear: Vec3::new(-RAM_SPEED, 0.0, 0.0),
-                angular: Vec3::ZERO,
-            },
-        );
-        // The ram travels −x, so the deposited momentum is −p_x.
-        let mut pushed_peak = 0.0f32;
-        for _ in 0..RAM_WINDOW {
-            tick(&mut app, 1);
-            pushed_peak = pushed_peak.max(-crab_momentum_x(&mut app, Some(rammer)));
-        }
-
-        let p1 = carapace(&mut app);
-        let v1 = app
-            .world()
-            .get::<Velocity>(rammer)
-            .expect("the rammer body persists — nothing despawns it in this app")
-            .linear;
-        println!(
-            "ram: carapace {p0:?} -> {p1:?}, peak deposited momentum {pushed_peak:.2} kg·m/s \
-             (pre-ram wander momentum peak {wander_peak:.2}), rammer v1 {v1:?}"
-        );
-        assert!(
-            pushed_peak > 2.0 * wander_peak.max(0.5),
-            "the world must push her: an {RAM_SPEED} m/s ram peaked her net body momentum \
-             at {pushed_peak:.2} kg·m/s along the ram axis, not clearly above the pre-ram \
-             rest wander peak of {wander_peak:.2}"
-        );
-        assert!(
-            v1.x > -0.7 * RAM_SPEED,
-            "she must push back: the rammer kept {v1:?} of its {RAM_SPEED} m/s"
-        );
-    }
 
     /// rl#260: the rendered silhouette must never poke outside the physics collider — for
     /// every part, |offset| + half must fit inside [`VEHICLE_HALF`] on every axis.
@@ -1477,14 +1315,9 @@ mod tests {
     /// not one buried inside the hill.
     #[test]
     fn boarding_clamp_tracks_the_terrain_surface() {
-        use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack};
+        use crate::headless::headless_app;
 
-        let mut app = headless_stack(HeadlessStack {
-            num_envs: 1,
-            role: WorldRole::Standalone,
-            grid: crate::terrain::TerrainGrid::gcr(),
-            visuals: crate::Visuals(false),
-        });
+        let mut app = headless_app();
         app.add_plugins(VehiclePlugin);
         app.update();
 
@@ -1512,14 +1345,9 @@ mod tests {
     /// local ground, then fly, with terrain contact live throughout.
     #[test]
     fn plane_flies_over_terrain_without_sinking_through() {
-        use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack};
+        use crate::headless::headless_app;
 
-        let mut app = headless_stack(HeadlessStack {
-            num_envs: 1,
-            role: WorldRole::Standalone,
-            grid: crate::terrain::TerrainGrid::gcr(),
-            visuals: crate::Visuals(false),
-        });
+        let mut app = headless_app();
         app.add_plugins(VehiclePlugin);
         app.update();
 
@@ -1923,7 +1751,7 @@ mod tests {
     /// launch speed must decay, never grow.
     #[test]
     fn hypersonic_craft_brakes_instead_of_amplifying() {
-        use crate::bot::headless::tick;
+        use crate::headless::tick;
         // In-bounds launch (the rescue bound is the flat fixture's 512 m half-span)
         // so the out-of-world park can't mask a drag blowup; vertical UP so neither
         // the tile edge nor the below-terrain rescue is ever crossed while braking.
@@ -1956,7 +1784,7 @@ mod tests {
     /// is parked back on in-bounds terrain at rest by [`rescue_lost_crafts`].
     #[test]
     fn escaped_craft_parks_back_in_bounds() {
-        use crate::bot::headless::tick;
+        use crate::headless::tick;
         let mut app = flat_headless_app();
         app.add_plugins(VehiclePlugin);
         board(&mut app, P0, VehicleKind::Ship);
@@ -1996,7 +1824,7 @@ mod tests {
     /// the below-terrain branch must lift it back onto the surface.
     #[test]
     fn buried_craft_parks_back_on_the_surface() {
-        use crate::bot::headless::tick;
+        use crate::headless::tick;
         let (mut app, e) =
             app_with_vehicle(VehicleKind::Plane, Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO);
         app.world_mut()
@@ -2018,7 +1846,7 @@ mod tests {
     /// sentinel and rescue cover crab body parts only) parks at the arena origin.
     #[test]
     fn nonfinite_craft_parks_at_origin() {
-        use crate::bot::headless::tick;
+        use crate::headless::tick;
         let (mut app, e) =
             app_with_vehicle(VehicleKind::Plane, Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO);
         app.world_mut()
@@ -2048,7 +1876,7 @@ mod tests {
     /// the awake contact solve visibly chattered its orientation on the ground.
     #[test]
     fn parked_craft_falls_asleep() {
-        use crate::bot::headless::tick;
+        use crate::headless::tick;
         use bevy_rapier3d::plugin::context::RapierRigidBodySet;
         use bevy_rapier3d::prelude::RapierRigidBodyHandle;
 

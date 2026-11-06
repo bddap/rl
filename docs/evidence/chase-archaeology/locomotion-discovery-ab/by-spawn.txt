@@ -1,7 +1,0 @@
-arm  spawn distance  n   ever<=0.5m  median closed in 20 s
-off    0-2.5  m       27    12       0.21 m
-off  2.5-4.5  m       15     1       1.61 m
-off  4.5-10   m       18     0       1.04 m
-on     0-2.5  m       26     9       0.56 m
-on   2.5-4.5  m       13     0       0.47 m
-on   4.5-10   m       21     0       1.45 m

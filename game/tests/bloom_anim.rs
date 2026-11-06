@@ -10,7 +10,6 @@ use std::process::Command;
 use crab_world::ground::BLOOM_CYCLE_S;
 use net::sim::TICK_HZ;
 
-test_watchdog::arm!();
 
 fn frame(path: PathBuf) -> Vec<u8> {
     image::open(&path)

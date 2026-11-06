@@ -1,18 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-mod checkpoint_check;
 mod fp_screenshot;
 mod net;
 mod net_screenshot;
-mod nn_crab_probe;
-mod overlap_frame;
 mod play;
-mod sally_replay;
-mod sally_soak;
 mod shared;
 mod solo;
-mod step_profile;
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
@@ -26,21 +20,6 @@ pub(crate) enum Command {
     FpScreenshot(fp_screenshot::Args),
     /// Offscreen screenshot from inside a live two-peer match (the remote-client render).
     NetScreenshot(net_screenshot::Args),
-    /// Drive the NN crab headlessly and log a per-tick state hash — the cross-machine
-    /// bit-equality probe.
-    NnCrabProbe(nn_crab_probe::Args),
-    /// Verdict on a checkpoint dir: is it loadable, and does it match this binary's rig?
-    CheckpointCheck(checkpoint_check::Args),
-    /// rl#332: long headless soak hunting Sally's illegitimate "flight", with a
-    /// JSONL state-window dump per detected event.
-    SallySoak(sally_soak::Args),
-    SallyReplay(sally_replay::Args),
-    /// rl#332: draw a dumped plant state's colliders (top + side view) as a PPM,
-    /// the deepest same-crab overlap pair in red.
-    OverlapFrame(overlap_frame::Args),
-    /// rl#396: on-target cost profile of one driven physics step in an active-hunt
-    /// scene — wall time vs rapier-internal split, production 64:30 cadence.
-    StepProfile(step_profile::Args),
 }
 
 pub(crate) fn default_command() -> Command {
@@ -54,11 +33,5 @@ pub(crate) fn dispatch(command: Command) -> Result<()> {
         Command::Play(args) => play::run(args),
         Command::FpScreenshot(args) => fp_screenshot::run(args),
         Command::NetScreenshot(args) => net_screenshot::run(args),
-        Command::NnCrabProbe(args) => nn_crab_probe::run(args),
-        Command::CheckpointCheck(args) => checkpoint_check::run(args),
-        Command::SallySoak(args) => sally_soak::run(args),
-        Command::SallyReplay(args) => sally_replay::run(args),
-        Command::OverlapFrame(args) => overlap_frame::run(args),
-        Command::StepProfile(args) => step_profile::run(args),
     }
 }

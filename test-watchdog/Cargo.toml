@@ -1,9 +1,0 @@
-[package]
-name = "test-watchdog"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-ctor.workspace = true
-libc.workspace = true

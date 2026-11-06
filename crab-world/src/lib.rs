@@ -1,42 +1,20 @@
-#![cfg_attr(feature = "wgpu", recursion_limit = "512")]
-
-use std::path::PathBuf;
 
 use bevy::prelude::*;
-use clap::Parser;
-
-// rl#282: this suite has wedged for 1 h+ (every thread futex_wait at 0% CPU)
-// under trainer saturation; abort loudly on a process-wide CPU flatline instead.
-#[cfg(test)]
-test_watchdog::arm!();
 
 pub mod asset_pack;
 pub mod assets;
-pub mod bot;
 pub mod chord;
 pub mod controls;
-/// The headless training-SUCCESS eval — the true measure of the policy, distinct from the
-/// training reward: reuses the demo/train crab+ball scenario headless, places the ball far,
-/// drives the loaded policy deterministically, and reports real metres of progress toward the
-/// ball plus the total applied joint torque. Pure physics + inference (no window), so it
-/// stays out of the render gate.
-pub mod eval;
 pub mod fnv;
-pub mod mesh_fallback;
+pub mod headless;
 pub mod physics;
-pub mod policy;
 pub mod terrain;
-pub mod training;
 pub mod vehicle;
 
 #[cfg(feature = "render")]
 pub mod app_boot;
 #[cfg(feature = "render")]
-pub mod crab_view;
-#[cfg(feature = "render")]
 pub mod debug_overlay;
-#[cfg(all(feature = "render", target_os = "linux"))]
-pub mod frame_probe;
 #[cfg(feature = "render")]
 pub mod frame_telemetry;
 #[cfg(feature = "render")]
@@ -50,10 +28,6 @@ pub mod moisture;
 /// The moon — THE light source (rl#374). Its plugin rides [`sky::NightSkyPlugin`].
 #[cfg(feature = "render")]
 pub mod moon;
-#[cfg(feature = "render")]
-pub mod play;
-#[cfg(feature = "render")]
-pub mod sally_track;
 pub mod wall;
 
 #[cfg(feature = "render")]
@@ -86,37 +60,10 @@ pub fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// The one knob shared by every mode that loads a checkpoint (`learn`, `eval`, rl-demo). Split
-/// out of [`TrainConfig`] so binaries that only LOAD flatten just this, and a stray training
-/// knob like `--envs` is a parse error there instead of a silent no-op (bddap/rl#217).
-#[derive(clap::Args, Debug, Clone)]
-pub struct CheckpointArgs {
-    /// Directory of checkpoint files: loaded on startup if one is present; the
-    /// trainer also saves here periodically and on exit.
-    #[arg(long, default_value = "checkpoints", value_parser = absolute_dir)]
-    pub checkpoint_dir: PathBuf,
-}
-
-/// clap `value_parser` for every user-supplied checkpoint-dir flag: absolutize against
-/// CWD at parse time, so a relative flag keeps meaning "relative to where you ran the
-/// command". Required because the load stack's byte fetch is [`assets::read_asset`]
-/// (rl#411), which roots RELATIVE paths under the asset tree — the portable spelling
-/// reserved for shipped assets — so user paths must enter the stack absolute.
-pub fn absolute_dir(s: &str) -> std::io::Result<PathBuf> {
-    std::path::absolute(s)
-}
-
-/// The render-surface knob, flattened by every binary that opens a view on the crab world —
-/// the ONE declaration of `--render-mode` and its env fallback, so a malformed value is a parse
-/// error at t=0 on every surface (rl#275). `RL_DEBUG_COLLIDERS` is gone with it: it was a
-/// second, less expressive spelling of `--render-mode colliders`.
+/// The render-surface knobs, flattened by every binary that opens a view on the world.
 #[cfg(feature = "render")]
 #[derive(clap::Args, Debug, Clone, Copy, Default)]
 pub struct RenderArgs {
-    /// Which view to boot in. Unset: the mesh — or the honest collider wireframe when the
-    /// canonical Sally mesh can't be resolved.
-    #[arg(long, env = "RL_RENDER_MODE", value_enum)]
-    pub render_mode: Option<crab_view::RenderMode>,
     /// Which ground look to boot in (rl#304). The in-game toggle walks the same set;
     /// this is the same one field, pre-set, so an evidence shot exercises the swap
     /// the keybind does.
@@ -153,7 +100,6 @@ pub struct RenderArgs {
 
 /// A finite f32 CLI value — NaN/inf die at parse, t=0 (the rl#275 standard),
 /// instead of poisoning whatever consumes them. THE one implementation
-/// (rl-demo's vec/pose parsing imports it too).
 pub fn parse_finite_f32(s: &str) -> Result<f32, String> {
     let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
     if v.is_finite() {
@@ -165,36 +111,8 @@ pub fn parse_finite_f32(s: &str) -> Result<f32, String> {
 
 #[cfg(feature = "render")]
 impl RenderArgs {
-    /// The view `surface` boots in. With no usable skin asset, the flagless render
-    /// default is the collider wireframe, and the fallback is LOGGED (latched for
-    /// `surface`) — the render stays honest about what it is drawing. Visual-only:
-    /// physics builds the baked body either way (rl#340 stage 10). That logging is
-    /// why this is `resolve` and not a getter: call it once, at the entrypoint.
-    pub fn resolve(self, surface: mesh_fallback::Surface) -> BootView {
-        let mesh_err = mesh_fallback::usable_model().as_ref().err();
-        if let Some(reason) = mesh_err {
-            // An ABSENT model is the missing-asset class (rl#375): panic unless the
-            // environment is explicitly asset-less. A resolvable model whose bytes
-            // mismatch the baked digest keeps the loud collider-view fallback below —
-            // that path is the honest render for a deliberate mesh/re-bake divergence
-            // and is already surfaced at ERROR + on-screen banner, not silent.
-            if reason == mesh_fallback::MESH_ABSENT_REASON {
-                assets::missing_asset(
-                    &assets::bevy_asset_path().join("sally.glb"),
-                    reason,
-                    "rl-release-build packages assets/sally.glb at release time; a dev \
-                     checkout fetches it with scripts/fetch-sally.sh (or points \
-                     CRAB_MODEL_PATH at a model).",
-                );
-            }
-            mesh_fallback::log_fallback(surface, reason);
-        }
+    pub fn resolve(self) -> BootView {
         BootView {
-            render_mode: self.render_mode.unwrap_or(if mesh_err.is_some() {
-                crab_view::RenderMode::Colliders
-            } else {
-                crab_view::RenderMode::Mesh
-            }),
             ground_look: self.ground_look.unwrap_or_default(),
             moon: self.boot_moon(),
         }
@@ -225,7 +143,6 @@ impl RenderArgs {
 #[cfg(feature = "render")]
 #[derive(Debug, Clone, Copy)]
 pub struct BootView {
-    pub render_mode: crab_view::RenderMode,
     pub ground_look: ground::GroundLook,
     /// Boot values for the moon knobs (rl#374); the resource stays live-tweakable.
     pub moon: moon::Moon,
@@ -265,119 +182,6 @@ pub fn view_variant_name<T: CyclableView>(current: &T) -> String {
         .to_string()
 }
 
-/// Training config, consumed by the learner and its rollout threads (which build a
-/// `TrainingState`). Parsed only by the `learn` subcommand.
-///
-/// The run-shaping knobs keep an `env` fallback for the overnight loop's existing `RL_*`
-/// exports, but they are real flags: visible in `--help`, echoed by the argv a run was launched
-/// with, and a malformed value (flag OR env) is a parse error at t=0 — never a silent fallback
-/// mid-run (rl#272).
-#[derive(Parser, Debug, Clone)]
-pub struct TrainConfig {
-    #[command(flatten)]
-    pub checkpoint: CheckpointArgs,
-
-    #[arg(long, default_value_t = 0)]
-    pub ticks: u64,
-
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=eval::MAX_ENVS as u64))]
-    pub envs: u64,
-
-    #[arg(long)]
-    pub seed: Option<u64>,
-
-    /// Exploration σ-floor (log-space) the anneal refines down to.
-    #[arg(long, env = "RL_LOG_STD_FLOOR_END", allow_negative_numbers = true,
-          default_value_t = bot::arch::LOG_STD_MIN)]
-    pub log_std_floor_end: f32,
-
-    /// DIAGNOSTIC: the ROLLOUT worlds' ground. Default `gcr`, the canonical tile —
-    /// the only ground a deployable policy trains on (rl#293). `flat` isolates the
-    /// learning core from terrain (the 1807 flat-ground canary). The plant
-    /// sidecar/digest stay canonical-GCR either way; under `flat` the periodic
-    /// chase-eval is skipped outright — its canonical-GCR locales are
-    /// off-distribution for a flat-trained policy, and an in-process eval hang can
-    /// starve the learner (rl#351) — so `best/` is not maintained and train-side
-    /// reach telemetry is the run's ruler. A non-gcr run's checkpoints are diagnostic
-    /// artifacts, never deploy or warm-start candidates.
-    #[arg(long, env = "RL_TERRAIN", value_enum, default_value_t = TrainTerrain::Gcr)]
-    pub terrain: TrainTerrain,
-
-    /// DIAGNOSTIC: far edge (m) of the target-band draw, in (BAND_START_MIN,
-    /// [`training::targets::BAND_MAX_M`]]. Default the canonical band edge; smaller
-    /// restricts rollouts to the near band (the 1807 canary trains 1.5–9 m) without
-    /// touching the band geometry constants every other consumer (eval pace probe,
-    /// GCR hunt poser, edge margins) is pinned to.
-    #[arg(long, env = "RL_BAND_MAX_M", value_parser = parse_band_max,
-          default_value_t = training::targets::BAND_MAX_M)]
-    pub band_max_m: f32,
-}
-
-/// [`TrainConfig::terrain`]'s values — the ONE production seam for non-canonical
-/// ground, so a diagnostic run forks a flag, never a code path.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TrainTerrain {
-    #[default]
-    Gcr,
-    Flat,
-}
-
-impl TrainTerrain {
-    /// The rollout ground this choice builds. Flat spans ±512 m — the smallest
-    /// round size clearing [`training::targets::sample_clamp_half`]'s edge-margin
-    /// assert with the full canonical band, same as the band tests' fixture.
-    pub fn grid(self) -> std::sync::Arc<terrain::TerrainGrid> {
-        match self {
-            Self::Gcr => terrain::TerrainGrid::gcr(),
-            Self::Flat => std::sync::Arc::new(terrain::TerrainGrid::flat(512.0)),
-        }
-    }
-}
-
-impl TrainConfig {
-    /// Envs per rollout world as a count — the ONE sizing formula, so a world's
-    /// `NumEnvs`, its `TrainingState` buffers, and the learner's accounting can never
-    /// disagree. (clap already rejects `--envs 0`; the clamp is a backstop for
-    /// hand-built configs.)
-    pub fn num_envs(&self) -> usize {
-        self.envs.max(1) as usize
-    }
-}
-
-#[cfg(test)]
-impl TrainConfig {
-    /// Test config CLAP-PARSED so every knob carries its real default — a struct
-    /// literal here would grow a second default source that drifts.
-    pub(crate) fn scratch(checkpoint_dir: &std::path::Path, envs: u64, seed: u64) -> Self {
-        Self::try_parse_from([
-            "rl",
-            "--checkpoint-dir",
-            checkpoint_dir.to_str().unwrap(),
-            "--envs",
-            &envs.to_string(),
-            "--seed",
-            &seed.to_string(),
-        ])
-        .expect("parse scratch TrainConfig")
-    }
-}
-
-pub fn parse_band_max(s: &str) -> Result<f32, String> {
-    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
-    // Below BAND_START_MIN the log-uniform draw's range inverts; above the canonical
-    // edge the sampling clamp's edge margin (sized from the CONST) no longer bounds it.
-    if v.is_finite() && v > training::targets::BAND_START_MIN && v <= training::targets::BAND_MAX_M
-    {
-        Ok(v)
-    } else {
-        Err(format!(
-            "{v} is not in ({}, {}]",
-            training::targets::BAND_START_MIN,
-            training::targets::BAND_MAX_M
-        ))
-    }
-}
-
 #[cfg(all(test, feature = "render"))]
 mod render_args_tests {
     use super::*;
@@ -407,4 +211,3 @@ mod render_args_tests {
     }
 }
 
-pub mod simulation;

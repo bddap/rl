@@ -2,12 +2,7 @@
 //! no IO — the link layer (`net::transport`) feeds it bytes and injected time.
 //! Enforced by construction: this crate checks on wasm32 (see test-map.json).
 
-// rl#282: sibling sim suites have wedged (all threads futex_wait, 0% CPU) under
-// trainer saturation; abort loudly on a process-wide CPU flatline instead.
-#[cfg(test)]
-test_watchdog::arm!();
 
-pub mod articulation;
 pub mod cadence;
 pub mod client;
 pub mod codec;
