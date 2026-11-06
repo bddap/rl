@@ -1,9 +1,6 @@
 let
-  pkgs = import (fetchTarball {
-    url = "https://github.com/NixOS/nixpkgs/archive/6b5e5b7a6631f065bf6908986990b37d845f847f.tar.gz";
-    sha256 = "0vi99516bn335vdzcjmvrkff8ikj0brpmjfcfdrjnb8bfd0wlr5j";
-  }) {};
-  # Must equal Cargo.lock's wasm-bindgen (game-web/run.sh asserts); the pin above
+  pkgs = import ./nixpkgs.nix;
+  # Must equal Cargo.lock's wasm-bindgen (game-web/run.sh asserts); the nixpkgs pin
   # ships older CLIs only, so this builds the matching one with its own builder.
   wasm-bindgen-cli = pkgs.buildWasmBindgenCli rec {
     src = pkgs.fetchCrate {

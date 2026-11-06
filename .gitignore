@@ -10,3 +10,6 @@ __pycache__/
 # stray test/build output logs (do not commit)
 /*.log
 shots/
+# The purchased Sally mesh and its exports may not be redistributed (see NOTICE).
+*.blend
+*.glb

@@ -42,3 +42,10 @@ Creative Commons 0 on their Freesound pages):
   https://freesound.org/people/Mozfoo/sounds/440163/
 - ship-thruster.wav — "Ominous Rumble - loopable (24bit flac)" by steaq,
   https://freesound.org/people/steaq/sounds/593785/
+
+Sally Lightfoot crab model (grapsus_grapsus_crab_280.blend)
+-----------------------------------------------------------
+Purchased from Superhive (Blender Market). Royalty-free for use in a shipped product,
+but the source file may not be redistributed, so neither it nor any export of it is
+committed here. scripts/sally/export.sh fetches the .blend from a private release
+(or reads $SALLY_BLEND) and exports its mesh, unmodified, to a .glb that git ignores.

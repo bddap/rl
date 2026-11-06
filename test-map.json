@@ -23,6 +23,15 @@
     },
     {
       "paths": [
+        "scripts/sally/**"
+      ],
+      "tests": [
+        "nix-shell -p shellcheck python3 --run 'shellcheck scripts/sally/export.sh && python3 -m py_compile scripts/sally/*.py'"
+      ],
+      "why": "the purchased-mesh export; running it needs the private .blend, so offline it gets lint and syntax checks only"
+    },
+    {
+      "paths": [
         "scripts/**"
       ],
       "tests": [],
@@ -43,7 +52,8 @@
     },
     {
       "paths": [
-        "shell.nix"
+        "shell.nix",
+        "nixpkgs.nix"
       ],
       "tests": [],
       "why": "the pinned dev environment — every mapped suite below runs inside it, so a break fails those commands loudly"
