@@ -18,10 +18,9 @@
 //!
 //! Beds are CC0 recordings fetched from bddap-bot/rl-assets
 //! (scripts/fetch-ambience.sh; provenance in NOTICE) into the gitignored asset
-//! dir and packaged into every release by rl-release-build. A bed that fails to
-//! load goes through the game-wide missing-asset policy (rl#375): panic, unless
-//! the environment declares itself asset-less with RL_ALLOW_MISSING_ASSETS=1 —
-//! then the layer stays silent as before.
+//! dir. A bed that fails to load goes through the game-wide missing-asset policy
+//! (rl#375): panic, unless the environment declares itself asset-less with
+//! RL_ALLOW_MISSING_ASSETS=1 — then the layer stays silent.
 
 use std::sync::Arc;
 
@@ -373,8 +372,7 @@ pub(super) fn materialize_beds(
                 crab_world::assets::missing_asset(
                     std::path::Path::new(event.path.path()),
                     &format!("ambient bed unusable: {}", event.error),
-                    "rl-release-build packages assets/ambience/ at release time; a dev \
-                     checkout fetches the CC0 beds with scripts/fetch-ambience.sh.",
+                    "A dev checkout fetches the CC0 beds with scripts/fetch-ambience.sh.",
                 );
                 *bed = Bed::Ready(Arc::from([]));
             }

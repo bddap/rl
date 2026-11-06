@@ -98,6 +98,7 @@ pub mod trig {
         (sin(a) as i64, cos(a) as i64)
     }
 
+    #[cfg(test)]
     pub fn atan2_turns(x: i64, z: i64) -> i32 {
         if x == 0 && z == 0 {
             return 0;

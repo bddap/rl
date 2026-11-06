@@ -202,9 +202,8 @@ fn env_resource_attributes() -> Vec<KeyValue> {
         .collect()
 }
 
-/// The build the telemetry came from (rl#309). Launchers export `RL_BUILD_DIGEST`
-/// (the release's `rl_commit` — deck kits read manifest.json, the TV deploy stages a
-/// digest file); an ad-hoc run without one reports `dev`.
+/// The build the telemetry came from (rl#309). Launchers export `RL_BUILD_DIGEST`;
+/// an ad-hoc run without one reports `dev`.
 fn build_digest() -> String {
     env::var("RL_BUILD_DIGEST")
         .ok()
@@ -241,7 +240,7 @@ mod tests {
         for t in [
             "gilrs_core::platform::platform::gamepad", // connect/disconnect stays visible
             "gilrs::mapping",
-            "net::crab_slot",
+            "net::net_loop",
             "wgpu_hal",
         ] {
             assert!(exportable_target(t), "{t} should export");

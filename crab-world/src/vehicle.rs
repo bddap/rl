@@ -16,28 +16,13 @@ const VEHICLE_MASS: f32 = VEHICLE_DENSITY * 8.0 * VEHICLE_HALF.x * VEHICLE_HALF.
 const BRAKE_COEFF_MAX: f32 = crate::physics::brake_coeff_max(VEHICLE_MASS);
 
 /// How far below the local surface a craft must sink before rescue: past the
-/// heightfield's one-sided collider nothing pushes it back up (the crab's Buried
-/// case), and at rl#339 escape speeds a single substep tunnels straight through.
-/// Generous vs the crab's 2 m: a craft is never legitimately underground at all.
+/// heightfield's one-sided collider nothing pushes it back up, and at rl#339 escape
+/// speeds a single substep tunnels straight through. Generous: a craft is never
+/// legitimately underground at all.
 const CRAFT_BELOW_TERRAIN_RESCUE_M: f32 = 20.0;
 
 /// Pulled-in margin for the escape park — see [`rescue_lost_crafts`].
 const CRAFT_EDGE_PARK_MARGIN_M: f32 = 2.0;
-
-/// Craft ground handling (thrust scales, ground roll, the rl#307 grounded-ship
-/// feel) was tuned while the terrain had no Friction component — a 0.5↔0.5 Average
-/// pair. The rl#318 grip fix raised the ground side
-/// (`physics::world::GROUND_FRICTION` 2.5), which would have silently tripled
-/// craft–ground friction (a plane's breakaway ~32%→~96% throttle); `Min` at the old
-/// default keeps the craft–ground pair at its tuned 0.5 — `Average` could not, the
-/// raised ground side dominates any craft coefficient. Side effect accepted: `Min`
-/// also caps craft↔foot pairs at 0.5 (was 1.0 avg with `FOOT_FRICTION` 1.5; other
-/// crab parts already paired at 0.5) — those contacts are ram/bump impulses, not
-/// grip. Raise deliberately, not by drift.
-pub(crate) const VEHICLE_FRICTION: Friction = Friction {
-    coefficient: 0.5,
-    combine_rule: CoefficientCombineRule::Min,
-};
 
 const THROTTLE_TRIM_RATE: f32 = 0.03;
 
@@ -250,8 +235,7 @@ impl PilotCommand {
 /// pilot's body; removing it despawns the body ([`manage_vehicles`]). The single seam the net
 /// layer writes — the host authors an entry for EVERY filed pilot intent, its own and remote
 /// pilots' alike (intents ride each client's input submission), so every craft has a real
-/// body in the host's one physics world and the crab hunts boarded players wherever they fly
-/// (rl#265).
+/// body in the host's one physics world (rl#265).
 #[derive(Resource, Default)]
 pub struct VehicleControls(pub std::collections::BTreeMap<PilotId, PilotCommand>);
 
@@ -326,7 +310,6 @@ fn vehicle_bundle(
         },
         RigidBody::Dynamic,
         vehicle_collider(),
-        VEHICLE_FRICTION,
         ColliderMassProperties::Density(VEHICLE_DENSITY),
         GravityScale(kind.gravity_scale()),
         transform,
@@ -548,7 +531,7 @@ fn rescue_lost_crafts(
         vehicle.throttle = 0.0;
         if finite {
             // Reachable by legitimate long flight (nothing else stops a craft at the
-            // edge), so a warn — the fault tier is non-finite, as in the crab rescue.
+            // edge), so a warn — the fault tier is non-finite.
             warn!(
                 "rescue_lost_crafts: pilot {:?} craft left the world at translation={pos:?} \
                  — parked at rest at {parked:?} (rl#339)",
@@ -739,7 +722,7 @@ mod tests {
         )
     }
 
-    /// A hermetic free-space spot: hundreds of meters from the origin (and the crab),
+    /// A hermetic free-space spot: hundreds of meters from the origin,
     /// in the NEGATIVE quadrant so a test flying the craft outward (+X/+Z thrust)
     /// heads into the tile interior — from the positive corner it would cross the
     /// 512 m fixture edge mid-measurement and be parked by `rescue_lost_crafts`.
@@ -1305,8 +1288,7 @@ mod tests {
 
     /// Per-pilot multiplicity (rl#191): two pilots board on the same tick ⇒ two bodies, each the
     /// kind ITS pilot chose, each where ITS walker stood (rl#258); one pilot stepping
-    /// out despawns only ITS craft. Spawn/despawn bookkeeping only — a couple of ticks, so the
-    /// crab standing at the arena origin never comes into play.
+    /// out despawns only ITS craft. Spawn/despawn bookkeeping only — a couple of ticks.
     #[test]
     fn each_pilot_gets_its_own_craft() {
         let p1 = PilotId(1);
@@ -1622,8 +1604,7 @@ mod tests {
     }
 
     /// rl#339 regression: past dt·c/m = 1 the explicit quadratic drag flips from
-    /// brake to amplifier — a craft kicked to a few hundred m/s by a crab strike
-    /// escaped at a constant ~1e6 m/s. With the [`BRAKE_COEFF_MAX`] cap, ANY finite
+    /// brake to amplifier — a craft kicked to a few hundred m/s escaped at a constant ~1e6 m/s. With the [`BRAKE_COEFF_MAX`] cap, ANY finite
     /// launch speed must decay, never grow.
     #[test]
     fn hypersonic_craft_brakes_instead_of_amplifying() {
@@ -1718,8 +1699,7 @@ mod tests {
         assert!(v.linear.length() < 1.0, "rescued craft must be at rest");
     }
 
-    /// rl#339: a non-finite craft pose (nothing else guards crafts — the pose
-    /// sentinel and rescue cover crab body parts only) parks at the arena origin.
+    /// rl#339: a non-finite craft pose parks at the arena origin.
     #[test]
     fn nonfinite_craft_parks_at_origin() {
         use crate::headless::tick;

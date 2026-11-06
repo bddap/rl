@@ -54,7 +54,7 @@ pub struct DebugOverlay {
 }
 
 /// This frame's sim cost, written by the surface's sim driver (GCR's `drive_client_sim`)
-/// and CONSUMED by [`record_sample`] — a frame the driver skips (menu, rl-demo) records
+/// and CONSUMED by [`record_sample`] — a frame the driver skips (menu) records
 /// zeros, never a stale value. `ticks` pinned at the driver's per-frame cap means the sim
 /// can't keep up with wall time — the death-spiral signature.
 #[derive(Resource, Default)]

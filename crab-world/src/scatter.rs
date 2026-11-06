@@ -66,8 +66,8 @@ const CANDIDATES_PER_CHUNK: u32 = 72;
 const TUFT_DENSITY: f32 = 0.85;
 const PEBBLE_DENSITY: f32 = 0.5;
 
-/// Registered by `ArenaVisualsPlugin` — the one arena path, so rl-demo, GCR, and
-/// every MP peer grow the same scatter (headless hosts never compile this module).
+/// Registered by `ArenaWorldPlugin` — the one arena path, so every peer grows the
+/// same scatter (headless hosts never compile this module).
 pub struct ScatterPlugin;
 
 impl Plugin for ScatterPlugin {
@@ -105,13 +105,9 @@ enum Kind {
 
 fn setup_scatter_assets(
     mut commands: Commands,
-    visuals: Res<crate::Visuals>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if !visuals.0 {
-        return;
-    }
     let tuft_material = |base: Color| StandardMaterial {
         base_color: base,
         perceptual_roughness: 1.0,
@@ -248,7 +244,7 @@ fn wanted_chunks(cam_xz: Vec2, above_ground_m: f32, cutoff_m: f32) -> Vec<IVec2>
 fn update_scatter(
     mut commands: Commands,
     terrain: Res<Terrain>,
-    assets: Option<Res<ScatterAssets>>,
+    assets: Res<ScatterAssets>,
     anchor: Res<crate::ground::GroundAnchor>,
     mut chunks: ResMut<Chunks>,
     cams: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
@@ -266,9 +262,6 @@ fn update_scatter(
         d.limits().max_storage_buffers_per_shader_stage
             >= bevy::render::view::VISIBILITY_RANGES_STORAGE_BUFFER_COUNT
     });
-    // Asset presence IS the enabled flag: `setup_scatter_assets` inserts the
-    // resource only on `Visuals(true)` surfaces.
-    let Some(assets) = assets else { return };
     let Some(cam) = cams
         .iter()
         .find(|(c, _)| c.is_active)

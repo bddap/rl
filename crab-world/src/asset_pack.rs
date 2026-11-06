@@ -15,8 +15,8 @@ use std::io::{Error, ErrorKind, Read, Result};
 const MAGIC: &[u8; 8] = b"RLPACK1\n";
 
 /// Serialize `entries` (asset-tree-relative path, raw bytes) into a pack blob.
-/// Deflate is worth real bytes here: the WAV ambience beds and checkpoint tensors
-/// both shrink substantially, and the pack is fetched whole on every page load.
+/// Deflate is worth real bytes here: the WAV ambience beds shrink substantially, and
+/// the pack is fetched whole on every page load.
 pub fn write_pack(mut entries: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>> {
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     if let Some(w) = entries.windows(2).find(|w| w[0].0 == w[1].0) {
@@ -135,8 +135,8 @@ mod tests {
     #[test]
     fn roundtrip() {
         let entries = vec![
-            ("weights/brain.bin".to_string(), vec![7u8; 4096]),
-            ("sally.glb".to_string(), b"glTF-binary-ish".to_vec()),
+            ("a/b.bin".to_string(), vec![7u8; 4096]),
+            ("model.glb".to_string(), b"glTF-binary-ish".to_vec()),
             ("empty.txt".to_string(), Vec::new()),
         ];
         let pack = write_pack(entries.clone()).unwrap();

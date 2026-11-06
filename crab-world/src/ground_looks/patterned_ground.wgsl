@@ -51,7 +51,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
         + (1.0 - smoothstep(0.0, 0.05, plate.edge)) * 0.45;
     rgb *= 1.0 - 0.42 * seam * plate_w;
 
-    // ── Tier 2: meso plates (~14 m) — the claw-height stepping-stone read ──
+    // ── Tier 2: meso plates (~14 m) — the stepping-stone read underfoot ──
     let meso = voronoi(p / 14.0 + warp * 3.0, 92u);
     let meso_fade = footprint_fade(14.0, fw);
     rgb *= 1.0 + (0.16 * (cell_rand(meso, 95u) - 0.5) - 0.22 * (1.0 - smoothstep(0.0, 0.10, meso.edge)))

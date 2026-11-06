@@ -1,9 +1,8 @@
-//! The ONE bevy plugin-group recipe every rendered rl surface boots from (GCR's windowed
-//! client, its offscreen screenshot scaffold, rl-demo's demo + render-to-image arms).
+//! The ONE bevy plugin-group recipe every rendered surface boots from (the windowed
+//! client and its offscreen screenshot scaffold).
 //!
-//! Sibling recipe: [`crate::bot::headless::headless_stack`] is the SIM-world counterpart
-//! (GPU off, no asset root, compiles with render OFF) — a window/winit change here may
-//! need mirroring there.
+//! Sibling recipe: [`crate::headless`] is the SIM-world counterpart (GPU off, no asset
+//! root) — a window/winit change here may need mirroring there.
 
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;

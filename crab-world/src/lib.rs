@@ -27,21 +27,17 @@ pub mod moisture;
 /// The moon — THE light source (rl#374). Its plugin rides [`sky::NightSkyPlugin`].
 #[cfg(feature = "render")]
 pub mod moon;
-pub mod wall;
 
 #[cfg(feature = "render")]
 pub mod scatter;
 #[cfg(feature = "render")]
 pub mod screenshot;
-/// Procedural night-sky skybox shared by both rendered surfaces (rl-demo + GCR). `pub`
-/// because the `net` crate's GCR app builders add its [`sky::NightSkyPlugin`] too.
+/// Procedural night-sky skybox; the `net` crate's app builders add its
+/// [`sky::NightSkyPlugin`].
 #[cfg(feature = "render")]
 pub mod sky;
 #[cfg(feature = "render")]
 pub mod wav;
-
-#[derive(Resource, Clone, Copy)]
-pub struct Visuals(pub bool);
 
 /// The render-surface knobs, flattened by every binary that opens a view on the world.
 #[cfg(feature = "render")]

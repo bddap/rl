@@ -1,18 +1,13 @@
 //! The ONE terrain path (rl#281): a baked height grid drives BOTH the rapier
-//! [`Collider`] and (render-gated) the visible mesh, so wherever this module's mesh is
-//! what's drawn (rl-demo, GCR) it cannot diverge from what the crab stands on. Since
-//! the rl#293 flip the committed GCR bake is the default production grid; constant
-//! grids ([`TerrainGrid::flat`]) reach production only through the one diagnostic
-//! seam, [`crate::TrainTerrain`] — a flag choice, never a forked code path.
+//! [`Collider`] and (render-gated) the visible mesh, so what is drawn cannot diverge
+//! from what players stand on.
 //!
 //! Coordinates: the grid is centered on the world origin, +x = artifact column
 //! (preview-PNG right), +z = artifact row (preview-PNG down), heights along +y.
 //! [`TerrainGrid::height`] is triangle-exact against parry's default heightfield
 //! subdivision — the sampler IS the collider surface, not a bilinear approximation
 //! of it. Outside the tile the sampler clamps to the edge value, but the collider
-//! ends at the tile edge; a world-bounds policy is a later stage of rl#281
-//! (interim backstops: `rescue_lost_crabs`' BelowTerrain and the rl#339
-//! `rescue_lost_crafts` park).
+//! ends at the tile edge (backstop: the rl#339 `rescue_lost_crafts` park).
 
 use std::sync::{Arc, OnceLock};
 
@@ -38,7 +33,7 @@ const MAGIC: &[u8; 8] = b"RLTERR01";
 /// Cell-size cap for [`TerrainGrid::flat`], for f32 contact precision — parry solves
 /// heightfield contacts against the containing cell's triangle, and one grid-spanning
 /// cell on a ±16 km fixture puts that triangle's vertices where f32 ulp is ~2 mm,
-/// comparable to contact tolerances (and it measurably perturbed the rl#224 flail-walk).
+/// comparable to contact tolerances.
 /// 256 m keeps near-origin triangle vertices small at 129² points for the largest
 /// fixtures, instead of megabytes of zeros per world.
 const FLAT_CELL_MAX_M: f32 = 256.0;
@@ -64,8 +59,6 @@ pub struct TerrainGrid {
     cell: f32,
     /// Row-major `[row * cols + col]`, like the artifact.
     heights: Vec<f32>,
-    /// Height span over the whole grid, computed once at construction.
-    relief: f32,
 }
 
 impl TerrainGrid {
@@ -116,15 +109,11 @@ impl TerrainGrid {
             .iter()
             .map(|&h| (i32::from(h) - i32::from(datum)) as f32 * meta.height_scale)
             .collect();
-        let (min, max) = heights
-            .iter()
-            .fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
         Ok(Self {
             rows: meta.rows,
             cols: meta.cols,
             cell: meta.cell_size_m,
             heights,
-            relief: max - min,
         })
     }
 
@@ -154,14 +143,8 @@ impl TerrainGrid {
     }
 
     /// A constant y=0 grid spanning ±`half_extent`, expressed through the one
-    /// terrain path instead of a bespoke slab or halfspace — for tests whose expected
-    /// geometry is hand-computed on a plane, and for the `--terrain flat` rollout
-    /// diagnostic ([`crate::TrainTerrain`]). Was test-gated after the rl#293
-    /// flat-arena deletion; the diagnostic seam re-opened it, and "production ground
-    /// is [`Self::gcr`]" is now held by [`crate::TrainTerrain`]'s default instead of
-    /// by construction. Grids that run band logic ([`crate::training::targets`])
-    /// must span ≥ the edge margin + band — smaller grids fail the sampling clamp's
-    /// assert.
+    /// terrain path instead of a bespoke slab or halfspace — for worlds whose expected
+    /// geometry is hand-computed on a plane.
     pub fn flat(half_extent: f32) -> Self {
         let cells = ((half_extent * 2.0) / FLAT_CELL_MAX_M).ceil().max(1.0) as usize;
         let n = cells + 1;
@@ -170,13 +153,12 @@ impl TerrainGrid {
             cols: n,
             cell: half_extent * 2.0 / cells as f32,
             heights: vec![0.0; n * n],
-            relief: 0.0,
         }
     }
 
-    /// The committed GCR bake (parsed once; the artifact ships inside the binary so the
-    /// headless trainer and every peer sample the identical world with no asset-path or
-    /// download dependence).
+    /// The committed GCR bake (parsed once; the artifact ships inside the binary so
+    /// every peer samples the identical world with no asset-path or download
+    /// dependence).
     pub fn gcr() -> Arc<Self> {
         static GRID: OnceLock<Arc<TerrainGrid>> = OnceLock::new();
         GRID.get_or_init(|| {
@@ -185,43 +167,15 @@ impl TerrainGrid {
         .clone()
     }
 
-    /// The committed GCR bake with its relief scaled by ONE well-defined scalar
-    /// (rl#341): every datum-shifted height is multiplied by `amplitude`,
-    /// so relief scales about the tile-centre datum (the centre sample stays y=0 and
-    /// spawns near the origin stay near y=0 at every amplitude). `1.0` returns the
-    /// canonical singleton BIT-IDENTICALLY — no silent arena change on the default
-    /// path. This is a runtime relief scalar, distinct from the bake pipeline's
-    /// `--fbm-amplitude-m` (a detail-octave knob that mutates samples and needs a GPU
-    /// re-bake); the eval takes THIS one. Headless-measurement knob only: the render
-    /// path's biome stops are keyed on absolute datum-shifted metres, so rendering a
-    /// scaled grid would repaint biomes as a side effect — nothing render-side calls
-    /// this. Non-finite or negative amplitudes refuse loudly.
-    pub fn gcr_with_amplitude(amplitude: f32) -> Result<Arc<Self>, String> {
-        if !(amplitude.is_finite() && amplitude >= 0.0) {
-            return Err(format!(
-                "terrain amplitude must be a finite non-negative scalar, got {amplitude}"
-            ));
-        }
-        if amplitude == 1.0 {
-            return Ok(Self::gcr());
-        }
-        let mut grid = Self::parse(GCR_TERRAIN_BYTES).expect("committed artifact parses");
-        for h in &mut grid.heights {
-            *h *= amplitude;
-        }
-        grid.relief *= amplitude;
-        Ok(Arc::new(grid))
-    }
-
     /// Full world-x span (grid columns).
     pub fn extent_x(&self) -> f32 {
         (self.cols - 1) as f32 * self.cell
     }
 
     /// Half the tile's shorter span — where the ground collider ends on the tighter
-    /// axis. The ONE source for "the edge of the world": the sampling interior
-    /// (`training::targets::sample_clamp_half`) and the rl#339 craft rescue both
-    /// derive from it, so an escape bound can never drift outside the collider.
+    /// axis. The ONE source for "the edge of the world": the sim's spawn clamp and the
+    /// rl#339 craft rescue both derive from it, so an escape bound can never drift
+    /// outside the collider.
     pub fn half_span_min(&self) -> f32 {
         self.extent_x().min(self.extent_z()) / 2.0
     }
@@ -296,11 +250,8 @@ impl TerrainGrid {
 
     /// The whole-tile static collider. Same grid as [`Self::height`] and [`Self::mesh`],
     /// transposed to parry's column-major layout (rows along +z, columns along +x).
-    /// Built with `FIX_INTERNAL_EDGES`: the crab's soft contacts rest with ~cm
-    /// penetration, and without the flag a foot straddling a cell seam takes a tilted
-    /// ghost impulse from the neighbor triangle's edge — on a flat grid the seam
-    /// diagonal passes through the spawn origin, so the flag is what keeps the
-    /// heightfield floor contact-equivalent to the slab it replaced.
+    /// Built with `FIX_INTERNAL_EDGES`: without it a body resting across a cell seam
+    /// takes a tilted ghost impulse from the neighbor triangle's edge.
     pub fn collider(&self) -> Collider {
         use bevy_rapier3d::rapier::geometry::SharedShape;
         use bevy_rapier3d::rapier::parry::shape::{HeightField, HeightFieldFlags};
@@ -320,17 +271,11 @@ impl TerrainGrid {
         SharedShape::new(field).into()
     }
 
-    /// Height span over the whole grid — 0 for the flat test grids.
-    pub fn relief(&self) -> f32 {
-        self.relief
-    }
-
     /// The visible terrain surface — the SAME vertices and cell diagonal as the
     /// collider's triangles, so render matches physics by construction. Smooth
     /// per-vertex normals via central differences; per-vertex biome tint from
     /// elevation + slope (rl#281 stage 3). No LOD: the 1024² tile is ~2M triangles in
-    /// one static buffer, which the demo already renders live at full rate — decimation
-    /// would only buy back memory we don't miss and open a render/physics seam gap.
+    /// one static buffer; decimation would open a render/physics seam gap.
     #[cfg(feature = "render")]
     pub fn mesh(&self) -> Mesh {
         use bevy::asset::RenderAssetUsages;
@@ -460,7 +405,7 @@ pub mod biome {
 
 /// Per-vertex biome color (linear RGBA — multiplied into the terrain material):
 /// a hypsometric ramp over datum-shifted elevation `h` in METERS — not the tile's
-/// normalized range, because the datum shift puts y=0 where the crab lives (the tile's
+/// normalized range, because the datum shift puts y=0 where play happens (the tile's
 /// center sample), so bands stay anchored to gameplay ground whatever a bake's absolute
 /// span is (a normalized ramp painted the whole origin plateau as snow). Rock on steep
 /// slopes, snow only on gentle high peaks, and a per-vertex hash jitter so
@@ -474,7 +419,7 @@ fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
         (DEEP_VALLEY_M, [0.20, 0.36, 0.16]), // deep valley green
         (LOWLAND_M, [0.27, 0.42, 0.18]),     // lowland green
         (DRY_GRASS_M, [0.40, 0.50, 0.24]),   // dry grass
-        (SCREE_M, [0.60, 0.50, 0.32]),       // tan scree (crab country rim)
+        (SCREE_M, [0.60, 0.50, 0.32]),       // tan scree
         (HIGH_BROWN_M, [0.59, 0.47, 0.39]),  // high brown
     ];
     const ROCK: [f32; 3] = [0.42, 0.39, 0.36];
@@ -500,9 +445,8 @@ fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
     [c.red * jitter, c.green * jitter, c.blue * jitter, 1.0]
 }
 
-/// The world's terrain, inserted by `PhysicsWorldPlugin` from its grid. `Arc` because
-/// eval worlds are rebuilt per bearing and training worlds per env batch — the
-/// (possibly 4 MB) grid is shared, not re-parsed.
+/// The world's terrain, inserted by `PhysicsWorldPlugin` from its grid. `Arc` so the
+/// 4 MB grid is shared, not re-parsed.
 #[derive(Resource, Clone)]
 pub struct Terrain(Arc<TerrainGrid>);
 
@@ -602,43 +546,6 @@ mod tests {
         assert_eq!(g.height(-hx, -hz), g.at(0, 0));
         assert_eq!(g.height(hx, -hz), g.at(0, 1023));
         assert_eq!(g.height(-hx, hz), g.at(1023, 0));
-    }
-
-    #[test]
-    fn relief_is_zero_flat_and_full_span_on_gcr() {
-        assert_eq!(TerrainGrid::flat(10.0).relief(), 0.0);
-        assert_eq!(TerrainGrid::gcr().relief(), (4508 - 295) as f32);
-    }
-
-    /// The rl#341 amplitude scalar: 1.0 is the canonical singleton bit-identically
-    /// (the same Arc — no silent arena change on the default path); any other value
-    /// scales every datum-shifted height about the tile-centre datum; degenerate
-    /// scalars refuse loudly.
-    #[test]
-    fn gcr_amplitude_scales_relief_about_the_datum() {
-        let canonical = TerrainGrid::gcr();
-        let identity = TerrainGrid::gcr_with_amplitude(1.0).unwrap();
-        assert!(Arc::ptr_eq(&canonical, &identity), "1.0 IS the singleton");
-
-        let doubled = TerrainGrid::gcr_with_amplitude(2.0).unwrap();
-        assert_eq!(doubled.relief(), 2.0 * canonical.relief());
-        assert_eq!(doubled.at(512, 512), 0.0, "the datum stays y=0");
-        for (x, z) in [(4800.0, -3600.0), (-6400.0, 5200.0), (123.0, 456.0)] {
-            assert!(
-                (doubled.height(x, z) - 2.0 * canonical.height(x, z)).abs() < 1e-3,
-                "height at ({x},{z}) scales by exactly the amplitude"
-            );
-        }
-
-        let flattened = TerrainGrid::gcr_with_amplitude(0.0).unwrap();
-        assert_eq!(flattened.relief(), 0.0, "amplitude 0 is a plane");
-
-        for bad in [f32::NAN, f32::INFINITY, -1.0] {
-            assert!(
-                TerrainGrid::gcr_with_amplitude(bad).is_err(),
-                "{bad} must refuse"
-            );
-        }
     }
 
     /// The biome tint contract the taste loop leans on: banded colors with

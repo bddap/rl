@@ -9,15 +9,9 @@ use crate::ground::{GroundDetail, GroundLook, GroundMaterial, GroundMaterialPlug
 use crate::terrain::{Terrain, TerrainGrid};
 
 /// Plugin that lays the arena PHYSICS — the ground collider — and publishes the
-/// [`Terrain`] resource spawn-on-surface consumers sample. Since the rl#293 flip
-/// there is ONE production ground: the committed GCR bake ([`TerrainGrid::gcr`]) —
-/// the trainer, the keep-best/honest evals, GCR, and rl-demo all build exactly it,
-/// and it is the only grid production code can construct ([`TerrainGrid::flat`] is
-/// test-gated). Tests may pass a fixture grid: a degenerate parameter of the one
-/// seam, not a second ground path. No meshes or lights: the visible dressing is a
-/// SEPARATE [`ArenaVisualsPlugin`] (split rl#160), so a headless host adds the
-/// collider alone. Every rendered surface — rl-demo and, since rl#281 stage 6,
-/// GCR — adds both: there is ONE way an arena looks.
+/// [`Terrain`] resource spawn-on-surface consumers sample. No meshes or lights, so a
+/// headless host adds the collider alone; rendered surfaces add
+/// [`ArenaWorldPlugin`], which is this plus the visible dressing.
 pub struct PhysicsWorldPlugin {
     pub grid: Arc<TerrainGrid>,
 }
@@ -30,11 +24,8 @@ impl Plugin for PhysicsWorldPlugin {
 }
 
 /// The one arena every rendered surface installs — terrain physics on the
-/// committed gcr bake plus the visible dressing, visuals on. The world exists
-/// whether or not a crab is armed (rl#296), so this is deliberately separate from
-/// any crab stack: GCR's windowed and screenshot scaffolds and rl-demo all add
-/// exactly this plugin, one formula that cannot drift per-surface. Headless hosts
-/// keep composing [`PhysicsWorldPlugin`] alone.
+/// committed gcr bake plus the visible dressing — so the windowed client and the
+/// screenshot scaffold cannot drift apart.
 #[cfg(feature = "render")]
 pub struct ArenaWorldPlugin {
     pub ground_look: GroundLook,
@@ -43,24 +34,9 @@ pub struct ArenaWorldPlugin {
 #[cfg(feature = "render")]
 impl Plugin for ArenaWorldPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(crate::Visuals(true))
-            .add_plugins(PhysicsWorldPlugin {
-                grid: TerrainGrid::gcr(),
-            })
-            .add_plugins(ArenaVisualsPlugin {
-                ground_look: self.ground_look,
-            });
-    }
-}
-
-#[cfg(feature = "render")]
-pub struct ArenaVisualsPlugin {
-    pub ground_look: GroundLook,
-}
-
-#[cfg(feature = "render")]
-impl Plugin for ArenaVisualsPlugin {
-    fn build(&self, app: &mut App) {
+        app.add_plugins(PhysicsWorldPlugin {
+            grid: TerrainGrid::gcr(),
+        });
         app.add_plugins(GroundMaterialPlugin {
             initial: self.ground_look,
         });
@@ -72,9 +48,7 @@ impl Plugin for ArenaVisualsPlugin {
     }
 }
 
-/// Lay the ground collider — the one terrain heightfield. No meshes or lights (those
-/// are render-only — see [`setup_arena_visuals`]), so this is the one arena setup the
-/// headless trainer runs, touching no graphics types.
+/// Lay the ground collider — the one terrain heightfield.
 fn setup_ground(mut commands: Commands, terrain: Res<Terrain>) {
     commands.spawn((RigidBody::Fixed, terrain.collider(), Transform::IDENTITY));
 }
@@ -82,17 +56,12 @@ fn setup_ground(mut commands: Commands, terrain: Res<Terrain>) {
 #[cfg(feature = "render")]
 fn setup_arena_visuals(
     mut commands: Commands,
-    visuals: Res<crate::Visuals>,
     terrain: Res<Terrain>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GroundMaterial>>,
     mut images: ResMut<Assets<Image>>,
     look: Res<GroundLook>,
 ) {
-    if !visuals.0 {
-        return;
-    }
-
     // The directional light is the moon's (`crate::moon`, via NightSkyPlugin);
     // only the ambient starlight floor lives here.
     commands.insert_resource(GlobalAmbientLight {
@@ -131,17 +100,13 @@ fn setup_arena_visuals(
 }
 
 /// Give every camera aerial-perspective fog toward the night sky's horizon color.
-/// Runs in `Update` because cameras can spawn any time (the demo's orbit cam, the
-/// offscreen shot cam); same attach pattern as the skybox.
+/// Runs in `Update` because cameras can spawn any time; same attach pattern as the
+/// skybox.
 #[cfg(feature = "render")]
 fn attach_vista_fog(
     mut commands: Commands,
-    visuals: Res<crate::Visuals>,
     cams: Query<Entity, (With<Camera3d>, Without<DistanceFog>)>,
 ) {
-    if !visuals.0 {
-        return;
-    }
     for cam in &cams {
         commands.entity(cam).insert(DistanceFog {
             color: crate::sky::horizon_fog_color(),

@@ -2,7 +2,6 @@
 /tmp
 .cargo-home/
 *.png
-vendor/
 # CC0 ambience beds (see NOTICE): fetched by scripts/fetch-ambience.sh, kept out
 # of git for size only.
 crab-world/assets/ambience/

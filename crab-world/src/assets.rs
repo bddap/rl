@@ -17,8 +17,7 @@ pub fn set_asset_root(root: PathBuf) {
 }
 
 /// The asset root of record: the pinned config value, else the native default —
-/// binaries without a config entrypoint (probes, trainers) resolve the same way the
-/// native adapter does.
+/// binaries without a config entrypoint resolve the same way the native adapter does.
 #[cfg(not(target_family = "wasm"))]
 pub fn asset_root() -> PathBuf {
     ROOT.get().cloned().unwrap_or_else(native_asset_root)
@@ -48,28 +47,19 @@ pub fn bevy_asset_path() -> PathBuf {
     asset_root().join("assets")
 }
 
-/// THE byte fetch for every asset read that happens outside an `AssetServer` load
-/// (rl#411): the glb digest gate, the checkpoint set (brain/normalizer envelopes,
-/// plant sidecar, checkpoint digest), the glyph packaging probe. One body, one tree —
-/// the same `bevy_asset_path()` the `AssetServer` mounts — so porting the byte source
-/// (a web/embedded build swaps this body for its baked byte table) ports every one of
-/// those consumers at once instead of leaving stray `std::fs` reads behind.
-///
-/// `path` is asset-tree-relative (the portable form). An ABSOLUTE path passes through
-/// (`Path::join` semantics, same as bevy's own `FileAssetReader`) — that is the
-/// native-only dev affordance (`CRAB_MODEL_PATH`, explicit `--checkpoint` dirs,
-/// trainer run dirs) and fails naturally on a platform with no filesystem.
+/// THE byte fetch for an asset read outside an `AssetServer` load (rl#411), over the
+/// same tree the `AssetServer` mounts, so the web build's baked byte table serves it
+/// too. `path` is asset-tree-relative.
 #[cfg(not(target_family = "wasm"))]
-pub fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
-    std::fs::read(asset_file_path(path))
+fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(bevy_asset_path().join(path))
 }
 
 /// The web body of the one byte path: the baked asset tree the entry adapter fills
 /// BEFORE the game boots. Sync-by-construction: wasm has no blocking fetch, so the
-/// pack fill happens in the async entry and this keeps the same sync signature
-/// every native consumer already has.
+/// pack fill happens in the async entry and this keeps the native sync signature.
 #[cfg(target_family = "wasm")]
-pub fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
+fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
     web_asset_dir()
         .get_asset(path)
         .map(|d| d.value().to_vec())
@@ -134,21 +124,6 @@ pub fn preload_web_assets(entries: impl IntoIterator<Item = (PathBuf, Vec<u8>)>)
     }
 }
 
-/// [`read_asset`]'s path resolution WITHOUT the read — for the NATIVE-ONLY fs
-/// affordances that must observe the same file the asset path serves (the hot-reload
-/// mtime poll, the brain-swap roster `read_dir`) and for operator-facing labels that
-/// should name the real file. Web/embedded builds have no fs peer for this — their
-/// consumers are the fs affordances that are inert there by construction.
-pub fn asset_file_path(path: &Path) -> PathBuf {
-    bevy_asset_path().join(path)
-}
-
-/// [`read_asset`] for text assets (the plant sidecar).
-pub fn read_asset_to_string(path: &Path) -> std::io::Result<String> {
-    String::from_utf8(read_asset(path)?)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-}
-
 /// What a load path does when an asset it wants is not there (rl#375
 /// directive): every release repeatedly shipped code without its assets and the
 /// resulting degradation was silent-by-design, found by ear. So missing-asset is now
@@ -158,8 +133,8 @@ pub fn read_asset_to_string(path: &Path) -> std::io::Result<String> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MissingAssetPolicy {
     Panic,
-    /// Explicitly declared asset-less environment: keep the pre-rl#375 behavior
-    /// (silent layer / blank glyph slot / collider view), logged at WARN.
+    /// Explicitly declared asset-less environment: the caller falls back (silent
+    /// layer, blank glyph slot), logged at WARN.
     Degrade,
 }
 
@@ -185,7 +160,7 @@ fn policy_from(env: Option<&str>) -> MissingAssetPolicy {
 /// The single missing-asset chokepoint: every loader that finds an asset absent (or
 /// unreadable) reports it here. Panics under [`MissingAssetPolicy::Panic`] naming the
 /// path and the packaging step that should have shipped it; under `Degrade` it logs
-/// and returns so the caller can fall back exactly as before.
+/// and returns so the caller can fall back.
 ///
 /// `ship_step` names how a correct deployment gets this asset (the packaging step
 /// and/or the dev fetch script) — the panic message must leave the reader with the
@@ -205,8 +180,8 @@ pub fn missing_asset(path: &Path, detail: &str, ship_step: &str) {
     }
 }
 
-/// Control-overlay glyphs: committed at crab-world/assets/controls/ and staged into
-/// every release, so an absent one is a broken checkout or bundle.
+/// Control-overlay glyphs: committed at crab-world/assets/controls/, so an absent one
+/// is a broken checkout or bundle.
 pub fn require_glyphs<I: IntoIterator<Item = &'static str>>(paths: I) {
     let base = bevy_asset_path();
     for p in paths {
@@ -215,9 +190,8 @@ pub fn require_glyphs<I: IntoIterator<Item = &'static str>>(paths: I) {
             missing_asset(
                 &full,
                 "control glyph not found",
-                "These CC0 Kenney glyphs are committed at crab-world/assets/controls/ and \
-                 packaged by rl-release-build; if your assets live elsewhere, set \
-                 BEVY_ASSET_ROOT.",
+                "These CC0 Kenney glyphs are committed at crab-world/assets/controls/; \
+                 if your assets live elsewhere, set BEVY_ASSET_ROOT.",
             );
         }
     }

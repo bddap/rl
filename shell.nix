@@ -31,8 +31,8 @@ pkgs.mkShell {
 
     ffmpeg
 
-    # The wasm32 web-build toolchain (rl#411 stage 6), pinned HERE so the release
-    # builder needs no channel/<nixpkgs>: lld links the wasm, wasm-bindgen-cli must
+    # The wasm32 web-build toolchain (rl#411 stage 6), pinned HERE so a web build
+    # needs no channel/<nixpkgs>: lld links the wasm, wasm-bindgen-cli must
     # match Cargo.lock's wasm-bindgen (run.sh asserts), and ring's C sources need an
     # UNWRAPPED clang (the nix-wrapped one emits x86 objects) — see the env below.
     lld

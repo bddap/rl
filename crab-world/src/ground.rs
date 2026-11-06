@@ -5,8 +5,8 @@
 //! play scale, and the mesh stays the collider's exact geometry (render matches
 //! physics; beauty is shading only).
 //!
-//! Every [`GroundLook`] is swappable at runtime and none of them can move physics or
-//! eval: the swap reaches only the fragment shader the ground pipeline is specialized
+//! Every [`GroundLook`] is swappable at runtime and none of them can move physics:
+//! the swap reaches only the fragment shader the ground pipeline is specialized
 //! with.
 
 use bevy::asset::{load_internal_asset, uuid_handle};
@@ -472,7 +472,7 @@ fn apply_ground_look(look: Res<GroundLook>, mut materials: ResMut<Assets<GroundM
 /// extraction point (see `sync_ground_anchor` in net for why not the spawn frame;
 /// constant per round, so nothing pops mid-round — a new round is a teleport
 /// anyway); anything that never leaves the origin's neighbourhood can leave the
-/// zero default (the trainer's demo, tests).
+/// zero default (tests).
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct GroundAnchor(pub Vec2);
 
@@ -561,7 +561,7 @@ fn update_look_readout(
 }
 
 /// Registers [`GroundMaterial`], every embedded look, and the swap system. Added by
-/// `ArenaVisualsPlugin`, so every rendered surface gets it through the one arena
+/// `ArenaWorldPlugin`, so every rendered surface gets it through the one arena
 /// path. `initial` is the look the app boots in (`--ground-look`).
 pub struct GroundMaterialPlugin {
     pub initial: GroundLook,

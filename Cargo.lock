@@ -2618,12 +2618,10 @@ dependencies = [
  "clap",
  "flate2",
  "frametime",
- "js-sys",
  "otel",
  "serde",
  "serde_json",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

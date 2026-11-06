@@ -58,9 +58,6 @@ console_error_panic_hook = "0.1"
 name = "form_web"
 crate-type = ["cdylib"]
 
-[dev-dependencies]
-crab-world = { path = "../crab-world" }
-
 # Native-only test plumbing: neither exists on wasm, and an unconditional dev-dep
 # would drag them into the wasm example build above.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]

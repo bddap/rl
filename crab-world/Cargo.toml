@@ -36,10 +36,5 @@ name = "perf_collapse_smoke"
 required-features = ["render"]
 
 [dev-dependencies]
-tracing-subscriber.workspace = true
 # The perf_collapse_smoke example arms real export.
 otel = { path = "../otel" }
-
-# `wall::unix_ms`'s browser clock (Date.now). Already in the tree via wasm-bindgen.
-[target.'cfg(target_family = "wasm")'.dependencies]
-js-sys = "0.3"

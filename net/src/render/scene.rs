@@ -84,8 +84,8 @@ pub(super) fn spawn_world(
     mut materials: ResMut<Assets<StandardMaterial>>,
     state: NonSend<GameState>,
 ) {
-    // Ground and lighting are the world's own dressing (ArenaVisualsPlugin, rl#281):
-    // the same grid the physics runs on, terrain or flat, rendered where it stands (one
+    // Ground and lighting are the world's own dressing (ArenaWorldPlugin, rl#281):
+    // the same grid the physics runs on, rendered where it stands (one
     // frame). Nothing world-shaped is spawned here.
 
     let ex = state.client.sim().extraction().pos();

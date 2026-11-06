@@ -14,7 +14,7 @@
 // reads as an upscaled low-res texture the moment the camera gets closer than it
 // was tuned for. So descend by thirds from 2.6 m until the octave is subpixel
 // (footprint-faded to nothing), down to a 0.1 mm floor. The old 3.5 mm floor
-// assumed ~2 mm ground per pixel — a standing HUMAN eye; the crab eye is
+// assumed ~2 mm ground per pixel — a standing HUMAN eye; the player eye is
 // centimeters above the ground, near ground is 0.02-0.2 mm/px, and 3.5 mm was
 // a ~35 px blur ceiling on every down-look (rl#390 — the fade windows, checked
 // first, were innocent: fw sat so far below every octave's fade that widening

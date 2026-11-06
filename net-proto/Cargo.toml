@@ -24,8 +24,6 @@ anyhow.workspace = true
 # EndpointId is a pure ed25519 key — the one identity type shared with the link layer.
 iroh-base.workspace = true
 
-[dev-dependencies]
-
 # The wasm32 platform-freedom check needs entropy backends named explicitly:
 # rand 0.8 pulls getrandom 0.2 (feature `js`), and getrandom 0.3 additionally
 # wants the backend cfg in .cargo/config.toml. Target-scoped: native unaffected.
