@@ -1,4 +1,4 @@
-use bevy::asset::{RenderAssetUsages, load_internal_asset, uuid_handle};
+use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::PrimitiveTopology;
@@ -10,7 +10,7 @@ use bevy::shader::ShaderRef;
 pub const NIGHT_CLEAR: Color = Color::srgb(0.02, 0.03, 0.09);
 
 /// Procedural night sky (rl#325): one fullscreen triangle whose fragment shader
-/// (`sky.wgsl`) evaluates the sky per pixel over the whole sphere — full wrap below
+/// (`sky.wesl`) evaluates the sky per pixel over the whole sphere — full wrap below
 /// the horizon, resolution-independent stars, no cubemap bake or texture memory.
 /// The look's math lives in the shader; the Rust side spawns the triangle and
 /// feeds it the moon uniforms.
@@ -22,11 +22,16 @@ pub struct NightSkyPlugin {
     pub moon: crate::moon::Moon,
 }
 
-const SKY_SHADER: Handle<Shader> = uuid_handle!("4f6b0e29-8d17-4c52-b3a9-7e04d1c68f5a");
+fn sky_shader() -> ShaderRef {
+    ShaderRef::Path(
+        bevy::asset::AssetPath::from_path_buf(bevy::asset::embedded_path!("sky.wesl"))
+            .with_source("embedded"),
+    )
+}
 
 impl Plugin for NightSkyPlugin {
     fn build(&self, app: &mut App) {
-        load_internal_asset!(app, SKY_SHADER, "sky.wgsl", Shader::from_wgsl);
+        bevy::shader::load_shader_library!(app, "sky.wesl");
         app.add_plugins(crate::moon::MoonPlugin { moon: self.moon })
             .add_plugins(MaterialPlugin::<StarSkyMaterial>::default())
             .add_systems(Startup, spawn_sky)
@@ -35,7 +40,7 @@ impl Plugin for NightSkyPlugin {
 }
 
 /// Uniforms carry the [`crate::moon::Moon`] knobs to the shader. Colors are
-/// authored srgb like every constant in `sky.wgsl` (the shader converts to
+/// authored srgb like every constant in `sky.wesl` (the shader converts to
 /// linear at the end).
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 struct StarSkyMaterial {
@@ -73,11 +78,11 @@ fn sync_moon_uniforms(
 
 impl Material for StarSkyMaterial {
     fn vertex_shader() -> ShaderRef {
-        SKY_SHADER.into()
+        sky_shader()
     }
 
     fn fragment_shader() -> ShaderRef {
-        SKY_SHADER.into()
+        sky_shader()
     }
 }
 
@@ -154,18 +159,18 @@ mod tests {
         assert_eq!([c.red, c.green, c.blue], [HORIZON.x, HORIZON.y, HORIZON.z]);
     }
 
-    /// sky.wgsl must keep the fog-matching horizon constant verbatim — the two
+    /// sky.wesl must keep the fog-matching horizon constant verbatim — the two
     /// sides of the seam live in two languages, so the test greps the shader
     /// source rather than trusting a comment to keep them aligned.
     #[test]
     fn shader_horizon_matches_rust() {
-        let wgsl = include_str!("sky.wgsl");
+        let wgsl = include_str!("sky.wesl");
         assert!(
             wgsl.contains("vec3(0.078, 0.122, 0.235)"),
-            "sky.wgsl HORIZON no longer matches sky.rs HORIZON"
+            "sky.wesl HORIZON no longer matches sky.rs HORIZON"
         );
         for entry in ["fn vertex(", "fn fragment("] {
-            assert!(wgsl.contains(entry), "sky.wgsl lost entry point {entry}");
+            assert!(wgsl.contains(entry), "sky.wesl lost entry point {entry}");
         }
     }
 }

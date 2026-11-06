@@ -1,54 +1,47 @@
 // The ground scaffold (rl#333 seam 3): the ONE `fn fragment` every ground look
-// renders through. It builds the shared GroundCtx (rl::ground::art), dispatches
+// renders through. It builds the shared GroundCtx (ground_art), dispatches
 // to the selected look's `art()` module on a LOOK_* shader def pushed by
 // `GroundDetail::specialize` (ground.rs), applies the always-on high-frequency
-// detail layer (rl::ground::detail — a look modulates it via grain/relief, never
+// detail layer (ground_detail — a look modulates it via grain/relief, never
 // skips it), then lighting, then the look's additive glow.
 //
-// The dispatch chain has NO #else: a variant whose def is missing leaves `art`
+// The dispatch chain has NO @else: a variant whose def is missing leaves `art`
 // unresolved and pipeline creation fails loudly — no silent fallback to Shipped.
 // Guarded by `every_look_def_dispatches_in_the_scaffold` (ground.rs) and the
 // per-look screenshot sweep, which specializes every variant on real naga.
 
-#import bevy_pbr::{
+import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
     mesh_view_bindings::globals,
-}
+};
 
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-    prepass_io::{VertexOutput, FragmentOutput},
-    pbr_deferred_functions::deferred_output,
-}
-#else
-#import bevy_pbr::{
+@if(PREPASS_PIPELINE)
+import bevy_pbr::{
+    prepass::io::{VertexOutput, FragmentOutput},
+    deferred::functions::deferred_output,
+};
+@else
+import bevy_pbr::render::{
     forward_io::{VertexOutput, FragmentOutput},
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
-}
-#endif
+};
 
-#import rl::ground::detail::{fine_color, relief_normal}
-#import rl::ground::art::{GroundCtx, GroundArt}
+import package::ground_detail::{fine_color, relief_normal};
+import package::ground_art::{GroundCtx, GroundArt};
 
-#ifdef LOOK_SHIPPED
-#import rl::ground::looks::shipped::art
-#endif
-#ifdef LOOK_NIGHT_BLOOM
-#import rl::ground::looks::night_bloom::art
-#endif
-#ifdef LOOK_PATTERNED_GROUND
-#import rl::ground::looks::patterned_ground::art
-#endif
-#ifdef LOOK_WIND_COMBED
-#import rl::ground::looks::wind_combed::art
-#endif
-#ifdef LOOK_CRACKED_LOAM
-#import rl::ground::looks::cracked_loam::art
-#endif
-#ifdef LOOK_WATERSHED
-#import rl::ground::looks::watershed::art
-#endif
+@if(LOOK_SHIPPED)
+import package::ground_looks::shipped::art;
+@if(LOOK_NIGHT_BLOOM)
+import package::ground_looks::night_bloom::art;
+@if(LOOK_PATTERNED_GROUND)
+import package::ground_looks::patterned_ground::art;
+@if(LOOK_WIND_COMBED)
+import package::ground_looks::wind_combed::art;
+@if(LOOK_CRACKED_LOAM)
+import package::ground_looks::cracked_loam::art;
+@if(LOOK_WATERSHED)
+import package::ground_looks::watershed::art;
 
 // Global diffuse-albedo scale on every look's output (rl#404: "reduce ground
 // reflectance"). Modest by design; the moon-brightness knob is FULL_MOON_LUX
@@ -57,16 +50,16 @@ const GROUND_REFLECTANCE: f32 = 0.8;
 
 // x: macro, y: meso (look-owned structure gains); z: grain, w: relief
 // (scaffold-owned detail gains, modulated by art()'s grain/relief fields).
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> strengths: vec4<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> strengths: vec4<f32>;
 // The hydrology bake (moisture.rs, rl#323): R wetness, G standing water. World-
 // mapped over the whole tile — uv = world_xz / extent + 0.5, the same transform
 // TerrainGrid::height uses — so it has no repeat period to spot from altitude.
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var moisture_tex: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var moisture_smp: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var<uniform> moisture_extent: vec4<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var moisture_tex: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var moisture_smp: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(103) var<uniform> moisture_extent: vec4<f32>;
 // The look's aesthetic parameter row (GroundLook::params, ground.rs) — a variant
 // of a shared shader is a row, never a fork.
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var<uniform> params: array<vec4<f32>, 8>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(104) var<uniform> params: array<vec4<f32>, 8>;
 
 @fragment
 fn fragment(
@@ -129,15 +122,21 @@ fn fragment(
     );
     pbr_input.N = relief_normal(p, fw, a.n, strengths.w * a.relief);
 
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    pbr_input.material.base_color = alpha_discard(
+        pbr_input.material.flags,
+        pbr_input.material.alpha_cutoff,
+        pbr_input.material.base_color,
+    );
 
-#ifdef PREPASS_PIPELINE
+@if(PREPASS_PIPELINE)
     let out = deferred_output(in, pbr_input);
-#else
+@if(!PREPASS_PIPELINE)
     var out: FragmentOutput;
+@if(!PREPASS_PIPELINE)
     out.color = apply_pbr_lighting(pbr_input);
+@if(!PREPASS_PIPELINE)
     out.color = vec4(out.color.rgb + a.glow, out.color.a);
+@if(!PREPASS_PIPELINE)
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
-#endif
     return out;
 }

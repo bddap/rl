@@ -1,13 +1,11 @@
-// rl::ground::detail — the always-on high-frequency ground layer (rl#333 seam 2):
+// ground_detail — the always-on high-frequency ground layer (rl#333 seam 2):
 // the rl#324 adaptive descents. One copy, called only by the ground scaffold
-// (ground.wgsl), so every look composes with it by construction and a taste pass
+// (ground.wesl), so every look composes with it by construction and a taste pass
 // on on-foot detail is one edit, fleet-wide.
 
-#define_import_path rl::ground::detail
-
 // gnoise, not vnoise, in BOTH descents (rl#373): these are the two places the
-// value-noise lattice reached the eye — see rl::noise::gnoise for why.
-#import rl::noise::{gnoise, footprint_fade, grain_fade, ROT}
+// value-noise lattice reached the eye — see noise::gnoise for why.
+import package::noise::{gnoise, footprint_fade, grain_fade, ROT};
 
 // Fine color detail (meters and below): the on-foot / landing-height optic-flow cue.
 // ADAPTIVE descent (rl#324): a fixed finest octave IS a resolution — its lattice
@@ -25,7 +23,7 @@
 // out at the corners, thousands of such lattice cells.
 // Distant ground exits after one test — fw alone decides, so the loop is
 // quad-coherent and the near-fullscreen far ground pays nothing.
-// Each octave rotated by ROT from the last (why that angle: rl::noise).
+// Each octave rotated by ROT from the last (why that angle: noise).
 // `gain` is the scaffold's composed grain strength (`strengths.z * art.grain`)
 // — inside the function, like relief_normal's, so both seams share one contract
 // (pass the composed gain, get the finished contribution) and a zero-gain look

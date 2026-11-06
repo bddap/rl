@@ -17,9 +17,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-bevy = { version = "0.19", default-features = false }
-bevy_rapier3d = { version = "0.36", default-features = false }
-bevy_egui = "0.41"
+bevy = { version = "0.20.1", default-features = false }
+bevy_rapier3d = { version = "0.37", default-features = false }
+bevy_egui = "0.43"
 
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }

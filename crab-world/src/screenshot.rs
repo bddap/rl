@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use bevy::app::AppExit;
 use bevy::camera::RenderTarget;
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
+use bevy::render::view::Tonemapping;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 
 #[derive(Resource)]
@@ -36,7 +36,7 @@ pub fn offscreen_camera_bundle(target: Handle<Image>) -> impl Bundle {
             ..default()
         },
         RenderTarget::Image(target.into()),
-        Tonemapping::None,
+        Tonemapping::Linear,
         bevy::ui::IsDefaultUiCamera,
     )
 }

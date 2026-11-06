@@ -1,10 +1,8 @@
-// rl::ground::art — the look contract (rl#333 seam 3): the context the ground
-// scaffold (ground.wgsl) hands every look's `art()`, and the surface a look hands
+// ground_art — the look contract (rl#333 seam 3): the context the ground
+// scaffold (ground.wesl) hands every look's `art()`, and the surface a look hands
 // back. A look never owns `fn fragment` — it cannot skip the always-on detail
 // layer, only modulate it through the typed `grain`/`relief` fields, and a full
 // override is one explicit, reviewable line (`out.grain = 0.0`).
-
-#define_import_path rl::ground::art
 
 // The shipped-look strengths defaults (`GroundDetail::new`, ground.rs — the one
 // Rust source). Looks that tune their constants at S = 1 normalize against this

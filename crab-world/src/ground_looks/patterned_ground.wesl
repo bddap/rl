@@ -9,16 +9,14 @@
 //
 // One of the interchangeable `art()` modules in this directory; the contract —
 // GroundCtx in, GroundArt out, the scaffold owns `fn fragment` and the detail
-// layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
+// layer — lives in ground_art (ground_art.wesl) and on `GroundLook`
 // (ground.rs).
-
-#define_import_path rl::ground::looks::patterned_ground
 
 // strengths lanes here: x plate mosaic (both tiers), y unused, z mudcracks
 // (and the scaffold's grain gain), w crack grooves (and the scaffold's
 // relief gain).
-#import rl::noise::{vnoise, footprint_fade, voronoi, cell_rand}
-#import rl::ground::art::{GroundCtx, GroundArt, default_art}
+import package::noise::{vnoise, footprint_fade, voronoi, cell_rand};
+import package::ground_art::{GroundCtx, GroundArt, default_art};
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let p = ctx.p;

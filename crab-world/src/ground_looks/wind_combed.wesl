@@ -8,16 +8,14 @@
 //
 // One of the interchangeable `art()` modules in this directory; the contract —
 // GroundCtx in, GroundArt out, the scaffold owns `fn fragment` and the detail
-// layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
+// layer — lives in ground_art (ground_art.wesl) and on `GroundLook`
 // (ground.rs).
-
-#define_import_path rl::ground::looks::wind_combed
 
 // strengths lanes here: x unused, y meso comb streaks, z fine combed fiber
 // (and the scaffold's grain gain), w streak detail normal (and the scaffold's
 // relief gain).
-#import rl::noise::{footprint_fade, streak, wind_dir}
-#import rl::ground::art::{GroundCtx, GroundArt, default_art}
+import package::noise::{footprint_fade, streak, wind_dir};
+import package::ground_art::{GroundCtx, GroundArt, default_art};
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let p = ctx.p;
@@ -29,7 +27,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let n_geo = ctx.n_geo;
     let steep = 1.0 - n_geo.y;
 
-    // The comb direction: the shared wind field (rl::noise wind_dir).
+    // The comb direction: the shared wind field (noise wind_dir).
     let d = wind_dir(p, n_geo);
 
     // Meso comb streaks (tens of meters, direction-locked): the look's spine.

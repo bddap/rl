@@ -9,7 +9,6 @@
 //! the swap reaches only the fragment shader the ground pipeline is specialized
 //! with.
 
-use bevy::asset::{load_internal_asset, uuid_handle};
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{
     ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
@@ -33,12 +32,12 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 /// field to write and no wrapper to keep in sync.
 ///
 /// Each look is an `art()` MODULE in `src/ground_looks/` (the rl#333 flip): the
-/// one scaffold `ground.wgsl` owns `fn fragment`, builds the shared `GroundCtx`
+/// one scaffold `ground.wesl` owns `fn fragment`, builds the shared `GroundCtx`
 /// (anchor-relative ground plane, footprint, normals, view vector, biome tint +
 /// veg/snow masks, hydrology sample — documented field-by-field in
-/// `ground_art.wgsl`), dispatches to the selected look on the `LOOK_*` shader def
+/// `ground_art.wesl`), dispatches to the selected look on the `LOOK_*` shader def
 /// pushed by [`GroundDetail::specialize`], applies the always-on high-frequency
-/// detail layer (`rl::ground::detail`, modulated by the look's `grain`/`relief`
+/// detail layer (`ground_detail`, modulated by the look's `grain`/`relief`
 /// fields — a look cannot skip it, only turn it down in one reviewable line),
 /// then lighting, then the look's additive `glow`.
 ///
@@ -58,9 +57,9 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 ///
 /// To add a look: an `art()` module in `src/ground_looks/`, a variant here, a row
 /// in [`ground_looks!`] — exhaustive over this enum, so a variant with no row is a
-/// compile error rather than a look nobody can reach — and the row's `#ifdef`
-/// dispatch line in `ground.wgsl` (guarded by
-/// `every_look_def_dispatches_in_the_scaffold`; the chain has no `#else`, so a
+/// compile error rather than a look nobody can reach — and the row's `@if`
+/// dispatch line in `ground.wesl` (guarded by
+/// `every_look_def_dispatches_in_the_scaffold`; the chain has no `@else`, so a
 /// missing line fails pipeline creation loudly instead of silently drawing
 /// Shipped).
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Reflect, clap::ValueEnum)]
@@ -91,11 +90,14 @@ pub enum GroundLook {
 }
 
 /// The scaffold — the ONE fragment shader every ground pipeline runs (rl#333):
-/// it builds `GroundCtx`, `#ifdef`-dispatches to the selected look's `art()`
-/// module, and applies the always-on detail layer. A const UUID handle because
-/// [`MaterialExtension::fragment_shader`] gets no world access to resolve a
-/// loaded path.
-const GROUND_SHADER_HANDLE: Handle<Shader> = uuid_handle!("b7c9d4e2-8f13-4a6b-9c05-2e7d81f3a924");
+/// it builds `GroundCtx`, `@if`-dispatches to the selected look's `art()`
+/// module, and applies the always-on detail layer.
+fn ground_shader() -> ShaderRef {
+    ShaderRef::Path(
+        bevy::asset::AssetPath::from_path_buf(bevy::asset::embedded_path!("ground.wesl"))
+            .with_source("embedded"),
+    )
+}
 
 /// The one place a look's dispatch def and its module file sit together. Split
 /// across a `match` and a separate registration call, they drift, and a look ends
@@ -105,7 +107,7 @@ const GROUND_SHADER_HANDLE: Handle<Shader> = uuid_handle!("b7c9d4e2-8f13-4a6b-9c
 macro_rules! ground_looks {
     ($($($look:ident)|+ => $file:literal, $def:literal;)*) => {
         impl GroundLook {
-            /// The look's `#ifdef` dispatch def in `ground.wgsl`, pushed onto the
+            /// The look's `@if` dispatch def in `ground.wesl`, pushed onto the
             /// forward fragment stage by [`GroundDetail::specialize`] — which
             /// `art()` import the scaffold resolves. Several looks may share one
             /// def (a row with `A | B | …`) — those are parameter sets over one
@@ -117,38 +119,38 @@ macro_rules! ground_looks {
             }
         }
 
-        /// Every look module registered on the shader composer, path-addressed via
-        /// its `#define_import_path` — the same naga_oil route the `bevy_pbr::`
-        /// imports ride. Embedded, so a missing or misnamed file is a BUILD error
-        /// instead of a runtime "path not found" that un-renders the ground.
+        /// Every look module registered as an embedded WESL module, addressed by
+        /// its file path (`package::ground_looks::<stem>`). Embedded, so a missing
+        /// or misnamed file is a BUILD error instead of a runtime "path not found"
+        /// that un-renders the ground.
         fn register_look_shaders(app: &mut App) {
             $(bevy::shader::load_shader_library!(app, $file);)*
         }
 
         /// Every variant's dispatch must appear as exactly ONE whole
-        /// `#ifdef <def> / #import <its own module>::art / #endif` block in the
-        /// scaffold. Zero means the look can never render (and, the chain having
-        /// no `#else`, fails pipeline creation only at RUNTIME, once someone
-        /// cycles onto it); two means one is dead text masking the other; and
-        /// matching the WHOLE block — not just the `#ifdef` — catches the def
+        /// `@if(<def>) / import <its own module>::art;` pair in the scaffold. Zero
+        /// means the look can never render (and, the chain having no `@else`,
+        /// fails pipeline creation only at RUNTIME, once someone cycles onto it);
+        /// two means one is dead text masking the other; and matching the WHOLE
+        /// pair — not just the `@if` — catches the def
         /// wrapping a NEIGHBOUR's import, which every Rust-side test would pass
         /// while the look draws the wrong art. Guarded here at build time.
         #[cfg(test)]
         #[test]
         fn every_look_def_dispatches_in_the_scaffold() {
-            let scaffold = include_str!("ground.wgsl");
+            let scaffold = include_str!("ground.wesl");
             $(
                 let stem = $file
                     .trim_start_matches("ground_looks/")
-                    .trim_end_matches(".wgsl");
+                    .trim_end_matches(".wesl");
                 let block = format!(
-                    "#ifdef {}\n#import rl::ground::looks::{}::art\n#endif\n",
+                    "@if({})\nimport package::ground_looks::{}::art;\n",
                     $def, stem
                 );
                 assert_eq!(
                     scaffold.matches(block.as_str()).count(),
                     1,
-                    concat!($def, " must dispatch its own module exactly once in ground.wgsl")
+                    concat!($def, " must dispatch its own module exactly once in ground.wesl")
                 );
             )*
         }
@@ -183,7 +185,7 @@ macro_rules! ground_looks {
         /// `ctx.time` included — out of the bevy bindings ONCE. A look importing
         /// `bevy_pbr::` itself (mesh_view_bindings, pbr_functions…) would grow a
         /// second, uncontracted input no swap test can see; the GroundCtx doc
-        /// (ground_art.wgsl) states the ban, this enforces it. Comments stripped
+        /// (ground_art.wesl) states the ban, this enforces it. Comments stripped
         /// so prose may still NAME the banned path.
         #[cfg(test)]
         #[test]
@@ -213,20 +215,20 @@ macro_rules! ground_looks {
 #[test]
 fn scaffold_reads_no_absent_uv_channel() {
     assert!(
-        !include_str!("ground.wgsl").contains("in.uv"),
-        "ground.wgsl reads in.uv, which the terrain mesh no longer carries"
+        !include_str!("ground.wesl").contains("in.uv"),
+        "ground.wesl reads in.uv, which the terrain mesh no longer carries"
     );
 }
 
 ground_looks! {
-    Shipped => "ground_looks/shipped.wgsl", "LOOK_SHIPPED";
+    Shipped => "ground_looks/shipped.wesl", "LOOK_SHIPPED";
     NightBloom | NightBloomAurora | NightBloomEmber | NightBloomFrost
-        | NightBloomRose | NightBloomFiligree => "ground_looks/night_bloom.wgsl", "LOOK_NIGHT_BLOOM";
-    PatternedGround => "ground_looks/patterned_ground.wgsl", "LOOK_PATTERNED_GROUND";
-    WindCombed => "ground_looks/wind_combed.wgsl", "LOOK_WIND_COMBED";
-    CrackedLoam => "ground_looks/cracked_loam.wgsl", "LOOK_CRACKED_LOAM";
+        | NightBloomRose | NightBloomFiligree => "ground_looks/night_bloom.wesl", "LOOK_NIGHT_BLOOM";
+    PatternedGround => "ground_looks/patterned_ground.wesl", "LOOK_PATTERNED_GROUND";
+    WindCombed => "ground_looks/wind_combed.wesl", "LOOK_WIND_COMBED";
+    CrackedLoam => "ground_looks/cracked_loam.wesl", "LOOK_CRACKED_LOAM";
     Watershed | WatershedNaturalist | WatershedNocturne
-        => "ground_looks/watershed.wgsl", "LOOK_WATERSHED";
+        => "ground_looks/watershed.wesl", "LOOK_WATERSHED";
 }
 
 /// Seconds per breath of the night-bloom glow (rl#420): slow enough to read as
@@ -240,7 +242,7 @@ impl GroundLook {
     /// shader fork. Zero for every look whose shader doesn't read 104. Exhaustive
     /// over the enum, so a new variant without a row is a compile error.
     ///
-    /// night_bloom.wgsl lanes:
+    /// night_bloom.wesl lanes:
     /// - `[0]` xyz night tint (base-color multiplier), w ground darkening under glow
     /// - `[1]` xyz vein color, w artery emissive intensity
     /// - `[2]` xyz knot-flush color, w knot mix strength
@@ -250,7 +252,7 @@ impl GroundLook {
     /// - `[5]` x artery width, y artery core width, z capillary width (noise-space),
     ///   w the breathing period, [`BLOOM_CYCLE_S`]
     ///
-    /// watershed.wgsl lanes (`[0]` only — the rl#323 design axes):
+    /// watershed.wesl lanes (`[0]` only — the rl#323 design axes):
     /// - `[0]` x bloom gain (fable-2's emissive web; 0 = no emissive anywhere),
     ///   y cellular structure (provinces + plates + cobble) — a GATE (> 0.5), not
     ///   a gain: off skips every Voronoi call,
@@ -352,7 +354,7 @@ impl GroundLook {
 
 /// Strength knobs for the shader's layers, one uniform so a taste iteration is a
 /// constant tweak, not a shader rewrite. Defaults are the shipped look (mirrored
-/// as `STRENGTH_DEFAULTS` in `ground_art.wgsl` for the looks that normalize
+/// as `STRENGTH_DEFAULTS` in `ground_art.wesl` for the looks that normalize
 /// against them — keep the two in sync). The lanes are four per-look intensity
 /// buckets: x macro structure (provinces/plate mosaic — unused by shipped,
 /// night_bloom, wind_combed), y meso, z fine grain, w relief;
@@ -415,7 +417,7 @@ impl MaterialExtension for GroundDetail {
     /// The scaffold — the same shader for every look; [`Self::specialize`] selects
     /// the look by pushing its `LOOK_*` def, never by repointing the stage.
     fn fragment_shader() -> ShaderRef {
-        GROUND_SHADER_HANDLE.into()
+        ground_shader()
     }
 
     fn specialize(
@@ -569,19 +571,16 @@ pub struct GroundMaterialPlugin {
 
 impl Plugin for GroundMaterialPlugin {
     fn build(&self, app: &mut App) {
-        // The shared noise module (rl#333 seam 1). Path-addressed (`rl::noise` via
-        // `#define_import_path`), so the looks resolve it through the same naga_oil
-        // composer their `bevy_pbr::` imports already ride.
-        bevy::shader::load_shader_library!(app, "noise.wgsl");
-        // The always-on high-frequency detail layer (rl#333 seam 2) — same
-        // path-addressed mechanism, imported as `rl::ground::detail`.
-        bevy::shader::load_shader_library!(app, "ground_detail.wgsl");
-        // The look contract types (`rl::ground::art`: GroundCtx / GroundArt).
-        bevy::shader::load_shader_library!(app, "ground_art.wgsl");
+        // The shared noise module (rl#333 seam 1), imported as `package::noise`.
+        bevy::shader::load_shader_library!(app, "noise.wesl");
+        // The always-on high-frequency detail layer (rl#333 seam 2).
+        bevy::shader::load_shader_library!(app, "ground_detail.wesl");
+        // The look contract types (`ground_art`: GroundCtx / GroundArt).
+        bevy::shader::load_shader_library!(app, "ground_art.wesl");
         register_look_shaders(app);
         // The scaffold (rl#333 seam 3) — the one `fn fragment`, compiled in so a
         // misnamed file is a BUILD error.
-        load_internal_asset!(app, GROUND_SHADER_HANDLE, "ground.wgsl", Shader::from_wgsl);
+        bevy::shader::load_shader_library!(app, "ground.wesl");
         app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
             .insert_resource(self.initial)
             .init_resource::<GroundAnchor>()

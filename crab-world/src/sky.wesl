@@ -16,14 +16,14 @@
 // bevy's light pre-exposure; a material fragment is never pre-exposed, so that
 // counterweight vanishes rather than being ported.
 
-#import bevy_pbr::mesh_view_bindings::view
-#import rl::noise::{hash3, rand01}
+import bevy_pbr::render::mesh_view_bindings::view;
+import package::noise::{hash3, rand01};
 
 // The moon knobs (crate::moon::Moon, synced by sky.rs). xyz/w of the first:
 // world-space unit vector toward the moon / phase [0,1) (0 new, 0.5 full). The
 // second: srgb moon tint / illuminated fraction (drives the halo).
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> moon_dir_phase: vec4<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> moon_color_frac: vec4<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> moon_dir_phase: vec4<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(1) var<uniform> moon_color_frac: vec4<f32>;
 
 struct SkyVertexOutput {
     @builtin(position) position: vec4<f32>,

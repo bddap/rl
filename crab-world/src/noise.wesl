@@ -1,16 +1,14 @@
-// rl::noise — the one copy of the procedural-noise helpers (rl#333 seam 1) and
+// noise — the one copy of the procedural-noise helpers (rl#333 seam 1) and
 // of the shared ground-look fields built on them (sparkle, wind_dir, cell_rand:
 // helpers with baked art-direction constants that more than one look reads).
-// Every ground look and sky.wgsl import from here.
+// Every ground look and sky.wesl import from here.
 // History's warning, and this module's reason to exist: as per-file copies these
 // drifted twice (the rl#324 quintic fix reached 1 of 14 looks) — a fix here is
 // fleet-wide by construction.
 
-#define_import_path rl::noise
-
 // Same integer-hash family as the Rust side's sky/terrain jitter (sky.rs hash3).
 fn hash2(p: vec2<i32>, seed: u32) -> u32 {
-    var h = bitcast<u32>(p.x) * 0x8da6b343u ^ bitcast<u32>(p.y) * 0xd8163841u ^ seed * 0xcb1ab31fu;
+    var h = (bitcast<u32>(p.x) * 0x8da6b343u) ^ (bitcast<u32>(p.y) * 0xd8163841u) ^ (seed * 0xcb1ab31fu);
     h ^= h >> 13u;
     h *= 0x165667b1u;
     h ^= h >> 16u;
@@ -20,9 +18,9 @@ fn hash2(p: vec2<i32>, seed: u32) -> u32 {
 // 3D sibling; constants match sky.rs's hash3 (bitcast matches Rust's `as u32` on
 // negative cells).
 fn hash3(v: vec3<i32>) -> u32 {
-    var h = bitcast<u32>(v.x) * 0x8da6b343u
-        ^ bitcast<u32>(v.y) * 0xd8163841u
-        ^ bitcast<u32>(v.z) * 0xcb1ab31fu;
+    var h = (bitcast<u32>(v.x) * 0x8da6b343u)
+        ^ (bitcast<u32>(v.y) * 0xd8163841u)
+        ^ (bitcast<u32>(v.z) * 0xcb1ab31fu);
     h ^= h >> 13u;
     h *= 0x165667b1u;
     h ^= h >> 16u;
@@ -65,7 +63,7 @@ fn grad2(h: u32) -> vec2<f32> {
 // cell scale — a normal built from it shows the lattice as cells with ramps
 // between them (rl#373). Gradient noise puts one SLOPE per cell (value 0 at
 // every corner), so derivative energy is spread across the cell: the
-// rl::ground::detail descents sample HERE. vnoise stays alive alongside for
+// ground_detail descents sample HERE. vnoise stays alive alongside for
 // the field/threshold/vein uses — gradient noise is zero at every lattice
 // point, so a threshold or zero-set (vein) of it would inherit exactly the
 // lattice structure this function exists to remove.
@@ -111,8 +109,6 @@ fn streak(p: vec2<f32>, d: vec2<f32>, along: f32, across: f32, seed: u32) -> f32
     return vnoise(q, seed);
 }
 
-// The F1 member is `dist`, not `f1`: naga_oil 0.20 breaks a cross-module member
-// named `f1` — importers fail naga validation with "invalid field accessor `f1`".
 struct Voro {
     dist: f32, // F1: distance to nearest feature point (cell units)
     edge: f32, // F2-F1: ~0 on a cell border

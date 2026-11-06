@@ -9,15 +9,13 @@
 //
 // One of the interchangeable `art()` modules in this directory; the contract —
 // GroundCtx in, GroundArt out, the scaffold owns `fn fragment` and the detail
-// layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
+// layer — lives in ground_art (ground_art.wesl) and on `GroundLook`
 // (ground.rs).
-
-#define_import_path rl::ground::looks::night_bloom
 
 // strengths lanes here: x vein glow, y meso patchiness, z spore
 // density (and the scaffold's grain gain), w the scaffold's relief gain.
-#import rl::noise::{hash2, rand01, vnoise, footprint_fade, vein}
-#import rl::ground::art::{GroundCtx, GroundArt, default_art}
+import package::noise::{hash2, rand01, vnoise, footprint_fade, vein};
+import package::ground_art::{GroundCtx, GroundArt, default_art};
 
 const TAU: f32 = 6.283185307;
 // Peak-to-mean swing of the breathing bloom light: 1 ± this.

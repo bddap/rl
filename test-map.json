@@ -71,7 +71,7 @@
         "**/Cargo.toml",
         "Cargo.lock",
         ".cargo/config.toml",
-        "**/*.wgsl",
+        "**/*.wesl",
         "crab-world/assets/**"
       ],
       "tests": [

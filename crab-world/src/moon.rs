@@ -1,5 +1,5 @@
 //! The moon — THE light source (rl#374). One knob-driven state drives both the
-//! sky's visible disc (`sky.wgsl`, via `StarSkyMaterial` uniforms) and the one
+//! sky's visible disc (`sky.wesl`, via `StarSkyMaterial` uniforms) and the one
 //! `DirectionalLight`, so the light on the terrain and the disc in the sky can
 //! never disagree. There is no other directional light anywhere.
 
@@ -103,7 +103,7 @@ impl Moon {
     /// moon is ~1/10 of full, matching the real moon's strongly superlinear
     /// brightness curve — over a small earthshine floor so a new-moon world is
     /// dark but not a void (ambient starlight stays separate). Distinct from
-    /// the disc's 0.1 dark-limb floor in `sky.wgsl` — that one is albedo on the
+    /// the disc's 0.1 dark-limb floor in `sky.wesl` — that one is albedo on the
     /// visible disc, this one is light on the world; they need not match.
     pub fn illuminance(&self) -> f32 {
         let f = self.illuminated_fraction();

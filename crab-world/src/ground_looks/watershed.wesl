@@ -36,19 +36,17 @@
 //
 // One of the interchangeable `art()` modules in this directory; the contract —
 // GroundCtx in, GroundArt out, the scaffold owns `fn fragment` and the detail
-// layer — lives in rl::ground::art (ground_art.wgsl) and on `GroundLook`
+// layer — lives in ground_art (ground_art.wesl) and on `GroundLook`
 // (ground.rs). Designs B (naturalist) and C (nocturne) are param rows over this
 // one module (`GroundLook::params`), never forks. Watershed's own row turns
 // every design axis on: each use below multiplies or gates on a lane.
-
-#define_import_path rl::ground::looks::watershed
 
 // strengths lanes here: x macro provinces + moisture contrast, y meso structure
 // (plates/comb/scree flow), z near-field (cobble/fiber/dew, and the scaffold's
 // grain gain), w detail normal (cobble, and the scaffold's relief gain)
 // — all normalized to S = strengths / STRENGTH_DEFAULTS.
-#import rl::noise::{hash2, rand01, vnoise, footprint_fade, sparkle, streak, voronoi, cell_rand, vein, wind_dir}
-#import rl::ground::art::{GroundCtx, GroundArt, STRENGTH_DEFAULTS, default_art}
+import package::noise::{hash2, rand01, vnoise, footprint_fade, sparkle, streak, voronoi, cell_rand, vein, wind_dir};
+import package::ground_art::{GroundCtx, GroundArt, STRENGTH_DEFAULTS, default_art};
 
 fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let wp = ctx.wp;
@@ -88,7 +86,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     let fray = hydro.r * (1.0 - hydro.r) * 4.0;
     let moist = clamp(hydro.r + (m_fbm - 0.5) * 0.55 * fray, 0.0, 1.0) * (1.0 - snow);
 
-    // WIND — the shared direction field (rl::noise wind_dir): the same wind,
+    // WIND — the shared direction field (noise wind_dir): the same wind,
     // by construction, that combs wind_combed.
     let wind_d = wind_dir(p, n_geo);
 
@@ -306,7 +304,7 @@ fn art(ctx: GroundCtx, params: array<vec4<f32>, 8>) -> GroundArt {
     out.roughness = rough;
     out.n = n;
     out.emissive = emissive;
-    // Dew glints (rl::noise sparkle): near-field only, boosted on snow AND
+    // Dew glints (noise sparkle): near-field only, boosted on snow AND
     // moisture, drowned in puddles. Post-lighting additive radiance — the
     // scaffold adds it after apply_pbr_lighting. Computed on the look-level
     // normal: the scaffold's relief layer runs after art(), a known small drift
