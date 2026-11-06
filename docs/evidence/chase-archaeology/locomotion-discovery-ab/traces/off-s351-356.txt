@@ -1,0 +1,23 @@
+RENDER_ROLLOUT terrain=Flat band_max_m=9 seed=Some(356) exploration_log_std_floor=None
+RENDER_CHECKPOINT dir=/home/bot/.cache/botq-wt/10564/runs/off-s351/ckpt/marks/40000000 ticks=40000512
+ROLLOUT_TRACE video_tick=64 body=Vec3(0.1760765, 0.4341086, -1.4116545) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.44828 tip_distance_m=Some(0.86234903) upright=-0.73071
+ROLLOUT_TRACE video_tick=128 body=Vec3(0.12893601, 0.50942117, -1.7191128) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.68095 tip_distance_m=Some(1.0576029) upright=-0.96551
+ROLLOUT_TRACE video_tick=192 body=Vec3(0.10577483, 0.44208798, -1.6373917) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.59682 tip_distance_m=Some(1.2786438) upright=-0.96998
+ROLLOUT_TRACE video_tick=256 body=Vec3(-0.0155542595, 0.49040085, -1.7306908) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.64931 tip_distance_m=Some(1.3270491) upright=-0.93764
+ROLLOUT_TRACE video_tick=320 body=Vec3(-0.057303883, 0.5288875, -1.7625515) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.67426 tip_distance_m=Some(1.4003977) upright=-0.95037
+ROLLOUT_TRACE video_tick=384 body=Vec3(-0.104742035, 0.52906096, -1.9119455) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.81936 tip_distance_m=Some(1.4971889) upright=-0.88124
+ROLLOUT_TRACE video_tick=448 body=Vec3(-0.1596309, 0.5198552, -1.8002671) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.70723 tip_distance_m=Some(1.4091686) upright=-0.99287
+ROLLOUT_TRACE video_tick=512 body=Vec3(-0.14308518, 0.4416075, -1.5657934) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.47248 tip_distance_m=Some(0.920847) upright=-0.81414
+ROLLOUT_TRACE video_tick=576 body=Vec3(-0.15465651, 0.44887802, -1.4493506) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.35635 tip_distance_m=Some(0.82641757) upright=-0.76416
+ROLLOUT_TRACE video_tick=640 body=Vec3(-0.13150172, 0.46437502, -1.4733347) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.38009 tip_distance_m=Some(0.81417644) upright=-0.79100
+ROLLOUT_TRACE video_tick=704 body=Vec3(0.15918039, 0.45733136, -1.664025) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.64416 tip_distance_m=Some(1.3150063) upright=-0.98454
+ROLLOUT_TRACE video_tick=768 body=Vec3(0.46060026, 0.48614845, -1.9204476) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=1.02192 tip_distance_m=Some(1.6143568) upright=-0.90829
+ROLLOUT_TRACE video_tick=832 body=Vec3(0.449079, 0.48693702, -1.9077251) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=1.00485 tip_distance_m=Some(1.5692735) upright=-0.93375
+ROLLOUT_TRACE video_tick=896 body=Vec3(0.39217803, 0.486663, -1.8620731) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.93472 tip_distance_m=Some(1.6186616) upright=-0.95790
+ROLLOUT_TRACE video_tick=960 body=Vec3(0.3456862, 0.5331168, -1.7887112) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.84795 tip_distance_m=Some(1.5462463) upright=-0.99198
+ROLLOUT_TRACE video_tick=1024 body=Vec3(0.25246248, 0.42532715, -1.5975038) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.63865 tip_distance_m=Some(1.3001269) upright=-0.85537
+ROLLOUT_TRACE video_tick=1088 body=Vec3(0.31070763, 0.3666821, -1.5817008) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.66426 tip_distance_m=Some(1.1478146) upright=-0.90146
+ROLLOUT_TRACE video_tick=1152 body=Vec3(0.31156152, 0.4114058, -1.4595686) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.58106 tip_distance_m=Some(0.9717706) upright=-0.67308
+ROLLOUT_TRACE video_tick=1216 body=Vec3(0.32776693, 0.37052718, -1.5542932) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.65641 tip_distance_m=Some(0.8427134) upright=-0.86636
+ROLLOUT_TRACE video_tick=1280 body=Vec3(0.2875193, 0.3807115, -1.5953872) target=Vec3(-0.13954946, 0.64478385, -1.0933254) distance_m=0.65913 tip_distance_m=Some(0.65879875) upright=-0.67729
+DRIVE_STATS ticks=1280 mean_abs_drive=0.84887 mean_effort=29.75349 hard_ccd_crab_link_clamp_candidates=11

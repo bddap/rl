@@ -1,0 +1,74 @@
+off-s351
+unit_result=success exit=0
+launches=25 cold_starts=1 (every other launch warm-resumed from ckpt/ after a CPU-turn pause) integrity_lines=0 panics=0
+[learner] DONE: rollout 181 samples/sec | end-to-end 180 samples/sec | 16991348 samples over 94583.8s (93808.8s rollout) | K=6 M=2 H=512
+[learner] Tick budget reached (40000512 ticks) — stopping training.
+ff266b5cc86dee5008f72037c85dff42e5e941c52682727e4c6c4e1e844b50c1  brain.bin
+4cebdd61c79296fc6cfada16677a3abdc2986c79d22ee7b9b77aadffc0e8b6f2  normalizer.bin
+b6d3ca9a890ee440aaf38713d202adbc4ab88274e48abac4ff52317fb1b59115  ticks.txt
+ff266b5cc86dee5008f72037c85dff42e5e941c52682727e4c6c4e1e844b50c1  marks/40000000/brain.bin
+4cebdd61c79296fc6cfada16677a3abdc2986c79d22ee7b9b77aadffc0e8b6f2  marks/40000000/normalizer.bin
+
+off-s352
+unit_result=success exit=0
+launches=26 cold_starts=1 (every other launch warm-resumed from ckpt/ after a CPU-turn pause) integrity_lines=0 panics=0
+[learner] DONE: rollout 180 samples/sec | end-to-end 178 samples/sec | 16861532 samples over 94704.0s (93861.0s rollout) | K=6 M=2 H=512
+[learner] Tick budget reached (40000512 ticks) — stopping training.
+b3949f9e79c3734a4212e09321364a888c210f1a006abbc166d481ee01981191  brain.bin
+9c005900b545880d7e41a0e607114c4d8dce4486d252bd2ce17c5fb85b70b608  normalizer.bin
+b6d3ca9a890ee440aaf38713d202adbc4ab88274e48abac4ff52317fb1b59115  ticks.txt
+b3949f9e79c3734a4212e09321364a888c210f1a006abbc166d481ee01981191  marks/40000000/brain.bin
+9c005900b545880d7e41a0e607114c4d8dce4486d252bd2ce17c5fb85b70b608  marks/40000000/normalizer.bin
+
+off-s353
+unit_result=success exit=0
+launches=23 cold_starts=1 (every other launch warm-resumed from ckpt/ after a CPU-turn pause) integrity_lines=0 panics=0
+[learner] DONE: rollout 181 samples/sec | end-to-end 176 samples/sec | 16589129 samples over 94119.0s (91494.1s rollout) | K=6 M=2 H=512
+[learner] Tick budget reached (40000512 ticks) — stopping training.
+17ad3c76b236d1df77c3f6ad810fb5b8a9a1c81812eba68caadaab50ab12ec27  brain.bin
+a3ce819a106924a49108a040eaaefc878736fbc53219fc525da43245c2f15011  normalizer.bin
+b6d3ca9a890ee440aaf38713d202adbc4ab88274e48abac4ff52317fb1b59115  ticks.txt
+17ad3c76b236d1df77c3f6ad810fb5b8a9a1c81812eba68caadaab50ab12ec27  marks/40000000/brain.bin
+a3ce819a106924a49108a040eaaefc878736fbc53219fc525da43245c2f15011  marks/40000000/normalizer.bin
+
+on-s351
+unit_result=success exit=0
+launches=23 cold_starts=1 (every other launch warm-resumed from ckpt/ after a CPU-turn pause) integrity_lines=0 panics=0
+[learner] DONE: rollout 180 samples/sec | end-to-end 175 samples/sec | 16590621 samples over 94977.0s (92396.1s rollout) | K=6 M=2 H=512
+[learner] Tick budget reached (40000512 ticks) — stopping training.
+f54cf196aad4a05cea90230b63cd3541d665146f33722202f7677ff7bac07c31  brain.bin
+d9ab96bd376397db1827e68a591cd75714be36f003b94c5c145bbc239b0a49f9  normalizer.bin
+b6d3ca9a890ee440aaf38713d202adbc4ab88274e48abac4ff52317fb1b59115  ticks.txt
+f54cf196aad4a05cea90230b63cd3541d665146f33722202f7677ff7bac07c31  marks/40000000/brain.bin
+d9ab96bd376397db1827e68a591cd75714be36f003b94c5c145bbc239b0a49f9  marks/40000000/normalizer.bin
+
+on-s352
+unit_result=success exit=0
+launches=18 cold_starts=1 (every other launch warm-resumed from ckpt/ after a CPU-turn pause) integrity_lines=0 panics=0
+[learner] DONE: rollout 191 samples/sec | end-to-end 182 samples/sec | 17522727 samples over 96220.8s (91753.6s rollout) | K=6 M=2 H=512
+[learner] Tick budget reached (40000512 ticks) — stopping training.
+a593f60b43538532b38c300a55b2ed131de20181f17ec79945146a2307fd4189  brain.bin
+85ccbd1e6555a05214ab48eec36fd4d8c8488590aeb3056a5e812368a23a7fb7  normalizer.bin
+b6d3ca9a890ee440aaf38713d202adbc4ab88274e48abac4ff52317fb1b59115  ticks.txt
+a593f60b43538532b38c300a55b2ed131de20181f17ec79945146a2307fd4189  marks/40000000/brain.bin
+85ccbd1e6555a05214ab48eec36fd4d8c8488590aeb3056a5e812368a23a7fb7  marks/40000000/normalizer.bin
+
+on-s353
+unit_result=success exit=0
+launches=17 cold_starts=1 (every other launch warm-resumed from ckpt/ after a CPU-turn pause) integrity_lines=0 panics=0
+[learner] DONE: rollout 189 samples/sec | end-to-end 184 samples/sec | 17661808 samples over 95990.9s (93311.2s rollout) | K=6 M=2 H=512
+[learner] Tick budget reached (40000512 ticks) — stopping training.
+a20b87fec6e4aa115f6a9332f31b9388b3f4ef3fc2c2012cd452856d0cd9e05a  brain.bin
+4e1f3cd420eab0223d85628e29b2ae8f57681e5da91b86d25234f31584a5ad3e  normalizer.bin
+b6d3ca9a890ee440aaf38713d202adbc4ab88274e48abac4ff52317fb1b59115  ticks.txt
+a20b87fec6e4aa115f6a9332f31b9388b3f4ef3fc2c2012cd452856d0cd9e05a  marks/40000000/brain.bin
+4e1f3cd420eab0223d85628e29b2ae8f57681e5da91b86d25234f31584a5ad3e  marks/40000000/normalizer.bin
+
+
+Binaries per run (sha256 at read time, and distinct launch-line hashes in train.log):
+off-s351 rl-train=de09495f0719e8bf rl-demo=231d971caa48d648 launch_hashes=sha256=de09495f0719e8bfdc3f7ac960f3ff06ca8dde856ef5c591a5440656d48324d3 
+off-s352 rl-train=de09495f0719e8bf rl-demo=231d971caa48d648 launch_hashes=sha256=de09495f0719e8bfdc3f7ac960f3ff06ca8dde856ef5c591a5440656d48324d3 
+off-s353 rl-train=de09495f0719e8bf rl-demo=231d971caa48d648 launch_hashes=sha256=de09495f0719e8bfdc3f7ac960f3ff06ca8dde856ef5c591a5440656d48324d3 
+on-s351 rl-train=de09495f0719e8bf rl-demo=231d971caa48d648 launch_hashes=sha256=de09495f0719e8bfdc3f7ac960f3ff06ca8dde856ef5c591a5440656d48324d3 
+on-s352 rl-train=de09495f0719e8bf rl-demo=231d971caa48d648 launch_hashes=sha256=de09495f0719e8bfdc3f7ac960f3ff06ca8dde856ef5c591a5440656d48324d3 
+on-s353 rl-train=de09495f0719e8bf rl-demo=231d971caa48d648 launch_hashes=sha256=de09495f0719e8bfdc3f7ac960f3ff06ca8dde856ef5c591a5440656d48324d3 

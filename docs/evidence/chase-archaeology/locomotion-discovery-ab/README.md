@@ -1,6 +1,6 @@
 # Locomotion-discovery A/B: pre-registration
 
-Status: pre-registered; runs not yet launched. This is the locomotion-discovery increment of [#351](https://github.com/bddap/rl/issues/351).
+Status: complete — **rejected** ([verdict](verdict.md)); the gait clock and `--gait-clock` are removed from main. This is the locomotion-discovery increment of [#351](https://github.com/bddap/rl/issues/351).
 
 **Reading.** On the friction-fixed flat plant the registered flail travels 1.51 m in 20 s and random periodic open-loop gaits a median 1.48 m, but 4 of 96 cross 9 m ([gait search](../long-distance-closing-ab/gait-search.txt)). No trained policy has closed to within 0.5 m from 2.5 m or farther: 0/71 in the [last A/B](../long-distance-closing-ab/verdict.md). Spawn distance, entropy floor and upright shaping did not change that. The policy is a feed-forward map from the current observation to joint drives, and nothing in the observation oscillates, so a rhythm has to emerge from body state alone or from per-tick exploration noise.
 
@@ -10,7 +10,7 @@ Status: pre-registered; runs not yet launched. This is the locomotion-discovery 
 
 **Layout.** The clock adds two observation channels in both arms, so the channel-layout digest moves and checkpoints trained before this change no longer arm on main. A reject removes the channels and restores the previous layout.
 
-**Runs.** Six cold runs, one trainer binary built from main at the option's landing, with `rl-demo` from the same pin and the shipped plant `sally.glb`:
+**Runs.** Six cold runs, one trainer binary built from main at `569aca5`, with `rl-demo` from the same pin and the shipped plant `sally.glb`:
 
 `rl-train learn --terrain flat --band-max-m 9 --gait-clock {off|on} --arch mlp512x3 --workers 6 --envs 2 --horizon 512 --seed {351,352,353} --log-std-floor-end -1 --ticks 40000000 --read-mark 40000000`
 
@@ -27,3 +27,11 @@ All six run under the same runner. Warm resumes are recorded, and settings never
 2. Pooled episode-weighted 30–40M training reach is not below control's: the one-sided two-proportion z test of H1 control > treatment at p < 0.05 counts as harm.
 
 A keep makes the clock the flat baseline recipe and removes `--gait-clock`. A reject removes the clock channels and `--gait-clock` from main and records why.
+
+Full SHA-256 digests (release builds of `-p rl-train -p rl-demo` at `569aca5`):
+
+```
+de09495f0719e8bfdc3f7ac960f3ff06ca8dde856ef5c591a5440656d48324d3  rl-train
+231d971caa48d648e2a8c6b630cc615eda85711f95a609f6f545e7062587bd9f  rl-demo
+119d5a4f9986f3739e01677910f9880ddc48a47b0a12a24236c1781426a7bf0b  sally.glb
+```

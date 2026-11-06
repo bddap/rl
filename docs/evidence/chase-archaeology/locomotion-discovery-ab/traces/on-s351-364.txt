@@ -1,0 +1,23 @@
+RENDER_ROLLOUT terrain=Flat band_max_m=9 seed=Some(364) exploration_log_std_floor=None
+RENDER_CHECKPOINT dir=/home/bot/.cache/botq-wt/10564/runs/on-s351/ckpt/marks/40000000 ticks=40000512
+ROLLOUT_TRACE video_tick=64 body=Vec3(-0.42424974, 0.43326798, -0.51134485) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=3.46214 tip_distance_m=Some(3.9286935) upright=0.74850
+ROLLOUT_TRACE video_tick=128 body=Vec3(-0.6523876, 0.40632027, -0.70556366) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=3.17747 tip_distance_m=Some(3.5814881) upright=0.73517
+ROLLOUT_TRACE video_tick=192 body=Vec3(-0.8317468, 0.42303705, -0.7776247) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=3.02645 tip_distance_m=Some(3.3398123) upright=0.73658
+ROLLOUT_TRACE video_tick=256 body=Vec3(-0.98205584, 0.40620694, -0.7959877) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=2.94148 tip_distance_m=Some(3.2061896) upright=0.72087
+ROLLOUT_TRACE video_tick=320 body=Vec3(-0.9822623, 0.44701394, -0.8242197) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=2.91603 tip_distance_m=Some(3.2350776) upright=0.74211
+ROLLOUT_TRACE video_tick=384 body=Vec3(-0.9973433, 0.45163417, -1.004101) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=2.74876 tip_distance_m=Some(3.0913088) upright=0.76282
+ROLLOUT_TRACE video_tick=448 body=Vec3(-1.0883244, 0.44055438, -1.0604038) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=2.65730 tip_distance_m=Some(3.0026875) upright=0.74057
+ROLLOUT_TRACE video_tick=512 body=Vec3(-1.2286252, 0.42379817, -1.1578957) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=2.50896 tip_distance_m=Some(2.8401854) upright=0.74426
+ROLLOUT_TRACE video_tick=576 body=Vec3(-1.3544155, 0.4357728, -1.1711696) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=2.44712 tip_distance_m=Some(2.8127146) upright=0.66077
+ROLLOUT_TRACE video_tick=640 body=Vec3(-1.4078246, 0.42552117, -1.2187505) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=2.38323 tip_distance_m=Some(2.7271316) upright=0.75068
+ROLLOUT_TRACE video_tick=704 body=Vec3(-1.5198394, 0.40438986, -1.2823229) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=2.28491 tip_distance_m=Some(2.718983) upright=0.77535
+ROLLOUT_TRACE video_tick=768 body=Vec3(-1.6397495, 0.44694382, -1.3490818) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=2.18442 tip_distance_m=Some(2.5179446) upright=0.78798
+ROLLOUT_TRACE video_tick=832 body=Vec3(-1.884366, 0.41183227, -1.432461) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=2.04488 tip_distance_m=Some(2.3763232) upright=0.79414
+ROLLOUT_TRACE video_tick=896 body=Vec3(-2.0488923, 0.41007316, -1.5508809) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=1.90270 tip_distance_m=Some(2.2576325) upright=0.82459
+ROLLOUT_TRACE video_tick=960 body=Vec3(-2.079271, 0.3641873, -1.7628354) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=1.68866 tip_distance_m=Some(2.2006397) upright=0.87469
+ROLLOUT_TRACE video_tick=1024 body=Vec3(-2.0555077, 0.36532053, -2.0170233) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=1.43972 tip_distance_m=Some(2.0301547) upright=0.96205
+ROLLOUT_TRACE video_tick=1088 body=Vec3(-2.0045266, 0.31385788, -2.2706335) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=1.19974 tip_distance_m=Some(1.8344642) upright=0.91621
+ROLLOUT_TRACE video_tick=1152 body=Vec3(-1.9324057, 0.34743536, -2.2672575) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=1.22095 tip_distance_m=Some(1.7897878) upright=0.93892
+ROLLOUT_TRACE video_tick=1216 body=Vec3(-1.9244249, 0.3674935, -2.3400447) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=1.15353 tip_distance_m=Some(1.6161617) upright=0.92896
+ROLLOUT_TRACE video_tick=1280 body=Vec3(-1.897193, 0.36692494, -2.5032742) target=Vec3(-2.2695236, 0.28990537, -3.4407449) distance_m=1.00870 tip_distance_m=Some(1.4284452) upright=0.90401
+DRIVE_STATS ticks=1280 mean_abs_drive=0.87905 mean_effort=31.37825 hard_ccd_crab_link_clamp_candidates=17

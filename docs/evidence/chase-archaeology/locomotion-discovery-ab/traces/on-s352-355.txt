@@ -1,0 +1,23 @@
+RENDER_ROLLOUT terrain=Flat band_max_m=9 seed=Some(355) exploration_log_std_floor=None
+RENDER_CHECKPOINT dir=/home/bot/.cache/botq-wt/10564/runs/on-s352/ckpt/marks/40000000 ticks=40000512
+ROLLOUT_TRACE video_tick=64 body=Vec3(-0.2794246, 0.4443434, -0.8568859) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=4.55372 tip_distance_m=Some(4.4230776) upright=-0.74905
+ROLLOUT_TRACE video_tick=128 body=Vec3(-0.516067, 0.40624145, -1.3680059) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=4.14695 tip_distance_m=Some(3.8404324) upright=-0.97576
+ROLLOUT_TRACE video_tick=192 body=Vec3(-0.5151535, 0.4013724, -1.5846943) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=4.08329 tip_distance_m=Some(3.6186478) upright=-0.97557
+ROLLOUT_TRACE video_tick=256 body=Vec3(-0.54906136, 0.39903116, -1.6328876) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=4.03766 tip_distance_m=Some(3.6049957) upright=-0.97770
+ROLLOUT_TRACE video_tick=320 body=Vec3(-0.58422935, 0.40028903, -1.6820024) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.99092 tip_distance_m=Some(3.5738933) upright=-0.97571
+ROLLOUT_TRACE video_tick=384 body=Vec3(-0.6197809, 0.40057272, -1.7370743) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.94272 tip_distance_m=Some(3.5547314) upright=-0.97530
+ROLLOUT_TRACE video_tick=448 body=Vec3(-0.6937694, 0.39622232, -1.7337872) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.87185 tip_distance_m=Some(3.496887) upright=-0.97966
+ROLLOUT_TRACE video_tick=512 body=Vec3(-0.73438907, 0.39986604, -1.7815739) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.82074 tip_distance_m=Some(3.4702919) upright=-0.97685
+ROLLOUT_TRACE video_tick=576 body=Vec3(-0.77832884, 0.39913622, -1.8292118) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.76679 tip_distance_m=Some(3.440162) upright=-0.97519
+ROLLOUT_TRACE video_tick=640 body=Vec3(-0.83757216, 0.39537865, -1.8369519) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.70737 tip_distance_m=Some(3.4099374) upright=-0.98042
+ROLLOUT_TRACE video_tick=704 body=Vec3(-0.8602449, 0.39420614, -1.8771577) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.67610 tip_distance_m=Some(3.4048576) upright=-0.98307
+ROLLOUT_TRACE video_tick=768 body=Vec3(-0.90025616, 0.39133543, -1.9067422) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.63052 tip_distance_m=Some(3.3693652) upright=-0.97948
+ROLLOUT_TRACE video_tick=832 body=Vec3(-0.95242274, 0.39358717, -1.9246557) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.57570 tip_distance_m=Some(3.3131366) upright=-0.97505
+ROLLOUT_TRACE video_tick=896 body=Vec3(-1.0116146, 0.39980453, -1.9328249) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.51615 tip_distance_m=Some(3.2465887) upright=-0.97425
+ROLLOUT_TRACE video_tick=960 body=Vec3(-1.0730008, 0.4001792, -1.9245437) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.45813 tip_distance_m=Some(3.19202) upright=-0.97598
+ROLLOUT_TRACE video_tick=1024 body=Vec3(-1.1056917, 0.39248532, -1.9288769) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.42531 tip_distance_m=Some(3.152864) upright=-0.97732
+ROLLOUT_TRACE video_tick=1088 body=Vec3(-1.1960434, 0.39555585, -1.9099104) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.34179 tip_distance_m=Some(3.053816) upright=-0.97569
+ROLLOUT_TRACE video_tick=1152 body=Vec3(-1.2608494, 0.39750734, -1.900411) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.28118 tip_distance_m=Some(3.0100057) upright=-0.97189
+ROLLOUT_TRACE video_tick=1216 body=Vec3(-1.3120849, 0.38630342, -1.9214854) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.22635 tip_distance_m=Some(2.958501) upright=-0.97824
+ROLLOUT_TRACE video_tick=1280 body=Vec3(-1.3983538, 0.3984858, -1.90982) target=Vec3(-4.4426317, 0.6899712, -2.7018924) distance_m=3.14563 tip_distance_m=Some(2.8897405) upright=-0.97658
+DRIVE_STATS ticks=1280 mean_abs_drive=0.81519 mean_effort=27.97822 hard_ccd_crab_link_clamp_candidates=2
