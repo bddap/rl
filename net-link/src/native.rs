@@ -56,8 +56,8 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.guts.discovery.abort();
         // Idempotent with an explicit `close` — the graceful paths close first; this
-        // guarantees the endpoint never drops unclosed (iroh logs that at ERROR —
-        // fleet-error 2026-08-01) even on early-exit paths.
+        // guarantees the endpoint never drops unclosed (iroh logs that at ERROR) even on
+        // early-exit paths.
         self.guts.rt.block_on(self.endpoint.close());
     }
 }

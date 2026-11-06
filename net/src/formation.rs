@@ -8,8 +8,8 @@
 use anyhow::Result;
 use iroh::EndpointId;
 
-use crate::membership::Role;
-use crate::transport::{self, PeerWire};
+use net_link::{self, PeerWire};
+use net_proto::membership::Role;
 
 use net_proto::formation::{FormationCore, Outcome};
 pub use net_proto::formation::{Frozen, assign_player_ids, early_peer_msgs, solo_client_for};
@@ -28,7 +28,7 @@ pub enum Formation {
 
 /// One formation attempt, pump-to-completion. The core's clock is injected millis from
 /// the caller — in production the session's axis
-/// ([`Session::now_ms`](transport::Session::now_ms)), so the same driver runs wherever
+/// ([`Session::now_ms`](net_link::Session::now_ms)), so the same driver runs wherever
 /// the link does (native tokio clock, browser performance.now).
 pub struct FormationDriver {
     core: FormationCore,
@@ -43,10 +43,10 @@ impl FormationDriver {
     /// Timed LAN discovery (the scripted/CLI path): solo fallback after `discover_secs`
     /// if nobody shows.
     pub fn discovering(
-        session: &transport::Session,
+        session: &net_link::Session,
         discover_secs: u64,
         expect: usize,
-        stamp: crate::SyncStamp,
+        stamp: net_proto::SyncStamp,
         now_ms: u64,
     ) -> Self {
         println!(
@@ -64,10 +64,10 @@ impl FormationDriver {
     /// [`Self::set_starting`] arms agreement (rl#94 liveness — a joiner-role core's is
     /// inert by construction, see `Membership::set_starting`).
     pub fn lobby(
-        session: &transport::Session,
+        session: &net_link::Session,
         role: Role,
         expect: usize,
-        stamp: crate::SyncStamp,
+        stamp: net_proto::SyncStamp,
         now_ms: u64,
     ) -> Self {
         Self {
@@ -86,7 +86,7 @@ impl FormationDriver {
     /// loop of their own (the CLI paths). The windowed lobby polls [`Self::pump`] per
     /// frame instead: one driver, two pacers.
     #[cfg(not(target_family = "wasm"))]
-    pub fn pump_blocking(mut self, session: &mut transport::Session) -> Result<Formation> {
+    pub fn pump_blocking(mut self, session: &mut net_link::Session) -> Result<Formation> {
         loop {
             let now_ms = session.now_ms();
             if let Some(outcome) = self.pump(session, now_ms) {
@@ -110,7 +110,7 @@ impl FormationDriver {
     /// beat deadline is epoch-aligned, so faster polling never over-beats).
     pub fn pump(
         &mut self,
-        session: &mut transport::Session,
+        session: &mut net_link::Session,
         now_ms: u64,
     ) -> Option<Result<Formation>> {
         while let Some(from) = session.try_recv() {
@@ -124,7 +124,7 @@ impl FormationDriver {
                         "refusing mid-formation join from {}: still forming",
                         from.from.fmt_short()
                     );
-                    session.send(from.from, &crate::server::Refusal::Forming);
+                    session.send(from.from, &net_proto::server::Refusal::Forming);
                 }
                 PeerWire::Snapshot(_)
                 | PeerWire::Vehicles(_)
@@ -204,8 +204,8 @@ pub(crate) fn holds_current_beat(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SyncStamp;
-    use crate::sim::PlayerId;
+    use net_proto::SyncStamp;
+    use net_proto::sim::PlayerId;
 
     #[test]
     fn three_endpoints_form_the_identical_match_over_iroh() {
@@ -214,11 +214,11 @@ mod tests {
         use std::collections::BTreeMap;
         use std::time::Instant;
 
-        let mut sessions = [(); 3].map(|()| transport::start_session().expect("start session"));
+        let mut sessions = [(); 3].map(|()| net_link::start_session().expect("start session"));
         let ids = sessions.each_ref().map(|s| s.endpoint_id());
         let (a0, a1) = (sessions[0].local_addr(), sessions[1].local_addr());
         let form =
-            |s: &transport::Session, t| FormationDriver::discovering(s, 1, 3, SyncStamp::ZERO, t);
+            |s: &net_link::Session, t| FormationDriver::discovering(s, 1, 3, SyncStamp::ZERO, t);
 
         // A dial can LOSE the crossed-dial dedup to the peer's concurrent discovery-dial
         // (the kept link still serves), so a dial verdict is no signal.

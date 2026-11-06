@@ -43,7 +43,7 @@ pub fn run_game(config: GameConfig) -> Result<()> {
     // opens somewhere fresh every launch (and every in-round RESTART re-draws); the
     // authoritative sim logs the seed for repro. Screenshot tools keep their pinned
     // seed instead.
-    let seed = crate::sim::random_match_seed();
+    let seed = net_proto::sim::random_match_seed();
     let boot = match config.launch {
         Launch::Menu => Boot::Menu { seed },
         #[cfg(not(target_family = "wasm"))]
@@ -57,7 +57,7 @@ pub fn run_game(config: GameConfig) -> Result<()> {
                 discover_secs,
                 expect,
                 dial,
-                crate::SyncStamp::local(),
+                net_proto::SyncStamp::local(),
             )?;
             match result {
                 net_loop::MatchResult::Joined(joined) => {

@@ -1,5 +1,5 @@
 {
-  "about": "Touched-path → test-suite map, read by `botq test-map`. The acceptance gate derives every landed job's touched paths from its own diff and requires the commands mapped here green — independent of the job's brief. First matching rule wins: specific rules above broad ones. `tests: []` means CONSCIOUSLY untested and must carry its why. An unmapped path fails the resolver loud. Commands run from the repo root.",
+  "about": "Touched-path → test-suite map, read by the landing gate, which derives every landing's touched paths from its diff and requires the commands mapped here green. First matching rule wins: specific rules above broad ones. `tests: []` means CONSCIOUSLY untested and must carry its why. An unmapped path fails the resolver loud. Commands run from the repo root.",
   "rules": [
     {
       "paths": [
@@ -23,18 +23,10 @@
     },
     {
       "paths": [
-        ".github/**"
+        "scripts/**"
       ],
       "tests": [],
-      "why": "CI workflow definitions — exercised only by dispatching them on GitHub Actions; no local runner exists, and a broken workflow fails loudly at dispatch"
-    },
-    {
-      "paths": [
-        "scripts/**",
-        "otel/proof-rl-otel.sh"
-      ],
-      "tests": [],
-      "why": "operator tooling (profiling, terrain bake, asset fetch) and live proof scripts — exercised by use against a running system, no offline harness"
+      "why": "operator tooling (terrain bake, asset fetch) — exercised by use, no offline harness"
     },
     {
       "paths": [
@@ -48,15 +40,6 @@
         "node --check game-web/verify.mjs"
       ],
       "why": "the browser build/serve/verify harness (rl#411 stages 5-6) — a live harness exercised by RUNNING run.sh (verify drives headless chromium; no offline harness); shellcheck + node syntax checks keep it mechanically sound, and game-web/src/ rides the general rust rule below"
-    },
-    {
-      "paths": [
-        "net/examples/web-form/**"
-      ],
-      "tests": [
-        "nix-shell -p shellcheck --run 'shellcheck net/examples/web-form/run.sh'"
-      ],
-      "why": "the browser↔native cross-play formation probe (rl#412) — a live-network canary exercised by RUNNING run.sh against the n0 relays (no offline harness; form_web.rs rides the general rust rule from net/examples/); shellcheck keeps the runner mechanically sound"
     },
     {
       "paths": [

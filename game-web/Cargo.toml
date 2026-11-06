@@ -19,7 +19,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 # EXACT pins (rl#411 stage 6): the wasm-bindgen CLI that post-processes the build is
 # the one shell.nix ships, and its version must equal the crate's (run.sh asserts).
-# These pins move in lockstep with each other AND with a shell.nix nixpkgs bump.
+# These pins move in lockstep with each other AND with shell.nix's wasm-bindgen-cli.
 wasm-bindgen = "=0.2.130"
 wasm-bindgen-futures = "=0.4.80"
 web-sys = { version = "=0.3.107", features = ["console", "Window", "Document", "Element"] }

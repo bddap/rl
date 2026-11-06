@@ -1,5 +1,5 @@
 //! The platform-free protocol core (rl#411 stage 2). No tokio, no iroh, no clock,
-//! no IO — the link layer (`net::transport`) feeds it bytes and injected time.
+//! no IO — the link layer (`net-link`) feeds it bytes and injected time.
 //! Enforced by construction: this crate checks on wasm32 (see test-map.json).
 
 pub mod cadence;
@@ -8,6 +8,7 @@ pub mod codec;
 pub mod cordic;
 pub mod formation;
 pub mod membership;
+mod reader;
 pub mod roster;
 pub mod server;
 pub mod sim;

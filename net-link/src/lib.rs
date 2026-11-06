@@ -30,8 +30,8 @@ use tokio::sync::mpsc;
 
 pub use net_proto::codec::PeerWire;
 use net_proto::codec::{
-    ALPN, Codec, Frame, MAX_FRAME_LEN, StateAssembler, StateCodec, decode_peer_wire,
-    parse_state_datagram, state_datagrams,
+    ALPN, Codec, Frame, MAX_FRAME_LEN, StateAssembler, StateCodec, decode_control_wire,
+    decode_state_wire, parse_state_datagram, state_datagrams,
 };
 
 #[cfg(not(target_family = "wasm"))]
@@ -528,8 +528,8 @@ async fn datagram_loop(
         };
         let frag = parse_state_datagram(&d)?;
         let asm = assemblers.entry(frag.kind).or_default();
-        if let Some(body) = asm.accept(&frag)? {
-            let msg = decode_peer_wire(frag.kind, &body)?;
+        if let Some((tick, body)) = asm.accept(&frag)? {
+            let msg = decode_state_wire(frag.kind, tick, &body)?;
             if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
                 return Ok(());
             }
@@ -556,11 +556,7 @@ async fn read_loop(
             .context("reading frame body")?;
         let kind = Frame::from_byte(buf[0])
             .with_context(|| format!("unknown frame kind {:#x}", buf[0]))?;
-        anyhow::ensure!(
-            !kind.via_datagram(),
-            "state frame {kind:?} arrived on the reliable stream"
-        );
-        let msg = decode_peer_wire(kind, &buf[1..])?;
+        let msg = decode_control_wire(kind, &buf[1..])?;
         if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
             return Ok(());
         }

@@ -3,14 +3,8 @@
 //! rule for normal play doesn't apply to it, but it must render NOTHING until toggled.
 //! Widgets so far: FPS counter + sim-time readout + frame-time graph; new widgets are
 //! further children of the root column.
-//!
-//! Also the perf black box (rl#331): every frame lands in a ring buffer, and a sustained
-//! fps collapse emits the ring as a structured field on the collapse `warn!` itself — one
-//! record over the process' OTLP log pipe, so a slideshow episode leaves data at the fleet
-//! sink even when nobody had the overlay up, with nothing to fetch off the device.
 
 use std::collections::VecDeque;
-use std::fmt::Write as _;
 
 use bevy::prelude::*;
 
@@ -26,24 +20,7 @@ const FPS_TEXT_PERIOD_SECS: f32 = 0.25;
 const GOOD_MS: f32 = 17.0;
 const OK_MS: f32 = 33.4;
 
-/// Ring depth: ≈30 s of lead-up at 60 fps, minutes during a slideshow — enough to see
-/// the transition INTO the collapse, which is the diagnostic part.
-const RING_LEN: usize = 1800;
-/// Collapse = EVERY one of the last [`COLLAPSE_WINDOW`] frames at/over this. All-of, not
-/// mean-of: one multi-second hitch (asset load, window re-focus) must not trip a dump,
-/// and a real slideshow has no fast frames mixed in.
-const COLLAPSE_FRAME_MS: f32 = 100.0;
-const COLLAPSE_WINDOW: usize = 30;
-/// At most one dump per minute — a long episode re-emits with a fresher tail instead of
-/// shipping every frame of it.
-const DUMP_COOLDOWN_SECS: f32 = 60.0;
-
-pub struct DebugOverlayPlugin {
-    /// Emit the ring over telemetry when fps collapses. Off for offscreen surfaces —
-    /// they legitimately render slower than realtime (llvmpipe screenshots/video) and
-    /// would dump on every run.
-    pub collapse_dump: bool,
-}
+pub struct DebugOverlayPlugin;
 
 /// Toggle state as a resource (not just the root's `Visibility`) so surfaces without a
 /// keyboard — the fp-screenshot evidence path, GCR's chord toggle — can flip it from
@@ -63,23 +40,18 @@ pub struct SimFrameStats {
     pub ticks: u32,
 }
 
-/// One frame in the ring. `t_secs` is `Time<Real>` elapsed (f64 — f32 quantizes to
-/// frame-scale after days of TV uptime); wall-clock anchoring comes from the emitted
-/// log record's own timestamp (≈ the last sample's moment). The sim columns and
-/// `frame_ms` can be offset by one row: the driver and overlay chains have no ordering
-/// edge, and `frame_ms` (the delta measured at frame start) is the PREVIOUS frame's
-/// cost anyway — irrelevant at collapse scale (30+ consecutive slow frames).
+/// One frame of the graph. The sim columns and `frame_ms` can be offset by one row:
+/// the driver and overlay chains have no ordering edge.
 #[derive(Clone, Copy)]
-pub struct PerfSample {
-    pub t_secs: f64,
-    pub frame_ms: f32,
-    pub sim_ms: f32,
-    pub sim_ticks: u32,
+struct PerfSample {
+    frame_ms: f32,
+    sim_ms: f32,
+    sim_ticks: u32,
 }
 
 /// Rolling wall-clock frame records; `Time<Real>` like [`crate::frame_telemetry`] — a
 /// paused game still renders frames. Recorded even while hidden, so toggling on shows
-/// the seconds that led up to the toggle, and the collapse dump has its lead-up.
+/// the seconds that led up to the toggle.
 #[derive(Resource, Default)]
 struct PerfRing(VecDeque<PerfSample>);
 
@@ -109,9 +81,6 @@ impl Plugin for DebugOverlayPlugin {
                 )
                     .chain(),
             );
-        if self.collapse_dump {
-            app.add_systems(Update, dump_on_collapse.after(record_sample));
-        }
     }
 }
 
@@ -144,7 +113,6 @@ fn record_sample(
     push_sample(
         &mut ring.0,
         PerfSample {
-            t_secs: time.elapsed_secs_f64(),
             frame_ms: time.delta_secs() * 1000.0,
             sim_ms: sim.ms,
             sim_ticks: sim.ticks,
@@ -153,56 +121,10 @@ fn record_sample(
 }
 
 fn push_sample(ring: &mut VecDeque<PerfSample>, sample: PerfSample) {
-    if ring.len() == RING_LEN {
+    if ring.len() == GRAPH_COLS {
         ring.pop_front();
     }
     ring.push_back(sample);
-}
-
-fn collapsed(ring: &VecDeque<PerfSample>) -> bool {
-    ring.len() >= COLLAPSE_WINDOW
-        && ring
-            .iter()
-            .rev()
-            .take(COLLAPSE_WINDOW)
-            .all(|s| s.frame_ms >= COLLAPSE_FRAME_MS)
-}
-
-/// The ring, serialized for the log record's `samples_csv` attribute: header + one row
-/// per sample. CSV-in-a-field, not CSV-on-disk — densest self-describing shape for
-/// 1800 rows (~45 KB, well inside one OTLP/HTTP log record).
-fn ring_csv(ring: &VecDeque<PerfSample>) -> String {
-    let mut out = String::from("t_secs,frame_ms,sim_ms,sim_ticks\n");
-    for s in ring {
-        writeln!(
-            out,
-            "{:.3},{:.2},{:.2},{}",
-            s.t_secs, s.frame_ms, s.sim_ms, s.sim_ticks
-        )
-        .expect("String write is infallible");
-    }
-    out
-}
-
-fn dump_on_collapse(time: Res<Time<Real>>, ring: Res<PerfRing>, mut last_dump: Local<Option<f32>>) {
-    if !collapsed(&ring.0) {
-        return;
-    }
-    let now = time.elapsed_secs();
-    if last_dump.is_some_and(|t| now - t < DUMP_COOLDOWN_SECS) {
-        return;
-    }
-    *last_dump = Some(now);
-    // The alert and the data are ONE record: the ring rides the collapse warn! as a
-    // structured attribute over the process' OTLP log pipe (rl#331 — no second
-    // transport, no local file to fetch). Without an OTLP endpoint this still lands
-    // on stderr via the fmt layer, attribute included.
-    warn!(
-        samples_csv = %ring_csv(&ring.0),
-        "perf collapse: {} consecutive frames >= {COLLAPSE_FRAME_MS} ms — {} ring samples attached",
-        COLLAPSE_WINDOW,
-        ring.0.len()
-    );
 }
 
 fn spawn_overlay(mut commands: Commands) {
@@ -315,65 +237,20 @@ fn update_graph(
 mod tests {
     use super::*;
 
-    fn sample(frame_ms: f32) -> PerfSample {
-        PerfSample {
-            t_secs: 0.0,
-            frame_ms,
-            sim_ms: 1.0,
-            sim_ticks: 2,
-        }
-    }
-
-    fn ring_of(frames: &[f32]) -> VecDeque<PerfSample> {
-        frames.iter().map(|&ms| sample(ms)).collect()
-    }
-
-    #[test]
-    fn collapse_needs_a_full_window_of_slow_frames() {
-        assert!(!collapsed(&ring_of(&[])));
-        assert!(
-            !collapsed(&ring_of(&[500.0; 29])),
-            "under-full ring never trips"
-        );
-        assert!(collapsed(&ring_of(&[COLLAPSE_FRAME_MS; 30])));
-        // Fast frames older than the window don't save a live collapse.
-        let mut mixed = vec![16.0; 100];
-        mixed.extend([250.0; 30]);
-        assert!(collapsed(&ring_of(&mixed)));
-    }
-
-    /// One multi-second hitch (asset load, focus regain) is not a slideshow: any fast
-    /// frame inside the window vetoes the dump.
-    #[test]
-    fn single_hitch_does_not_trip_a_dump() {
-        let mut frames = vec![16.0; 40];
-        frames.push(10_000.0);
-        frames.extend([16.0; 5]);
-        assert!(!collapsed(&ring_of(&frames)));
-    }
-
     #[test]
     fn ring_is_capped() {
         let mut ring = VecDeque::new();
-        for i in 0..(RING_LEN + 10) {
-            push_sample(&mut ring, sample(i as f32));
+        for i in 0..(GRAPH_COLS + 10) {
+            push_sample(
+                &mut ring,
+                PerfSample {
+                    frame_ms: i as f32,
+                    sim_ms: 1.0,
+                    sim_ticks: 2,
+                },
+            );
         }
-        assert_eq!(ring.len(), RING_LEN);
-        // Oldest dropped, newest kept.
-        assert_eq!(ring.back().unwrap().frame_ms, (RING_LEN + 9) as f32);
-    }
-
-    #[test]
-    fn csv_has_header_and_one_row_per_sample() {
-        let ring = VecDeque::from([PerfSample {
-            t_secs: 1.5,
-            frame_ms: 33.333,
-            sim_ms: 4.0,
-            sim_ticks: 8,
-        }]);
-        assert_eq!(
-            ring_csv(&ring),
-            "t_secs,frame_ms,sim_ms,sim_ticks\n1.500,33.33,4.00,8\n"
-        );
+        assert_eq!(ring.len(), GRAPH_COLS);
+        assert_eq!(ring.back().unwrap().frame_ms, (GRAPH_COLS + 9) as f32);
     }
 }

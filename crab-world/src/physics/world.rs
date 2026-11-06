@@ -73,9 +73,8 @@ fn setup_arena_visuals(
     // The visible ground: the SAME grid the collider was built from (rl#281 — render
     // matches physics by construction). Macro tint rides the mesh's vertex colors
     // (biome bands); everything finer is the procedural world-space detail layer in
-    // [`GroundDetail`]'s fragment shader (rl#304 — it replaced the rl#197 checker,
-    // including its optic-flow duty) — inside the one ground path, never a second
-    // surface.
+    // [`GroundDetail`]'s fragment shader (rl#304, which also carries the optic-flow
+    // cue) — inside the one ground path, never a second surface.
     // The hydrology bake (rl#323): wetness + standing water derived from the SAME
     // grid as the mesh and collider, so the watershed look's moisture agrees with
     // the silhouette by construction.

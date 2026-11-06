@@ -70,12 +70,11 @@ const SHIP_AIM_TORQUE: f32 = 0.015;
 // rl#307 feel spec: rotational inertia — a released spin persists and is bled
 // by angular drag, never clamped; gravity "a bit"; drag "a bunch" (watercraft-heavy).
 // The knob for the inertia FEEL is angular_drag: spin-down τ = I/angular_drag, and the
-// craft box's yaw inertia is tiny (~0.0036 kg·m²), so the old 0.07 stopped a spin in
+// craft box's yaw inertia is tiny (~0.0036 kg·m²), so a drag near 0.07 stops a spin in
 // ~50 ms — indistinguishable from a clamp. 0.005 puts yaw τ ≈ 0.7 s (roll, the bumper
-// spin, ≈ 0.23 s on its slimmer axis); torques are scaled down with it so the
-// terminal rates stay where they were (τ·rate ≈ the old feel, plus carry).
-// Linear drag is 3× the old float (coast from top speed halves in ~1 s) with thrust
-// raised to hold top speed ≈ 2.5 m/s, so "a bunch" reads as heavy stopping, not slow.
+// spin, ≈ 0.23 s on its slimmer axis); torques are scaled to the terminal rates.
+// Linear drag halves a coast from top speed in ~1 s, with thrust sized to hold top
+// speed ≈ 2.5 m/s, so "a bunch" reads as heavy stopping, not slow.
 // The vertical thruster is the STRONGEST (rl#316): direct thrust is body-frame, so any
 // axis stronger than the weight lets an attitude cheat hold altitude (nose-up converts
 // forward thrust into lift) and gravity reads as idle-only. Weight 0.77 N > forward
@@ -132,7 +131,7 @@ impl VehicleKind {
     pub const ALL: [Self; 2] = [VehicleKind::Plane, VehicleKind::Ship];
 
     /// The craft's ONE wire byte, shared by every codec that ships a kind (the pilot-intent
-    /// frame and the articulation vehicle poses) so two mappings can't drift.
+    /// frame and the `VehicleFrame` codec) so two mappings can't drift.
     pub fn wire_byte(self) -> u8 {
         self as u8
     }
@@ -166,7 +165,7 @@ impl VehicleKind {
 
 /// Which player a craft belongs to — the crab-world key for per-player vehicles (rl#191: every
 /// piloting player gets its OWN body in the host's one physics world). A plain `u8` newtype, not
-/// `net`'s `PlayerId`, because this crate sits under `net`; the net bridge maps `PlayerId.0` in.
+/// `net_proto`'s `PlayerId`, because this crate sits under `net_proto`; the net bridge maps `PlayerId.0` in.
 /// The server-authoritative local player is always pilot 0 (the host holds `PlayerId(0)` by
 /// formation, and solo IS a host with a roster of one).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -657,7 +656,9 @@ const SLEEP_ANGULAR_THRESHOLD: f32 = 0.5;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::headless::{flat_headless_app, headless_app};
+    use crate::headless::headless_world;
+    use crate::terrain::TerrainGrid;
+    use std::sync::Arc;
 
     /// The tests' one pilot (the server-authoritative local player's id).
     const P0: PilotId = PilotId(0);
@@ -691,7 +692,7 @@ mod tests {
     }
 
     fn app_with_vehicle(kind: VehicleKind, at: Vec3, vel: Vec3) -> (App, Entity) {
-        let mut app = flat_headless_app();
+        let mut app = headless_world(Arc::new(TerrainGrid::flat(512.0)));
         app.add_plugins(VehiclePlugin);
         // File pilot 0's command so `manage_vehicles` keeps the body we spawn directly below (it
         // despawns a body whose pilot has no entry). Matching kind ⇒ no respawn, our entity
@@ -1071,7 +1072,7 @@ mod tests {
 
     #[test]
     fn manage_spawns_and_despawns_one_vehicle() {
-        let mut app = headless_app();
+        let mut app = headless_world(TerrainGrid::gcr());
         app.add_plugins(VehiclePlugin);
         let count = |app: &mut App| {
             app.world_mut()
@@ -1112,7 +1113,7 @@ mod tests {
     /// with its facing and velocity, lifted just enough that the collider clears the ground.
     #[test]
     fn boarding_spawns_at_the_walker_with_velocity_conserved() {
-        let mut app = flat_headless_app();
+        let mut app = headless_world(Arc::new(TerrainGrid::flat(512.0)));
         app.add_plugins(VehiclePlugin);
         app.update();
         let vel = Vec3::new(0.4, 0.0, 0.1);
@@ -1174,9 +1175,7 @@ mod tests {
     /// not one buried inside the hill.
     #[test]
     fn boarding_clamp_tracks_the_terrain_surface() {
-        use crate::headless::headless_app;
-
-        let mut app = headless_app();
+        let mut app = headless_world(TerrainGrid::gcr());
         app.add_plugins(VehiclePlugin);
         app.update();
 
@@ -1204,9 +1203,7 @@ mod tests {
     /// local ground, then fly, with terrain contact live throughout.
     #[test]
     fn plane_flies_over_terrain_without_sinking_through() {
-        use crate::headless::headless_app;
-
-        let mut app = headless_app();
+        let mut app = headless_world(TerrainGrid::gcr());
         app.add_plugins(VehiclePlugin);
         app.update();
 
@@ -1292,7 +1289,7 @@ mod tests {
     #[test]
     fn each_pilot_gets_its_own_craft() {
         let p1 = PilotId(1);
-        let mut app = flat_headless_app();
+        let mut app = headless_world(Arc::new(TerrainGrid::flat(512.0)));
         app.add_plugins(VehiclePlugin);
         // Warm the clock: the first update's zero delta runs no FixedUpdate (same dance as
         // `manage_spawns_and_despawns_one_vehicle`).
@@ -1339,7 +1336,7 @@ mod tests {
     #[test]
     fn a_command_drives_only_its_own_pilots_craft() {
         let p1 = PilotId(1);
-        let mut app = headless_app();
+        let mut app = headless_world(TerrainGrid::gcr());
         app.add_plugins(VehiclePlugin);
         board(&mut app, P0, VehicleKind::Ship);
         board(&mut app, p1, VehicleKind::Ship);
@@ -1435,7 +1432,7 @@ mod tests {
 
     /// rl#307: rotational inertia — releasing the yaw input must NOT stop the spin;
     /// the ship keeps rotating and angular drag brings it to rest, never an instant
-    /// clamp (with the old 0.07 angular drag the spin died in ~3 ticks and the first
+    /// clamp (at an angular drag near 0.07 the spin dies in ~3 ticks and the first
     /// assertion fails).
     #[test]
     fn ship_spin_persists_after_release_then_drag_stops_it() {
@@ -1468,9 +1465,9 @@ mod tests {
     }
 
     /// rl#307: drag "a bunch" — a coasting ship sheds half its speed within a second
-    /// (watercraft-heavy), where the old 0.05 float coasted for many seconds.
-    /// Gravity off (same isolation as `grip_swings_velocity_toward_nose_without_adding_speed`):
-    /// this pins the DRAG decay, and since rl#316 the weight would feed a ~1.9 m/s sink
+    /// (watercraft-heavy). Gravity off (same isolation as
+    /// `grip_swings_velocity_toward_nose_without_adding_speed`): this pins the DRAG
+    /// decay, and the weight (rl#316) would feed a ~1.9 m/s sink
     /// into the speed magnitude over the same second.
     #[test]
     fn ship_coast_halves_speed_within_a_second() {
@@ -1608,7 +1605,6 @@ mod tests {
     /// launch speed must decay, never grow.
     #[test]
     fn hypersonic_craft_brakes_instead_of_amplifying() {
-        use crate::headless::tick;
         // In-bounds launch (the rescue bound is the flat fixture's 512 m half-span)
         // so the out-of-world park can't mask a drag blowup; vertical UP so neither
         // the tile edge nor the below-terrain rescue is ever crossed while braking.
@@ -1617,7 +1613,7 @@ mod tests {
         set_cmd(&mut app, |c| c.throttle_trim = -1.0);
         let mut prev = 1e4_f32;
         for _ in 0..16 {
-            tick(&mut app, 1);
+            app.update();
             let (t, v) = body(&app, e);
             let speed = v.linear.length();
             assert!(
@@ -1641,11 +1637,12 @@ mod tests {
     /// is parked back on in-bounds terrain at rest by [`rescue_lost_crafts`].
     #[test]
     fn escaped_craft_parks_back_in_bounds() {
-        use crate::headless::tick;
-        let mut app = flat_headless_app();
+        let mut app = headless_world(Arc::new(TerrainGrid::flat(512.0)));
         app.add_plugins(VehiclePlugin);
         board(&mut app, P0, VehicleKind::Ship);
-        tick(&mut app, 4); // spawn edge (the first update may run no fixed step)
+        for _ in 0..4 {
+            app.update();
+        } // spawn edge (the first update may run no fixed step)
         let bound = app
             .world()
             .resource::<crate::terrain::Terrain>()
@@ -1662,7 +1659,9 @@ mod tests {
             ent.get_mut::<Transform>().unwrap().translation = Vec3::new(bound + 5000.0, 40.0, 0.0);
             ent.get_mut::<Velocity>().unwrap().linear = Vec3::X * 1e6;
         }
-        tick(&mut app, 4);
+        for _ in 0..4 {
+            app.update();
+        }
         let (t, v) = body(&app, e);
         assert!(
             t.translation.x.abs() <= bound && t.translation.z.abs() <= bound,
@@ -1681,7 +1680,6 @@ mod tests {
     /// the below-terrain branch must lift it back onto the surface.
     #[test]
     fn buried_craft_parks_back_on_the_surface() {
-        use crate::headless::tick;
         let (mut app, e) =
             app_with_vehicle(VehicleKind::Plane, Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO);
         app.world_mut()
@@ -1689,7 +1687,9 @@ mod tests {
             .get_mut::<Transform>()
             .unwrap()
             .translation = Vec3::new(0.0, -100.0, 0.0);
-        tick(&mut app, 4);
+        for _ in 0..4 {
+            app.update();
+        }
         let (t, v) = body(&app, e);
         assert!(
             t.translation.y > -1.0,
@@ -1702,7 +1702,6 @@ mod tests {
     /// rl#339: a non-finite craft pose parks at the arena origin.
     #[test]
     fn nonfinite_craft_parks_at_origin() {
-        use crate::headless::tick;
         let (mut app, e) =
             app_with_vehicle(VehicleKind::Plane, Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO);
         app.world_mut()
@@ -1710,7 +1709,9 @@ mod tests {
             .get_mut::<Transform>()
             .unwrap()
             .translation = Vec3::splat(f32::NAN);
-        tick(&mut app, 4);
+        for _ in 0..4 {
+            app.update();
+        }
         let (t, v) = body(&app, e);
         assert!(
             t.translation.is_finite() && t.rotation.is_finite(),
@@ -1732,15 +1733,16 @@ mod tests {
     /// the awake contact solve visibly chattered its orientation on the ground.
     #[test]
     fn parked_craft_falls_asleep() {
-        use crate::headless::tick;
         use bevy_rapier3d::plugin::context::RapierRigidBodySet;
         use bevy_rapier3d::prelude::RapierRigidBodyHandle;
 
-        let mut app = flat_headless_app();
+        let mut app = headless_world(Arc::new(TerrainGrid::flat(512.0)));
         app.add_plugins(VehiclePlugin);
         board_at(&mut app, P0, VehicleKind::Plane, Vec3::ZERO);
         // Spawn edge + ground settle + rapier's time_until_sleep (0.4 s ≈ 26 steps).
-        tick(&mut app, 120);
+        for _ in 0..120 {
+            app.update();
+        }
 
         let (e, frozen) = {
             let mut q = app.world_mut().query::<(Entity, &Transform, &Vehicle)>();
@@ -1760,7 +1762,9 @@ mod tests {
             "a parked craft with a neutral command must be asleep by 120 ticks"
         );
 
-        tick(&mut app, 60);
+        for _ in 0..60 {
+            app.update();
+        }
         let (t, _) = body(&app, e);
         assert!(
             t.translation == frozen.translation && t.rotation == frozen.rotation,

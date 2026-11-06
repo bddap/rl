@@ -8,7 +8,7 @@ the committed artifact under `crab-world/assets/terrain/`.
 Two pieces, split on the trust boundary:
 
 - `serve-model.sh` — clones + installs + runs the upstream model API inside
-  `run-untrusted -g -p PORT` (no `$HOME`, GPU passed through, the API port
+  the sandboxed runner named by `$SANDBOX` (GPU passed through, the API port
   forwarded from host loopback). Downloads HF weights and
   WorldClim rasters into its work dir (~1.5G); pass that dir back as
   `serve-model.sh <dir>` to reuse them.
@@ -19,7 +19,7 @@ Two pieces, split on the trust boundary:
 ## Bake a world
 
 ```bash
-scripts/terrain-bake/serve-model.sh &   # wait for "Running on"
+SANDBOX=<runner> scripts/terrain-bake/serve-model.sh &   # wait for "Running on"
 nix-shell -p 'python312.withPackages (ps: [ps.numpy ps.pillow])' \
   --run 'python3 scripts/terrain-bake/bake.py --seed 281 --size 1024 \
     --origin 1536 -2560 \

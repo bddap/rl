@@ -7,15 +7,15 @@ use super::app::SyncedRound;
 use super::input::{CameraPitch, CameraYaw};
 use super::pose::{Pose, PoseWindow};
 use super::*;
-use crate::client::PilotIntent;
-use crate::vehicles::VehicleFrame;
 use crab_world::vehicle::{PilotCommand, PilotId, Vehicle, VehicleControls, VehicleKind};
+use net_proto::client::PilotIntent;
+use net_proto::vehicles::VehicleFrame;
 
 pub(super) fn coordinator(
     net: Option<NetDriver>,
     peers: &[PlayerId],
     me: PlayerId,
-    initial_sim: crate::sim::Sim,
+    initial_sim: net_proto::sim::Sim,
 ) -> Box<Coordinator> {
     Box::new(Coordinator::for_round(net, peers, me, initial_sim))
 }
@@ -47,11 +47,6 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
          previous scope's teardowns would be silently dropped"
     );
     let mut scope: Vec<fn(&mut World)> = Vec::new();
-    // Process-lifetime, NOT round-scoped: one trace file spans rounds (each marked
-    // by its own `O` origin line), so it must not re-open — armed on first install.
-    if world.get_resource::<super::pos_trace::PosTrace>().is_none() {
-        world.insert_resource(super::pos_trace::PosTrace::from_env());
-    }
     let prev = SimSnapshot::capture(&client);
     world.insert_non_send(GameState {
         client,
@@ -100,11 +95,6 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
     // round's first pump — and a board landing on that round's first tick would match it
     // there instead of transforming at the walker (rl#258).
     scope.push(despawn_crafts);
-    // A survivor would suppress (or mis-measure) the next round's remote-craft
-    // appeared/moved edges.
-    scope.push(|w| {
-        w.remove_resource::<super::remote_vehicles::RemoteCraftWatch>();
-    });
     // The combo map's replicated session set is round state riding a PERSISTENT
     // resource (the save must survive rounds; the last session's map must not) —
     // clear just that field (rl#398).
@@ -161,7 +151,7 @@ pub(super) fn teardown_round(world: &mut World) {
 fn end_round_server_down(world: &mut World, down: crate::net_loop::ServerDown) {
     let message = down.to_string();
     // WARN, not ERROR: from the client's side losing the host is an expected round
-    // ending (host quit) or the client's own link dying (deck suspend) — not a fault
+    // ending (host quit) or the client's own link dying (device suspend) — not a fault
     // in this process.
     warn!("leaving the round — {message}");
     if world.get_resource::<super::app::BootedWithMenu>().is_some() {
@@ -210,13 +200,13 @@ fn pilot_of(pid: PlayerId) -> PilotId {
 /// primitive, not a reimplementation — so a boarding on a mountainside authors its
 /// craft at the walker's real elevation (rl#281 stage 6; on the flat grids the height
 /// is exactly 0). `world_to_sim` is planar (drops y), so the two stay inverses.
-fn sim_to_world(pos: crate::sim::Pos, terrain: &crab_world::terrain::TerrainGrid) -> Vec3 {
+fn sim_to_world(pos: net_proto::sim::Pos, terrain: &crab_world::terrain::TerrainGrid) -> Vec3 {
     let (x, z) = pos.to_meters();
     terrain.place(Vec2::new(x, z), 0.0)
 }
 
-fn world_to_sim(world: Vec3) -> crate::sim::Pos {
-    crate::sim::Pos::from_meters(world.x, world.z)
+fn world_to_sim(world: Vec3) -> net_proto::sim::Pos {
+    net_proto::sim::Pos::from_meters(world.x, world.z)
 }
 
 /// The boarding player's walker state in world frame (rl#258): where the
@@ -224,8 +214,8 @@ fn world_to_sim(world: Vec3) -> crate::sim::Pos {
 /// walker one tick earlier (its last step is the velocity); recomputed per tick, but read
 /// only on the spawn edge — and while piloting the walker already rides the craft.
 fn boarding_of(
-    now: crate::sim::Player,
-    prev: crate::sim::Player,
+    now: net_proto::sim::Player,
+    prev: net_proto::sim::Player,
     terrain: &crab_world::terrain::TerrainGrid,
 ) -> crab_world::vehicle::Boarding {
     let here = sim_to_world(now.pos(), terrain);
@@ -233,8 +223,8 @@ fn boarding_of(
     // A walker can't out-run its walk speed: a bigger per-tick delta is a TELEPORT (the
     // round-RESTART respawn, a join slot), not motion — a craft boarded right after one
     // must start at rest, not inherit a cross-map fling.
-    let max_walk = 2.0 * (crate::sim::PLAYER_SPEED as f32 * crate::sim::TICK_HZ as f32)
-        / crate::sim::UNIT as f32;
+    let max_walk = 2.0 * (net_proto::sim::PLAYER_SPEED as f32 * net_proto::sim::TICK_HZ as f32)
+        / net_proto::sim::UNIT as f32;
     let velocity = if velocity.length() <= max_walk {
         velocity
     } else {
@@ -242,13 +232,13 @@ fn boarding_of(
     };
     crab_world::vehicle::Boarding {
         pos: here,
-        yaw: crate::sim::trig_client::turns_to_radians(now.yaw()),
+        yaw: net_proto::sim::trig_client::turns_to_radians(now.yaw()),
         velocity,
     }
 }
 
 /// Every spawned craft's pose bridged back into sim space — the per-tick pilot-follow
-/// feed for [`crate::server::Server::step_next`] (rl#258): a piloting player's walker
+/// feed for [`net_proto::server::Server::step_next`] (rl#258): a piloting player's walker
 /// rides its craft, so the sim never keeps a husk at the boarding spot.
 /// The physics-side ceiling on what the craft bridge will vouch for, m/s: far above
 /// any honest craft, far below anything that overflows the sim's i64 integration. A
@@ -256,7 +246,7 @@ fn boarding_of(
 /// exists for) must not hand the authoritative walker a poisoned momentum.
 const CRAFT_HANDOFF_MAX_MPS: f32 = 1000.0;
 
-fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose> {
+fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, net_proto::sim::PilotPose> {
     // The craft's altitude and rapier velocity ride along (rl#355): the sim mirrors
     // both into the walker every piloted tick, so stepping out mid-air hands the
     // ballistic walker exactly the craft's altitude + momentum. Altitude is measured
@@ -265,8 +255,8 @@ fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose>
     let mut q = world.query::<(&Transform, &bevy_rapier3d::dynamics::Velocity, &Vehicle)>();
     let per_tick = |mps: f32| {
         let sane = if mps.is_finite() { mps } else { 0.0 };
-        crate::sim::mps_to_grid_per_tick(
-            sane.clamp(-CRAFT_HANDOFF_MAX_MPS, CRAFT_HANDOFF_MAX_MPS) as f64
+        net_proto::sim::mps_to_grid_per_tick(
+            sane.clamp(-CRAFT_HANDOFF_MAX_MPS, CRAFT_HANDOFF_MAX_MPS) as f64,
         )
     };
     q.iter(world)
@@ -280,11 +270,11 @@ fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose>
             };
             (
                 PlayerId(v.pilot.0),
-                crate::sim::PilotPose {
+                net_proto::sim::PilotPose {
                     pos,
-                    yaw: crate::sim::trig_client::radians_to_turns(super::scene::heading(nose)),
-                    alt: crate::sim::meters_to_grid_f64(y) - crate::sim::ground_at(pos),
-                    vel: crate::sim::Vel {
+                    yaw: net_proto::sim::trig_client::radians_to_turns(super::scene::heading(nose)),
+                    alt: net_proto::sim::meters_to_grid_f64(y) - net_proto::sim::ground_at(pos),
+                    vel: net_proto::sim::Vel {
                         x: per_tick(vel.linear.x),
                         y: per_tick(vel.linear.y),
                         z: per_tick(vel.linear.z),
@@ -310,7 +300,7 @@ pub(super) struct GameState {
     /// rl#204). Lives here — not a system `Local` — so a new round starts unlatched by
     /// construction (rl#210).
     reported_outcome: bool,
-    snap_buf: std::collections::VecDeque<crate::snapshot::CoreSnapshot>,
+    snap_buf: std::collections::VecDeque<net_proto::snapshot::CoreSnapshot>,
     vehicle_buf: std::collections::VecDeque<VehicleFrame>,
     /// Snapshot-stall latch (rl#273): the last remote-adopt drain iteration consumed a tick
     /// of render time but adopted nothing. While set, [`render_frac`] pins the clock at the
@@ -379,11 +369,11 @@ fn render_frac(accumulator: f64, stalled: bool) -> f32 {
 }
 
 impl GameState {
-    fn server(&self) -> Option<&crate::server::Server> {
+    fn server(&self) -> Option<&net_proto::server::Server> {
         self.coord.server()
     }
 
-    fn server_mut(&mut self) -> Option<&mut crate::server::Server> {
+    fn server_mut(&mut self) -> Option<&mut net_proto::server::Server> {
         self.coord.server_mut()
     }
 }
@@ -640,9 +630,6 @@ fn feed_pose_windows(world: &mut World, step: u64, frame: &VehicleFrame, me: Pil
         info!("cockpit engaged: own craft's first pose arrived");
     }
     vehicle.update_pose(step, p);
-    world
-        .resource_mut::<super::pos_trace::PosTrace>()
-        .craft(step, p.pos, p.orient);
 }
 
 /// Apply a chord-issued [`VehicleRequest`], if one is pending: boarding from foot needs
@@ -679,7 +666,7 @@ fn apply_vehicle_request(world: &mut World) {
     // carries through the sim (the pilot shadow mirrors the nose every piloted
     // tick, rl#258), but the on-foot pitch is a client-side accumulator
     // ([`CameraPitch`]) the flight never syncs — it must be set here or the foot
-    // camera resumes on a stale value. Yaw is set too for the not-Alive camera
+    // camera resumes on a stale value. Yaw is set too for the not-InPlay camera
     // arm, which reads [`CameraYaw`] instead of the sim. Boarding needs nothing:
     // the craft spawns with the walker's facing (rl#258), and craft→craft morphs
     // the body in place, pose untouched.
@@ -829,7 +816,7 @@ fn exchange_tick(world: &mut World, role: PeerRole, local: &LocalControl) -> Tic
 fn adopt_vehicle_frame(world: &mut World, frame: &VehicleFrame, me: PilotId) {
     feed_pose_windows(
         world,
-        crate::cadence::cumulative_steps(frame.tick),
+        net_proto::cadence::cumulative_steps(frame.tick),
         frame,
         me,
     );
@@ -838,9 +825,6 @@ fn adopt_vehicle_frame(world: &mut World, frame: &VehicleFrame, me: PilotId) {
 /// (Host) Bridge every pilot's intent into a [`PilotCommand`] for the world's
 /// vehicle systems, anchored at each walker's [`boarding_of`] state this tick.
 fn publish_pilot_commands(world: &mut World) {
-    if world.get_resource::<VehicleControls>().is_none() {
-        return;
-    }
     let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
     let entries: BTreeMap<PilotId, PilotCommand> = {
         let state = world.non_send::<GameState>();
@@ -890,7 +874,7 @@ fn start_host_tick(world: &mut World, me: PilotId) {
         state.prev = SimSnapshot::capture(&state.client);
     }
     let stepping_into = world.non_send::<GameState>().client.sim().tick() + 1;
-    let owed = crate::cadence::steps_for_tick(stepping_into) - 1;
+    let owed = net_proto::cadence::steps_for_tick(stepping_into) - 1;
     host_physics_step(world, me, owed);
     world.non_send_mut::<GameState>().pending_pump = Some(owed);
 }
@@ -914,10 +898,10 @@ fn step_pending_pump(world: &mut World, me: PilotId) {
 /// Fed per step, not per tick: the RenderClock counts a pending tick, so a window
 /// holding only finalized ticks clamps until the spread pump finishes (rl#396).
 fn host_physics_step(world: &mut World, me: PilotId, owed_after: u32) {
-    super::physics_pump::pump_fixed_steps(world, 1);
+    super::physics_pump::pump_fixed_step(world);
     let stepping_into = world.non_send::<GameState>().client.sim().tick() + 1;
     let frame = super::remote_vehicles::capture(world, stepping_into);
-    let step = crate::cadence::cumulative_steps(stepping_into) - u64::from(owed_after);
+    let step = net_proto::cadence::cumulative_steps(stepping_into) - u64::from(owed_after);
     feed_pose_windows(world, step, &frame, me);
 }
 
@@ -942,7 +926,7 @@ fn complete_pending_pump(world: &mut World, me: PilotId) {
             .step_next(shadows);
         (stepped.snapshot, stepped.restarted)
     };
-    let mut snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
+    let mut snap = net_proto::snapshot::CoreSnapshot::from_bytes(&bytes)
         .expect("the authoritative server's snapshot must decode");
     // rl#398: stamp the host's OWN discovered chord codes onto the outgoing
     // snapshot (rider metadata like `input_next` — the sim emits it empty) so a
@@ -999,26 +983,6 @@ fn log_round_edges(world: &mut World) {
     }
 }
 
-/// rl#371 trace: the local player's sim position after this tick's advance. On the
-/// remote-adopt arm the sim cursor can hold across iterations (jitter-buffer stall);
-/// the tick number on each line lets the reader collapse the repeats.
-fn record_tick_trace(world: &mut World) {
-    if world.resource::<super::pos_trace::PosTrace>().0.is_none() {
-        return;
-    }
-    let Some((tick, pos, alt)) = ({
-        let state = world.non_send::<GameState>();
-        let sim = state.client.sim();
-        sim.player(state.client.me())
-            .map(|p| (sim.tick(), p.pos(), p.alt()))
-    }) else {
-        return;
-    };
-    world
-        .resource_mut::<super::pos_trace::PosTrace>()
-        .tick(tick, pos, alt);
-}
-
 pub(super) fn drive_client_sim(world: &mut World) {
     let raw = world.resource::<Time>().delta_secs_f64();
     let dt = world.non_send_mut::<GameState>().dt_window.smooth(raw);
@@ -1065,8 +1029,6 @@ fn advance_frame(world: &mut World, dt: f64) {
             publish_pilot_commands(world);
             start_host_tick(world, me);
         }
-
-        record_tick_trace(world);
     }
 
     // A frame that crossed no tick pays one deferred physics step instead (rl#396) —
@@ -1128,7 +1090,7 @@ fn advance_frame(world: &mut World, dt: f64) {
     };
     world.insert_resource(clock);
 
-    // Feed the rl#331 perf readout/black box: this frame's whole-sim cost and how many
+    // Feed the rl#326 perf readout: this frame's whole-sim cost and how many
     // fixed ticks ran (pinned at MAX_TICKS_PER_FRAME = the sim can't keep up with wall
     // time — the death-spiral signature, distinct from a render/present stall).
     let sim_ms = sim_started.elapsed().as_secs_f32() * 1000.0;
@@ -1137,9 +1099,6 @@ fn advance_frame(world: &mut World, dt: f64) {
             ms: sim_ms,
             ticks: applied,
         };
-    world
-        .resource_mut::<super::pos_trace::PosTrace>()
-        .sim_cost(clock.tick, sim_ms, applied);
 }
 
 #[cfg(test)]
@@ -1149,17 +1108,19 @@ mod tests {
         LocalControl, PlaneControl, RenderClock, advance_frame, drive_client_sim, install_round,
         jitter_take, render_frac,
     };
-    use crate::sim::{Input, TICK_DT, buttons};
     use bevy::prelude::*;
+    use net_proto::sim::{Input, TICK_DT, buttons};
 
     /// A host round over a real physics world (flat ground): the host is `PlayerId(0)`,
     /// joined by `remotes` more players.
     fn host(remotes: u8) -> App {
-        let peers: Vec<crate::sim::PlayerId> = (0..=remotes).map(crate::sim::PlayerId).collect();
-        let client = crate::client::ClientSim::new(0xC0FFEE, &peers, peers[0]);
-        let mut app = crab_world::headless::headless_server_world(std::sync::Arc::new(
+        let peers: Vec<net_proto::sim::PlayerId> =
+            (0..=remotes).map(net_proto::sim::PlayerId).collect();
+        let client = net_proto::client::ClientSim::new(0xC0FFEE, &peers, peers[0]);
+        let mut app = crab_world::headless::headless_world(std::sync::Arc::new(
             crab_world::terrain::TerrainGrid::flat(16_384.0),
         ));
+        app.add_plugins(crab_world::vehicle::VehiclePlugin);
         super::super::physics_pump::park_fixed_auto_pump(&mut app);
         app.update();
         let coord = super::coordinator(None, client.peers(), client.me(), client.sim().clone());
@@ -1321,8 +1282,8 @@ mod tests {
             FpCamera, PlayerAvatar, apply_transforms, heading, lerp_pos, lerp_yaw,
             sync_ground_anchor,
         };
-        use crate::sim::PlayerId;
         use bevy::ecs::system::RunSystemOnce;
+        use net_proto::sim::PlayerId;
         use std::f32::consts::{PI, TAU};
 
         let (me, remote) = (PlayerId(0), PlayerId(1));
@@ -1423,7 +1384,7 @@ mod tests {
         #[derive(Resource, Default)]
         struct Stepped(Vec<Option<Vec3>>);
 
-        let r = crab_world::physics::PHYSICS_HZ as f64 / crate::sim::TICK_HZ as f64;
+        let r = crab_world::physics::PHYSICS_HZ as f64 / net_proto::sim::TICK_HZ as f64;
         for (rate, dt_lo, dt_span) in [("~60 fps", 0.44, 0.13), ("~144 fps", 0.19, 0.04)] {
             let mut app = host(0);
             app.init_resource::<Stepped>();
@@ -1505,14 +1466,13 @@ mod tests {
     /// staircase.
     #[test]
     fn client_cockpit_samples_adopted_ticks_on_the_step_clock() {
-        use crate::cadence::cumulative_steps;
-        use crate::vehicles::{VehicleFrame, VehiclePoseWire};
         use crab_world::vehicle::{PilotId, VehicleKind};
+        use net_proto::cadence::cumulative_steps;
+        use net_proto::vehicles::{VehicleFrame, VehiclePoseWire};
 
-        let r = crab_world::physics::PHYSICS_HZ as f64 / crate::sim::TICK_HZ as f64;
+        let r = crab_world::physics::PHYSICS_HZ as f64 / net_proto::sim::TICK_HZ as f64;
         let mut world = World::new();
         world.init_resource::<super::super::remote_vehicles::RemoteVehicle>();
-        world.init_resource::<super::super::pos_trace::PosTrace>();
         world.insert_resource(super::LocalVehicle::Flying {
             kind: VehicleKind::Ship,
             poses: Box::default(),
@@ -1593,7 +1553,7 @@ mod tests {
     /// (world_to_sim is planar, so the lift can't leak back).
     #[test]
     fn sim_world_conversion_roundtrips() {
-        let p = crate::sim::Pos {
+        let p = net_proto::sim::Pos {
             x: 12_340,
             z: -5_670,
         };
@@ -1611,8 +1571,8 @@ mod tests {
 
     #[test]
     fn own_wire_pose_picks_exactly_our_pilots_craft() {
-        use crate::vehicles::{VehicleFrame, VehiclePoseWire};
         use crab_world::vehicle::PilotId;
+        use net_proto::vehicles::{VehicleFrame, VehiclePoseWire};
         let frame = VehicleFrame {
             tick: 7,
             vehicles: vec![
@@ -1657,7 +1617,7 @@ mod tests {
 
     #[test]
     fn render_frac_holds_at_one_through_a_snapshot_stall() {
-        use crate::sim::TICK_DT;
+        use net_proto::sim::TICK_DT;
         assert_eq!(render_frac(0.0, false), 0.0);
         assert_eq!(render_frac(TICK_DT * 0.5, false), 0.5);
         // The rl#273 wrap: a stalled drain keeps consuming TICK_DT to pace input
@@ -1692,17 +1652,18 @@ mod tests {
 
     #[test]
     fn bunched_time_deltas_advance_the_render_clock_evenly() {
-        let me = crate::sim::PlayerId(0);
-        let client = crate::client::ClientSim::new(0xC0FFEE, &[me], me);
+        let me = net_proto::sim::PlayerId(0);
+        let client = net_proto::client::ClientSim::new(0xC0FFEE, &[me], me);
         let coord = super::coordinator(None, client.peers(), client.me(), client.sim().clone());
-        let mut world = World::new();
-        world.init_resource::<Time>();
-        world.init_resource::<Time<Fixed>>();
-        world.init_resource::<Time<Virtual>>();
-        world.add_schedule(Schedule::new(bevy::app::FixedMain));
+        let mut app = crab_world::headless::headless_world(std::sync::Arc::new(
+            crab_world::terrain::TerrainGrid::flat(512.0),
+        ));
+        app.add_plugins(crab_world::vehicle::VehiclePlugin);
+        app.update();
+        let world = app.world_mut();
         world.insert_resource(super::super::chord_map::DiscoveredCodes::load(None));
         world.init_resource::<crab_world::debug_overlay::SimFrameStats>();
-        install_round(&mut world, client, coord);
+        install_round(world, client, coord);
 
         let fast = 0.003;
         let mut prev = 0.0;
@@ -1711,7 +1672,7 @@ mod tests {
             world
                 .resource_mut::<Time>()
                 .advance_by(std::time::Duration::from_secs_f64(raw));
-            drive_client_sim(&mut world);
+            drive_client_sim(world);
             let clock = *world.resource::<RenderClock>();
             let now = clock.tick as f64 + f64::from(clock.frac);
             if frame >= DT_WINDOW {

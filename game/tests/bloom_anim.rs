@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crab_world::ground::BLOOM_CYCLE_S;
-use net::sim::TICK_HZ;
+use net_proto::sim::TICK_HZ;
 
 fn frame(path: PathBuf) -> Vec<u8> {
     image::open(&path)

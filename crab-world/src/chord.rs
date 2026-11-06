@@ -7,7 +7,7 @@
 //! machine takes no clock at all — a code can be entered as slowly as the player likes,
 //! and "no timeout" is structural rather than a tuning constant. The empty code (tap the
 //! modifier, no directions) is a code like any other: the registry decides whether it
-//! means something, so a bare modifier tap can keep a legacy tap-verb alive.
+//! means something, so a bare modifier tap can carry a verb of its own.
 
 use std::fmt::Debug;
 
@@ -176,7 +176,7 @@ mod glue {
     use crate::controls::ControlScheme;
     use bevy::prelude::*;
 
-    /// The chord modifier, fixed fleet-wide by the rl#330 directive: X held on pad,
+    /// The chord modifier, fixed game-wide (rl#330): X held on pad,
     /// right-click held on kb/m. One source — surfaces read these, never re-declare.
     pub const CHORD_MODIFIER_PAD: GamepadButton = GamepadButton::West;
     pub const CHORD_MODIFIER_MOUSE: MouseButton = MouseButton::Right;

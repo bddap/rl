@@ -7,19 +7,18 @@
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
 
-/// The physical height every UI size in this workspace is authored against (the Steam
-/// Deck's 800 rows).
+/// The physical height every UI size in this workspace is authored against (a
+/// 1280×800 handheld's 800 rows).
 const UI_REFERENCE_HEIGHT: f32 = 800.0;
 
 /// The ONE UI-size rule (rl#227): authored px render at `physical_height / 800` of
 /// their authored size, regardless of the compositor's reported scale factor.
 ///
 /// bevy renders UI at `authored × UiScale × scale_factor`, so returning
-/// `physical_height / (800 × scale_factor)` cancels the factor — a Deck whose
+/// `physical_height / (800 × scale_factor)` cancels the factor — a 1280×800 screen whose
 /// compositor reports 2× draws the same physical UI as one reporting 1×, and a 4K TV
 /// scales everything up ~2.7× instead of drawing desktop-sized specks. (This also
-/// cancels deliberate OS-level UI scaling; on this fleet's fixed screens that's the
-/// point, but it is a tradeoff.) The clamp bounds the PHYSICAL ratio, before the
+/// cancels deliberate OS-level UI scaling, a tradeoff.) The clamp bounds the PHYSICAL ratio, before the
 /// cancellation, so the bounds don't drift with the reported factor either.
 pub fn ui_scale_for(window: &Window) -> f32 {
     let sf = window.resolution.scale_factor();
@@ -94,9 +93,7 @@ pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
             })
             .add(UiScalePlugin)
             .add(crate::frame_telemetry::FrameTelemetryPlugin)
-            .add(crate::debug_overlay::DebugOverlayPlugin {
-                collapse_dump: true,
-            }),
+            .add(crate::debug_overlay::DebugOverlayPlugin),
         None => plugins
             .set(WindowPlugin {
                 primary_window: None,
@@ -109,11 +106,8 @@ pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
             })
             .disable::<bevy::winit::WinitPlugin>()
             .disable::<bevy::audio::AudioPlugin>()
-            // Offscreen too, so the fp-screenshot evidence path can capture the overlay —
-            // but no collapse dump: offscreen renders are legitimately slower than realtime.
-            .add(crate::debug_overlay::DebugOverlayPlugin {
-                collapse_dump: false,
-            }),
+            // Offscreen too, so the fp-screenshot evidence path can capture the overlay.
+            .add(crate::debug_overlay::DebugOverlayPlugin),
     }
 }
 
@@ -135,8 +129,8 @@ mod tests {
         // What lands on screen is ui_scale × scale_factor; that product must depend
         // only on the physical resolution.
         let physical = |w: &Window| ui_scale_for(w) * w.resolution.scale_factor();
-        assert_eq!(physical(&window(1280, 800, 1.0)), 1.0); // Deck at 1×
-        assert_eq!(physical(&window(1280, 800, 2.0)), 1.0); // Deck reporting 2× — same physical UI
+        assert_eq!(physical(&window(1280, 800, 1.0)), 1.0); // 800 rows at 1×
+        assert_eq!(physical(&window(1280, 800, 2.0)), 1.0); // 800 rows reporting 2× — same physical UI
         assert_eq!(physical(&window(3840, 2160, 1.0)), 2.7); // 4K TV
         assert_eq!(physical(&window(400, 250, 1.0)), 0.5); // clamp floor
         assert_eq!(physical(&window(400, 250, 2.5)), 0.5); // clamp floor is sf-invariant too

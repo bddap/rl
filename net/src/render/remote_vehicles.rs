@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crab_world::vehicle::{PilotId, Vehicle, VehicleKind};
 
 use super::pose::{Pose, PoseWindow};
-use crate::vehicles::{VehicleFrame, VehiclePoseWire};
+use net_proto::vehicles::{VehicleFrame, VehiclePoseWire};
 
 /// Every NON-LOCAL pilot's craft kind + pose window (rl#191), feeding the craft models
 /// (`vehicle_view`, rl#260). The local pilot's own
@@ -80,18 +80,6 @@ impl RemoteVehicle {
     }
 }
 
-/// One log line per remote-craft EDGE — the pilot set changing (a boarding/exit seen from this
-/// peer) and each craft's first real displacement (proof the other pilot's craft is moving here,
-/// rl#191 increment 4) — instead of a per-tick pose flood.
-#[derive(Resource, Default)]
-pub(super) struct RemoteCraftWatch {
-    pilots: Vec<u8>,
-    first_pose: std::collections::BTreeMap<u8, Vec3>,
-    moved: std::collections::BTreeSet<u8>,
-}
-
-const REMOTE_MOVED_LOG_METERS: f32 = 5.0;
-
 pub(super) fn publish_remote_vehicles(
     world: &mut World,
     step: u64,
@@ -103,31 +91,6 @@ pub(super) fn publish_remote_vehicles(
         .filter(|v| v.pilot != me.0)
         .copied()
         .collect();
-    let mut watch = world.get_resource_or_insert_with(RemoteCraftWatch::default);
-    let pilots: Vec<u8> = remote.iter().map(|v| v.pilot).collect();
-    if pilots != watch.pilots {
-        info!(
-            "remote crafts: pilots {:?} (was {:?})",
-            pilots, watch.pilots
-        );
-        watch.pilots = pilots;
-        watch
-            .first_pose
-            .retain(|p, _| remote.iter().any(|v| v.pilot == *p));
-        watch.moved.retain(|p| remote.iter().any(|v| v.pilot == *p));
-    }
-    for v in &remote {
-        let pos = Vec3::from_array(v.pos);
-        let first = *watch.first_pose.entry(v.pilot).or_insert(pos);
-        if !watch.moved.contains(&v.pilot) && first.distance(pos) > REMOTE_MOVED_LOG_METERS {
-            watch.moved.insert(v.pilot);
-            info!(
-                "remote craft (pilot {}) has moved {:.1}m since it appeared",
-                v.pilot,
-                first.distance(pos)
-            );
-        }
-    }
     // `install_round` owns creation — a missing resource here is a broken install, not
     // a case to paper over.
     world.resource_mut::<RemoteVehicle>().adopt(step, &remote);
@@ -136,13 +99,11 @@ pub(super) fn publish_remote_vehicles(
 /// The host's craft poses at `tick`, for the [`VehicleFrame`] broadcast and the host's
 /// own remote-craft view.
 pub(super) fn capture(world: &mut World, tick: u64) -> VehicleFrame {
-    // The pilots' live commands, for the wire's thrust fractions (rl#308). Absent in
-    // plugin-less test worlds — a pilot with no command plumes nothing, like a skipped
-    // force tick.
+    // The pilots' live commands, for the wire's thrust fractions (rl#308).
     let controls = world
-        .get_resource::<crab_world::vehicle::VehicleControls>()
-        .map(|c| c.0.clone())
-        .unwrap_or_default();
+        .resource::<crab_world::vehicle::VehicleControls>()
+        .0
+        .clone();
     let mut vehicles: Vec<VehiclePoseWire> = world
         .query::<(&Transform, &Vehicle)>()
         .iter(world)
@@ -166,7 +127,7 @@ pub(super) fn capture(world: &mut World, tick: u64) -> VehicleFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cadence::cumulative_steps;
+    use net_proto::cadence::cumulative_steps;
 
     /// The rl#267 pin for remote crafts: wire poses adopted per tick sample back out
     /// interpolated on the uniform physics-step clock — the same [`PoseWindow`] law the

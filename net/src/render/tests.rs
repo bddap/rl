@@ -8,8 +8,8 @@ use super::scene::{
 };
 use super::*;
 use crate::menu::ReadyMatch;
-use crate::sim::{Sim, UNIT};
 use crab_world::vehicle::VehicleKind;
+use net_proto::sim::{Sim, UNIT};
 
 #[test]
 fn menu_handoff_installs_the_chosen_round() {
@@ -42,7 +42,11 @@ fn menu_handoff_installs_the_chosen_round() {
         .world()
         .get_non_send::<GameState>()
         .expect("ensure_round_installed must build GameState from the parked round");
-    assert_eq!(gs.client.me(), crate::sim::PlayerId(0), "solo player id 0");
+    assert_eq!(
+        gs.client.me(),
+        net_proto::sim::PlayerId(0),
+        "solo player id 0"
+    );
     assert!(
         !gs.coord.is_remote_client() && gs.coord.server().is_some(),
         "a solo handoff installs a solo (internal-server) coordinator"
@@ -503,7 +507,7 @@ fn interpolated_eye_path_is_uniform_at_every_locale() {
     // position survives rel_meters exactly. Sample the real interpolation at a
     // 60 Hz cadence (frac 0, 0.5) and hold the per-frame step to the same bound.
     use super::scene::lerp_pos;
-    use crate::sim::{PLAYER_SPEED, Pos};
+    use net_proto::sim::{PLAYER_SPEED, Pos};
     let ideal = PLAYER_SPEED as f64 / 100_000.0 / 2.0; // meters per 60 Hz frame
     for (x0_m, z0_m) in [(3.0f64, -7.0f64), (-10318.9, -10006.1), (14800.0, 14800.0)] {
         let origin = super::RenderOrigin(Pos::from_meters(x0_m as f32, z0_m as f32));
@@ -536,7 +540,7 @@ fn interpolated_eye_path_is_uniform_at_every_locale() {
 
 #[test]
 fn walker_eye_path_is_uniform_at_every_locale() {
-    use crate::sim::{PLAYER_SPEED, Pos};
+    use net_proto::sim::{PLAYER_SPEED, Pos};
     let g = crab_world::terrain::TerrainGrid::gcr();
     let ideal = PLAYER_SPEED as f64 / 100_000.0;
     for (x0_m, z0_m) in [(3.0f64, -7.0f64), (-10318.9, -10006.1), (14800.0, 14800.0)] {

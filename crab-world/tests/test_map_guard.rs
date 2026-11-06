@@ -6,9 +6,9 @@
 #[test]
 fn manifest_carries_the_full_landing_matrix() {
     // Resolved at RUNTIME from the test cwd (cargo runs tests in the package dir),
-    // not via CARGO_MANIFEST_DIR baked at compile time: kache restores test
-    // binaries across worktrees, and a baked absolute path would read the
-    // BUILDING worktree's manifest, not the one under test.
+    // not via CARGO_MANIFEST_DIR baked at compile time: a build cache may restore
+    // test binaries across checkouts, and a baked absolute path would read the
+    // BUILDING checkout's manifest, not the one under test.
     let manifest =
         std::fs::read_to_string("../test-map.json").expect("test-map.json at the repo root");
     for cmd in [

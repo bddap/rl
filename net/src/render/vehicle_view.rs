@@ -221,7 +221,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
-    use crate::vehicles::VehiclePoseWire;
+    use net_proto::vehicles::VehiclePoseWire;
 
     /// [`VehicleAssets`] with default (empty) handles but the REAL per-kind part counts, so
     /// the reconcile logic runs without any render stack.
@@ -260,7 +260,7 @@ mod tests {
     /// remote_vehicles.rs.
     fn readopt(w: &mut World, tick: u64, remote: Vec<VehiclePoseWire>) {
         let mut rv = RemoteVehicle::default();
-        rv.adopt(crate::cadence::cumulative_steps(tick), &remote);
+        rv.adopt(net_proto::cadence::cumulative_steps(tick), &remote);
         w.insert_resource(rv);
         w.insert_resource(super::super::driver::RenderClock { tick, frac: 0.0 });
     }

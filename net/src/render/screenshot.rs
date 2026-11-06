@@ -1,4 +1,4 @@
-use super::controls_sync::sync_controls_context;
+use super::app::sync_controls_context;
 use super::driver::{
     FlightInput, PendingInput, ScriptedPackInput, coordinator, drive_client_sim, insert_core,
 };
@@ -85,10 +85,6 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig) {
                 gather_input,
                 drive_pilot_script,
                 drive_client_sim,
-                // rl#376: record the wind's airspeed read in captures too — the
-                // offscreen app has no audio systems, but the trace must still see
-                // the signal the wind would hear.
-                super::audio::trace_wind_speed,
                 // Before any pose/transform consumer, as in the windowed app: the
                 // render origin must be current the frame it changes (rl#354).
                 sync_ground_anchor.before(crab_world::ground::apply_ground_anchor),
@@ -174,10 +170,6 @@ pub struct PilotScript {
     sprint_holds: Vec<(u64, Option<u64>)>,
     /// On-foot SLIDE hold windows, same shape (rl#368).
     slide_holds: Vec<(u64, Option<u64>)>,
-    /// Walk dead straight instead of the default gentle arc — position-trace
-    /// captures (rl#371) need a constant-velocity ground truth to difference
-    /// against.
-    straight: bool,
     /// Hold every flight axis at zero while piloting instead of the default full
     /// forward drive — parked-craft captures (rl#377) need a body at rest.
     park: bool,
@@ -196,7 +188,6 @@ impl PilotScript {
             jump_holds: Vec::new(),
             sprint_holds: Vec::new(),
             slide_holds: Vec::new(),
-            straight: false,
             park: false,
             restart_taps: Vec::new(),
             frame: 0,
@@ -221,12 +212,6 @@ impl PilotScript {
 
     pub fn with_slide_holds(mut self, holds: Vec<(u64, Option<u64>)>) -> Self {
         self.slide_holds = holds;
-        self
-    }
-
-    /// See [`Self::straight`].
-    pub fn with_straight_walk(mut self, straight: bool) -> Self {
-        self.straight = straight;
         self
     }
 
@@ -342,10 +327,8 @@ fn drive_pilot_script(
             flight.rt = 0.5;
         }
     } else if script.walk_at.is_some_and(|at| script.frame >= at) {
-        // Walk a gentle arc on foot. Straight for the rl#371 position traces, where
-        // the arc would alias into the step lengths.
         pending.forward = 1.0;
-        pending.yaw_delta = if script.straight { 0.0 } else { 0.02 };
+        pending.yaw_delta = 0.02;
     }
     if vehicle.kind().is_none() {
         let frame = script.frame;

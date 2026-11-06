@@ -1,11 +1,11 @@
 use anyhow::Result;
 pub use iroh::EndpointId;
 
-use crate::client::ClientSim;
 use crate::formation::{self, FormationDriver};
-use crate::membership::Role;
 use crate::net_loop::{self, MatchResult, NetDriver};
-use crate::transport::Session;
+use net_link::Session;
+use net_proto::client::ClientSim;
+use net_proto::membership::Role;
 
 #[derive(Debug, Clone)]
 pub enum StartChoice {
@@ -16,13 +16,11 @@ pub enum StartChoice {
 const NET_EXPECT: usize = 2;
 
 /// Where a [`Formation`] is in its life. The session bind is pollable — async on web,
-/// resolved-on-first-poll native ([`crate::transport::bind_session`]) — so the lobby
+/// resolved-on-first-poll native ([`net_link::bind_session`]) — so the lobby
 /// has a pre-session phase on BOTH platforms: one path, no wasm fork (rl#412).
 enum FormState {
     /// The session is still binding; everything the lobby needs once it lands.
-    Binding {
-        pending: crate::transport::PendingSession,
-    },
+    Binding { pending: net_link::PendingSession },
     Live {
         session: Session,
         // Boxed for variant-size parity with Binding (clippy::large_enum_variant).
@@ -39,7 +37,7 @@ pub struct Formation {
     role: Role,
     cancelled: bool,
     seed: u64,
-    stamp: crate::SyncStamp,
+    stamp: net_proto::SyncStamp,
 }
 
 impl Formation {
@@ -171,14 +169,14 @@ impl Drop for Formation {
 /// non-blocking and platform-free (the web bind rides the JS event loop; native's
 /// resolves on the first poll). Errors, including a failed bind, surface through
 /// [`Formation::poll`].
-pub fn begin(choice: &StartChoice, seed: u64, stamp: crate::SyncStamp) -> Formation {
+pub fn begin(choice: &StartChoice, seed: u64, stamp: net_proto::SyncStamp) -> Formation {
     let role = match choice {
         StartChoice::Host => Role::Host,
         StartChoice::Join(host) => Role::Joiner { host: *host },
     };
     Formation {
         state: Some(FormState::Binding {
-            pending: crate::transport::bind_session(),
+            pending: net_link::bind_session(),
         }),
         role,
         cancelled: false,
@@ -188,7 +186,7 @@ pub fn begin(choice: &StartChoice, seed: u64, stamp: crate::SyncStamp) -> Format
 }
 
 /// The bound-session half of [`begin`]: fire the join dial, open the formation core.
-fn open_lobby(session: Session, role: Role, stamp: crate::SyncStamp, now_ms: u64) -> FormState {
+fn open_lobby(session: Session, role: Role, stamp: net_proto::SyncStamp, now_ms: u64) -> FormState {
     if let Role::Joiner { host: Some(host) } = role {
         // Fire-and-forget: a failed dial surfaces as a lobby that never fills (the
         // joiner cancels out), matching the discovery-may-still-find-them semantics.
@@ -444,7 +442,7 @@ impl MenuNav {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SyncStamp;
+    use net_proto::SyncStamp;
     use net_proto::membership::{BEAT_EVERY_MS, HostClaim, STABLE_FOR_MS};
 
     /// Poll `f` until it yields, failing past the hang guard.

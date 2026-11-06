@@ -10,23 +10,23 @@ use std::time::Duration;
 use anyhow::Result;
 use iroh::EndpointId;
 
-use crate::client::{ClientSim, PeerMsg, TickMsg};
 #[cfg(not(target_family = "wasm"))]
 use crate::formation::{Formation, FormationDriver};
 use crate::formation::{Frozen, early_peer_msgs};
-use crate::server::{JoinRequest, Refusal, Server, may_admit_joiner};
-use crate::sim::PlayerId;
-use crate::snapshot::CoreSnapshot;
-use crate::transport;
-use crate::transport::{PeerWire, Session};
-use crate::vehicles::VehicleFrame;
+use net_link;
+use net_link::{PeerWire, Session};
+use net_proto::client::{ClientSim, PeerMsg, TickMsg};
+use net_proto::server::{JoinRequest, Refusal, Server, may_admit_joiner};
+use net_proto::sim::PlayerId;
+use net_proto::snapshot::CoreSnapshot;
+use net_proto::vehicles::VehicleFrame;
 
 /// Most departed-endpoint ids remembered for the courtesy [`Refusal::Departed`] reply
 /// (rl#350): under join/depart churn the set would otherwise grow one endpoint id per
 /// cycle for the life of the round. Overflow clears the set — the reply is best-effort
 /// (a forgotten departee's zombie link is closed by the unrostered grace instead, and
 /// its client surfaces the loss as LinkLost).
-const DEPARTED_CAP: usize = crate::membership::MAX_MEMBERS;
+const DEPARTED_CAP: usize = net_proto::membership::MAX_MEMBERS;
 
 /// Sustained mid-game join-attempt rate the host processes, and the burst headroom over
 /// it (a party joining at once). Joins are rare human actions; anything past this is a
@@ -88,9 +88,9 @@ pub struct NetDriver {
     /// is bounded by the transport's link cap.
     unrostered_since: BTreeMap<EndpointId, u64>,
     /// Whether every peer stands on the same world, judged when this round was formed (or
-    /// admitted) by the ONE arbiter, [`crate::SyncStamp::agrees`].
+    /// admitted) by the ONE arbiter, [`net_proto::SyncStamp::agrees`].
     synced: bool,
-    stamp: crate::SyncStamp,
+    stamp: net_proto::SyncStamp,
 }
 
 #[derive(Default)]
@@ -249,7 +249,7 @@ impl NetDriver {
             Err(refusal) => {
                 // warn, not error: a refused join is a protocol outcome, not a host fault
                 // (the joiner surfaces its own loud error), and error-level would feed
-                // fleet alerting at joiner-controlled rate (rl#350).
+                // alerting at a joiner-controlled rate (rl#350).
                 tracing::warn!("refused mid-game joiner {}: {refusal}", eid.fmt_short());
                 self.refuse(eid, Refusal::Admission(refusal));
             }
@@ -315,7 +315,7 @@ pub struct Coordinator(Mode);
 
 enum Mode {
     Server {
-        // Boxed: the [`Server`] owns the authoritative [`crate::sim::Sim`], so it dwarfs the
+        // Boxed: the [`Server`] owns the authoritative [`net_proto::sim::Sim`], so it dwarfs the
         // `Client` variant's lone `NetDriver` — heap it to keep the enum balanced.
         server: Box<Server>,
         net: Option<NetDriver>,
@@ -337,7 +337,7 @@ impl Coordinator {
         net: Option<NetDriver>,
         peers: &[PlayerId],
         me: PlayerId,
-        sim: crate::sim::Sim,
+        sim: net_proto::sim::Sim,
     ) -> Self {
         Coordinator(match net {
             None => Mode::Server {
@@ -460,9 +460,9 @@ pub fn connect_and_form_dialing(
     discover_secs: u64,
     expect: usize,
     host: Option<EndpointId>,
-    stamp: crate::SyncStamp,
+    stamp: net_proto::SyncStamp,
 ) -> Result<MatchResult> {
-    let mut session = transport::start_session()?;
+    let mut session = net_link::start_session()?;
     let my_eid = session.endpoint_id();
     println!("fp client endpoint id: {my_eid}");
     let mut dial_verdict = None;
@@ -520,7 +520,7 @@ pub(crate) fn joined_from_frozen(
     session: Session,
     frozen: Frozen,
     seed: u64,
-    stamp: crate::SyncStamp,
+    stamp: net_proto::SyncStamp,
 ) -> Box<(ClientSim, NetDriver)> {
     let all_ids: Vec<PlayerId> = frozen.id_map.values().copied().collect();
     println!(
@@ -561,7 +561,7 @@ pub enum JoinResult {
 }
 
 /// A mid-game join as a poll-driven state machine — the mid-game analogue of
-/// [`crate::formation::FormationDriver`]: dial the host, send our [`crate::SyncStamp`]
+/// [`crate::formation::FormationDriver`]: dial the host, send our [`net_proto::SyncStamp`]
 /// as a [`JoinRequest`], and await the host's verdict — admitted (become a remote-adopt
 /// client booting from the host's next authoritative snapshot — the host spawns us into
 /// its LIVE round at `effective_tick`), refused (the host's [`Refusal`] relayed LOUDLY —
@@ -573,14 +573,14 @@ pub struct JoinDriver {
     session: Option<Session>,
     host: EndpointId,
     seed: u64,
-    stamp: crate::SyncStamp,
+    stamp: net_proto::SyncStamp,
     state: JoinState,
 }
 
 enum JoinState {
-    /// The session bind is in flight ([`transport::bind_session`] — async on web,
+    /// The session bind is in flight ([`net_link::bind_session`] — async on web,
     /// resolved-on-first-poll native): one path, no wasm fork (rl#412).
-    Binding { pending: transport::PendingSession },
+    Binding { pending: net_link::PendingSession },
     /// The dial is in flight on the platform executor; its verdict channel resolves it.
     Dialing {
         verdict: std::sync::mpsc::Receiver<Result<()>>,
@@ -593,15 +593,15 @@ enum JoinState {
 impl JoinDriver {
     /// Kick off the session bind — non-blocking and platform-free; pump for the
     /// outcome (the dial fires once the bind lands). `seed` is the shared
-    /// [`crate::sim`] match constant every peer holds.
-    pub fn begin(seed: u64, host: EndpointId, stamp: crate::SyncStamp) -> Self {
+    /// [`net_proto::sim`] match constant every peer holds.
+    pub fn begin(seed: u64, host: EndpointId, stamp: net_proto::SyncStamp) -> Self {
         Self {
             session: None,
             host,
             seed,
             stamp,
             state: JoinState::Binding {
-                pending: transport::bind_session(),
+                pending: net_link::bind_session(),
             },
         }
     }
@@ -688,7 +688,7 @@ impl JoinDriver {
         JoinResult::Unreachable
     }
 
-    fn resolve_admitted(&mut self, adm: crate::server::Admission) -> Result<JoinResult> {
+    fn resolve_admitted(&mut self, adm: net_proto::server::Admission) -> Result<JoinResult> {
         let session = self.take_resolved();
         let me = adm.pid;
         println!(
@@ -717,7 +717,7 @@ impl JoinDriver {
         // The ONE arbiter judges our round, from the host stamp the Welcome carried — the
         // same comparison the host's admission gate just passed, so an admitted joiner is
         // synced by construction, computed rather than assumed.
-        let synced = crate::SyncStamp::agrees(adm.host_stamp, self.stamp);
+        let synced = net_proto::SyncStamp::agrees(adm.host_stamp, self.stamp);
         let join_budget = JoinBudget::new(session.now_ms());
         let driver = NetDriver {
             session,
@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn solo_round_advances_through_the_coordinator() {
-        use crate::sim::Input;
+        use net_proto::sim::Input;
         let me = PlayerId(0);
         let mut client = ClientSim::new(0x5A11, &[me], me);
         let mut coord = Coordinator::for_round(None, client.peers(), me, client.sim().clone());
@@ -813,8 +813,8 @@ mod tests {
             let server = coord.server_mut().expect("solo runs an internal server");
             while server.next_tick_ready() {
                 let bytes = server.step_next(Default::default()).snapshot;
-                let snap =
-                    crate::snapshot::CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes");
+                let snap = net_proto::snapshot::CoreSnapshot::from_bytes(&bytes)
+                    .expect("snapshot decodes");
                 client.apply_core_snapshot(snap);
             }
         }

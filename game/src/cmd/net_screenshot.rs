@@ -51,7 +51,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         args.discover_secs,
         args.expect,
         dial,
-        net::SyncStamp::local(),
+        net_proto::SyncStamp::local(),
     )?;
 
     let (client, driver) = match result {

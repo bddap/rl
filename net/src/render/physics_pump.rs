@@ -1,28 +1,23 @@
 //! The host's manual physics pump: the wall-clock fixed-timestep auto-pump is parked
-//! ([`park_fixed_auto_pump`]), so [`pump_fixed_steps`] is the ONLY thing that advances
-//! `FixedMain`, and the per-tick count comes from [`crate::cadence::steps_for_tick`], the
-//! one source for the 64:30 staircase.
+//! ([`park_fixed_auto_pump`]), so [`pump_fixed_step`] is the ONLY thing that advances
+//! `FixedMain`. The host calls it once per owed step, spreading each tick's
+//! [`net_proto::cadence::steps_for_tick`] across frames (rl#396).
 
 use bevy::prelude::*;
 
-pub(crate) fn pump_fixed_steps(world: &mut World, steps: u32) {
+pub(crate) fn pump_fixed_step(world: &mut World) {
     use bevy::app::FixedMain;
     use bevy::time::{Fixed, Virtual};
 
-    if steps == 0 {
-        return;
-    }
-    for _ in 0..steps {
-        let fixed = world.resource::<Time<Fixed>>().as_generic();
-        *world.resource_mut::<Time>() = fixed;
-        world.run_schedule(FixedMain);
-    }
+    let fixed = world.resource::<Time<Fixed>>().as_generic();
+    *world.resource_mut::<Time>() = fixed;
+    world.run_schedule(FixedMain);
     let virt = world.resource::<Time<Virtual>>().as_generic();
     *world.resource_mut::<Time>() = virt;
 }
 
 /// Park the wall-clock fixed-timestep auto-pump — EXACTLY: every peer's `FixedUpdate`
-/// then advances only through [`pump_fixed_steps`], which only the server-auth arm
+/// then advances only through [`pump_fixed_step`], which only the server-auth arm
 /// calls. Two layers because neither alone is airtight: the overstep discard runs
 /// every frame BEFORE bevy's accrual+expend, so the accumulator entering the expend
 /// holds at most one frame's virtual delta — which the huge timestep can never expend
@@ -41,7 +36,7 @@ pub(crate) fn park_fixed_auto_pump(app: &mut App) {
 }
 
 /// [`park_fixed_auto_pump`]'s per-frame half: zero the fixed accumulator before the
-/// frame's accrual. [`pump_fixed_steps`] is untouched — it runs `FixedMain` directly
+/// frame's accrual. [`pump_fixed_step`] is untouched — it runs `FixedMain` directly
 /// and never consults the accumulator.
 fn discard_parked_overstep(mut fixed: ResMut<Time<Fixed>>) {
     let overstep = fixed.overstep();

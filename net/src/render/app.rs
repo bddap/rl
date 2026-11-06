@@ -1,6 +1,6 @@
-use super::controls_sync::{sync_controls_context, sync_menu_controls_context};
 use super::driver::{
-    PendingRound, drive_client_sim, ensure_round_installed, insert_core, teardown_round,
+    LocalVehicle, PendingRound, drive_client_sim, ensure_round_installed, insert_core,
+    teardown_round,
 };
 use super::input::{gather_input, grab_cursor, quit_game, release_cursor};
 use super::scene::{
@@ -28,7 +28,7 @@ pub fn build_windowed_app(boot: Boot, view: crab_world::BootView) -> anyhow::Res
     let mut app = App::new();
     let window = Window {
         title: "Giant Crab Rescue".into(),
-        // gamescope forces fullscreen on the Deck but a plain desktop leaves a Windowed app
+        // gamescope forces fullscreen but a plain desktop leaves a Windowed app
         // windowed; BorderlessFullscreen makes the app own the policy on every target.
         mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
         ..default()
@@ -107,7 +107,6 @@ pub fn build_windowed_app(boot: Boot, view: crab_world::BootView) -> anyhow::Res
                 // muffle (rl#359) lands on wind and beds as one mix move.
                 super::audio::drive_muffle,
                 super::audio::drive_wind,
-                super::audio::trace_wind_speed,
                 super::ambience::spawn_ambience,
                 super::ambience::update_context,
                 super::ambience::drive_layers,
@@ -156,7 +155,7 @@ pub fn build_windowed_app(boot: Boot, view: crab_world::BootView) -> anyhow::Res
             app.insert_resource(BootedWithMenu);
             app.add_plugins(menu::MenuPlugin {
                 seed,
-                stamp: crate::SyncStamp::local(),
+                stamp: net_proto::SyncStamp::local(),
             });
         }
     }
@@ -226,4 +225,17 @@ fn toggle_debug_overlay(
     if chords.executed(controls::Action::ToggleDebugOverlay) {
         overlay.visible = !overlay.visible;
     }
+}
+
+pub(super) fn sync_controls_context(
+    vehicle: Res<LocalVehicle>,
+    mut ctx: ResMut<ActiveContext<GcrControls>>,
+) {
+    ActiveContext::sync(&mut ctx, vehicle.context());
+}
+
+/// The not-Playing twin of [`sync_controls_context`]: menu and lobby (Connecting) share
+/// the one Menu context (rl#117).
+fn sync_menu_controls_context(mut ctx: ResMut<ActiveContext<GcrControls>>) {
+    ActiveContext::sync(&mut ctx, GcrContext::Menu);
 }

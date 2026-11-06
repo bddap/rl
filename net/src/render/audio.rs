@@ -22,8 +22,8 @@ use bevy::audio::{AddAudioSource, Decodable, PlaybackSettings};
 use bevy::prelude::*;
 
 use super::driver::{GameState, LocalVehicle};
-use crate::sim::{TICK_HZ, UNIT};
 use crab_world::vehicle::VehicleKind;
+use net_proto::sim::{TICK_HZ, UNIT};
 
 /// The shared "external world" mix bus (rl#359): every diegetic outdoor sound routes
 /// its parameters through this resource instead of straight to the master mix, so
@@ -249,24 +249,6 @@ pub(super) fn drive_wind(
         .store([gain, cutoff, whistle_hz, whistle_gain, gust]);
 }
 
-/// rl#376 trace observer: the airspeed [`drive_wind`] drives the synth with, through
-/// the same [`local_speed_mps`] read — registered in the windowed AND offscreen apps
-/// (the latter has no audio systems), so captures record the signal the wind hears.
-pub(super) fn trace_wind_speed(
-    state: NonSend<GameState>,
-    vehicle: Res<LocalVehicle>,
-    trace: Option<ResMut<super::pos_trace::PosTrace>>,
-) {
-    let Some(mut trace) = trace else {
-        return;
-    };
-    if let LocalVehicle::Flying { poses, .. } = &*vehicle
-        && let Some(step) = poses.newest_step()
-    {
-        trace.wind(step, local_speed_mps(&state, &vehicle));
-    }
-}
-
 /// Timbre map: context + airspeed → `[gain, cutoff_hz, whistle_hz, whistle_gain,
 /// gust_depth]`. Each context normalizes speed over its own audible band — quiet
 /// floor to [`FULL_WIND_MPS`] — then shapes loudness and brightness from that.
@@ -275,7 +257,7 @@ pub(super) fn profile(kind: Option<VehicleKind>, speed_mps: f32) -> [f32; 5] {
     const MASTER: f32 = WIND_MASTER;
     // On foot the floor sits above sprint (~0.25 m/s): walking and sprinting stay
     // near-silent, a fall is what roars.
-    let sprint_mps = crate::sim::SPRINT_SPEED as f32 / UNIT as f32 * TICK_HZ as f32;
+    let sprint_mps = net_proto::sim::SPRINT_SPEED as f32 / UNIT as f32 * TICK_HZ as f32;
     let (floor, ceil) = match kind {
         None => (sprint_mps, FULL_WIND_MPS),
         // The plane is audible from just above slow flight; full roar at terminal.

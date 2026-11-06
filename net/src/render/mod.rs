@@ -6,34 +6,31 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindow, WindowMode};
 
-use crate::client::{ClientSim, TickMsg};
 use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::net_loop::{Coordinator, Exchanged, NetDriver};
-use crate::sim::{
-    Input, Outcome, PLAYER_HEIGHT, Player, PlayerId, PlayerStatus, Pos, buttons, trig, trig_client,
-};
 use crab_world::controls::{ActiveContext, PAD_STICK_DEADZONE, update_controls_ui};
-
-pub use crate::sim::TICK_HZ;
-
-pub use crate::sim::TICK_DT;
+use net_proto::client::{ClientSim, TickMsg};
+use net_proto::sim::{
+    Input, Outcome, PLAYER_HEIGHT, Player, PlayerId, PlayerStatus, Pos, TICK_DT, buttons, trig,
+    trig_client,
+};
 
 const MAX_TICKS_PER_FRAME: u32 = 8;
 
-/// Eye level: the pre-rl#256 1.6 m eyes on the 1.8 m player, as a stature fraction.
-const EYE_HEIGHT: f32 = 1.6 / 1.8 * crate::sim::PLAYER_HEIGHT;
+/// Eye level, as a stature fraction.
+const EYE_HEIGHT: f32 = 8.0 / 9.0 * net_proto::sim::PLAYER_HEIGHT;
 
 /// Eye level mid-slide (rl#368): a crouch-skid at half stature. The dip is the
 /// first-person cue that the slide took — the sim's speed change alone was
 /// unreadable in play. Render-only.
-const SLIDE_EYE_HEIGHT: f32 = 0.9 / 1.8 * crate::sim::PLAYER_HEIGHT;
+const SLIDE_EYE_HEIGHT: f32 = 0.5 * net_proto::sim::PLAYER_HEIGHT;
 
 /// The eye eases between stand and slide height with this per-second rate
 /// (time-constant ≈ 1/12 s ≈ 80 ms — quick enough to read as a drop, not a cut).
 const SLIDE_EYE_RATE: f32 = 12.0;
 
-/// Avatar capsule radius: the pre-rl#256 0.4 m on the 1.8 m player, as a stature fraction.
-const PLAYER_RADIUS: f32 = 0.4 / 1.8 * crate::sim::PLAYER_HEIGHT;
+/// Avatar capsule radius, as a stature fraction.
+const PLAYER_RADIUS: f32 = 2.0 / 9.0 * net_proto::sim::PLAYER_HEIGHT;
 
 const MOUSE_SENS: f32 = 0.0022;
 
@@ -75,22 +72,20 @@ fn world(pos: Pos, y: f32, origin: RenderOrigin) -> Vec3 {
 /// by this same cap so full `look_yaw` deflection means exactly "the most the sim
 /// turns in one tick" — commanding more would only make the camera lag the avatar,
 /// since the sim would clamp it. Derived from the sim's own
-/// [`crate::sim::MAX_YAW_TURNS_PER_TICK`], so the two can't drift.
+/// [`net_proto::sim::MAX_YAW_TURNS_PER_TICK`], so the two can't drift.
 const MAX_YAW_PER_TICK_RADIANS: f32 =
-    crate::sim::MAX_YAW_TURNS_PER_TICK as f32 / trig::TURN as f32 * std::f32::consts::TAU;
+    net_proto::sim::MAX_YAW_TURNS_PER_TICK as f32 / trig::TURN as f32 * std::f32::consts::TAU;
 
 mod ambience;
 mod app;
 mod audio;
 pub mod chord_map;
-mod controls_sync;
 mod driver;
 mod input;
 #[cfg(not(target_family = "wasm"))]
 mod live_screenshot;
 mod menu;
 mod physics_pump;
-mod pos_trace;
 mod pose;
 mod remote_vehicles;
 mod run_game;

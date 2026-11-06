@@ -1,7 +1,7 @@
 //! Physics-step-time pose interpolation (rl#264/rl#267) — THE one mechanism for
 //! rendering any stepped pose stream. Craft state advances a
 //! VARIABLE number of physics steps per sim tick (the 64:30 staircase,
-//! [`crate::cadence::cumulative_steps`]), so interpolating a pose pair by
+//! [`net_proto::cadence::cumulative_steps`]), so interpolating a pose pair by
 //! tick-fraction surges rendered velocity ±50% ~4×/s. Every consumer — the local
 //! cockpit ([`super::driver::LocalVehicle`]) and remote pilots' craft models
 //! ([`super::remote_vehicles::RemoteVehicle`]) — samples through this window instead; a second interpolation mechanism is a bug
@@ -62,8 +62,8 @@ impl PoseWindow {
     }
 
     pub(super) fn sample(&self, now_tick: u64, tick_frac: f32) -> Option<Pose> {
-        use crate::sim::TICK_HZ;
         use crab_world::physics::PHYSICS_HZ;
+        use net_proto::sim::TICK_HZ;
 
         let r = PHYSICS_HZ as f64 / TICK_HZ as f64;
         // Render time in ticks is (now_tick − 1) + frac — a frame interpolates the
@@ -95,10 +95,6 @@ impl PoseWindow {
         self.buf[DEPTH - 1].is_none()
     }
 
-    pub(super) fn newest_step(&self) -> Option<u64> {
-        self.buf[DEPTH - 1].map(|(s, _)| s)
-    }
-
     /// Ground speed of the newest interval, m/s (rl#356), divided by physics steps,
     /// not ticks: a tick spans 2 or 3 steps (rl#376). `None` until two poses arrive.
     pub(super) fn speed_mps(&self) -> Option<f32> {
@@ -113,7 +109,7 @@ impl PoseWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cadence::cumulative_steps;
+    use net_proto::cadence::cumulative_steps;
 
     #[test]
     fn pose_window_renders_uniform_velocity_through_the_staircase() {
@@ -125,7 +121,8 @@ mod tests {
         // jumps (a tick gap: both peers' clocks stall together on loss), the covered
         // distance must stay proportional to the jump — no surge, no shortfall.
         const STEP_METERS: f64 = 0.1;
-        let r = STEP_METERS * crab_world::physics::PHYSICS_HZ as f64 / crate::sim::TICK_HZ as f64;
+        let r =
+            STEP_METERS * crab_world::physics::PHYSICS_HZ as f64 / net_proto::sim::TICK_HZ as f64;
         let pose_at = |tick: u64| Pose {
             pos: Vec3::new(
                 (cumulative_steps(tick) as f64 * STEP_METERS) as f32,

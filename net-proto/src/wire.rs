@@ -64,14 +64,14 @@ pub(crate) fn pos_from_bytes(b: [u8; 16]) -> Pos {
 impl PlayerStatus {
     pub(crate) fn tag(self) -> u8 {
         match self {
-            PlayerStatus::Alive => 0,
+            PlayerStatus::InPlay => 0,
             PlayerStatus::Extracted => 1,
         }
     }
 
     pub(crate) fn from_tag(tag: u8) -> Option<Self> {
         match tag {
-            0 => Some(PlayerStatus::Alive),
+            0 => Some(PlayerStatus::InPlay),
             1 => Some(PlayerStatus::Extracted),
             _ => None,
         }

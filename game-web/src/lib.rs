@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use wasm_bindgen::prelude::*;
 
 /// The page's entry point, called with the fetched `assets.pack` bytes once both
-/// downloads finish (index.html shows progress until then; a ~150 MB cold load is
+/// downloads finish (index.html shows progress until then; a cold load is
 /// minutes of otherwise-black screen on residential bandwidth — rl#413).
 #[wasm_bindgen]
 pub fn boot(pack: Vec<u8>) {

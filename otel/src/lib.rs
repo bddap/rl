@@ -81,7 +81,7 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
 
     // No span export on purpose: bevy_render opens `info_span!`s per frame with no
     // feature gate, so a span pipeline ships ~6k spans/s from a running game (3 GiB/h
-    // at the sink, tv 2026-07-21) — and nothing fleet-side reads traces, only logs.
+    // at the sink) — and nothing downstream reads traces, only logs.
     match build_providers(service_name, &endpoint) {
         Ok((logger_provider, meter_provider)) => {
             let log_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
@@ -121,12 +121,12 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
 /// still reaches stderr). Excluded:
 ///
 /// - The export pipeline's own crates — exporting their records feeds back into export.
-/// - gilrs's force-feedback module. No rl surface plays rumble, but bevy_gilrs 0.18
+/// - gilrs's force-feedback module. No rl surface plays rumble, but bevy_gilrs
 ///   hardcodes ff ON, so gilrs holds a second fd per gamepad and pokes it every 50ms
 ///   tick; when a Bluetooth pad sleeps, the ticks that race the Disconnected event hit
 ///   the deleted node and log expected ENODEV at ERROR (upstream's own Drop impl
-///   treats ENODEV as expected), firing a fleet-error per controller sleep (tv,
-///   2026-08-11). Reconnect self-heals: gilrs re-opens the device with the fresh node.
+///   treats ENODEV as expected), firing an error per controller sleep. Reconnect
+///   self-heals: gilrs re-opens the device with the fresh node.
 fn exportable_target(t: &str) -> bool {
     !(t.starts_with("opentelemetry")
         || t.starts_with("hyper")
@@ -212,7 +212,7 @@ fn build_digest() -> String {
 }
 
 fn host_name() -> String {
-    env::var("DECK_ID")
+    env::var("DEVICE_ID")
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))

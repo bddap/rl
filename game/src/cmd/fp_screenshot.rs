@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use net::render;
-use net::sim::PlayerId;
+use net_proto::sim::PlayerId;
 
 use crab_world::RenderArgs;
 
@@ -79,11 +79,6 @@ pub(crate) struct Args {
     #[arg(long, value_delimiter = ',')]
     slide_holds: Vec<String>,
 
-    /// Walk dead straight instead of the default gentle arc — position-trace
-    /// captures (rl#371) need a constant-velocity ground truth.
-    #[arg(long)]
-    walk_straight: bool,
-
     /// Tap round-RESTART at these frames (comma-separated) — each restart draws the
     /// next rl#305 layout off the seed's stream, so a sighting anchored to
     /// "restart N of seed S" is reachable headlessly (rl#372).
@@ -108,13 +103,13 @@ pub(crate) struct Args {
 pub(crate) fn run(args: Args) -> Result<()> {
     let me = PlayerId(0);
     let players: Vec<PlayerId> = (0..args.players.max(1)).map(PlayerId).collect();
-    let client = net::client::ClientSim::new(args.seed, &players, me);
+    let client = net_proto::client::ClientSim::new(args.seed, &players, me);
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(args.cam_yaw, args.cam_pitch)
         .with_cam_height(args.cam_height)
         .with_fov(args.cam_fov)
         .with_anim(args.anim_frames.map(|count| (count, args.anim_every)));
-    let pack = net::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
+    let pack = net_proto::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
     let mut app = render::build_screenshot_app(client, cfg, args.render.resolve(), pack);
     if args.debug_overlay {
         app.insert_resource(crab_world::debug_overlay::DebugOverlay { visible: true });
@@ -137,7 +132,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
                 .with_jump_holds(parse_holds(&args.jump_holds)?)
                 .with_sprint_holds(parse_holds(&args.sprint_holds)?)
                 .with_slide_holds(parse_holds(&args.slide_holds)?)
-                .with_straight_walk(args.walk_straight)
                 .with_park(args.pilot_park)
                 .with_restart_taps(args.restart_taps),
         );

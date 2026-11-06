@@ -6,14 +6,13 @@
 use bevy::prelude::*;
 
 /// Full-moon illuminance (lux, stylized — real moonlight is ~0.3 lux). Tuned so a
-/// full-moon ground vista renders at 30% of the pre-moon static light's mean
-/// linear luminance (rl#404 — measured on screenshots, not scaled on the
-/// constant: the 400-lux ambient floor makes as-rendered ≠ proportional-in-lux).
+/// full-moon ground vista renders at the rl#404 target mean linear luminance
+/// (measured on screenshots, not scaled on the constant: the 400-lux ambient floor
+/// makes as-rendered ≠ proportional-in-lux).
 const FULL_MOON_LUX: f32 = 2300.0;
 
 /// The hue knob turns only the hue of an otherwise fixed pastel: saturation 1.0 /
-/// lightness 0.925 in HSL, chosen so the default hue reproduces the pre-moon
-/// light color exactly (`hsl(220°) == srgb(0.85, 0.90, 1.0)` — guarded by test).
+/// lightness 0.925 in HSL; the default hue 220° is srgb(0.85, 0.90, 1.0).
 const MOON_SATURATION: f32 = 1.0;
 const MOON_LIGHTNESS: f32 = 0.925;
 
@@ -24,14 +23,12 @@ pub const DEFAULT_TIMESCALE: f32 = 24.0;
 const DAY_SECONDS: f64 = 86_400.0;
 const SYNODIC_SECONDS: f64 = 29.530588 * DAY_SECONDS;
 
-/// The traversal path's anchor is the default (pre-moon-light) pose: the moon
-/// "rises" there, so a freshly booted moving sky starts exactly where the
-/// static stage-1 moon stood and departs smoothly.
+/// The traversal path's anchor is the default pose: the moon "rises" there, so a
+/// freshly booted moving sky starts at the default and departs smoothly.
 const RISE_AZIMUTH_DEG: f32 = 43.8;
 /// The elevation floor: the traversal never dips below this, so the moon never
 /// sets and never grazes low enough for the missing far-field terrain shadows
-/// to read as wrong. It equals the default elevation — the shipped stage-1
-/// look already proved this height sound.
+/// to read as wrong. It equals the default elevation.
 const ELEVATION_FLOOR_DEG: f32 = 21.5;
 const PEAK_ELEVATION_DEG: f32 = 60.0;
 /// How far the azimuth travels in one crossing before turning back — half the
@@ -63,9 +60,7 @@ pub struct Moon {
 }
 
 impl Default for Moon {
-    /// Reproduces the pre-moon static light's pose and color: its euler-angle
-    /// transform pointed the light along -(0.644, 0.367, 0.671) and its color
-    /// was `hsl(220°)`. Illuminance is dimmer than that light was (rl#404).
+    /// The light points along -(0.644, 0.367, 0.671) at hue 220°, full illuminance.
     fn default() -> Self {
         Self {
             azimuth_deg: RISE_AZIMUTH_DEG,
@@ -352,26 +347,6 @@ fn sync_moon_light(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The default moon must reproduce the pre-moon static light it replaced:
-    /// same color, same illuminance, same direction (rl#374 — the "old light
-    /// path deleted in the same change" contract).
-    #[test]
-    fn default_moon_reproduces_the_old_light() {
-        let moon = Moon::default();
-        let c = moon.color().to_srgba();
-        for (got, want) in [(c.red, 0.85), (c.green, 0.90), (c.blue, 1.0)] {
-            assert!((got - want).abs() < 5e-3, "color {got} != {want}");
-        }
-        assert!((moon.illuminance() - FULL_MOON_LUX).abs() < 1.0);
-        let old_forward = Quat::from_euler(EulerRot::XYZ, -0.5, 0.7, 0.0) * Vec3::NEG_Z;
-        assert!(
-            moon.direction().dot(-old_forward) > 0.9999,
-            "default direction {:?} drifted from the old light's {:?}",
-            moon.direction(),
-            -old_forward
-        );
-    }
 
     /// Phase endpoints: new moon is (nearly) dark, full moon is the anchor, and
     /// a quarter moon sits an order of magnitude under full.

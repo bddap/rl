@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::reader::Reader;
 use crab_world::chord::ChordDir;
 
 use crate::sim::{JumpWindows, Outcome, Player, PlayerId, PlayerStatus, Pos};
@@ -187,35 +188,9 @@ impl CoreSnapshot {
     }
 }
 
-struct Reader<'a> {
-    buf: &'a [u8],
-    at: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, at: 0 }
-    }
-
-    fn take<const N: usize>(&mut self) -> Result<[u8; N], SnapshotDecodeError> {
-        let end = self
-            .at
-            .checked_add(N)
-            .ok_or(SnapshotDecodeError::Truncated)?;
-        let slice = self
-            .buf
-            .get(self.at..end)
-            .ok_or(SnapshotDecodeError::Truncated)?;
-        self.at = end;
-        Ok(slice.try_into().expect("slice length checked above"))
-    }
-
-    fn byte(&mut self) -> Result<u8, SnapshotDecodeError> {
-        Ok(self.take::<1>()?[0])
-    }
-
-    fn is_empty(&self) -> bool {
-        self.at == self.buf.len()
+impl From<crate::reader::Truncated> for SnapshotDecodeError {
+    fn from(_: crate::reader::Truncated) -> Self {
+        Self::Truncated
     }
 }
 

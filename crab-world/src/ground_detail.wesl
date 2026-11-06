@@ -1,7 +1,7 @@
 // ground_detail — the always-on high-frequency ground layer (rl#333 seam 2):
 // the rl#324 adaptive descents. One copy, called only by the ground scaffold
 // (ground.wesl), so every look composes with it by construction and a taste pass
-// on on-foot detail is one edit, fleet-wide.
+// on on-foot detail is one edit.
 
 // gnoise, not vnoise, in BOTH descents (rl#373): these are the two places the
 // value-noise lattice reached the eye — see noise::gnoise for why.

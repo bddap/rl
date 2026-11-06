@@ -10,14 +10,12 @@ path = "src/main.rs"
 
 [dependencies]
 net = { path = "../net", features = ["render"] }
+net-proto = { path = "../net-proto" }
 crab-world = { path = "../crab-world", features = ["render"] }
 otel = { path = "../otel" }
 anyhow.workspace = true
 clap.workspace = true
 iroh.workspace = true
-# The headless net loop reports progress/faults as tracing events (not println), so they
-# ride the same subscriber + OTLP export as every other game fault (#133).
-tracing.workspace = true
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

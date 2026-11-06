@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use crate::SyncStamp;
 use crate::client::{PilotIntent, TickMsg};
 use crate::membership::{self, Beat};
+use crate::reader::Reader;
 use crate::server::{Admission, AdmissionRefusal, JoinRequest, Refusal};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
@@ -27,11 +28,11 @@ pub enum Frame {
     Tick = 0,
     /// A [`Beat`]: heartbeat + roster advertisement for the formation barrier.
     Beat = 1,
-    JoinRequest = 3,
-    Refuse = 5,
-    Welcome = 6,
-    Snapshot = 7,
-    Vehicles = 8,
+    JoinRequest = 2,
+    Refuse = 3,
+    Welcome = 4,
+    Snapshot = 5,
+    Vehicles = 6,
 }
 
 impl Frame {
@@ -39,11 +40,11 @@ impl Frame {
         match b {
             0 => Some(Frame::Tick),
             1 => Some(Frame::Beat),
-            3 => Some(Frame::JoinRequest),
-            5 => Some(Frame::Refuse),
-            6 => Some(Frame::Welcome),
-            7 => Some(Frame::Snapshot),
-            8 => Some(Frame::Vehicles),
+            2 => Some(Frame::JoinRequest),
+            3 => Some(Frame::Refuse),
+            4 => Some(Frame::Welcome),
+            5 => Some(Frame::Snapshot),
+            6 => Some(Frame::Vehicles),
             _ => None,
         }
     }
@@ -80,6 +81,10 @@ pub trait Codec: Sized {
     const KIND: Frame;
     type Bytes: AsRef<[u8]>;
     fn encode(&self) -> Self::Bytes;
+}
+
+/// A frame on the reliable ordered stream: its body is the whole message.
+pub trait ControlCodec: Codec {
     fn decode(body: &[u8]) -> Result<Self>;
 }
 
@@ -91,6 +96,8 @@ pub trait Codec: Sized {
 /// correct within a connection's lifetime.
 pub trait StateCodec: Codec {
     fn tick(&self) -> u64;
+    /// `tick` is the datagram header's ([`parse_state_datagram`]).
+    fn decode(tick: u64, body: &[u8]) -> Result<Self>;
 }
 
 impl Codec for TickMsg {
@@ -115,7 +122,9 @@ impl Codec for TickMsg {
         }
         b
     }
+}
 
+impl ControlCodec for TickMsg {
     fn decode(body: &[u8]) -> Result<Self> {
         let b: &[u8; TICKMSG_LEN] = body.try_into().map_err(|_| {
             anyhow::anyhow!("tick frame body is {} B, want {TICKMSG_LEN}", body.len())
@@ -157,11 +166,9 @@ impl Codec for TickMsg {
     }
 }
 
-fn take<'a>(r: &mut &'a [u8], n: usize, what: &str) -> Result<&'a [u8]> {
-    anyhow::ensure!(r.len() >= n, "frame truncated reading {what}");
-    let (head, tail) = r.split_at(n);
-    *r = tail;
-    Ok(head)
+fn take<const N: usize>(r: &mut Reader, what: &str) -> Result<[u8; N]> {
+    r.take()
+        .map_err(|_| anyhow::anyhow!("frame truncated reading {what}"))
 }
 
 impl Codec for CoreSnapshot {
@@ -171,15 +178,22 @@ impl Codec for CoreSnapshot {
     fn encode(&self) -> Vec<u8> {
         self.to_bytes()
     }
-
-    fn decode(body: &[u8]) -> Result<Self> {
-        CoreSnapshot::from_bytes(body).map_err(|e| anyhow::anyhow!("decoding snapshot frame: {e}"))
-    }
 }
 
 impl StateCodec for CoreSnapshot {
     fn tick(&self) -> u64 {
         self.tick
+    }
+
+    fn decode(tick: u64, body: &[u8]) -> Result<Self> {
+        let snap = CoreSnapshot::from_bytes(body)
+            .map_err(|e| anyhow::anyhow!("decoding snapshot frame: {e}"))?;
+        anyhow::ensure!(
+            snap.tick == tick,
+            "snapshot body tick {} disagrees with its datagram tick {tick}",
+            snap.tick
+        );
+        Ok(snap)
     }
 }
 
@@ -190,15 +204,16 @@ impl Codec for VehicleFrame {
     fn encode(&self) -> Vec<u8> {
         self.to_bytes()
     }
-
-    fn decode(body: &[u8]) -> Result<Self> {
-        VehicleFrame::from_bytes(body).map_err(|e| anyhow::anyhow!("decoding vehicle frame: {e}"))
-    }
 }
 
 impl StateCodec for VehicleFrame {
     fn tick(&self) -> u64 {
         self.tick
+    }
+
+    fn decode(tick: u64, body: &[u8]) -> Result<Self> {
+        VehicleFrame::from_bytes(tick, body)
+            .map_err(|e| anyhow::anyhow!("decoding vehicle frame: {e}"))
     }
 }
 
@@ -209,7 +224,9 @@ impl Codec for Beat {
     fn encode(&self) -> Vec<u8> {
         membership::encode_beat(self)
     }
+}
 
+impl ControlCodec for Beat {
     fn decode(body: &[u8]) -> Result<Self> {
         membership::decode_beat(body)
     }
@@ -222,18 +239,16 @@ impl Codec for JoinRequest {
     fn encode(&self) -> [u8; SyncStamp::WIRE_LEN] {
         self.stamp.to_wire()
     }
+}
 
+impl ControlCodec for JoinRequest {
     fn decode(body: &[u8]) -> Result<Self> {
-        let mut r = body;
-        let stamp = SyncStamp::from_wire(
-            take(&mut r, SyncStamp::WIRE_LEN, "stamp")?
-                .try_into()
-                .unwrap(),
-        );
+        let mut r = Reader::new(body);
+        let stamp = SyncStamp::from_wire(take(&mut r, "stamp")?);
         anyhow::ensure!(
             r.is_empty(),
             "join-request frame has {} trailing bytes",
-            r.len()
+            r.remaining()
         );
         Ok(JoinRequest { stamp })
     }
@@ -254,23 +269,24 @@ impl Codec for Admission {
         b.extend_from_slice(&self.host_stamp.to_wire());
         b
     }
+}
 
+impl ControlCodec for Admission {
     fn decode(body: &[u8]) -> Result<Self> {
-        let mut r = body;
-        let pid = PlayerId(take(&mut r, 1, "pid")?[0]);
-        let effective_tick =
-            u64::from_le_bytes(take(&mut r, 8, "effective_tick")?.try_into().unwrap());
-        let n = u16::from_le_bytes(take(&mut r, 2, "roster len")?.try_into().unwrap());
+        let mut r = Reader::new(body);
+        let pid = PlayerId(take::<1>(&mut r, "pid")?[0]);
+        let effective_tick = u64::from_le_bytes(take(&mut r, "effective_tick")?);
+        let n = u16::from_le_bytes(take(&mut r, "roster len")?);
         let mut roster = Vec::with_capacity(n as usize);
         for _ in 0..n {
-            roster.push(PlayerId(take(&mut r, 1, "roster pid")?[0]));
+            roster.push(PlayerId(take::<1>(&mut r, "roster pid")?[0]));
         }
-        let host_stamp = SyncStamp::from_wire(
-            take(&mut r, SyncStamp::WIRE_LEN, "host stamp")?
-                .try_into()
-                .unwrap(),
+        let host_stamp = SyncStamp::from_wire(take(&mut r, "host stamp")?);
+        anyhow::ensure!(
+            r.is_empty(),
+            "welcome frame has {} trailing bytes",
+            r.remaining()
         );
-        anyhow::ensure!(r.is_empty(), "welcome frame has {} trailing bytes", r.len());
         Ok(Admission {
             pid,
             effective_tick,
@@ -297,33 +313,52 @@ impl Codec for Refusal {
             Refusal::Forming => vec![3],
         }
     }
+}
 
+impl ControlCodec for Refusal {
     fn decode(body: &[u8]) -> Result<Self> {
-        let mut r = body;
-        let verdict = match take(&mut r, 1, "refusal tag")?[0] {
+        let mut r = Reader::new(body);
+        let verdict = match take::<1>(&mut r, "refusal tag")?[0] {
             0 => Refusal::Admission(AdmissionRefusal::TerrainMismatch {
-                host: u64::from_le_bytes(take(&mut r, 8, "host digest")?.try_into().unwrap()),
-                joiner: u64::from_le_bytes(take(&mut r, 8, "joiner digest")?.try_into().unwrap()),
+                host: u64::from_le_bytes(take(&mut r, "host digest")?),
+                joiner: u64::from_le_bytes(take(&mut r, "joiner digest")?),
             }),
             1 => Refusal::Admission(AdmissionRefusal::MatchFull),
             2 => Refusal::Departed,
             3 => Refusal::Forming,
             x => anyhow::bail!("unknown refusal tag {x:#x}"),
         };
-        anyhow::ensure!(r.is_empty(), "refuse frame has {} trailing bytes", r.len());
+        anyhow::ensure!(
+            r.is_empty(),
+            "refuse frame has {} trailing bytes",
+            r.remaining()
+        );
         Ok(verdict)
     }
 }
 
-pub fn decode_peer_wire(kind: Frame, body: &[u8]) -> Result<PeerWire> {
+/// Decode a reliable-stream frame; a state kind here is a routing violation.
+pub fn decode_control_wire(kind: Frame, body: &[u8]) -> Result<PeerWire> {
     Ok(match kind {
         Frame::Tick => PeerWire::Tick(TickMsg::decode(body)?),
         Frame::Beat => PeerWire::Beat(Beat::decode(body)?),
         Frame::JoinRequest => PeerWire::JoinRequest(JoinRequest::decode(body)?),
         Frame::Refuse => PeerWire::Refuse(Refusal::decode(body)?),
         Frame::Welcome => PeerWire::Welcome(Admission::decode(body)?),
-        Frame::Snapshot => PeerWire::Snapshot(CoreSnapshot::decode(body)?),
-        Frame::Vehicles => PeerWire::Vehicles(VehicleFrame::decode(body)?),
+        Frame::Snapshot | Frame::Vehicles => {
+            anyhow::bail!("state frame {kind:?} arrived on the reliable stream")
+        }
+    })
+}
+
+/// Decode a reassembled datagram state frame at its header `tick`.
+pub fn decode_state_wire(kind: Frame, tick: u64, body: &[u8]) -> Result<PeerWire> {
+    Ok(match kind {
+        Frame::Snapshot => PeerWire::Snapshot(CoreSnapshot::decode(tick, body)?),
+        Frame::Vehicles => PeerWire::Vehicles(VehicleFrame::decode(tick, body)?),
+        Frame::Tick | Frame::Beat | Frame::JoinRequest | Frame::Refuse | Frame::Welcome => {
+            anyhow::bail!("control frame {kind:?} arrived as a datagram")
+        }
     })
 }
 
@@ -421,7 +456,8 @@ pub struct StateAssembler {
 }
 
 impl StateAssembler {
-    pub fn accept(&mut self, f: &DgramFrag) -> Result<Option<Vec<u8>>> {
+    /// A completed frame comes back with its tick.
+    pub fn accept(&mut self, f: &DgramFrag) -> Result<Option<(u64, Vec<u8>)>> {
         if self.delivered.is_some_and(|d| f.tick <= d) {
             return Ok(None);
         }
@@ -455,7 +491,7 @@ impl StateAssembler {
             .flat_map(|s| s.expect("all fragments present"))
             .collect();
         self.have = 0;
-        Ok(Some(body))
+        Ok(Some((self.tick, body)))
     }
 }
 
@@ -540,6 +576,7 @@ mod tests {
     fn feed(asm: &mut StateAssembler, d: &[u8]) -> Option<Vec<u8>> {
         asm.accept(&parse_state_datagram(d).expect("well-formed fragment"))
             .expect("well-formed fragment sequence")
+            .map(|(_, body)| body)
     }
 
     #[test]
@@ -641,16 +678,18 @@ mod tests {
 
     #[test]
     fn frame_kind_byte_roundtrips() {
-        assert_eq!(Frame::from_byte(0), Some(Frame::Tick));
-        assert_eq!(Frame::from_byte(1), Some(Frame::Beat));
-        assert_eq!(Frame::from_byte(2), None);
-        assert_eq!(Frame::from_byte(3), Some(Frame::JoinRequest));
-        assert_eq!(Frame::from_byte(4), None);
-        assert_eq!(Frame::from_byte(5), Some(Frame::Refuse));
-        assert_eq!(Frame::from_byte(6), Some(Frame::Welcome));
-        assert_eq!(Frame::from_byte(7), Some(Frame::Snapshot));
-        assert_eq!(Frame::from_byte(8), Some(Frame::Vehicles));
-        assert_eq!(Frame::from_byte(9), None);
+        for kind in [
+            Frame::Tick,
+            Frame::Beat,
+            Frame::JoinRequest,
+            Frame::Refuse,
+            Frame::Welcome,
+            Frame::Snapshot,
+            Frame::Vehicles,
+        ] {
+            assert_eq!(Frame::from_byte(kind as u8), Some(kind));
+        }
+        assert_eq!(Frame::from_byte(7), None);
         assert_eq!(Frame::from_byte(0xff), None);
     }
 
@@ -673,8 +712,8 @@ mod tests {
             }],
         };
         let body = VehicleFrame::encode(&frame);
-        assert_eq!(VehicleFrame::decode(&body).unwrap(), frame);
-        assert!(VehicleFrame::decode(&body[..body.len() - 1]).is_err());
+        assert_eq!(VehicleFrame::decode(frame.tick, &body).unwrap(), frame);
+        assert!(VehicleFrame::decode(frame.tick, &body[..body.len() - 1]).is_err());
     }
 
     #[test]
@@ -690,8 +729,12 @@ mod tests {
         sim.step(&inputs, &BTreeMap::new());
         let snap = sim.core_snapshot();
         let body = CoreSnapshot::encode(&snap);
-        assert_eq!(CoreSnapshot::decode(&body).unwrap(), snap);
-        assert!(CoreSnapshot::decode(&body[..body.len() - 1]).is_err());
+        assert_eq!(CoreSnapshot::decode(snap.tick, &body).unwrap(), snap);
+        assert!(CoreSnapshot::decode(snap.tick, &body[..body.len() - 1]).is_err());
+        assert!(
+            CoreSnapshot::decode(snap.tick + 1, &body).is_err(),
+            "a body tick disagreeing with the datagram header is refused"
+        );
     }
 
     /// Stamps are honest-by-construction outside the core ([`SyncStamp::local`] is the

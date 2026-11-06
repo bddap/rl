@@ -21,15 +21,6 @@ Run Cargo inside [shell.nix](shell.nix). Before submitting code:
 [test-map.json](test-map.json) selects covering suites. A test runs in the map or is
 deleted; do not use `#[ignore]`.
 
-## Profiling
-
-For slow frames, use [scripts/profile-game.sh](scripts/profile-game.sh).
-`--pid N` observes a running process; without it the script launches and later kills
-a target. `--perf` adds a breakdown when available. Run as the graphical-session
-user for the real Vulkan client. Profile under contention without stopping other
-jobs or waiting for exclusivity, and record load average. Inspect the backend,
-GPU utilization and per-thread CPU before attributing a bottleneck.
-
 ## Boundaries
 
 Keep this project independent. Reference other projects only as declared, versioned

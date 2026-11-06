@@ -772,7 +772,7 @@ mod tests {
             Player::from_parts(
                 p.pos(),
                 p.yaw(),
-                PlayerStatus::Alive,
+                PlayerStatus::InPlay,
                 p.alt(),
                 p.vel(),
                 p.sliding(),
@@ -1513,7 +1513,7 @@ mod tests {
     /// Mid-game join via snapshot transfer, proven at the authoritative-server seam. A solo host
     /// runs a round, stepping its OWN sim and walking its player off its spawn; then a joiner is
     /// admitted (`admit`). The moment the sim steps THROUGH the admission's `effective_tick`, the
-    /// emitted snapshot must (a) carry the joiner as a fresh `Alive` player, (b) preserve the
+    /// emitted snapshot must (a) carry the joiner as a fresh `InPlay` player, (b) preserve the
     /// host player's LIVE pose — NOT reset to spawn — and (c) keep the live, monotonic tick. A
     /// round-boundary reset would instead zero the tick and respawn everyone; these assertions
     /// catch that regression.
@@ -1584,8 +1584,8 @@ mod tests {
         );
         assert_eq!(
             after.players[&jpid].status(),
-            crate::sim::PlayerStatus::Alive,
-            "the joiner spawns Alive"
+            crate::sim::PlayerStatus::InPlay,
+            "the joiner spawns InPlay"
         );
         assert!(
             after.roster.contains(&jpid),

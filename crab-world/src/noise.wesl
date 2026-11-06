@@ -2,9 +2,7 @@
 // of the shared ground-look fields built on them (sparkle, wind_dir, cell_rand:
 // helpers with baked art-direction constants that more than one look reads).
 // Every ground look and sky.wesl import from here.
-// History's warning, and this module's reason to exist: as per-file copies these
-// drifted twice (the rl#324 quintic fix reached 1 of 14 looks) — a fix here is
-// fleet-wide by construction.
+// One copy, so a fix here reaches every look by construction.
 
 // Same integer-hash family as the Rust side's sky/terrain jitter (sky.rs hash3).
 fn hash2(p: vec2<i32>, seed: u32) -> u32 {

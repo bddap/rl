@@ -118,7 +118,8 @@ fn mountain_bed(ctx: &AmbientContext) -> f32 {
 /// On-foot walking pace, m/s — the sim's tuned walk speed, the full-gain point of
 /// the movement layers (sprint holds full, it does not get louder).
 fn walk_mps() -> f32 {
-    crate::sim::PLAYER_SPEED as f32 / crate::sim::UNIT as f32 * crate::sim::TICK_HZ as f32
+    net_proto::sim::PLAYER_SPEED as f32 / net_proto::sim::UNIT as f32
+        * net_proto::sim::TICK_HZ as f32
 }
 
 /// Footsteps, any walkable ground: grounded (the jump apex is ~1.5 player
@@ -476,12 +477,12 @@ pub(super) fn update_context(
             };
             let (x, z) = p.pos().to_meters_f64();
             let v = p.vel();
-            let gait = ((v.x as f32).hypot(v.z as f32)) / crate::sim::UNIT as f32
-                * crate::sim::TICK_HZ as f32;
+            let gait = ((v.x as f32).hypot(v.z as f32)) / net_proto::sim::UNIT as f32
+                * net_proto::sim::TICK_HZ as f32;
             (
                 x,
                 z,
-                Alt::AboveGround(p.alt() as f32 / crate::sim::UNIT as f32),
+                Alt::AboveGround(p.alt() as f32 / net_proto::sim::UNIT as f32),
                 gait,
             )
         }

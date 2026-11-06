@@ -2754,7 +2754,6 @@ dependencies = [
  "clap",
  "flate2",
  "frametime",
- "otel",
  "serde",
  "serde_json",
  "tracing",
@@ -3659,8 +3658,8 @@ dependencies = [
  "image",
  "iroh",
  "net",
+ "net-proto",
  "otel",
- "tracing",
 ]
 
 [[package]]
@@ -5452,7 +5451,6 @@ dependencies = [
  "bevy_egui",
  "bevy_rapier3d",
  "chrono",
- "console_error_panic_hook",
  "crab-world",
  "iroh",
  "n0-future",
@@ -5462,9 +5460,6 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha",
  "tracing",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

@@ -3,6 +3,9 @@
 
 use crab_world::vehicle::VehicleKind;
 
+use crate::reader::Reader;
+
+/// `tick` rides the datagram header ([`crate::codec::state_datagrams`]), not the body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VehicleFrame {
     pub tick: u64,
@@ -59,8 +62,7 @@ impl std::error::Error for VehicleFrameDecodeError {}
 
 impl VehicleFrame {
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(10 + RECORD_LEN * self.vehicles.len());
-        out.extend_from_slice(&self.tick.to_le_bytes());
+        let mut out = Vec::with_capacity(2 + (1 + 1 + 12 + 16 + 3) * self.vehicles.len());
         out.extend_from_slice(&(self.vehicles.len() as u16).to_le_bytes());
         for v in &self.vehicles {
             out.push(v.pilot);
@@ -76,18 +78,17 @@ impl VehicleFrame {
         out
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, VehicleFrameDecodeError> {
+    pub fn from_bytes(tick: u64, bytes: &[u8]) -> Result<Self, VehicleFrameDecodeError> {
         use VehicleFrameDecodeError as E;
-        let mut r = Reader { buf: bytes, at: 0 };
-        let tick = u64::from_le_bytes(r.take()?);
+        let mut r = Reader::new(bytes);
         let n = u16::from_le_bytes(r.take()?) as usize;
         let mut vehicles: Vec<VehiclePoseWire> = Vec::new();
         for _ in 0..n {
             let v = VehiclePoseWire {
-                pilot: r.take::<1>()?[0],
-                kind: VehicleKind::from_wire_byte(r.take::<1>()?[0]).ok_or(E::BadVehicleKind)?,
-                pos: r.floats()?,
-                rot: r.floats()?,
+                pilot: r.byte()?,
+                kind: VehicleKind::from_wire_byte(r.byte()?).ok_or(E::BadVehicleKind)?,
+                pos: floats(&mut r)?,
+                rot: floats(&mut r)?,
                 thrust: r.take::<3>()?.map(|b| b as i8),
             };
             if vehicles.last().is_some_and(|prev| prev.pilot >= v.pilot) {
@@ -95,36 +96,24 @@ impl VehicleFrame {
             }
             vehicles.push(v);
         }
-        if r.at != bytes.len() {
+        if !r.is_empty() {
             return Err(E::TrailingBytes);
         }
         Ok(Self { tick, vehicles })
     }
 }
 
-const RECORD_LEN: usize = 1 + 1 + 12 + 16 + 3;
-
-struct Reader<'a> {
-    buf: &'a [u8],
-    at: usize,
+fn floats<const N: usize>(r: &mut Reader) -> Result<[f32; N], VehicleFrameDecodeError> {
+    let mut out = [0.0; N];
+    for c in &mut out {
+        *c = f32::from_le_bytes(r.take()?);
+    }
+    Ok(out)
 }
 
-impl Reader<'_> {
-    fn take<const N: usize>(&mut self) -> Result<[u8; N], VehicleFrameDecodeError> {
-        let slice = self
-            .buf
-            .get(self.at..self.at + N)
-            .ok_or(VehicleFrameDecodeError::Truncated)?;
-        self.at += N;
-        Ok(slice.try_into().expect("slice length checked above"))
-    }
-
-    fn floats<const N: usize>(&mut self) -> Result<[f32; N], VehicleFrameDecodeError> {
-        let mut out = [0.0; N];
-        for c in &mut out {
-            *c = f32::from_le_bytes(self.take()?);
-        }
-        Ok(out)
+impl From<crate::reader::Truncated> for VehicleFrameDecodeError {
+    fn from(_: crate::reader::Truncated) -> Self {
+        Self::Truncated
     }
 }
 
@@ -162,23 +151,26 @@ mod tests {
     #[test]
     fn bytes_roundtrip_is_exact() {
         let a = sample();
-        assert_eq!(VehicleFrame::from_bytes(&a.to_bytes()).unwrap(), a);
+        assert_eq!(VehicleFrame::from_bytes(a.tick, &a.to_bytes()).unwrap(), a);
         let empty = VehicleFrame {
             tick: 0,
             vehicles: vec![],
         };
-        assert_eq!(VehicleFrame::from_bytes(&empty.to_bytes()).unwrap(), empty);
+        assert_eq!(
+            VehicleFrame::from_bytes(0, &empty.to_bytes()).unwrap(),
+            empty
+        );
     }
 
     #[test]
     fn truncated_buffer_is_rejected() {
         let bytes = sample().to_bytes();
         assert_eq!(
-            VehicleFrame::from_bytes(&bytes[..bytes.len() - 1]),
+            VehicleFrame::from_bytes(0, &bytes[..bytes.len() - 1]),
             Err(VehicleFrameDecodeError::Truncated)
         );
         assert_eq!(
-            VehicleFrame::from_bytes(&[]),
+            VehicleFrame::from_bytes(0, &[]),
             Err(VehicleFrameDecodeError::Truncated)
         );
     }
@@ -188,7 +180,7 @@ mod tests {
         let mut bytes = sample().to_bytes();
         bytes.push(0);
         assert_eq!(
-            VehicleFrame::from_bytes(&bytes),
+            VehicleFrame::from_bytes(0, &bytes),
             Err(VehicleFrameDecodeError::TrailingBytes)
         );
     }
@@ -197,10 +189,10 @@ mod tests {
     fn vehicle_count_past_the_bytes_is_rejected() {
         let a = sample();
         let mut bytes = a.to_bytes();
-        assert_eq!(bytes[8], a.vehicles.len() as u8);
-        bytes[8] += 1;
+        assert_eq!(bytes[0], a.vehicles.len() as u8);
+        bytes[0] += 1;
         assert_eq!(
-            VehicleFrame::from_bytes(&bytes),
+            VehicleFrame::from_bytes(0, &bytes),
             Err(VehicleFrameDecodeError::Truncated)
         );
     }
@@ -209,11 +201,11 @@ mod tests {
     fn unknown_vehicle_kind_byte_is_rejected() {
         let a = sample();
         let mut bytes = a.to_bytes();
-        let kind_off = 10 + 1;
+        let kind_off = 2 + 1;
         assert_eq!(bytes[kind_off], a.vehicles[0].kind.wire_byte());
         bytes[kind_off] = 0xEE;
         assert_eq!(
-            VehicleFrame::from_bytes(&bytes),
+            VehicleFrame::from_bytes(0, &bytes),
             Err(VehicleFrameDecodeError::BadVehicleKind)
         );
     }
@@ -223,13 +215,13 @@ mod tests {
         let mut a = sample();
         a.vehicles.swap(0, 1);
         assert_eq!(
-            VehicleFrame::from_bytes(&a.to_bytes()),
+            VehicleFrame::from_bytes(0, &a.to_bytes()),
             Err(VehicleFrameDecodeError::UnorderedVehicles)
         );
         let mut a = sample();
         a.vehicles[1].pilot = a.vehicles[0].pilot;
         assert_eq!(
-            VehicleFrame::from_bytes(&a.to_bytes()),
+            VehicleFrame::from_bytes(0, &a.to_bytes()),
             Err(VehicleFrameDecodeError::UnorderedVehicles)
         );
     }

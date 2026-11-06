@@ -19,7 +19,7 @@ use crate::net_loop::{self, JoinResult};
 
 pub struct MenuPlugin {
     pub seed: u64,
-    pub stamp: crate::SyncStamp,
+    pub stamp: net_proto::SyncStamp,
 }
 
 #[derive(Component)]
@@ -91,7 +91,7 @@ pub(super) fn despawn_menu_camera(mut commands: Commands, cams: Query<Entity, Wi
 
 struct MenuState {
     seed: u64,
-    stamp: crate::SyncStamp,
+    stamp: net_proto::SyncStamp,
     nav: MenuNav,
     stick_latched: bool,
     code_input: String,
@@ -102,7 +102,7 @@ struct MenuState {
 }
 
 impl MenuState {
-    fn new(seed: u64, stamp: crate::SyncStamp) -> Self {
+    fn new(seed: u64, stamp: net_proto::SyncStamp) -> Self {
         Self {
             seed,
             stamp,
@@ -414,7 +414,7 @@ fn poll_rejoin(
             state.error = Some(format!("The host refused our rejoin: {reason}"));
             // Forming is transient ("try again in a few seconds") — keep last_host so
             // OnEnter(Menu) reopens the rejoin offer; the other refusals are terminal.
-            if reason != crate::server::Refusal::Forming {
+            if reason != net_proto::server::Refusal::Forming {
                 state.last_host = None;
             }
             next.set(AppPhase::Menu);

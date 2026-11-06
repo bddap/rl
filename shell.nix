@@ -3,6 +3,20 @@ let
     url = "https://github.com/NixOS/nixpkgs/archive/6b5e5b7a6631f065bf6908986990b37d845f847f.tar.gz";
     sha256 = "0vi99516bn335vdzcjmvrkff8ikj0brpmjfcfdrjnb8bfd0wlr5j";
   }) {};
+  # Must equal Cargo.lock's wasm-bindgen (game-web/run.sh asserts); the pin above
+  # ships older CLIs only, so this builds the matching one with its own builder.
+  wasm-bindgen-cli = pkgs.buildWasmBindgenCli rec {
+    src = pkgs.fetchCrate {
+      pname = "wasm-bindgen-cli";
+      version = "0.2.130";
+      hash = "sha256-9Og1O/6/VC3sc5hBjoIWBErmLW2UHGMsTQO+6+m/dng=";
+    };
+    cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+      inherit src;
+      inherit (src) pname version;
+      hash = "sha256-j81sUf1m5yXU4FJfGj7GV+hdqVCV8mRmNb0QIsMCjqw=";
+    };
+  };
 in
 pkgs.mkShell {
   buildInputs = with pkgs; [

@@ -277,7 +277,7 @@ impl SpawnFrame {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerStatus {
-    Alive,
+    InPlay,
     Extracted,
 }
 
@@ -285,7 +285,7 @@ impl PlayerStatus {
     /// The vehicle-boarding ability gate — the ONE formula; the host's intent filter and the
     /// client's toggle both consult it. Extracted is out of the round.
     pub fn may_board(self) -> bool {
-        self == PlayerStatus::Alive
+        self == PlayerStatus::InPlay
     }
 }
 
@@ -575,7 +575,7 @@ impl Sim {
             Player::standing(
                 self.spawn_frame.place(x, 0),
                 self.spawn_frame.rot,
-                PlayerStatus::Alive,
+                PlayerStatus::InPlay,
             ),
         );
     }
@@ -602,7 +602,7 @@ impl Sim {
                 id,
                 // Facing local +z — the party opens looking at the objective,
                 // whatever heading the frame drew.
-                Player::standing(frame.place(x, 0), frame.rot, PlayerStatus::Alive),
+                Player::standing(frame.place(x, 0), frame.rot, PlayerStatus::InPlay),
             );
         }
         let extraction = ExtractionPoint {
@@ -647,7 +647,7 @@ impl Sim {
         }
 
         for (id, p) in self.players.iter_mut() {
-            if p.status != PlayerStatus::Alive {
+            if p.status != PlayerStatus::InPlay {
                 continue;
             }
             let inp = inputs[id];
@@ -681,7 +681,7 @@ impl Sim {
         for (id, p) in self.players.iter_mut() {
             // Grounded only (rl#355): extraction is stepping onto the pad, and a
             // walker sailing over it at plane speed must not scoop the win mid-air.
-            if p.status == PlayerStatus::Alive
+            if p.status == PlayerStatus::InPlay
                 && p.alt == 0
                 && within(p.pos.x, p.pos.z, ex.x, ex.z, EXTRACT_RADIUS)
                 && inputs[id].pressed(buttons::ACTION)
@@ -803,7 +803,7 @@ impl Sim {
             return;
         }
         if let Some(p) = self.players.get_mut(&id)
-            && p.status == PlayerStatus::Alive
+            && p.status == PlayerStatus::InPlay
         {
             Self::advance_player(p, inp);
         }
@@ -836,8 +836,8 @@ impl Sim {
         // ([`Self::core_snapshot`]/[`Self::apply_core_snapshot`]) — the SHARED world.
         // Host-private machinery (rng stream, restart latch, spawn frame) is
         // deliberately excluded: an adopt-only client never replicates it,
-        // and since rl#305 each peer draws its own seed, so hashing it would desync
-        // the cross-peer diff (`game net --hash-log`, #133) on every tick from 0.
+        // and each peer draws its own seed (rl#305), so hashing it would make two
+        // peers' hashes differ on every tick from 0.
         // Divergence there still surfaces here one draw later, through the
         // extraction/players it produces.
         let _ = (rng, restart_held, spawn_frame);
@@ -1564,7 +1564,7 @@ mod tests {
         step_on_foot(&mut sim, &action);
         assert_eq!(
             sim.player(PlayerId(0)).unwrap().status(),
-            PlayerStatus::Alive,
+            PlayerStatus::InPlay,
             "sailing over the pad does not extract"
         );
         assert_eq!(sim.outcome(), Outcome::Ongoing);
@@ -1763,7 +1763,7 @@ mod tests {
         let mut won = false;
         for _ in 0..4000 {
             let p = sim.player(PlayerId(0)).unwrap();
-            if p.status() != PlayerStatus::Alive {
+            if p.status() != PlayerStatus::InPlay {
                 break;
             }
             let pp = p.pos();
@@ -2063,7 +2063,7 @@ mod tests {
         assert_eq!(sim.outcome(), Outcome::Ongoing);
         assert!(
             sim.players()
-                .all(|(_, p)| p.status() == PlayerStatus::Alive),
+                .all(|(_, p)| p.status() == PlayerStatus::InPlay),
             "a restart revives everyone at spawn"
         );
         assert_ne!(
@@ -2092,7 +2092,7 @@ mod tests {
         assert_eq!(sim.tick(), tick_at_end + 1, "the tick keeps counting");
         assert_eq!(
             sim.player(PlayerId(0)).unwrap().status(),
-            PlayerStatus::Alive,
+            PlayerStatus::InPlay,
             "the player is back in the round after a post-extraction restart"
         );
     }

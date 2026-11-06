@@ -51,8 +51,8 @@ pub type GroundMaterial = ExtendedMaterial<StandardMaterial, GroundDetail>;
 ///   lies about geometry — normal perturbation is fine, parallax/displacement is
 ///   NOT (the visual surface IS the collision heightfield).
 /// - octaves faded by their on-screen footprint (`ctx.fw`): structure must exist
-///   on foot and at landing height — the rl#197 optic-flow cue the deleted checker
-///   used to carry — without shimmering from the plane.
+///   on foot and at landing height (the optic-flow cue that reads speed) without
+///   shimmering from the plane.
 /// - judge colors at rendered exposure (moon-sun + ambient are pre-exposed).
 ///
 /// To add a look: an `art()` module in `src/ground_looks/`, a variant here, a row

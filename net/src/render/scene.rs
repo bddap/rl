@@ -191,8 +191,6 @@ pub(super) fn apply_transforms(
     // Smoothed eye height (0 = uninitialized): the stand↔slide crouch eases at
     // [`SLIDE_EYE_RATE`] instead of cutting, so the dip reads as a body motion.
     mut eye_h: Local<f32>,
-    // `Option`: the hand-built test worlds run this system without a round install.
-    trace: Option<ResMut<super::pos_trace::PosTrace>>,
 ) {
     let sim = state.client.sim();
     let alpha = clock.frac;
@@ -240,7 +238,7 @@ pub(super) fn apply_transforms(
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
-            let cam_yaw = if now.status() == PlayerStatus::Alive {
+            let cam_yaw = if now.status() == PlayerStatus::InPlay {
                 let sim_yaw = lerp_yaw(prev.yaw(), now.yaw(), alpha);
                 yaw.0 = sim_yaw;
                 sim_yaw
@@ -266,9 +264,6 @@ pub(super) fn apply_transforms(
             *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
         }
         clamp_camera_above_terrain(&mut cam, &terrain, *origin);
-        if let Some(mut trace) = trace {
-            trace.frame(clock.tick, alpha, time.delta(), &cam, origin.0);
-        }
     }
 }
 
@@ -312,7 +307,7 @@ fn cockpit_camera(pose: Pose, origin: super::RenderOrigin) -> Transform {
 /// Interpolated feet-over-surface height in meters (rl#355) — the walker's sim
 /// altitude, ready to add to a `place` lift.
 pub(super) fn lerp_alt(a: i64, b: i64, alpha: f32) -> f32 {
-    (a as f32 + (b - a) as f32 * alpha) / crate::sim::UNIT as f32
+    (a as f32 + (b - a) as f32 * alpha) / net_proto::sim::UNIT as f32
 }
 
 /// Lerp the per-tick DELTA in f32 and add it back on the i64 grid. The absolute

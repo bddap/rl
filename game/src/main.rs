@@ -3,7 +3,7 @@ mod cmd;
 use anyhow::Result;
 use clap::Parser;
 
-/// Phase 1 gray-box extraction loop, host-authoritative over iroh.
+/// Giant Crab Rescue: an extraction game, host-authoritative over iroh.
 #[derive(Parser)]
 struct Cli {
     #[command(flatten)]
