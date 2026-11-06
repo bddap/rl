@@ -1,12 +1,10 @@
 //! Physics-step-time pose interpolation (rl#264/rl#267) — THE one mechanism for
-//! rendering any stepped pose stream. Craft and crab-part state advances a
+//! rendering any stepped pose stream. Craft state advances a
 //! VARIABLE number of physics steps per sim tick (the 64:30 staircase,
 //! [`crate::cadence::cumulative_steps`]), so interpolating a pose pair by
 //! tick-fraction surges rendered velocity ±50% ~4×/s. Every consumer — the local
-//! cockpit ([`super::driver::LocalVehicle`]), remote pilots' craft models
-//! ([`super::articulation::RemoteVehicle`]), and the crab body parts on both arms
-//! ([`super::articulation::CrabPartWindows`], host and client alike since rl#274) —
-//! samples through this window instead; a second interpolation mechanism is a bug
+//! cockpit ([`super::driver::LocalVehicle`]) and remote pilots' craft models
+//! ([`super::remote_vehicles::RemoteVehicle`]) — samples through this window instead; a second interpolation mechanism is a bug
 //! (rl#267).
 
 use bevy::prelude::*;
@@ -30,7 +28,7 @@ pub(super) struct PoseWindow {
 /// The host feeds per step, up to ~3 steps ahead of the sample clock.
 const DEPTH: usize = 4;
 
-/// A per-push pose jump no craft or crab part can cover by MOVING (plane terminal
+/// A per-push pose jump no craft can cover by MOVING (plane terminal
 /// ~9.1 m/s ⇒ ~0.30 m/tick) is a TELEPORT — a round-RESTART respawn, a non-finite
 /// rescue (rl#137). Interpolating across one would smear the body over the window's
 /// span on every observer, so the window restarts and holds the arrival pose — the

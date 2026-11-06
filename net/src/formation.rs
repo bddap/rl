@@ -35,7 +35,6 @@ pub struct FormationDriver {
     /// Session-axis ms at construction — for the human-facing "agreed in N s" print.
     born_ms: u64,
     expect: usize,
-    stamp: crate::SyncStamp,
     /// Roster as of the last change the core reported — for lobby UI polling.
     roster: Vec<EndpointId>,
 }
@@ -57,7 +56,6 @@ impl FormationDriver {
             core: FormationCore::new(session.endpoint_id(), expect, discover_secs, stamp, now_ms),
             born_ms: now_ms,
             expect,
-            stamp,
             roster: Vec::new(),
         }
     }
@@ -76,7 +74,6 @@ impl FormationDriver {
             core: FormationCore::host_triggered(role, session.endpoint_id(), expect, stamp, now_ms),
             born_ms: now_ms,
             expect,
-            stamp,
             roster: Vec::new(),
         }
     }
@@ -130,7 +127,7 @@ impl FormationDriver {
                     session.send(from.from, &crate::server::Refusal::Forming);
                 }
                 PeerWire::Snapshot(_)
-                | PeerWire::Articulation(_)
+                | PeerWire::Vehicles(_)
                 | PeerWire::Refuse(_)
                 | PeerWire::Welcome(_) => {}
             }
@@ -176,43 +173,18 @@ impl FormationDriver {
             id_map.len(),
             now_ms.saturating_sub(self.born_ms) as f64 / 1000.0
         );
-        if self.stamp.body_digest() != 0 {
-            if !agreement.sync.body {
-                tracing::warn!(
-                    "GCR: crab BODY NOT synced across peers (a peer has a different sally.glb \
-                     / no model / a different baked collider table or binary version — it \
-                     would build and render a different crab) — cannot arm the NN crabs; the \
-                     windowed client will REFUSE this round (rl#114, no integer fallback). \
-                     Run rl-update on every device so all carry the identical build + model."
-                );
-            } else {
-                println!(
-                    "GCR: the crab body is synced across all {} peer(s) — NN crabs eligible",
-                    id_map.len()
-                );
-            }
-        }
-        if self.stamp.plant_digest() != 0 {
-            if !agreement.sync.plant {
-                tracing::warn!(
-                    "GCR: the PLANT is NOT synced across peers (a peer resolves a different arena, \
-                     terrain bake, or joint-friction cap — its ground would disagree with the poses \
-                     it adopts, floating/burying every crab and craft on that screen); the windowed \
-                     client will REFUSE this round (rl#286, same policy as rl#114). Run rl-update on \
-                     every device so all carry the identical build + checkpoint."
-                );
-            } else {
-                println!(
-                    "GCR: the plant (arena/bake/friction) is synced across all {} peer(s)",
-                    id_map.len()
-                );
-            }
+        if !agreement.synced {
+            tracing::warn!(
+                "GCR: the terrain is NOT synced across peers (a peer embeds a different terrain \
+                 bake, so its ground would disagree with the poses it adopts); the windowed \
+                 client will REFUSE this round. Run the identical build on every device."
+            );
         }
         Ok(Formation::Agreed(Frozen {
             id_map,
             me,
             early: agreement.early,
-            sync: agreement.sync,
+            synced: agreement.synced,
         }))
     }
 }

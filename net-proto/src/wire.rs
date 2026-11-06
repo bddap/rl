@@ -65,16 +65,14 @@ impl PlayerStatus {
     pub(crate) fn tag(self) -> u8 {
         match self {
             PlayerStatus::Alive => 0,
-            PlayerStatus::Downed => 1,
-            PlayerStatus::Extracted => 2,
+            PlayerStatus::Extracted => 1,
         }
     }
 
     pub(crate) fn from_tag(tag: u8) -> Option<Self> {
         match tag {
             0 => Some(PlayerStatus::Alive),
-            1 => Some(PlayerStatus::Downed),
-            2 => Some(PlayerStatus::Extracted),
+            1 => Some(PlayerStatus::Extracted),
             _ => None,
         }
     }
@@ -85,7 +83,6 @@ impl Outcome {
         match self {
             Outcome::Ongoing => 0,
             Outcome::Extracted => 1,
-            Outcome::Wiped => 2,
         }
     }
 
@@ -93,7 +90,6 @@ impl Outcome {
         match tag {
             0 => Some(Outcome::Ongoing),
             1 => Some(Outcome::Extracted),
-            2 => Some(Outcome::Wiped),
             _ => None,
         }
     }

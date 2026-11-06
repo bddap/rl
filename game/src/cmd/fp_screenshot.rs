@@ -5,8 +5,7 @@ use net::sim::PlayerId;
 
 use crab_world::RenderArgs;
 
-use super::shared::{ChordScriptArgs, MATCH_SEED, boot_view, parse_hold};
-use net::render::nn_crab_policy;
+use super::shared::{ChordScriptArgs, MATCH_SEED, parse_hold};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -29,18 +28,11 @@ pub(crate) struct Args {
     /// Raise the camera this many meters above the eye point (vista/altitude shots).
     #[arg(long, default_value_t = 0.0)]
     cam_height: f32,
-    // No `env` here, unlike the other surfaces: this flag is the OPT-IN to arm a crab at all
-    // (`.map(..)` below), so an exported RL_CRAB_CHECKPOINT_DIR would silently seed a crab into
-    // an evidence shot that is meant to have none.
-    #[arg(long, value_name = "DIR", value_parser = crab_world::absolute_dir)]
-    nn_crab_checkpoint: Option<std::path::PathBuf>,
-
     #[command(flatten)]
     render: RenderArgs,
 
-    /// Yaw axis held by the scripted pack (−1..1): non-zero makes the pack orbit instead
-    /// of bee-lining, presenting the crab flank/bystander geometry (the claw-down regime,
-    /// rl#249) rather than only frontal pursuit.
+    /// Yaw axis held by the scripted pack of other players (−1..1): non-zero makes the
+    /// pack orbit instead of walking straight.
     #[arg(long, default_value_t = 0.0)]
     pack_look_yaw: f32,
 
@@ -122,13 +114,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .with_cam_height(args.cam_height)
         .with_fov(args.cam_fov)
         .with_anim(args.anim_frames.map(|count| (count, args.anim_every)));
-    let nn_crab = args
-        .nn_crab_checkpoint
-        .map(|flag| nn_crab_policy(Some(flag)).map(|(_, policy)| policy))
-        .transpose()?;
-    let boot_view = boot_view(args.render);
     let pack = net::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
-    let mut app = render::build_screenshot_app(client, cfg, nn_crab, boot_view, pack);
+    let mut app = render::build_screenshot_app(client, cfg, args.render.resolve(), pack);
     if args.debug_overlay {
         app.insert_resource(crab_world::debug_overlay::DebugOverlay { visible: true });
     }

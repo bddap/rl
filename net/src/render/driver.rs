@@ -1,13 +1,14 @@
 //! The windowed round driver: installs and tears down a round's world state through
 //! the one round-scope registry, paces the fixed-tick loop ([`drive_client_sim`]),
-//! bridges local input to the sim and the crab world's vehicles, and writes the
+//! bridges local input to the sim and the world's vehicles, and writes the
 //! frame's [`RenderClock`] — THE clock every pose sampler reads.
 
-use super::app::{ArmedRound, NnCrabStackInstalled};
+use super::app::SyncedRound;
 use super::input::{CameraPitch, CameraYaw};
 use super::pose::{Pose, PoseWindow};
 use super::*;
 use crate::client::PilotIntent;
+use crate::vehicles::VehicleFrame;
 use crab_world::vehicle::{PilotCommand, PilotId, Vehicle, VehicleControls, VehicleKind};
 
 pub(super) fn coordinator(
@@ -60,7 +61,7 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
         prev,
         reported_outcome: false,
         snap_buf: std::collections::VecDeque::new(),
-        art_buf: std::collections::VecDeque::new(),
+        vehicle_buf: std::collections::VecDeque::new(),
         stalled: false,
         logged_statuses: BTreeMap::new(),
         pending_pump: None,
@@ -84,24 +85,11 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
     });
     round_resource::<LocalVehicle>(world, &mut scope);
     round_resource::<RenderClock>(world, &mut scope);
-    round_resource::<super::articulation::RemoteVehicle>(world, &mut scope);
-    round_resource::<super::articulation::CrabPartWindows>(world, &mut scope);
-    round_resource::<crab_world::bot::skin::CrabRenderPose>(world, &mut scope);
+    round_resource::<super::remote_vehicles::RemoteVehicle>(world, &mut scope);
     round_resource::<super::RenderOrigin>(world, &mut scope);
 
-    // Round state MADE elsewhere during arm/play, not inserted here — its teardown still
+    // Round state MADE elsewhere during play, not inserted here — its teardown still
     // lives in this one registry:
-    scope.push(|w| {
-        w.remove_resource::<crate::crab_slot::NnCrabsArmed>();
-    });
-    // Un-label the crab bodies that persist across rounds: labels are round state (the host
-    // republishes on the next arm; a client re-adopts from the next round's articulation),
-    // and a survivor here would float brain labels over the menu (the rl#211 class).
-    scope.push(|w| {
-        if let Some(mut labels) = w.get_resource_mut::<crab_world::crab_view::CrabBrainLabels>() {
-            labels.0.clear();
-        }
-    });
     scope.push(|w| {
         if let Some(mut ctrl) = w.get_resource_mut::<VehicleControls>() {
             ctrl.0.clear();
@@ -111,19 +99,11 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
     // parked outside Playing, so a survivor would sit at its stale pose until the next
     // round's first pump — and a board landing on that round's first tick would match it
     // there instead of transforming at the walker (rl#258).
-    scope.push(|w| {
-        let crafts: Vec<Entity> = w
-            .query_filtered::<Entity, With<Vehicle>>()
-            .iter(w)
-            .collect();
-        for e in crafts {
-            w.despawn(e);
-        }
-    });
+    scope.push(despawn_crafts);
     // A survivor would suppress (or mis-measure) the next round's remote-craft
     // appeared/moved edges.
     scope.push(|w| {
-        w.remove_resource::<super::articulation::RemoteCraftWatch>();
+        w.remove_resource::<super::remote_vehicles::RemoteCraftWatch>();
     });
     // The combo map's replicated session set is round state riding a PERSISTENT
     // resource (the save must survive rounds; the last session's map must not) —
@@ -136,30 +116,30 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
     world.insert_resource(RoundScope(scope));
 }
 
+/// Every craft body gone; [`crab_world::vehicle::VehiclePlugin`] respawns a still-filed
+/// pilot's craft at its walker on the next physics step.
+fn despawn_crafts(world: &mut World) {
+    let crafts: Vec<Entity> = world
+        .query_filtered::<Entity, With<Vehicle>>()
+        .iter(world)
+        .collect();
+    for e in crafts {
+        world.despawn(e);
+    }
+}
+
 #[derive(Default)]
-pub(super) struct PendingRound(pub(super) Option<ArmedRound>);
+pub(super) struct PendingRound(pub(super) Option<SyncedRound>);
 
 pub(super) fn ensure_round_installed(world: &mut World) {
     if world.get_non_send::<GameState>().is_some() {
         return;
     }
-    let mut ready = world
+    let ready = world
         .get_non_send_mut::<PendingRound>()
         .and_then(|mut p| p.0.take())
         .expect("entered Playing with no round to install — the menu must park a round before transitioning")
         .into_ready();
-    assert!(
-        world.get_resource::<NnCrabStackInstalled>().is_some(),
-        "the NN-crab stack must be installed before Playing (rl#114: the checkpoint is required)"
-    );
-    let spawns = match world.get_non_send::<crate::crab_slot::CrabPolicies>() {
-        Some(p) => super::app::seed_round_crabs(&mut ready.client, p.0.len()),
-        None => Vec::new(),
-    };
-    crate::crab_slot::arm(world);
-    if !spawns.is_empty() {
-        crate::crab_slot::restart_crabs_to_spawns(world, &spawns);
-    }
     let coord = coordinator(
         ready.net,
         ready.client.peers(),
@@ -331,28 +311,26 @@ pub(super) struct GameState {
     /// construction (rl#210).
     reported_outcome: bool,
     snap_buf: std::collections::VecDeque<crate::snapshot::CoreSnapshot>,
-    art_buf: std::collections::VecDeque<crate::articulation::CrabArticulation>,
+    vehicle_buf: std::collections::VecDeque<VehicleFrame>,
     /// Snapshot-stall latch (rl#273): the last remote-adopt drain iteration consumed a tick
     /// of render time but adopted nothing. While set, [`render_frac`] pins the clock at the
     /// end of the last adopted interval instead of wrapping — a stall renders as a clean
     /// hold, not a 30 Hz replay. Always false on the host: its drain steps every tick.
     stalled: bool,
-    /// Last logged per-player status, so Alive→Downed/Extracted edges (a crab strike landing,
-    /// an extraction) each leave exactly one log line on every peer.
+    /// Last logged per-player status, so an extraction edge leaves exactly one log line on
+    /// every peer.
     logged_statuses: BTreeMap<PlayerId, PlayerStatus>,
     /// The host tick mid-pump (rl#396): the owed physics steps not yet run, if a tick
     /// is started but unfinalized. Paying a tick's whole 2-3-step physics pump inline
     /// in the crossing frame made TV frametimes bimodal, so the crossing frame runs
     /// only the exchange + the FIRST owed step, the rest spread one per frame
     /// ([`step_pending_pump`]) and force-complete before the next exchange
-    /// ([`complete_pending_pump`]) — finalize (pose collect + hunt feed,
-    /// authoritative sim step, snapshot + articulation broadcast) happens at
-    /// owed-complete, so the wire still sees whole 30 Hz ticks. While `Some`, the
+    /// ([`complete_pending_pump`]) — finalize (authoritative sim step, snapshot +
+    /// vehicle broadcast) happens at owed-complete, so the wire still sees whole 30 Hz
+    /// ticks. While `Some`, the
     /// client sim's tick sits one behind the exchanged tick (its walkers predicted
     /// into it) — the [`RenderClock`] write adds the tick back so render time never
-    /// rewinds. Just a step count: the tick's slot inputs are re-derived at finalize,
-    /// identical by construction (nothing touches the server sim between start and
-    /// complete). Always `None` on a remote-adopt client (its frames are cheap; the
+    /// rewinds. Just a step count. Always `None` on a remote-adopt client (its frames are cheap; the
     /// host is the one peer that pumps physics).
     pending_pump: Option<u32>,
 }
@@ -413,15 +391,12 @@ impl GameState {
 #[derive(Clone, Default)]
 pub(super) struct SimSnapshot {
     pub(super) players: BTreeMap<PlayerId, Player>,
-    pub(super) crabs: Vec<Crab>,
 }
 
 impl SimSnapshot {
     fn capture(client: &ClientSim) -> Self {
-        let snap = client.core_snapshot();
         Self {
-            players: snap.players,
-            crabs: snap.crabs,
+            players: client.core_snapshot().players,
         }
     }
 }
@@ -587,9 +562,8 @@ impl LocalControl {
 /// [`drive_client_sim`]: the last exchanged/adopted sim tick plus the accumulator
 /// fraction into the next (on the host, a tick mid-deferral counts as exchanged —
 /// rl#396). THE one clock every [`super::pose::PoseWindow`] sampler
-/// reads — the cockpit, the remote craft models, the wireframe pass, and the crab
-/// body parts (both arms, rl#274) — so their notions of "now" cannot drift apart
-/// within a frame.
+/// reads — the cockpit and the remote craft models — so their notions of "now" cannot
+/// drift apart within a frame.
 #[derive(Resource, Clone, Copy, Default)]
 pub(super) struct RenderClock {
     pub tick: u64,
@@ -644,23 +618,21 @@ impl LocalVehicle {
 
 /// Keyed by pilot: the host's world also carries REMOTE pilots' crafts (rl#191), and
 /// the cockpit camera must fly from ours alone.
-fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Option<Pose> {
-    art.vehicles.iter().find(|v| v.pilot == me.0).map(|v| Pose {
-        pos: Vec3::from_array(v.pos),
-        orient: Quat::from_array(v.rot),
-    })
+fn own_wire_pose(frame: &VehicleFrame, me: PilotId) -> Option<Pose> {
+    frame
+        .vehicles
+        .iter()
+        .find(|v| v.pilot == me.0)
+        .map(|v| Pose {
+            pos: Vec3::from_array(v.pos),
+            orient: Quat::from_array(v.rot),
+        })
 }
 
 /// The one pose-window feed on both arms (rl#274), stamped by physics step.
-fn feed_pose_windows(
-    world: &mut World,
-    step: u64,
-    art: &crate::articulation::CrabArticulation,
-    me: PilotId,
-) {
-    super::articulation::feed_crab_part_windows(world, step, &art.crabs);
-    super::articulation::publish_remote_vehicles(world, step, &art.vehicles, me);
-    let Some(p) = own_wire_pose(art, me) else {
+fn feed_pose_windows(world: &mut World, step: u64, frame: &VehicleFrame, me: PilotId) {
+    super::remote_vehicles::publish_remote_vehicles(world, step, &frame.vehicles, me);
+    let Some(p) = own_wire_pose(frame, me) else {
         return;
     };
     let mut vehicle = world.resource_mut::<LocalVehicle>();
@@ -773,8 +745,8 @@ fn take_local_control(world: &mut World) -> LocalControl {
 
 /// What one [`Coordinator::exchange`] round-trip produced for the rest of the frame.
 struct TickOutcome {
-    /// The adopt-arm articulation to publish this tick (remote client only).
-    articulation: Option<crate::articulation::CrabArticulation>,
+    /// The adopt-arm craft poses to publish this tick (remote client only).
+    vehicles: Option<VehicleFrame>,
     server_down: Option<crate::net_loop::ServerDown>,
 }
 
@@ -819,12 +791,12 @@ fn exchange_tick(world: &mut World, role: PeerRole, local: &LocalControl) -> Tic
             Exchanged::default()
         }
     };
-    let mut articulation = None;
+    let mut vehicles = None;
     match role {
         PeerRole::ServerAuth => {}
         PeerRole::RemoteAdopt => {
             state.snap_buf.extend(exch.snapshots);
-            state.art_buf.extend(exch.articulations);
+            state.vehicle_buf.extend(exch.vehicle_frames);
             let take = jitter_take(state.snap_buf.len());
             state.stalled = take == 0;
             if take > 0 {
@@ -839,31 +811,31 @@ fn exchange_tick(world: &mut World, role: PeerRole, local: &LocalControl) -> Tic
                 state.client.reconcile_local_prediction();
                 let adopted_tick = state.client.next_tick();
                 while state
-                    .art_buf
+                    .vehicle_buf
                     .front()
                     .is_some_and(|a| a.tick <= adopted_tick)
                 {
-                    articulation = state.art_buf.pop_front();
+                    vehicles = state.vehicle_buf.pop_front();
                 }
             }
         }
     }
     TickOutcome {
-        articulation,
+        vehicles,
         server_down,
     }
 }
 
-fn adopt_wire_articulation(
-    world: &mut World,
-    art: &crate::articulation::CrabArticulation,
-    me: PilotId,
-) {
-    super::articulation::adopt_brain_labels(world, art);
-    feed_pose_windows(world, crate::cadence::cumulative_steps(art.tick), art, me);
+fn adopt_vehicle_frame(world: &mut World, frame: &VehicleFrame, me: PilotId) {
+    feed_pose_windows(
+        world,
+        crate::cadence::cumulative_steps(frame.tick),
+        frame,
+        me,
+    );
 }
 
-/// (Host) Bridge every pilot's intent into a [`PilotCommand`] for the crab world's
+/// (Host) Bridge every pilot's intent into a [`PilotCommand`] for the world's
 /// vehicle systems, anchored at each walker's [`boarding_of`] state this tick.
 fn publish_pilot_commands(world: &mut World) {
     if world.get_resource::<VehicleControls>().is_none() {
@@ -896,7 +868,7 @@ fn publish_pilot_commands(world: &mut World) {
 /// `exchange` assembled at most the one tick this frame's issued local input
 /// completed (a remote can delay nothing — rl#195), and `advance` asserts the
 /// previous tick was stepped, so a missed force-complete fails loud.
-fn start_host_tick(world: &mut World, me: PilotId, armed: bool) {
+fn start_host_tick(world: &mut World, me: PilotId) {
     {
         let state = world.non_send::<GameState>();
         debug_assert!(
@@ -917,29 +889,16 @@ fn start_host_tick(world: &mut World, me: PilotId, armed: bool) {
         let mut state = world.non_send_mut::<GameState>();
         state.prev = SimSnapshot::capture(&state.client);
     }
-    let remaining = if armed {
-        let stepping_into = {
-            let state = world.non_send::<GameState>();
-            state.client.sim().tick() + 1
-        };
-        let owed = crate::cadence::steps_for_tick(stepping_into) - 1;
-        host_physics_step(world, me, owed);
-        owed
-    } else {
-        0
-    };
-    world.non_send_mut::<GameState>().pending_pump = Some(remaining);
-    if remaining == 0 {
-        // Nothing to spread (the unarmed crab-less screenshot host pumps no physics)
-        // — finalize inline, frame-identical to the pre-rl#396 inline pump.
-        complete_pending_pump(world, me, armed);
-    }
+    let stepping_into = world.non_send::<GameState>().client.sim().tick() + 1;
+    let owed = crate::cadence::steps_for_tick(stepping_into) - 1;
+    host_physics_step(world, me, owed);
+    world.non_send_mut::<GameState>().pending_pump = Some(owed);
 }
 
 /// One deferred physics step toward the pending host tick, on a frame that crossed no
 /// tick; the last owed step finalizes in the same frame (the finalize tail — sim step
 /// + broadcast — is cheap next to a physics step).
-fn step_pending_pump(world: &mut World, me: PilotId, armed: bool) {
+fn step_pending_pump(world: &mut World, me: PilotId) {
     let Some(remaining) = world.non_send::<GameState>().pending_pump else {
         return;
     };
@@ -947,7 +906,7 @@ fn step_pending_pump(world: &mut World, me: PilotId, armed: bool) {
         host_physics_step(world, me, remaining - 1);
         world.non_send_mut::<GameState>().pending_pump = Some(remaining - 1);
     } else {
-        complete_pending_pump(world, me, armed);
+        complete_pending_pump(world, me);
     }
 }
 
@@ -955,48 +914,32 @@ fn step_pending_pump(world: &mut World, me: PilotId, armed: bool) {
 /// Fed per step, not per tick: the RenderClock counts a pending tick, so a window
 /// holding only finalized ticks clamps until the spread pump finishes (rl#396).
 fn host_physics_step(world: &mut World, me: PilotId, owed_after: u32) {
-    crate::crab_slot::pump_fixed_steps(world, 1);
+    super::physics_pump::pump_fixed_steps(world, 1);
     let stepping_into = world.non_send::<GameState>().client.sim().tick() + 1;
-    let art = super::articulation::capture(world, stepping_into);
+    let frame = super::remote_vehicles::capture(world, stepping_into);
     let step = crate::cadence::cumulative_steps(stepping_into) - u64::from(owed_after);
-    feed_pose_windows(world, step, &art, me);
+    feed_pose_windows(world, step, &frame, me);
 }
 
 /// Force-complete the pending host tick: run every still-owed physics step now, then
-/// finalize — collect the crab poses + feed the next hunt, step the authoritative sim,
-/// broadcast the snapshot + articulation, and mirror the step into our own client.
-/// Runs before each exchange (the sim must sit at tick N before tick N+1's input
-/// applies) and as [`step_pending_pump`]'s owed-complete tail. No-op when nothing is
-/// pending.
-fn complete_pending_pump(world: &mut World, me: PilotId, armed: bool) {
+/// finalize — step the authoritative sim on the crafts' poses, broadcast the snapshot +
+/// craft poses, and mirror the step into our own client. Runs before each exchange (the
+/// sim must sit at tick N before tick N+1's input applies) and as
+/// [`step_pending_pump`]'s owed-complete tail. No-op when nothing is pending.
+fn complete_pending_pump(world: &mut World, me: PilotId) {
     let Some(remaining) = world.non_send_mut::<GameState>().pending_pump.take() else {
         return;
     };
-    // Identical to a capture at start: the server sim is untouched between start and
-    // complete (physics steps mutate only the crab world; exchange only assembles).
-    let inputs = {
-        let state = world.non_send::<GameState>();
-        crate::crab_slot::slot_inputs(state.server().expect("server_auth ⇒ a server").sim())
-    };
-    let (crab_poses, shadows) = if armed {
-        for owed in (0..remaining).rev() {
-            host_physics_step(world, me, owed);
-        }
-        let poses = crate::crab_slot::finish_slot_tick(world, &inputs);
-        (poses, pilot_shadows(world))
-    } else {
-        // The one unarmed host: the crab-less screenshot path
-        // (fp-screenshot without a checkpoint) — no crab world to read,
-        // so the sim's crabs hold their spawn poses, clawless. Poses stay
-        // mandatory; this is a diagnostics surface, not a served round.
-        (inputs.fallback.clone(), BTreeMap::new())
-    };
+    for owed in (0..remaining).rev() {
+        host_physics_step(world, me, owed);
+    }
+    let shadows = pilot_shadows(world);
     let (bytes, restarted) = {
         let mut state = world.non_send_mut::<GameState>();
         let stepped = state
             .server_mut()
             .expect("server_auth ⇒ a server")
-            .step_next(&crab_poses, shadows);
+            .step_next(shadows);
         (stepped.snapshot, stepped.restarted)
     };
     let mut snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
@@ -1010,10 +953,10 @@ fn complete_pending_pump(world: &mut World, me: PilotId, armed: bool) {
         .resource::<super::chord_map::DiscoveredCodes>()
         .codes()
         .clone();
-    let articulation = armed.then(|| crate::render::articulation::capture(world, snap.tick));
+    let vehicles = super::remote_vehicles::capture(world, snap.tick);
     {
         let state = world.non_send::<GameState>();
-        state.coord.broadcast_step(&snap, articulation.as_ref());
+        state.coord.broadcast_step(&snap, &vehicles);
     }
     {
         let mut state = world.non_send_mut::<GameState>();
@@ -1025,17 +968,10 @@ fn complete_pending_pump(world: &mut World, me: PilotId, armed: bool) {
         }
         state.client.apply_core_snapshot(snap);
     }
-    if restarted && armed {
-        let spawns: Vec<crate::sim::Pos> = world
-            .non_send::<GameState>()
-            .server()
-            .expect("server_auth ⇒ a server")
-            .sim()
-            .crabs()
-            .iter()
-            .map(|c| c.pos())
-            .collect();
-        crate::crab_slot::restart_crabs_to_spawns(world, &spawns);
+    // A RESTART re-pins the round at the fresh spawn layout; a craft left where it was
+    // would drag its pilot's walker straight back across the map.
+    if restarted {
+        despawn_crafts(world);
     }
 }
 
@@ -1048,25 +984,7 @@ fn log_round_edges(world: &mut World) {
     for (pid, p) in state.client.sim().players() {
         match state.logged_statuses.insert(pid, p.status()) {
             Some(prev) if prev != p.status() => {
-                // A down is always a claw touch (rl#236 — no under-body disc); the crab
-                // distance locates where near her body the strike landed.
-                let (px, pz) = p.pos().to_meters();
-                let from_crab = state
-                    .client
-                    .sim()
-                    .crabs()
-                    .iter()
-                    .map(|c| {
-                        let (cx, cz) = c.pos().to_meters();
-                        (px - cx).hypot(pz - cz)
-                    })
-                    .fold(f32::INFINITY, f32::min);
-                info!(
-                    "player {:?}: {:?} -> {:?} ({from_crab:.2} m from crab center)",
-                    pid,
-                    prev,
-                    p.status()
-                );
+                info!("player {:?}: {:?} -> {:?}", pid, prev, p.status());
             }
             _ => {}
         }
@@ -1109,9 +1027,6 @@ pub(super) fn drive_client_sim(world: &mut World) {
 
 fn advance_frame(world: &mut World, dt: f64) {
     let sim_started = bevy::platform::time::Instant::now();
-    let armed = world
-        .get_resource::<crate::crab_slot::NnCrabsArmed>()
-        .is_some();
     let role = PeerRole::of(world.non_send::<GameState>());
     let me = local_pilot(world.non_send::<GameState>());
     world.non_send_mut::<GameState>().accumulator += dt;
@@ -1133,14 +1048,13 @@ fn advance_frame(world: &mut World, dt: f64) {
             // The previous tick's deferred steps must land before this tick's input
             // applies: the sim sits at tick N when tick N+1 assembles (rl#396), and
             // `Server::advance` asserts it.
-            complete_pending_pump(world, me, armed);
+            complete_pending_pump(world, me);
         }
 
         let local = take_local_control(world);
-        let sim_input = local.sim_input();
         let tick = exchange_tick(world, role, &local);
-        if let Some(art) = tick.articulation {
-            adopt_wire_articulation(world, &art, me);
+        if let Some(frame) = tick.vehicles {
+            adopt_vehicle_frame(world, &frame, me);
         }
         if let Some(down) = tick.server_down {
             end_round_server_down(world, down);
@@ -1149,12 +1063,10 @@ fn advance_frame(world: &mut World, dt: f64) {
 
         if role == PeerRole::ServerAuth {
             publish_pilot_commands(world);
-            start_host_tick(world, me, armed);
+            start_host_tick(world, me);
         }
 
         record_tick_trace(world);
-
-        super::net_track::sample(world, role == PeerRole::ServerAuth, sim_input);
     }
 
     // A frame that crossed no tick pays one deferred physics step instead (rl#396) —
@@ -1162,7 +1074,7 @@ fn advance_frame(world: &mut World, dt: f64) {
     // tick. A crossing frame already ran its step (and any force-completed
     // remainder), so it never doubles up here.
     if applied == 0 {
-        step_pending_pump(world, me, armed);
+        step_pending_pump(world, me);
     }
 
     // rl#398: publish the adopted snapshots' discovered chord codes to the combo
@@ -1240,40 +1152,16 @@ mod tests {
     use crate::sim::{Input, TICK_DT, buttons};
     use bevy::prelude::*;
 
-    /// A host round over a real armed crab world (rest-pose policy, flat ground): the
-    /// host is `PlayerId(0)`, joined by `remotes` more players.
-    fn armed_host(remotes: u8) -> App {
-        use crab_world::bot::headless::{
-            HeadlessStack, WorldRole, force_serial_schedules, headless_stack,
-            pin_single_thread_pools,
-        };
-
-        pin_single_thread_pools();
+    /// A host round over a real physics world (flat ground): the host is `PlayerId(0)`,
+    /// joined by `remotes` more players.
+    fn host(remotes: u8) -> App {
         let peers: Vec<crate::sim::PlayerId> = (0..=remotes).map(crate::sim::PlayerId).collect();
-        let mut client = crate::client::ClientSim::new(0xC0FFEE, &peers, peers[0]);
-        let spawns = super::super::app::seed_round_crabs(&mut client, 1);
-        let mut app = headless_stack(HeadlessStack {
-            num_envs: spawns.len(),
-            role: WorldRole::Standalone,
-            grid: std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(16_384.0)),
-            visuals: crab_world::Visuals(false),
-        });
-        app.add_plugins(crate::crab_slot::NnCrabPlugin::new(
-            spawns
-                .iter()
-                .map(|_| crab_world::policy::Policy::rest())
-                .collect(),
-            spawns.clone(),
+        let client = crate::client::ClientSim::new(0xC0FFEE, &peers, peers[0]);
+        let mut app = crab_world::headless::headless_server_world(std::sync::Arc::new(
+            crab_world::terrain::TerrainGrid::flat(16_384.0),
         ));
-        app.add_plugins(crab_world::vehicle::VehiclePlugin);
-        crate::crab_slot::arm(app.world_mut());
-        crate::crab_slot::park_fixed_auto_pump(&mut app);
-        crate::crab_slot::restart_crabs_to_spawns(app.world_mut(), &spawns);
-        force_serial_schedules(&mut app);
-        // Spawn the crab world's Update-side entities before installing the round.
-        for _ in 0..8 {
-            app.update();
-        }
+        super::super::physics_pump::park_fixed_auto_pump(&mut app);
+        app.update();
         let coord = super::coordinator(None, client.peers(), client.me(), client.sim().clone());
         install_round(app.world_mut(), client, coord);
         app.insert_resource(super::super::chord_map::DiscoveredCodes::load(None));
@@ -1283,13 +1171,12 @@ mod tests {
 
     /// rl#409 repro: a ship boarded on a live host must answer the stick BOTH before
     /// and after an in-round RESTART. A double RESTART while piloting opened a
-    /// dead-stick window: the walker track jumped to the rl#322 park ring and the
-    /// craft then ignored ~6 min of stick input.
+    /// dead-stick window: the craft then ignored ~6 min of stick input.
     #[test]
     fn ship_answers_the_stick_before_and_after_a_restart() {
         use crab_world::vehicle::{Vehicle, VehicleKind};
 
-        let mut app = armed_host(0);
+        let mut app = host(0);
         let world = app.world_mut();
         // One full tick per call: a crossing frame (exchange + first owed step) then a
         // non-crossing frame that finalizes the spread pump (rl#396).
@@ -1346,7 +1233,8 @@ mod tests {
         for _ in 0..300 {
             tick(world);
         }
-        let parked = craft_pos(world).expect("the craft survives a RESTART (rl#322 park)");
+        let parked =
+            craft_pos(world).expect("a still-filed pilot's craft respawns after a RESTART");
 
         fly(world, 90);
         let after = craft_pos(world).expect("the craft persists across the post-restart fly");
@@ -1365,7 +1253,7 @@ mod tests {
     /// tick, so a missed force-complete would panic right here.
     #[test]
     fn host_pump_spreads_steps_across_frames() {
-        let mut app = armed_host(0);
+        let mut app = host(0);
         let world = app.world_mut();
         let mut render_time = 0.0_f64;
         let mut drive = |world: &mut World, dt: f64| {
@@ -1438,7 +1326,7 @@ mod tests {
         use std::f32::consts::{PI, TAU};
 
         let (me, remote) = (PlayerId(0), PlayerId(1));
-        let mut app = armed_host(1);
+        let mut app = host(1);
         let world = app.world_mut();
         let cam = world.spawn((FpCamera, Transform::default())).id();
         let avatar = world
@@ -1521,43 +1409,31 @@ mod tests {
         );
     }
 
-    /// rl#396: the host's [`super::pose::PoseWindow`] surfaces render its physics
-    /// steps on time while the spread pump holds a tick pending. A ship flight and a
-    /// settling crab at ~60 and ~144 fps frame deltas: every frame's cockpit and
-    /// carapace samples must equal the physics steps, recorded as they ran,
-    /// interpolated at that frame's [`RenderClock`] — capped at the steps run so far,
-    /// which a crossing frame late in its tick phase trails by a fraction of a step.
+    /// rl#396: the host's cockpit [`super::pose::PoseWindow`] renders its physics steps on
+    /// time while the spread pump holds a tick pending. A ship flight at ~60 and ~144 fps
+    /// frame deltas: every frame's cockpit sample must equal the physics steps, recorded
+    /// as they ran, interpolated at that frame's [`RenderClock`] — capped at the steps run
+    /// so far, which a crossing frame late in its tick phase trails by a fraction of a
+    /// step.
     #[test]
-    fn host_pose_windows_render_every_physics_step_on_time() {
-        use super::super::articulation::sample_crab_part_poses;
-        use bevy::ecs::system::RunSystemOnce;
-        use crab_world::bot::body::{CrabBodyPart, CrabCarapace};
-        use crab_world::bot::skin::CrabRenderPose;
+    fn host_cockpit_renders_every_physics_step_on_time() {
         use crab_world::vehicle::{Vehicle, VehicleKind};
 
-        /// Craft and carapace translations after each physics step, index = step − 1.
+        /// Craft translation after each physics step, index = step − 1.
         #[derive(Resource, Default)]
-        struct Stepped(Vec<(Option<Vec3>, Vec3)>);
+        struct Stepped(Vec<Option<Vec3>>);
 
         let r = crab_world::physics::PHYSICS_HZ as f64 / crate::sim::TICK_HZ as f64;
         for (rate, dt_lo, dt_span) in [("~60 fps", 0.44, 0.13), ("~144 fps", 0.19, 0.04)] {
-            let mut app = armed_host(0);
+            let mut app = host(0);
             app.init_resource::<Stepped>();
             app.add_systems(
                 FixedLast,
-                |mut stepped: ResMut<Stepped>,
-                 crafts: Query<&Transform, With<Vehicle>>,
-                 carapaces: Query<&Transform, (With<CrabCarapace>, With<CrabBodyPart>)>| {
-                    let craft = crafts.iter().next().map(|t| t.translation);
-                    let carapace = carapaces.single().expect("one crab").translation;
-                    stepped.0.push((craft, carapace));
+                |mut stepped: ResMut<Stepped>, crafts: Query<&Transform, With<Vehicle>>| {
+                    stepped.0.push(crafts.iter().next().map(|t| t.translation));
                 },
             );
             let world = app.world_mut();
-            let carapace = world
-                .query_filtered::<Entity, (With<CrabCarapace>, With<CrabBodyPart>)>()
-                .single(world)
-                .expect("one crab");
             world.resource_mut::<super::PendingInput>().vehicle =
                 Some(super::VehicleRequest::Board(VehicleKind::Ship));
             world.resource_mut::<super::FlightInput>().left = Vec2::new(0.0, 1.0);
@@ -1567,33 +1443,24 @@ mod tests {
                     world,
                     TICK_DT * (dt_lo + dt_span * (f64::from(frame) * 0.618_034 % 1.0)),
                 );
-                world
-                    .run_system_once(sample_crab_part_poses)
-                    .expect("sample_crab_part_poses runs");
                 let clock = *world.resource::<RenderClock>();
                 let cockpit = world
                     .resource::<super::LocalVehicle>()
                     .cockpit_sample(clock.tick, clock.frac)
                     .map(|p| p.pos);
-                let body = world.resource::<CrabRenderPose>().0[&carapace].translation;
                 let ran = world.resource::<Stepped>().0.len();
-                frames.push((clock, ran, cockpit, body));
+                frames.push((clock, ran, cockpit));
             }
-            let offset = world.resource::<super::super::RenderOrigin>().offset_m();
             let stepped = &world.resource::<Stepped>().0;
 
-            let at = |t: f64, pick: fn(&(Option<Vec3>, Vec3)) -> Option<Vec3>| {
+            let at = |t: f64| {
                 let s = t.floor() as usize;
-                let a = pick(&stepped[s - 1])?;
+                let a = stepped[s - 1]?;
                 let w = (t - s as f64) as f32;
-                Some(if w == 0.0 {
-                    a
-                } else {
-                    a.lerp(pick(&stepped[s])?, w)
-                })
+                Some(if w == 0.0 { a } else { a.lerp(stepped[s]?, w) })
             };
-            let (mut flown, mut settled) = (0, 0);
-            for (frame, &(clock, ran, cockpit, body)) in frames.iter().enumerate() {
+            let mut flown = 0;
+            for (frame, &(clock, ran, cockpit)) in frames.iter().enumerate() {
                 let target = r * (clock.tick.saturating_sub(1) as f64 + clock.frac as f64) - 1.0;
                 if clock.tick == 0 || target < 1.0 {
                     continue;
@@ -1607,19 +1474,9 @@ mod tests {
                     clock.frac,
                 );
                 let t = target.min(ran as f64);
-                let off = |got: Vec3, want: Vec3| (got - want).length();
-                let body_want = at(t, |s| Some(s.1)).expect("the crab is always stepped") - offset;
-                assert!(
-                    off(body, body_want) < 1e-4,
-                    "{rate} frame {frame} (clock {} + {}): carapace {body} vs the \
-                     physics steps' {body_want}",
-                    clock.tick,
-                    clock.frac,
-                );
-                settled += 1;
-                if let (Some(want), Some(cockpit)) = (at(t, |s| s.0), cockpit) {
+                if let (Some(want), Some(cockpit)) = (at(t), cockpit) {
                     assert!(
-                        off(cockpit, want) < 1e-4,
+                        (cockpit - want).length() < 1e-4,
                         "{rate} frame {frame} (clock {} + {}): cockpit {cockpit} vs the \
                          physics steps' {want}",
                         clock.tick,
@@ -1628,36 +1485,33 @@ mod tests {
                     flown += 1;
                 }
             }
-            let (first, last) = (stepped.first().unwrap().1, stepped.last().unwrap().1);
-            let mut flight = stepped.iter().filter_map(|s| s.0);
+            let mut flight = stepped.iter().filter_map(|s| *s);
             let (lift, cruise) = (flight.clone().next().unwrap(), flight.next_back().unwrap());
             assert!(
-                (first - last).length() > 0.01 && (lift - cruise).length() > 1.0,
-                "{rate}: sanity — the crab settled and the ship flew \
-                 ({first} -> {last}, {lift} -> {cruise})"
+                (lift - cruise).length() > 1.0,
+                "{rate}: sanity — the ship flew ({lift} -> {cruise})"
             );
             assert!(
-                flown > frames.len() / 2 && settled > frames.len() - 16,
-                "{rate}: {flown} flown and {settled} settled frames of {}",
+                flown > frames.len() / 2,
+                "{rate}: {flown} flown frames of {}",
                 frames.len()
             );
         }
     }
 
-    /// A remote client stamps each adopted articulation at its tick's physics step —
+    /// A remote client stamps each adopted vehicle frame at its tick's physics step —
     /// the clock [`super::pose::PoseWindow`] samples on — so a craft moving at constant
     /// velocity in physics time renders exactly on that clock through the 64:30
     /// staircase.
     #[test]
     fn client_cockpit_samples_adopted_ticks_on_the_step_clock() {
-        use crate::articulation::{CrabArticulation, VehiclePoseWire};
         use crate::cadence::cumulative_steps;
+        use crate::vehicles::{VehicleFrame, VehiclePoseWire};
         use crab_world::vehicle::{PilotId, VehicleKind};
 
         let r = crab_world::physics::PHYSICS_HZ as f64 / crate::sim::TICK_HZ as f64;
         let mut world = World::new();
-        world.init_resource::<super::super::articulation::CrabPartWindows>();
-        world.init_resource::<super::super::articulation::RemoteVehicle>();
+        world.init_resource::<super::super::remote_vehicles::RemoteVehicle>();
         world.init_resource::<super::super::pos_trace::PosTrace>();
         world.insert_resource(super::LocalVehicle::Flying {
             kind: VehicleKind::Ship,
@@ -1665,9 +1519,8 @@ mod tests {
         });
         let mut checked = 0;
         for tick in 1..=12u64 {
-            let art = CrabArticulation {
+            let frame = VehicleFrame {
                 tick,
-                crabs: Vec::new(),
                 vehicles: vec![VehiclePoseWire {
                     pilot: 0,
                     kind: VehicleKind::Ship,
@@ -1676,7 +1529,7 @@ mod tests {
                     thrust: [0; 3],
                 }],
             };
-            super::adopt_wire_articulation(&mut world, &art, PilotId(0));
+            super::adopt_vehicle_frame(&mut world, &frame, PilotId(0));
             if tick < 4 {
                 continue;
             }
@@ -1758,11 +1611,10 @@ mod tests {
 
     #[test]
     fn own_wire_pose_picks_exactly_our_pilots_craft() {
-        use crate::articulation::{CrabArticulation, VehiclePoseWire};
+        use crate::vehicles::{VehicleFrame, VehiclePoseWire};
         use crab_world::vehicle::PilotId;
-        let art = CrabArticulation {
+        let frame = VehicleFrame {
             tick: 7,
-            crabs: Vec::new(),
             vehicles: vec![
                 VehiclePoseWire {
                     pilot: 0,
@@ -1780,11 +1632,11 @@ mod tests {
                 },
             ],
         };
-        let ours = super::own_wire_pose(&art, PilotId(2)).expect("our craft is on the wire");
+        let ours = super::own_wire_pose(&frame, PilotId(2)).expect("our craft is on the wire");
         assert_eq!(ours.pos.to_array(), [9.0, 8.0, 7.0]);
         assert_eq!(ours.orient.to_array(), [0.0, 1.0, 0.0, 0.0]);
         assert!(
-            super::own_wire_pose(&art, PilotId(1)).is_none(),
+            super::own_wire_pose(&frame, PilotId(1)).is_none(),
             "no craft on the wire = the request→grant window: the camera holds off"
         );
     }
@@ -1845,6 +1697,9 @@ mod tests {
         let coord = super::coordinator(None, client.peers(), client.me(), client.sim().clone());
         let mut world = World::new();
         world.init_resource::<Time>();
+        world.init_resource::<Time<Fixed>>();
+        world.init_resource::<Time<Virtual>>();
+        world.add_schedule(Schedule::new(bevy::app::FixedMain));
         world.insert_resource(super::super::chord_map::DiscoveredCodes::load(None));
         world.init_resource::<crab_world::debug_overlay::SimFrameStats>();
         install_round(&mut world, client, coord);

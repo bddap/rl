@@ -1,4 +1,3 @@
-use super::app::NnCrabStackInstalled;
 use super::driver::{
     FlightControl, FlightInput, GameState, PendingRound, VEHICLE_STICK_SENS,
     ensure_round_installed, flight_control,
@@ -9,7 +8,7 @@ use super::scene::{
 };
 use super::*;
 use crate::menu::ReadyMatch;
-use crate::sim::{Externals, Sim, UNIT};
+use crate::sim::{Sim, UNIT};
 use crab_world::vehicle::VehicleKind;
 
 #[test]
@@ -21,15 +20,13 @@ fn menu_handoff_installs_the_chosen_round() {
         .init_non_send::<PendingRound>()
         .add_systems(OnEnter(AppPhase::Playing), ensure_round_installed);
 
-    app.world_mut().insert_resource(NnCrabStackInstalled);
-
     let seed = 0x1234_5678;
-    let armed = super::app::arm_round(ReadyMatch {
+    let round = super::app::start_round(ReadyMatch {
         client: crate::formation::solo_client_for(seed),
         net: None,
     })
-    .expect("a solo round always arms");
-    app.world_mut().insert_non_send(PendingRound(Some(armed)));
+    .expect("a solo round always starts");
+    app.world_mut().insert_non_send(PendingRound(Some(round)));
     app.world_mut()
         .resource_mut::<NextState<AppPhase>>()
         .set(AppPhase::Playing);
@@ -59,61 +56,22 @@ fn menu_handoff_installs_the_chosen_round() {
 }
 
 #[test]
-fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
-    use super::app::check_armable;
-    use crate::SyncVerdict;
-    let synced = |body, crabs| {
-        Some(SyncVerdict {
-            body,
-            crabs,
-            plant: true,
-        })
-    };
+fn unsynced_round_refuses_with_actionable_message_not_a_crash() {
+    use super::app::check_synced;
+    assert!(check_synced(None).is_ok(), "solo always starts");
     assert!(
-        check_armable(None).is_ok(),
-        "solo (no net, no formation verdict) always arms"
+        check_synced(Some(true)).is_ok(),
+        "a synced networked round starts"
+    );
+    let refused =
+        check_synced(Some(false)).expect_err("a networked round on disagreeing worlds must refuse");
+    assert!(
+        refused.contains("terrain bake"),
+        "names the cause: {refused}"
     );
     assert!(
-        check_armable(synced(true, true)).is_ok(),
-        "a networked round with synced assets + crab count arms"
-    );
-    let count = check_armable(synced(true, false))
-        .expect_err("a count-mismatched networked round must refuse, not arm the wrong crabs");
-    assert!(
-        count.contains("crab count") || count.contains("NN-crab count"),
-        "names the count cause: {count}"
-    );
-    assert!(
-        count.contains("binding list"),
-        "tells the operator the fix: {count}"
-    );
-    let colliders = check_armable(synced(false, true))
-        .expect_err("an unsynced-assets networked round must refuse, not arm a fake crab");
-    assert!(
-        colliders.contains("sally.glb"),
-        "names the collider mismatch: {colliders}"
-    );
-    assert!(
-        colliders.contains("rl-update"),
-        "tells the operator how to fix it: {colliders}"
-    );
-    assert!(
-        colliders.contains("refusing"),
-        "the round REFUSES (no silent integer fallback): {colliders}"
-    );
-    let plant = check_armable(Some(SyncVerdict {
-        body: true,
-        crabs: true,
-        plant: false,
-    }))
-    .expect_err("a plant-mismatched networked round must refuse — the worlds disagree (rl#286)");
-    assert!(
-        plant.contains("arena") && plant.contains("terrain bake"),
-        "names the plant cause: {plant}"
-    );
-    assert!(
-        plant.contains("rl-update"),
-        "tells the operator the fix: {plant}"
+        refused.contains("identical build"),
+        "tells the operator the fix: {refused}"
     );
 }
 
@@ -182,8 +140,7 @@ fn full_look_axis_turns_one_tick_cap() {
     let input = Input::new(0.0, 0.0, look_axis, 0);
     let mut inputs = BTreeMap::new();
     inputs.insert(PlayerId(0), input);
-    let poses = crate::sim::hold_poses(&sim);
-    sim.step(&inputs, Externals::crabs_only(&poses));
+    sim.step(&inputs, &BTreeMap::new());
     let after = sim.player(PlayerId(0)).unwrap().yaw();
     let cap = trig::TURN / 24;
     assert_eq!(

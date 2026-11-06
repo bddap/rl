@@ -37,9 +37,7 @@ mod wasm {
 
     async fn form_and_run(host_code: String, run_secs: u32) -> anyhow::Result<()> {
         let host: iroh::EndpointId = host_code.parse()?;
-        // Crabless stamp, matching `game net`'s headless host (rest-pose statue).
-        let stamp = net::SyncStamp::local(0);
-        let mut forming = menu::begin(&StartChoice::Join(Some(host)), 7, None, stamp);
+        let mut forming = menu::begin(&StartChoice::Join(Some(host)), 7, net::SyncStamp::local());
 
         let mut announced = false;
         let mut last_roster = 0usize;

@@ -216,10 +216,6 @@ impl ClientSim {
         }
     }
 
-    pub fn configure_crabs(&mut self, crabs: usize) {
-        self.sim.configure_crabs(crabs);
-    }
-
     pub fn me(&self) -> PlayerId {
         self.me
     }
@@ -300,8 +296,7 @@ mod tests {
         let mut wire_up: std::collections::VecDeque<TickMsg> = Default::default();
         let mut wire_down: std::collections::VecDeque<CoreSnapshot> = Default::default();
 
-        // Stay within STARTUP_GRACE_TICKS (30): the crab stays disarmed (no claw downs) and the round
-        // stays Ongoing — pure movement, so the convergence is EXACT.
+        // The round stays Ongoing — pure movement, so the convergence is EXACT.
         const FRAMES: u64 = 20;
         for f in 0..FRAMES {
             // Vary move AND turn every tick (never neutral), so a dropped or mis-ordered replay
@@ -320,8 +315,7 @@ mod tests {
             }
             server.advance(host_sched.submit_local_input(Input::default(), None));
             while server.next_tick_ready() {
-                let poses = crate::sim::hold_poses(server.sim());
-                let bytes = server.step_next(&poses, Default::default()).snapshot;
+                let bytes = server.step_next(Default::default()).snapshot;
                 wire_down.push_back(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
             if wire_down.len() > LATENCY {
@@ -348,8 +342,7 @@ mod tests {
             }
             server.advance(host_sched.submit_local_input(Input::default(), None));
             while server.next_tick_ready() {
-                let poses = crate::sim::hold_poses(server.sim());
-                let bytes = server.step_next(&poses, Default::default()).snapshot;
+                let bytes = server.step_next(Default::default()).snapshot;
                 wire_down.push_back(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
             let mut adopted = false;
@@ -392,8 +385,7 @@ mod tests {
             let input = Input::new(0.0, if t < 5 { 1.0 } else { 0.0 }, 0.0, btns);
             host.advance(sched.submit_local_input(input, None));
             while host.next_tick_ready() {
-                let poses = crate::sim::hold_poses(host.sim());
-                let bytes = host.step_next(&poses, Default::default()).snapshot;
+                let bytes = host.step_next(Default::default()).snapshot;
                 arrivals.push(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
         }

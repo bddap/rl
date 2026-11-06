@@ -51,7 +51,6 @@ fn run(pack: Vec<u8>) -> Result<()> {
     // menu as native. No scripted lobby.
     net::render::run_game(net::render::GameConfig {
         launch: net::render::Launch::Menu,
-        nn_crab_checkpoints: Vec::new(),
         view: crab_world::RenderArgs::default(),
         // Page-relative: bevy's wasm reader and the page's prefetch both resolve
         // `assets/…` against the page URL, one tree for both byte paths.

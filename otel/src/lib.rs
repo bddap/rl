@@ -10,29 +10,10 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:4318";
 
-/// Target of the Sally flight-recorder batches (`crab_world::sally_track`, rl#332):
-/// OTLP-export-only data records — ~1 Hz of ~1 KB JSON that would be pure noise on
-/// stderr/journal, so the fmt layer drops them while the OTLP log layer ships them.
-pub const SALLY_TRACK_TARGET: &str = "sally_track";
-
-/// Target of the controller-input summary batches (`net::render::net_track`, rl#403):
-/// same export-only contract as [`SALLY_TRACK_TARGET`].
-pub const INPUT_TRACK_TARGET: &str = "input_track";
-
-/// Target of the vehicle-mode transition events (`crab_world::sally_track`, rl#403):
-/// rare first-class events (player, from-mode, to-mode). Forced past quiet RUST_LOG
-/// defaults like the batch targets, but NOT dropped from stderr — a boarding edge is
-/// worth a journal line.
-pub const VEHICLE_TRANSITION_TARGET: &str = "vehicle_transition";
-
 /// Target of in-game screenshot events (`net::render::live_screenshot`, rl#405):
-/// rare first-class events naming the written PNG so tooling can fetch it. Same
-/// contract as [`VEHICLE_TRANSITION_TARGET`] — forced past quiet RUST_LOG, kept on
-/// stderr.
+/// rare first-class events naming the written PNG so tooling can fetch it. Forced past
+/// quiet RUST_LOG defaults, kept on stderr.
 pub const SCREENSHOT_TARGET: &str = "screenshot";
-
-/// The ~1 Hz batch targets: export-only (dropped from the stderr fmt layer).
-const BATCH_TARGETS: &[&str] = &[SALLY_TRACK_TARGET, INPUT_TRACK_TARGET];
 
 #[must_use = "telemetry stops and unflushed data is lost when the guard is dropped"]
 pub struct OtelGuard {
@@ -74,22 +55,17 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
     // tracing-subscriber's default `tracing-log` feature: every `.init()` below installs
     // the LogTracer bridge itself. Do NOT also call `tracing_log::LogTracer::init()` here —
     // a pre-set logger makes those `.init()` calls PANIC (SetLoggerError), which took down
-    // every binary at startup and broke the rl-release checkpoint gate (2026-07-02).
-    // The flight-recorder target rides on top of whatever RUST_LOG asks for: surfaces
-    // default to `warn`-ish filters (rl-demo pre-sets RUST_LOG), and a recorder that a
-    // quieter default silently disables is the gap rl#332 exists to close.
-    let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    for t in BATCH_TARGETS
-        .iter()
-        .chain([&VEHICLE_TRANSITION_TARGET, &SCREENSHOT_TARGET])
-    {
-        filter = filter.add_directive(format!("{t}=info").parse().expect("static directive"));
-    }
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
-            !BATCH_TARGETS.contains(&meta.target())
-        }));
+    // every binary at startup (2026-07-02).
+    // The screenshot target rides on top of whatever RUST_LOG asks for, so a quieter
+    // default cannot silently hide the PNG path tooling waits for.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive(
+            format!("{SCREENSHOT_TARGET}=info")
+                .parse()
+                .expect("static directive"),
+        );
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
     let endpoint = resolve_endpoint(args.enabled);
     let Some(endpoint) = endpoint else {

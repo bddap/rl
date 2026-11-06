@@ -10,8 +10,7 @@ use crate::client::{ClientSim, TickMsg};
 use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::net_loop::{Coordinator, Exchanged, NetDriver};
 use crate::sim::{
-    Crab, Input, Outcome, PLAYER_HEIGHT, Player, PlayerId, PlayerStatus, Pos, buttons, trig,
-    trig_client,
+    Input, Outcome, PLAYER_HEIGHT, Player, PlayerId, PlayerStatus, Pos, buttons, trig, trig_client,
 };
 use crab_world::controls::{ActiveContext, PAD_STICK_DEADZONE, update_controls_ui};
 
@@ -26,7 +25,7 @@ const EYE_HEIGHT: f32 = 1.6 / 1.8 * crate::sim::PLAYER_HEIGHT;
 
 /// Eye level mid-slide (rl#368): a crouch-skid at half stature. The dip is the
 /// first-person cue that the slide took — the sim's speed change alone was
-/// unreadable in play. Render-only; the sim's collision/claw geometry is untouched.
+/// unreadable in play. Render-only.
 const SLIDE_EYE_HEIGHT: f32 = 0.9 / 1.8 * crate::sim::PLAYER_HEIGHT;
 
 /// The eye eases between stand and slide height with this per-second rate
@@ -82,9 +81,7 @@ const MAX_YAW_PER_TICK_RADIANS: f32 =
 
 mod ambience;
 mod app;
-mod articulation;
 mod audio;
-mod brain_swap;
 pub mod chord_map;
 mod controls_sync;
 mod driver;
@@ -92,10 +89,10 @@ mod input;
 #[cfg(not(target_family = "wasm"))]
 mod live_screenshot;
 mod menu;
-mod net_track;
+mod physics_pump;
 mod pos_trace;
 mod pose;
-mod render_mode;
+mod remote_vehicles;
 mod run_game;
 mod scene;
 // Offscreen evidence app (fp/net screenshot CLIs): fs PNG output, native tooling.
@@ -104,6 +101,7 @@ mod screenshot;
 #[cfg(test)]
 mod tests;
 mod vehicle_view;
+mod view_knobs;
 
 /// The windowed client's per-save data dir: `$XDG_DATA_HOME|~/.local/share` +
 /// `giant-crab-rescue`. `None` (no HOME at all) means callers run unpersisted
@@ -117,12 +115,9 @@ fn data_dir() -> Option<PathBuf> {
 
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use audio::ExternalBus;
-pub use run_game::{
-    CHECKPOINT_ENV, GameConfig, Launch, nn_crab_policies, nn_crab_policy, run_game,
-};
+pub use run_game::{GameConfig, Launch, run_game};
 // The game CLI wires script resources onto built apps without its own bevy dep.
 pub use bevy::app::App;
-pub use render_mode::RenderMode;
 #[cfg(not(target_family = "wasm"))]
 pub use screenshot::{
     ChordScript, FrameDtModel, PilotScript, ScreenshotConfig, build_net_screenshot_app,

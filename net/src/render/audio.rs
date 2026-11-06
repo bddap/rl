@@ -274,7 +274,7 @@ pub(super) fn profile(kind: Option<VehicleKind>, speed_mps: f32) -> [f32; 5] {
     // Loudness ceiling: leave headroom under the rest of the mix.
     const MASTER: f32 = WIND_MASTER;
     // On foot the floor sits above sprint (~0.25 m/s): walking and sprinting stay
-    // near-silent, a fall or a claw launch is what roars.
+    // near-silent, a fall is what roars.
     let sprint_mps = crate::sim::SPRINT_SPEED as f32 / UNIT as f32 * TICK_HZ as f32;
     let (floor, ceil) = match kind {
         None => (sprint_mps, FULL_WIND_MPS),

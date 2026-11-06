@@ -4,8 +4,7 @@ use net::{net_loop, render};
 
 use crab_world::RenderArgs;
 
-use super::shared::{ChordScriptArgs, MATCH_SEED, boot_view, parse_join_dial};
-use net::render::nn_crab_policy;
+use super::shared::{ChordScriptArgs, MATCH_SEED, parse_join_dial};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -29,8 +28,6 @@ pub(crate) struct Args {
     cam_fov: f32,
     #[arg(long, default_value_t = 8.0)]
     cam_pitch: f32,
-    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV, value_parser = crab_world::absolute_dir)]
-    nn_crab_checkpoint: Option<std::path::PathBuf>,
     #[command(flatten)]
     render: RenderArgs,
     /// Press the vehicle E-cycle at this frame (repeatable) and hold a forward drive while
@@ -38,8 +35,7 @@ pub(crate) struct Args {
     /// the real wire (rl#191).
     #[arg(long, value_name = "FRAME", value_parser = clap::value_parser!(u64).range(1..))]
     pilot_toggle_at: Vec<u64>,
-    /// From this frame on, the scripted pilot walks a gentle arc on foot (a moving target for
-    /// the hunting crab).
+    /// From this frame on, the scripted pilot walks a gentle arc on foot.
     #[arg(long, value_name = "FRAME", value_parser = clap::value_parser!(u64).range(1..))]
     pilot_walk_at: Option<u64>,
     // Scripted chord entry + map save (rl#398): drives the combo map on either peer of
@@ -49,16 +45,13 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    let boot_view = boot_view(args.render);
-    let (_, nn_crab) = nn_crab_policy(args.nn_crab_checkpoint)?;
-
     let dial = parse_join_dial(args.join.as_deref())?;
     let result = net_loop::connect_and_form_dialing(
         MATCH_SEED,
         args.discover_secs,
         args.expect,
         dial,
-        net::SyncStamp::local(1),
+        net::SyncStamp::local(),
     )?;
 
     let (client, driver) = match result {
@@ -81,7 +74,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(0.0, args.cam_pitch)
         .with_fov(Some(args.cam_fov));
-    let mut app = render::build_net_screenshot_app(client, driver, cfg, nn_crab, boot_view);
+    let mut app = render::build_net_screenshot_app(client, driver, cfg, args.render.resolve());
     if !args.pilot_toggle_at.is_empty() || args.pilot_walk_at.is_some() {
         app.insert_resource(render::PilotScript::new(
             args.pilot_toggle_at,

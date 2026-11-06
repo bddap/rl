@@ -6,38 +6,16 @@
 use anyhow::{Context, Result};
 
 use crate::SyncStamp;
-use crate::articulation::CrabArticulation;
 use crate::client::{PilotIntent, TickMsg};
 use crate::membership::{self, Beat};
 use crate::server::{Admission, AdmissionRefusal, JoinRequest, Refusal};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
+use crate::vehicles::VehicleFrame;
 
-// v15: state frames (snapshot/articulation) moved off the reliable bi-stream onto QUIC
-// datagrams (rl#259), and the stale "lockstep" vocabulary retired with the same bump (rl#244).
-// v16: articulation vehicle poses carry a kind byte (rl#260).
-// v17: world re-based to rig scale — UNIT 1000→100_000 grid/m and every constant's
-// physical meaning changed with it (rl#256); absolute wire positions are incompatible.
-// v18: beats + join requests carry the effective-plant digest (arena/bake/friction,
-// rl#286); the widened frames are incompatible.
-// v19: one frame (rl#298 stage 5) — articulation lost the arena_anchor triple and the
-// per-crab repose flag/shift, and its part/vehicle poses are WORLD poses now; a
-// pre-stage-5 peer would mis-frame every pose it decodes.
-// v20: snapshots carry the extraction point (rl#305 — the host draws a random spawn
-// layout, so a client can no longer derive the objective from the shared constant);
-// a pre-rl#305 peer would mis-frame every field after the crabs.
-// v21: articulation vehicle poses carry a 3-byte thrust command (rl#308 — exhaust
-// plumes track thrust on every peer); a pre-rl#308 peer would mis-frame the vehicle
-// list.
-// v22: Welcome carries the host's 17-byte SyncStamp (rl#336 — the joiner computes its
-// sync verdict with the one arbiter) and Refusal gained the MatchFull tag; a v21 peer
-// would reject the widened Welcome and the unknown tag.
-// v23: snapshot players carry altitude + carried velocity (rl#355 — the on-foot
-// momentum state); a v22 peer would mis-frame every snapshot after the handshake.
-// v24: snapshot carries the host's discovered chord codes (rl#398 — the joined
-// client's combo map shows the session's discovered space); a v23 peer would see
-// trailing bytes on every snapshot.
-pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/24";
+// Bumped on every wire-format change: peers on different formats refuse each other at
+// the ALPN instead of mis-framing.
+pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/25";
 
 /// Hard cap every receiver enforces on a decoded frame body — the codec-level bound
 /// both the reliable stream's length prefix and the datagram fragment count obey.
@@ -53,7 +31,7 @@ pub enum Frame {
     Refuse = 5,
     Welcome = 6,
     Snapshot = 7,
-    Articulation = 8,
+    Vehicles = 8,
 }
 
 impl Frame {
@@ -65,7 +43,7 @@ impl Frame {
             5 => Some(Frame::Refuse),
             6 => Some(Frame::Welcome),
             7 => Some(Frame::Snapshot),
-            8 => Some(Frame::Articulation),
+            8 => Some(Frame::Vehicles),
             _ => None,
         }
     }
@@ -76,7 +54,7 @@ impl Frame {
     /// path at monomorphization, and each receive path rejects the other's kinds, so a kind
     /// can never ride both (rl#259).
     pub const fn via_datagram(self) -> bool {
-        matches!(self, Frame::Snapshot | Frame::Articulation)
+        matches!(self, Frame::Snapshot | Frame::Vehicles)
     }
 }
 
@@ -89,7 +67,7 @@ pub enum PeerWire {
     Refuse(Refusal),
     Welcome(Admission),
     Snapshot(CoreSnapshot),
-    Articulation(CrabArticulation),
+    Vehicles(VehicleFrame),
 }
 
 const IN_LEN: usize = crate::sim::Input::WIRE_LEN;
@@ -205,8 +183,8 @@ impl StateCodec for CoreSnapshot {
     }
 }
 
-impl Codec for CrabArticulation {
-    const KIND: Frame = Frame::Articulation;
+impl Codec for VehicleFrame {
+    const KIND: Frame = Frame::Vehicles;
     type Bytes = Vec<u8>;
 
     fn encode(&self) -> Vec<u8> {
@@ -214,12 +192,11 @@ impl Codec for CrabArticulation {
     }
 
     fn decode(body: &[u8]) -> Result<Self> {
-        CrabArticulation::from_bytes(body)
-            .map_err(|e| anyhow::anyhow!("decoding articulation frame: {e}"))
+        VehicleFrame::from_bytes(body).map_err(|e| anyhow::anyhow!("decoding vehicle frame: {e}"))
     }
 }
 
-impl StateCodec for CrabArticulation {
+impl StateCodec for VehicleFrame {
     fn tick(&self) -> u64 {
         self.tick
     }
@@ -267,7 +244,7 @@ impl Codec for Admission {
     type Bytes = Vec<u8>;
 
     fn encode(&self) -> Vec<u8> {
-        let mut b = Vec::with_capacity(1 + 8 + 2 + self.roster.len() + 17);
+        let mut b = Vec::with_capacity(1 + 8 + 2 + self.roster.len() + SyncStamp::WIRE_LEN);
         b.push(self.pid.0);
         b.extend_from_slice(&self.effective_tick.to_le_bytes());
         b.extend_from_slice(&(self.roster.len() as u16).to_le_bytes());
@@ -309,47 +286,28 @@ impl Codec for Refusal {
 
     fn encode(&self) -> Vec<u8> {
         match self {
-            Refusal::Admission(AdmissionRefusal::BodyMismatch { host, joiner }) => {
+            Refusal::Admission(AdmissionRefusal::TerrainMismatch { host, joiner }) => {
                 let mut b = vec![0u8];
                 b.extend_from_slice(&host.to_le_bytes());
                 b.extend_from_slice(&joiner.to_le_bytes());
                 b
             }
-            Refusal::Admission(AdmissionRefusal::CrabCountMismatch { host, joiner }) => {
-                vec![1, *host, *joiner]
-            }
+            Refusal::Admission(AdmissionRefusal::MatchFull) => vec![1],
             Refusal::Departed => vec![2],
             Refusal::Forming => vec![3],
-            Refusal::Admission(AdmissionRefusal::PlantMismatch { host, joiner }) => {
-                let mut b = vec![4u8];
-                b.extend_from_slice(&host.to_le_bytes());
-                b.extend_from_slice(&joiner.to_le_bytes());
-                b
-            }
-            Refusal::Admission(AdmissionRefusal::MatchFull) => vec![5],
         }
     }
 
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = body;
         let verdict = match take(&mut r, 1, "refusal tag")?[0] {
-            0 => Refusal::Admission(AdmissionRefusal::BodyMismatch {
+            0 => Refusal::Admission(AdmissionRefusal::TerrainMismatch {
                 host: u64::from_le_bytes(take(&mut r, 8, "host digest")?.try_into().unwrap()),
                 joiner: u64::from_le_bytes(take(&mut r, 8, "joiner digest")?.try_into().unwrap()),
             }),
-            1 => Refusal::Admission(AdmissionRefusal::CrabCountMismatch {
-                host: take(&mut r, 1, "host crab count")?[0],
-                joiner: take(&mut r, 1, "joiner crab count")?[0],
-            }),
+            1 => Refusal::Admission(AdmissionRefusal::MatchFull),
             2 => Refusal::Departed,
             3 => Refusal::Forming,
-            4 => Refusal::Admission(AdmissionRefusal::PlantMismatch {
-                host: u64::from_le_bytes(take(&mut r, 8, "host plant digest")?.try_into().unwrap()),
-                joiner: u64::from_le_bytes(
-                    take(&mut r, 8, "joiner plant digest")?.try_into().unwrap(),
-                ),
-            }),
-            5 => Refusal::Admission(AdmissionRefusal::MatchFull),
             x => anyhow::bail!("unknown refusal tag {x:#x}"),
         };
         anyhow::ensure!(r.is_empty(), "refuse frame has {} trailing bytes", r.len());
@@ -365,7 +323,7 @@ pub fn decode_peer_wire(kind: Frame, body: &[u8]) -> Result<PeerWire> {
         Frame::Refuse => PeerWire::Refuse(Refusal::decode(body)?),
         Frame::Welcome => PeerWire::Welcome(Admission::decode(body)?),
         Frame::Snapshot => PeerWire::Snapshot(CoreSnapshot::decode(body)?),
-        Frame::Articulation => PeerWire::Articulation(CrabArticulation::decode(body)?),
+        Frame::Vehicles => PeerWire::Vehicles(VehicleFrame::decode(body)?),
     })
 }
 
@@ -560,14 +518,9 @@ mod tests {
     #[test]
     fn refusal_wire_roundtrips_typed() {
         for verdict in [
-            Refusal::Admission(AdmissionRefusal::BodyMismatch {
+            Refusal::Admission(AdmissionRefusal::TerrainMismatch {
                 host: 0x1122_3344_5566_7788,
                 joiner: 0x99aa_bbcc_ddee_ff00,
-            }),
-            Refusal::Admission(AdmissionRefusal::CrabCountMismatch { host: 3, joiner: 1 }),
-            Refusal::Admission(AdmissionRefusal::PlantMismatch {
-                host: 0x7e44_a100_0bad_5eed,
-                joiner: 0x7e44_a100_0bad_5eee,
             }),
             Refusal::Admission(AdmissionRefusal::MatchFull),
             Refusal::Departed,
@@ -625,8 +578,8 @@ mod tests {
         let mut asm = StateAssembler::default();
         let body5: Vec<u8> = vec![5; DGRAM_FRAG_PAYLOAD + 1];
         let body6: Vec<u8> = vec![6; DGRAM_FRAG_PAYLOAD + 1];
-        let f5 = state_datagrams(Frame::Articulation, 5, &body5);
-        let f6 = state_datagrams(Frame::Articulation, 6, &body6);
+        let f5 = state_datagrams(Frame::Vehicles, 5, &body5);
+        let f6 = state_datagrams(Frame::Vehicles, 6, &body6);
         assert_eq!(feed(&mut asm, &f5[0]), None);
         assert_eq!(
             feed(&mut asm, &f6[1]),
@@ -681,7 +634,7 @@ mod tests {
         ] {
             assert!(!kind.via_datagram(), "{kind:?} is control traffic");
         }
-        for kind in [Frame::Snapshot, Frame::Articulation] {
+        for kind in [Frame::Snapshot, Frame::Vehicles] {
             assert!(kind.via_datagram(), "{kind:?} is tick-stamped full state");
         }
     }
@@ -696,31 +649,16 @@ mod tests {
         assert_eq!(Frame::from_byte(5), Some(Frame::Refuse));
         assert_eq!(Frame::from_byte(6), Some(Frame::Welcome));
         assert_eq!(Frame::from_byte(7), Some(Frame::Snapshot));
-        assert_eq!(Frame::from_byte(8), Some(Frame::Articulation));
+        assert_eq!(Frame::from_byte(8), Some(Frame::Vehicles));
         assert_eq!(Frame::from_byte(9), None);
         assert_eq!(Frame::from_byte(0xff), None);
     }
 
     #[test]
-    fn articulation_wire_roundtrips() {
-        use crate::articulation::{CrabArticulation, CrabFrame, PartTransform, VehiclePoseWire};
-        let art = CrabArticulation {
+    fn vehicle_frame_wire_roundtrips() {
+        use crate::vehicles::VehiclePoseWire;
+        let frame = VehicleFrame {
             tick: 909,
-            crabs: vec![CrabFrame {
-                parts: vec![
-                    PartTransform {
-                        part: 0,
-                        pos: [0.5, -1.0, 2.0],
-                        rot: [0.0, 0.0, 0.0, 1.0],
-                    },
-                    PartTransform {
-                        part: 12,
-                        pos: [3.0, 4.0, 5.0],
-                        rot: [0.5, 0.5, 0.5, 0.5],
-                    },
-                ],
-                brain_label: "mlp512x3 @deadbeef".to_string(),
-            }],
             vehicles: vec![VehiclePoseWire {
                 pilot: 1,
                 kind: crab_world::vehicle::VehicleKind::Ship,
@@ -734,27 +672,22 @@ mod tests {
                 thrust: [90, 0, -33],
             }],
         };
-        let body = CrabArticulation::encode(&art);
-        assert_eq!(CrabArticulation::decode(&body).unwrap(), art);
-        assert!(CrabArticulation::decode(&body[..body.len() - 1]).is_err());
+        let body = VehicleFrame::encode(&frame);
+        assert_eq!(VehicleFrame::decode(&body).unwrap(), frame);
+        assert!(VehicleFrame::decode(&body[..body.len() - 1]).is_err());
     }
 
     #[test]
     fn snapshot_wire_roundtrips() {
         use std::collections::BTreeMap;
 
-        use crate::sim::{CrabPose, Externals, Input, PlayerId, Pos, Sim};
+        use crate::sim::{Input, PlayerId, Sim};
         let mut sim = Sim::new(3, &[PlayerId(0), PlayerId(1)]);
-        let posed = vec![CrabPose {
-            pos: Pos { x: 77, z: -88 },
-            yaw: 5,
-            claws: Vec::new(),
-        }];
         let inputs = BTreeMap::from([
             (PlayerId(0), Input::default()),
             (PlayerId(1), Input::default()),
         ]);
-        sim.step(&inputs, Externals::crabs_only(&posed));
+        sim.step(&inputs, &BTreeMap::new());
         let snap = sim.core_snapshot();
         let body = CoreSnapshot::encode(&snap);
         assert_eq!(CoreSnapshot::decode(&body).unwrap(), snap);
@@ -763,28 +696,21 @@ mod tests {
 
     /// Stamps are honest-by-construction outside the core ([`SyncStamp::local`] is the
     /// one cross-crate constructor), so wire tests assemble theirs through the codec.
-    fn test_stamp(body: u64, plant: u64, count: u8) -> SyncStamp {
-        let mut w = [0u8; SyncStamp::WIRE_LEN];
-        w[0..8].copy_from_slice(&body.to_le_bytes());
-        w[8..16].copy_from_slice(&plant.to_le_bytes());
-        w[16] = count;
-        SyncStamp::from_wire(w)
+    fn test_stamp(digest: u64) -> SyncStamp {
+        SyncStamp::from_wire(digest.to_le_bytes())
     }
 
     #[test]
     fn join_request_wire_roundtrips() {
         let req = JoinRequest {
-            stamp: test_stamp(0xdead_beef_cafe_f00d, 0x7e44_a100_0bad_5eed, 3),
+            stamp: test_stamp(0xdead_beef_cafe_f00d),
         };
         assert_eq!(
             JoinRequest::decode(JoinRequest::encode(&req).as_ref()).unwrap(),
             req
         );
         assert!(JoinRequest::decode(&[0u8; 4]).is_err());
-        // Trailing bytes too — notably a pre-rl#286 9-byte (body|count) frame must be a loud
-        // version-skew error, never silently defaulted to plant digest 0.
         assert!(JoinRequest::decode(&[0u8; 9]).is_err());
-        assert!(JoinRequest::decode(&[0u8; 18]).is_err());
     }
 
     #[test]
@@ -795,7 +721,7 @@ mod tests {
                 pid: PlayerId(2),
                 effective_tick: 1_234_567,
                 roster,
-                host_stamp: test_stamp(0xA1B2_C3D4, 0x5E6F_7081, 3),
+                host_stamp: test_stamp(0xA1B2_C3D4),
             };
             assert_eq!(
                 Admission::decode(Admission::encode(&adm).as_ref()).unwrap(),

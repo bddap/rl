@@ -25,9 +25,6 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = super::shared::DEFAULT_EXPECT)]
     expect: usize,
 
-    #[arg(long, value_name = "DIR", env = net::render::CHECKPOINT_ENV, value_parser = crab_world::absolute_dir)]
-    nn_crab_checkpoint: Vec<std::path::PathBuf>,
-
     #[command(flatten)]
     render: RenderArgs,
 }
@@ -44,7 +41,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
     };
     run_game(GameConfig {
         launch,
-        nn_crab_checkpoints: args.nn_crab_checkpoint,
         view: args.render,
         asset_root: crab_world::assets::native_asset_root(),
     })

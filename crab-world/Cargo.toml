@@ -21,11 +21,9 @@ bevy = { workspace = true, features = [
     "bevy_log",
 ] }
 bevy_rapier3d = { workspace = true, features = ["dim3"] }
-rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
-bincode.workspace = true
 # asset_pack's deflate (rl#411 stage 6): pure-rust miniz backend, wasm-clean.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tracing.workspace = true
@@ -39,8 +37,7 @@ required-features = ["render"]
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
-# Tests pin the tracing-target constants to otel's; the perf_collapse_smoke example
-# arms real export.
+# The perf_collapse_smoke example arms real export.
 otel = { path = "../otel" }
 
 # `wall::unix_ms`'s browser clock (Date.now). Already in the tree via wasm-bindgen.

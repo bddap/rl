@@ -88,19 +88,16 @@ pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
         })
         .disable::<bevy::log::LogPlugin>();
     match window {
-        Some(window) => {
-            let plugins = plugins
-                .set(WindowPlugin {
-                    primary_window: Some(window),
-                    ..default()
-                })
-                .add(UiScalePlugin)
-                .add(crate::frame_telemetry::FrameTelemetryPlugin)
-                .add(crate::debug_overlay::DebugOverlayPlugin {
-                    collapse_dump: true,
-                });
-            plugins
-        }
+        Some(window) => plugins
+            .set(WindowPlugin {
+                primary_window: Some(window),
+                ..default()
+            })
+            .add(UiScalePlugin)
+            .add(crate::frame_telemetry::FrameTelemetryPlugin)
+            .add(crate::debug_overlay::DebugOverlayPlugin {
+                collapse_dump: true,
+            }),
         None => plugins
             .set(WindowPlugin {
                 primary_window: None,

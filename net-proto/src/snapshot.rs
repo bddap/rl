@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crab_world::chord::ChordDir;
 
-use crate::sim::{Crab, JumpWindows, Outcome, Player, PlayerId, PlayerStatus, Pos};
+use crate::sim::{JumpWindows, Outcome, Player, PlayerId, PlayerStatus, Pos};
 use crate::wire::{pos_bytes, pos_from_bytes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,7 +12,6 @@ pub struct CoreSnapshot {
     /// [`crate::client::ClientSim::adopt_snapshots`].)
     pub tick: u64,
     pub players: BTreeMap<PlayerId, Player>,
-    pub crabs: Vec<Crab>,
     /// The run's objective point — per-run state since rl#305 (the host draws the
     /// spawn layout), so the host ships it like every other host-owned fact and a
     /// client never trusts its own placeholder derivation.
@@ -50,7 +49,6 @@ pub struct CoreSnapshot {
 pub enum SnapshotDecodeError {
     Truncated,
     BadTag,
-    NoCrabs,
     TrailingBytes,
 }
 
@@ -59,7 +57,6 @@ impl std::fmt::Display for SnapshotDecodeError {
         let msg = match self {
             Self::Truncated => "snapshot buffer ended mid-field",
             Self::BadTag => "snapshot held an unknown enum tag",
-            Self::NoCrabs => "snapshot carried zero crabs (a round always has one — rl#114)",
             Self::TrailingBytes => "trailing bytes after a complete snapshot",
         };
         f.write_str(msg)
@@ -87,12 +84,6 @@ impl CoreSnapshot {
             out.push(player.sliding() as u8);
             out.push(player.jump().coyote);
             out.push(player.jump().buffer);
-        }
-
-        out.extend_from_slice(&(self.crabs.len() as u32).to_le_bytes());
-        for crab in &self.crabs {
-            out.extend_from_slice(&pos_bytes(crab.pos()));
-            out.extend_from_slice(&crab.yaw().to_le_bytes());
         }
 
         out.extend_from_slice(&pos_bytes(self.extraction));
@@ -153,17 +144,6 @@ impl CoreSnapshot {
             );
         }
 
-        let n_crabs = u32::from_le_bytes(r.take::<4>()?) as usize;
-        if n_crabs == 0 {
-            return Err(SnapshotDecodeError::NoCrabs);
-        }
-        let mut crabs = Vec::new();
-        for _ in 0..n_crabs {
-            let pos = pos_from_bytes(r.take()?);
-            let yaw = i32::from_le_bytes(r.take()?);
-            crabs.push(Crab::from_parts(pos, yaw));
-        }
-
         let extraction = pos_from_bytes(r.take()?);
 
         let outcome = Outcome::from_tag(r.byte()?).ok_or(SnapshotDecodeError::BadTag)?;
@@ -198,7 +178,6 @@ impl CoreSnapshot {
         Ok(Self {
             tick,
             players,
-            crabs,
             extraction,
             outcome,
             roster,
@@ -243,21 +222,15 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::{CrabPose, Externals, Input, Pos, Sim};
+    use crate::sim::{Input, Sim};
 
     fn sample() -> CoreSnapshot {
         let mut sim = Sim::new(9, &[PlayerId(0), PlayerId(1)]);
-        // A stepped-in crab pose, so the roundtrip carries a non-spawn crab.
-        let posed = vec![CrabPose {
-            pos: Pos { x: 1234, z: -5678 },
-            yaw: 42,
-            claws: Vec::new(),
-        }];
         let inputs = BTreeMap::from([
             (PlayerId(0), Input::default()),
             (PlayerId(1), Input::default()),
         ]);
-        sim.step(&inputs, Externals::crabs_only(&posed));
+        sim.step(&inputs, &BTreeMap::new());
         let mut snap = sim.core_snapshot();
         // A mid-air walker with carried momentum (rl#355), so the roundtrip carries
         // nonzero altitude/velocity — not just the all-zero spawn state.

@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 crab-world = { path = "../crab-world" }
-# Math types only (Vec3 in the pilot/articulation wire structs) — no bevy runtime.
+# Math types only (Vec3 in the pilot/vehicle wire structs) — no bevy runtime.
 bevy = { workspace = true, features = ["std"] }
 tracing.workspace = true
 rand.workspace = true

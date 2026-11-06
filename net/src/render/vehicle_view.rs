@@ -2,13 +2,11 @@
 //! cuboid silhouette ([`VehicleKind::silhouette`]) instead of a bare collider wireframe.
 //! Kind and pose come off the same wire data on both arms ([`RemoteVehicle`] — the host from
 //! its capture, a client from its adopt), so host and client render through ONE path. The
-//! local pilot's own craft stays unrendered: the cockpit camera flies from it. The wireframe
-//! pass remains the colliders-mode view ([`render_mode`]).
+//! local pilot's own craft stays unrendered: the cockpit camera flies from it.
 
-use crab_world::crab_view::RenderMode;
 use crab_world::vehicle::{Nozzle, PilotId, VehicleKind};
 
-use super::articulation::{RemoteVehicle, SampledCraft};
+use super::remote_vehicles::{RemoteVehicle, SampledCraft};
 use super::*;
 
 #[derive(Resource)]
@@ -61,8 +59,8 @@ pub(super) fn register(app: &mut App) {
     // RemoteVehicle is round state — `install_round` inserts it on every path into Playing.
     app.add_systems(Startup, build_assets);
     // PostUpdate, after the Update chain has published this frame's RemoteVehicle (an
-    // unordered Update slot could run first and leave every model a tick stale, visibly
-    // shearing off the fresh wireframe in mesh+colliders mode), before propagation so the
+    // unordered Update slot could run first and leave every model a tick stale), before
+    // propagation so the
     // root pose lands in this frame's GlobalTransforms.
     app.add_systems(
         PostUpdate,
@@ -116,26 +114,21 @@ fn reconcile_vehicle_models(
     assets: Res<VehicleAssets>,
     remote: Res<RemoteVehicle>,
     clock: Res<super::driver::RenderClock>,
-    mode: Res<RenderMode>,
     origin: Res<super::RenderOrigin>,
-    mut models: Query<(Entity, &VehicleModel, &mut Transform, &mut Visibility)>,
+    mut models: Query<(Entity, &VehicleModel, &mut Transform)>,
 ) {
     let sampled = remote.sample(clock.tick, clock.frac);
-    let want_vis = mode.mesh_visibility();
     // Physics poses are absolute; models render in the render frame (rl#354).
     let offset = origin.offset_m();
     let placed = |c: &SampledCraft| {
         Transform::from_translation(c.pose.pos - offset).with_rotation(c.pose.orient)
     };
     let mut matched = std::collections::BTreeSet::new();
-    for (entity, model, mut tf, mut vis) in &mut models {
+    for (entity, model, mut tf) in &mut models {
         match sampled.iter().find(|v| v.pilot == model.pilot) {
             Some(v) if v.kind == model.kind => {
                 matched.insert(model.pilot);
                 *tf = placed(v);
-                if *vis != want_vis {
-                    *vis = want_vis;
-                }
             }
             _ => commands.entity(entity).despawn(),
         }
@@ -153,7 +146,7 @@ fn reconcile_vehicle_models(
                     kind: v.kind,
                 },
                 placed(v),
-                want_vis,
+                Visibility::Visible,
             ))
             .with_children(|parts| {
                 for (mesh, offset) in &k.parts {
@@ -186,8 +179,7 @@ fn reconcile_vehicle_models(
 /// sampled body-frame thrust command has a component along its axis, its cone stretching
 /// with intensity and flickering on cheap per-nozzle sine noise. Transforms only — one
 /// shared mesh and material, no per-frame asset writes, so a ship's ten nozzles cost ten
-/// tiny draws (deck-safe). Parent visibility already gates render mode; a dead nozzle
-/// hides itself.
+/// tiny draws. A dead nozzle hides itself.
 fn animate_exhaust(
     remote: Res<RemoteVehicle>,
     clock: Res<super::driver::RenderClock>,
@@ -229,7 +221,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
-    use crate::articulation::VehiclePoseWire;
+    use crate::vehicles::VehiclePoseWire;
 
     /// [`VehicleAssets`] with default (empty) handles but the REAL per-kind part counts, so
     /// the reconcile logic runs without any render stack.
@@ -255,18 +247,17 @@ mod tests {
         kind.silhouette().len() + kind.nozzles().len()
     }
 
-    fn world_with(remote: Vec<VehiclePoseWire>, mode: RenderMode) -> World {
+    fn world_with(remote: Vec<VehiclePoseWire>) -> World {
         let mut w = World::new();
         w.insert_resource(stub_assets());
         readopt(&mut w, 1, remote);
-        w.insert_resource(mode);
         w.insert_resource(super::super::RenderOrigin::default());
         w
     }
 
     /// A 1-deep window samples its pose raw, so these reconcile tests see the exact
     /// wire poses they fed; the interpolation law itself is pinned in pose.rs and
-    /// articulation.rs.
+    /// remote_vehicles.rs.
     fn readopt(w: &mut World, tick: u64, remote: Vec<VehiclePoseWire>) {
         let mut rv = RemoteVehicle::default();
         rv.adopt(crate::cadence::cumulative_steps(tick), &remote);
@@ -296,10 +287,7 @@ mod tests {
 
     #[test]
     fn spawns_tracks_and_despawns_remote_craft_models() {
-        let mut w = world_with(
-            vec![wire(1, VehicleKind::Plane, [2.0, 5.0, -1.0])],
-            RenderMode::Mesh,
-        );
+        let mut w = world_with(vec![wire(1, VehicleKind::Plane, [2.0, 5.0, -1.0])]);
         w.run_system_once(reconcile_vehicle_models).unwrap();
         let got = models(&mut w);
         assert_eq!(got.len(), 1, "one model per remote craft");
@@ -341,10 +329,7 @@ mod tests {
 
     #[test]
     fn kind_cycle_swaps_the_model_in_one_pass() {
-        let mut w = world_with(
-            vec![wire(2, VehicleKind::Plane, [0.0, 2.0, 0.0])],
-            RenderMode::Mesh,
-        );
+        let mut w = world_with(vec![wire(2, VehicleKind::Plane, [0.0, 2.0, 0.0])]);
         w.run_system_once(reconcile_vehicle_models).unwrap();
         readopt(&mut w, 2, vec![wire(2, VehicleKind::Ship, [0.0, 2.0, 0.0])]);
         w.run_system_once(reconcile_vehicle_models).unwrap();
@@ -358,13 +343,10 @@ mod tests {
     /// the ship's pontoon mains stretch aft — while every other nozzle stays dark.
     #[test]
     fn plumes_fire_on_their_thrust_axis_only() {
-        let mut w = world_with(
-            vec![VehiclePoseWire {
-                thrust: [0, 0, 127],
-                ..wire(1, VehicleKind::Ship, [0.0, 2.0, 0.0])
-            }],
-            RenderMode::Mesh,
-        );
+        let mut w = world_with(vec![VehiclePoseWire {
+            thrust: [0, 0, 127],
+            ..wire(1, VehicleKind::Ship, [0.0, 2.0, 0.0])
+        }]);
         w.insert_resource(Time::<()>::default());
         w.run_system_once(reconcile_vehicle_models).unwrap();
         w.run_system_once(animate_exhaust).unwrap();
@@ -391,20 +373,6 @@ mod tests {
             lit + dark,
             VehicleKind::Ship.nozzles().len(),
             "every nozzle spawned a plume"
-        );
-    }
-
-    #[test]
-    fn colliders_mode_hides_the_models() {
-        let mut w = world_with(
-            vec![wire(1, VehicleKind::Ship, [0.0, 2.0, 0.0])],
-            RenderMode::Colliders,
-        );
-        w.run_system_once(reconcile_vehicle_models).unwrap();
-        assert_eq!(
-            models(&mut w)[0].3,
-            Visibility::Hidden,
-            "colliders mode shows the wireframe, not the model"
         );
     }
 }

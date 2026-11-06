@@ -24,16 +24,7 @@ pub enum AppPhase {
     Playing,
 }
 
-pub fn build_windowed_app(
-    boot: Boot,
-    nn_crabs: Vec<crab_world::policy::Policy>,
-    view: crab_world::BootView,
-) -> anyhow::Result<App> {
-    // NO determinism pin, on ANY boot (rl#199): only the solo/host peer steps the float NN
-    // crab — a remote client adopts snapshots and steps nothing — so no runtime path compares
-    // float state across peers (hash logs are offline diagnostics).
-    // Single-thread pinning lives where reproducibility is actually consumed: the trainer,
-    // eval, and the headless probe ([`crab_world::bot::headless::pin_single_thread_pools`]).
+pub fn build_windowed_app(boot: Boot, view: crab_world::BootView) -> anyhow::Result<App> {
     let mut app = App::new();
     let window = Window {
         title: "Giant Crab Rescue".into(),
@@ -63,6 +54,7 @@ pub fn build_windowed_app(
     app.add_plugins(crab_world::physics::ArenaWorldPlugin {
         ground_look: view.ground_look,
     });
+    install_craft_physics(&mut app);
     app.init_state::<AppPhase>();
 
     // The controls hint/overlay is app-global chrome (rl#117): the plugin owns its whole
@@ -109,7 +101,6 @@ pub fn build_windowed_app(
                 // origin must be current when poses/transforms are written, or a
                 // round's first frame renders against the previous locale (rl#354).
                 sync_ground_anchor.before(crab_world::ground::apply_ground_anchor),
-                super::articulation::sample_crab_part_poses,
                 reconcile_avatars,
                 apply_transforms,
                 // Bus writer before every bus reader, same frame: the code-entry
@@ -136,13 +127,7 @@ pub fn build_windowed_app(
         )
         .add_systems(
             Update,
-            (
-                grab_cursor,
-                quit_game,
-                super::brain_swap::swap_brain,
-                toggle_debug_overlay,
-            )
-                .run_if(in_state(AppPhase::Playing)),
+            (grab_cursor, quit_game, toggle_debug_overlay).run_if(in_state(AppPhase::Playing)),
         )
         .add_systems(
             Update,
@@ -153,40 +138,30 @@ pub fn build_windowed_app(
                 .before(update_controls_ui::<GcrControls>),
         );
 
-    let stamp = crate::SyncStamp::local(nn_crabs.len() as u8);
-
     match boot {
         Boot::Round(round) => {
             let (client, net) = *round;
-            let armed = arm_round(crate::menu::ReadyMatch { client, net })
-                .map_err(|msg| anyhow::anyhow!(msg))?;
-            let crate::menu::ReadyMatch { mut client, net } = armed.into_ready();
-            let spawns = seed_round_crabs(&mut client, nn_crabs.len());
+            let crate::menu::ReadyMatch { client, net } =
+                start_round(crate::menu::ReadyMatch { client, net })
+                    .map_err(|msg| anyhow::anyhow!(msg))?
+                    .into_ready();
             let coord =
                 super::driver::coordinator(net, client.peers(), client.me(), client.sim().clone());
             insert_core(&mut app, client, coord);
-            install_armed_nn_crab(&mut app, nn_crabs, spawns);
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
                 .set(AppPhase::Playing);
         }
         Boot::Menu { seed } => {
             app.insert_resource(BootedWithMenu);
-            app.add_plugins(menu::MenuPlugin { seed, stamp });
-            {
-                let policies = nn_crabs;
-                let mut throwaway = crate::formation::solo_client_for(seed);
-                throwaway.configure_crabs(policies.len());
-                let crab_spawns: Vec<Pos> =
-                    throwaway.sim().crabs().iter().map(|c| c.pos()).collect();
-                add_nn_crab_stack(&mut app, policies, crab_spawns);
-                app.insert_resource(crab_world::bot::NumEnvs(0));
-                app.insert_resource(NnCrabStackInstalled);
-            }
+            app.add_plugins(menu::MenuPlugin {
+                seed,
+                stamp: crate::SyncStamp::local(),
+            });
         }
     }
 
-    super::render_mode::register(&mut app, view.render_mode);
+    super::view_knobs::register(&mut app);
 
     Ok(app)
 }
@@ -200,97 +175,46 @@ pub(super) struct RoundOver {
     pub(super) host: crate::menu::EndpointId,
 }
 
-#[derive(Resource, Clone, Copy)]
-pub(super) struct NnCrabStackInstalled;
+/// A round whose peers passed the shared-world check — the only kind that may enter
+/// Playing.
+pub(super) struct SyncedRound(crate::menu::ReadyMatch);
 
-pub(super) struct ArmedRound(crate::menu::ReadyMatch);
-
-impl ArmedRound {
+impl SyncedRound {
     pub(super) fn into_ready(self) -> crate::menu::ReadyMatch {
         self.0
     }
 }
 
-pub(super) fn arm_round(ready: crate::menu::ReadyMatch) -> Result<ArmedRound, String> {
-    check_armable(ready.net.as_ref().map(NetDriver::sync_verdict)).map(|()| {
+pub(super) fn start_round(ready: crate::menu::ReadyMatch) -> Result<SyncedRound, String> {
+    check_synced(ready.net.as_ref().map(NetDriver::synced)).map(|()| {
         // tracing, not println: the one round-entry marker that reaches every
         // platform's log sink (the web verify greps it from the browser console).
         tracing::info!(
             "ROUND_ARMED net={}",
             if ready.net.is_some() { "peers" } else { "solo" }
         );
-        ArmedRound(ready)
+        SyncedRound(ready)
     })
 }
 
-pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), String> {
-    if crate::may_arm_crabs(sync) {
+/// `None` is solo: no formation ran, nothing to disagree with.
+pub(super) fn check_synced(synced: Option<bool>) -> Result<(), String> {
+    if synced != Some(false) {
         return Ok(());
     }
-    // Arming only fails on a formed verdict (None always arms), and the destructure
-    // makes a new verdict axis a compile error here — it must pick its message.
-    let crate::SyncVerdict { body, crabs, plant } =
-        sync.expect("armability only fails on a formed verdict");
-    let (cause, fix) = if !crabs {
-        (
-            "the HOST's NN-crab count doesn't line up — it serves no crabs at all (a headless \
-             driver hosting a rest-pose match) or a different count than this device renders",
-            "host from a windowed device, and launch every device with the same \
-             --nn-crab-checkpoint binding list",
-        )
-    } else if !plant {
-        (
-            "the PLANT differs on a peer (a different arena, terrain bake, or joint-friction \
-             cap, rl#286) — its ground would disagree with the poses it adopts, floating or \
-             burying Sally and every craft on that screen",
-            "run rl-update on every device and launch all of them from the same checkpoint",
-        )
-    } else {
-        debug_assert!(!body, "some axis must be false when arming is refused");
-        (
-            "the crab body differs on a peer (a different sally.glb, baked collider table, \
-             or binary version) — it would build and render a different crab",
-            "run rl-update on every device so all peers share the same build + model",
-        )
-    };
-    Err(format!(
-        "rl#114: refusing to start the round — can't arm the trained NN crabs (\"Sally\") for \
-         this multiplayer match because {cause}. Fix: {fix}, then re-form the match. (There is \
-         deliberately no integer stand-in crab — an unarmable round refuses rather than \
-         silently dropping Sally.)"
-    ))
+    Err(
+        "refusing to start the round — a peer stands on a different world (its binary \
+         embeds a different terrain bake, so its ground would disagree with the poses it \
+         adopts). Fix: run the identical build on every device, then re-form the match."
+            .to_string(),
+    )
 }
 
-pub(super) fn seed_round_crabs(client: &mut ClientSim, crabs: usize) -> Vec<Pos> {
-    client.configure_crabs(crabs);
-    client.sim().crabs().iter().map(|c| c.pos()).collect()
-}
-
-pub(super) fn add_nn_crab_stack(
-    app: &mut App,
-    policies: Vec<crab_world::policy::Policy>,
-    crab_spawns: Vec<Pos>,
-) {
-    app.insert_resource(crab_world::bot::NumEnvs(policies.len()))
-        .add_plugins(crab_world::physics::CrabPhysicsPlugin)
-        .add_plugins(crab_world::bot::BotPlugin)
-        .add_plugins(crab_world::vehicle::VehiclePlugin)
-        .add_plugins(crate::crab_slot::NnCrabPlugin::new(policies, crab_spawns));
-
-    crate::crab_slot::park_fixed_auto_pump(app);
-}
-
-pub(super) fn install_armed_nn_crab(
-    app: &mut App,
-    policies: Vec<crab_world::policy::Policy>,
-    crab_spawns: Vec<Pos>,
-) {
-    add_nn_crab_stack(app, policies, crab_spawns.clone());
-    crate::crab_slot::arm(app.world_mut());
-    // Same install shape as `ensure_round_installed` (rl#290): the restart is THE one
-    // path that lays the env origins AT the sim spawns — here, pre-spawn, it
-    // stashes the layout for `spawn_initial_crabs`.
-    crate::crab_slot::restart_crabs_to_spawns(app.world_mut(), &crab_spawns);
+/// The crafts' physics, pumped by hand on the host ([`super::physics_pump`]).
+pub(super) fn install_craft_physics(app: &mut App) {
+    app.add_plugins(crab_world::physics::WorldPhysicsPlugin)
+        .add_plugins(crab_world::vehicle::VehiclePlugin);
+    super::physics_pump::park_fixed_auto_pump(app);
 }
 
 /// The rl#326 F3 overlay, reachable from the controller: GCR runs on a TV where no

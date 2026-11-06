@@ -1,7 +1,7 @@
 //! rl#420: the night-bloom glow breathes — one shared mechanism over every
 //! variant row, period `BLOOM_CYCLE_S`. Proven on the rendered pixels through
 //! the game's own frame-sequence path: half a period apart the frame changes,
-//! a whole period apart it repeats. A static scene (sky frozen, no crab, no
+//! a whole period apart it repeats. A static scene (sky frozen, no
 //! walk) so the ground's light is the only thing that can move.
 
 use std::path::PathBuf;
@@ -9,7 +9,6 @@ use std::process::Command;
 
 use crab_world::ground::BLOOM_CYCLE_S;
 use net::sim::TICK_HZ;
-
 
 fn frame(path: PathBuf) -> Vec<u8> {
     image::open(&path)

@@ -2,7 +2,6 @@
 //! no IO — the link layer (`net::transport`) feeds it bytes and injected time.
 //! Enforced by construction: this crate checks on wasm32 (see test-map.json).
 
-
 pub mod cadence;
 pub mod client;
 pub mod codec;
@@ -13,120 +12,51 @@ pub mod roster;
 pub mod server;
 pub mod sim;
 pub mod snapshot;
+pub mod vehicles;
 pub mod wire;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyncVerdict {
-    pub body: bool,
-    pub crabs: bool,
-    /// Every peer runs the same effective plant — arena, terrain bake, friction caps
-    /// ([`crab_world::bot::body::constructed_plant_digest`], rl#286). Without it two
-    /// peers arm DISAGREEING WORLDS: a flat-arena client adopts terrain-height poses,
-    /// so Sally and every craft float or bury by the tile's relief on that screen.
-    pub plant: bool,
-}
-
-impl SyncVerdict {
-    /// THE shared-asset arbiter (rl#336): judge a peer's stamp against the host's, one
-    /// axis per field. Formation ([`membership::Membership::sync_verdict`]) and mid-game
-    /// admission ([`server::may_admit_joiner`]) both derive from this, so the two gates
-    /// cannot diverge — a joiner a host would refuse is exactly a peer formation would
-    /// not arm with. A zero digest is an UNSET axis and never passes; a crab-less host
-    /// (`crab_count` 0) never passes the crabs axis; a crab-less PEER (a viewer) defers
-    /// to the host's count.
-    pub fn between(host: SyncStamp, peer: SyncStamp) -> SyncVerdict {
-        SyncVerdict {
-            body: host.body_digest != 0 && peer.body_digest == host.body_digest,
-            crabs: host.crab_count >= 1
-                && (peer.crab_count == 0 || peer.crab_count == host.crab_count),
-            plant: host.plant_digest != 0 && peer.plant_digest == host.plant_digest,
-        }
-    }
-}
-
-pub fn may_arm_crabs(sync: Option<SyncVerdict>) -> bool {
-    // Destructure so a new verdict axis is a compile error here, not a silently
-    // un-gated bool.
-    sync.is_none_or(|v| {
-        let SyncVerdict { body, crabs, plant } = v;
-        body && crabs && plant
-    })
-}
-
-/// What a peer advertises about its local world during formation/admission — the
-/// digests the [`SyncVerdict`] is judged from. One value threaded from the launch
-/// site to [`membership::Membership`], so a new identity axis rides the existing
-/// plumbing instead of growing every signature by another scalar.
-/// Fields are `pub(crate)`: [`SyncStamp::local`] is the honest constructor, and
-/// [`SyncStamp::from_wire`] the link layer's decode path — a REMOTE stamp is
-/// untrusted by nature (the verdict compares digests, never believes them), so
-/// what the privacy protects is the LOCAL path: a launcher reaching for a stamp
-/// finds `local`, not a field-by-field hand-roll.
+/// What a peer advertises about its local world during formation/admission: the digest
+/// of the terrain bake it stands on. Two peers whose binaries embed different bakes stand
+/// on different mountains, so [`SyncStamp::agrees`] refuses them. The field is
+/// `pub(crate)`: [`SyncStamp::local`] is the honest constructor and
+/// [`SyncStamp::from_wire`] the link layer's decode path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncStamp {
-    /// [`crab_world::bot::rig::baked_body_digest`] (rl#340 stage 10: every peer constructs the baked body).
-    pub(crate) body_digest: u64,
-    /// [`crab_world::bot::body::constructed_plant_digest`] — never legitimately 0.
-    pub(crate) plant_digest: u64,
-    /// NN crabs this peer would render; 0 = crabless viewer, host count rules.
-    pub(crate) crab_count: u8,
+    pub(crate) terrain_digest: u64,
 }
 
 impl SyncStamp {
-    /// No-model, no-plant, crabless: [`membership::Membership`]'s pre-`with_stamp`
-    /// start, and tests exercising formation mechanics rather than the sync verdict.
-    /// Safe to expose: zero digests are UNSET axes and never pass a verdict.
-    pub const ZERO: SyncStamp = SyncStamp {
-        body_digest: 0,
-        plant_digest: 0,
-        crab_count: 0,
-    };
+    /// Unset: [`membership::Membership`]'s pre-`with_stamp` start, and tests exercising
+    /// formation mechanics rather than the sync check. A zero digest never agrees.
+    pub const ZERO: SyncStamp = SyncStamp { terrain_digest: 0 };
 
-    pub const WIRE_LEN: usize = 17;
+    pub const WIRE_LEN: usize = 8;
 
-    /// The one wire shape for a stamp (le body digest | le plant digest | crab count),
-    /// shared by every handshake frame that carries one — the link layer moves these
-    /// bytes without ever constructing a stamp field-by-field.
     pub fn to_wire(self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        out[0..8].copy_from_slice(&self.body_digest.to_le_bytes());
-        out[8..16].copy_from_slice(&self.plant_digest.to_le_bytes());
-        out[16] = self.crab_count;
-        out
+        self.terrain_digest.to_le_bytes()
     }
 
     pub fn from_wire(b: [u8; Self::WIRE_LEN]) -> Self {
         Self {
-            body_digest: u64::from_le_bytes(b[0..8].try_into().unwrap()),
-            plant_digest: u64::from_le_bytes(b[8..16].try_into().unwrap()),
-            crab_count: b[16],
+            terrain_digest: u64::from_le_bytes(b),
         }
     }
 
-    pub fn body_digest(self) -> u64 {
-        self.body_digest
+    pub fn terrain_digest(self) -> u64 {
+        self.terrain_digest
     }
 
-    pub fn plant_digest(self) -> u64 {
-        self.plant_digest
-    }
-
-    pub fn crab_count(self) -> u8 {
-        self.crab_count
-    }
-
-    /// The honest local stamp. Call AFTER any checkpoint plant is adopted
-    /// (`adopt_recorded_plant`) — a pre-adopt call latches the wrong plant, which
-    /// adoption then refuses loudly. Launch paths that load policies do so before
-    /// forming a match; checkpoint-less ones (headless `game net`) advertise the
-    /// env-default plant and are refused by checkpoint-bearing peers unless the
-    /// plants genuinely agree — that refusal is the rl#286 guard, not a bug.
-    pub fn local(crab_count: u8) -> Self {
+    pub fn local() -> Self {
         Self {
-            body_digest: crab_world::bot::rig::baked_body_digest(),
-            plant_digest: crab_world::bot::body::constructed_plant_digest(),
-            crab_count,
+            terrain_digest: crab_world::terrain::gcr_bake_digest(),
         }
+    }
+
+    /// THE shared-world arbiter (rl#336): formation ([`membership::Membership::synced`])
+    /// and mid-game admission ([`server::may_admit_joiner`]) both derive from this, so a
+    /// joiner a host would refuse is exactly a peer formation would not start with.
+    pub fn agrees(host: SyncStamp, peer: SyncStamp) -> bool {
+        host.terrain_digest != 0 && peer.terrain_digest == host.terrain_digest
     }
 }
 
@@ -138,8 +68,7 @@ mod desync_test {
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
-    use crate::SyncVerdict;
-    use crate::sim::{Externals, Input, Outcome, PlayerId, Sim, buttons, hold_poses};
+    use crate::sim::{Input, PlayerId, Sim, buttons};
 
     fn input_log(seed: u64, players: &[PlayerId], ticks: usize) -> Vec<BTreeMap<PlayerId, Input>> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -174,14 +103,8 @@ mod desync_test {
         assert_eq!(a.state_hash(), b.state_hash(), "initial state must match");
 
         for (t, inputs) in log.iter().enumerate() {
-            {
-                let poses = hold_poses(&a);
-                a.step(inputs, Externals::crabs_only(&poses))
-            };
-            {
-                let poses = hold_poses(&b);
-                b.step(inputs, Externals::crabs_only(&poses))
-            };
+            a.step(inputs, &BTreeMap::new());
+            b.step(inputs, &BTreeMap::new());
             assert_eq!(
                 a.state_hash(),
                 b.state_hash(),
@@ -192,35 +115,6 @@ mod desync_test {
     }
 
     #[test]
-    fn long_replay_drives_the_real_loop_and_stays_in_lockstep() {
-        let players: Vec<PlayerId> = (0..2).map(PlayerId).collect();
-        let neutral: BTreeMap<PlayerId, Input> =
-            players.iter().map(|&p| (p, Input::default())).collect();
-        let mut a = Sim::new(0x5EED, &players);
-        let mut b = Sim::new(0x5EED, &players);
-        let mut resolved_at = None;
-        for t in 0..1500u64 {
-            let poses_a = super::sim::drive_crab_toward_prey(&a);
-            let poses_b = super::sim::drive_crab_toward_prey(&b);
-            a.step(&neutral, Externals::crabs_only(&poses_a));
-            b.step(&neutral, Externals::crabs_only(&poses_b));
-            assert_eq!(a.state_hash(), b.state_hash(), "diverged at tick {t}");
-            if resolved_at.is_none() && a.outcome() != Outcome::Ongoing {
-                resolved_at = Some(t);
-            }
-        }
-        assert_eq!(
-            a.outcome(),
-            Outcome::Wiped,
-            "still players must be wiped by the crab"
-        );
-        assert!(
-            resolved_at.is_some(),
-            "round must resolve mid-replay, then stay frozen"
-        );
-    }
-
-    #[test]
     fn replaying_the_same_log_reproduces_the_same_final_hash() {
         let players: Vec<PlayerId> = (0..3).map(PlayerId).collect();
         let log = input_log(0x1234, &players, 120);
@@ -228,10 +122,7 @@ mod desync_test {
         let run = || {
             let mut s = Sim::new(77, &players);
             for inputs in &log {
-                {
-                    let poses = hold_poses(&s);
-                    s.step(inputs, Externals::crabs_only(&poses));
-                }
+                s.step(inputs, &BTreeMap::new());
             }
             s.state_hash()
         };
@@ -266,14 +157,8 @@ mod desync_test {
         assert_eq!(a.state_hash(), b.state_hash(), "initial state must match");
         let mut restarts = 0u32;
         for (t, inputs) in log.iter().enumerate() {
-            restarts += u32::from({
-                let poses = hold_poses(&a);
-                a.step(inputs, Externals::crabs_only(&poses))
-            });
-            {
-                let poses = hold_poses(&b);
-                b.step(inputs, Externals::crabs_only(&poses))
-            };
+            restarts += u32::from(a.step(inputs, &BTreeMap::new()));
+            b.step(inputs, &BTreeMap::new());
             assert_eq!(
                 a.state_hash(),
                 b.state_hash(),
@@ -285,66 +170,6 @@ mod desync_test {
             a.tick(),
             log.len() as u64,
             "restarts never rewind the tick counter"
-        );
-    }
-
-    fn would_arm_crabs(sync: Option<SyncVerdict>, checkpoint: Option<()>) -> bool {
-        checkpoint.is_some() && super::may_arm_crabs(sync)
-    }
-
-    fn synced(body: bool) -> Option<SyncVerdict> {
-        Some(SyncVerdict {
-            body,
-            crabs: true,
-            plant: true,
-        })
-    }
-
-    #[test]
-    fn arm_gate_keys_on_solo_or_synced_assets() {
-        assert!(
-            !would_arm_crabs(synced(false), Some(())),
-            "a networked round with mismatched crab ASSETS must NOT arm the NN crab (round refused)"
-        );
-
-        assert!(
-            would_arm_crabs(synced(true), Some(())),
-            "a networked round with SYNCED assets must arm the NN crab"
-        );
-
-        assert!(
-            !would_arm_crabs(
-                Some(SyncVerdict {
-                    body: true,
-                    crabs: true,
-                    plant: false,
-                }),
-                Some(())
-            ),
-            "a networked round with mismatched PLANTS (arena/bake/friction) must NOT arm — \
-             the peers would render disagreeing worlds (rl#286)"
-        );
-
-        assert!(would_arm_crabs(None, Some(())));
-
-        assert!(!would_arm_crabs(None, None));
-        assert!(!would_arm_crabs(synced(true), None));
-    }
-
-    #[test]
-    fn may_arm_crabs_rules() {
-        assert!(
-            super::may_arm_crabs(None),
-            "solo (no formation ran, no verdict) always arms"
-        );
-        assert!(
-            super::may_arm_crabs(synced(true)),
-            "networked + synced assets → may arm (the GCR path)"
-        );
-        assert!(
-            !super::may_arm_crabs(synced(false)),
-            "networked + UNSYNCED crab assets → must NOT arm (different colliders render \
-             different Sallys)"
         );
     }
 }

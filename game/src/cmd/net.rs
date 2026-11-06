@@ -32,9 +32,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let my_eid = session.endpoint_id();
     info!("game endpoint id: {my_eid}");
 
-    // Crabless STAMP (a rest-pose statue serves the poses, not a bound brain):
-    // windowed peers refuse this harness on the crabs axis (rl#114/rl#286).
-    let stamp = net::SyncStamp::local(0);
+    let stamp = net::SyncStamp::local();
     let formed = if args.lobby_host {
         let mut driver = formation::FormationDriver::lobby(
             &session,
@@ -93,17 +91,12 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .find(|(_, pid)| **pid == PlayerId(0))
         .map(|(eid, _)| eid)
         .expect("a frozen roster always contains PlayerId(0)");
+    // No physics world here: this harness's host flies no crafts, so it steps its sim
+    // with no pilot poses.
     let mut server = am_host.then(|| {
         let mut s = net::server::Server::new(me, &all_ids, client.sim().clone());
         s.seed_early(&formation::early_peer_msgs(&frozen));
-        // Crab poses are mandatory (rl#298 stage 5): the headless host runs the one
-        // crab world too — a rest-pose brain, no checkpoint bound (the crabless
-        // SyncStamp above still keeps windowed peers from joining this harness).
-        let world = net::crab_slot::HeadlessHostWorld::new(
-            vec![crab_world::policy::Policy::rest()],
-            s.sim(),
-        );
-        (s, world)
+        s
     });
 
     let tick_dt = Duration::from_secs_f64(TICK_DT);
@@ -143,7 +136,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
                         snapshots.push(snap);
                     }
                 }
-                transport::PeerWire::Articulation(_) => {}
+                transport::PeerWire::Vehicles(_) => {}
                 transport::PeerWire::Beat(_) => {}
                 transport::PeerWire::Refuse(reason) => {
                     if !am_host && m.from == server_eid {
@@ -158,7 +151,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         let input = Input::from_axes(t.cos(), t.sin());
         let msg = client.submit_local_input(input, None);
 
-        if let Some((srv, host_world)) = server.as_mut() {
+        if let Some(srv) = server.as_mut() {
             // HOST: file remote clients' inputs into their per-player streams, then assemble +
             // step THIS tick at our own pace (a remote can delay nothing — rl#193/#194/#195) and
             // broadcast the snapshot the instant it is stepped — the SAME host-authoritative path
@@ -175,7 +168,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
             let connected = session.connected_peers();
             let _ = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected);
             srv.advance(msg);
-            for stepped in host_world.step_ready_ticks(srv) {
+            while srv.next_tick_ready() {
+                let stepped = srv.step_next(Default::default());
                 let snap = net::snapshot::CoreSnapshot::from_bytes(&stepped.snapshot)
                     .expect("the authoritative server's snapshot must decode");
                 session.broadcast_state(&snap);

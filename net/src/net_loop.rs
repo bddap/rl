@@ -10,7 +10,6 @@ use std::time::Duration;
 use anyhow::Result;
 use iroh::EndpointId;
 
-use crate::articulation::CrabArticulation;
 use crate::client::{ClientSim, PeerMsg, TickMsg};
 #[cfg(not(target_family = "wasm"))]
 use crate::formation::{Formation, FormationDriver};
@@ -20,6 +19,7 @@ use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
 use crate::transport;
 use crate::transport::{PeerWire, Session};
+use crate::vehicles::VehicleFrame;
 
 /// Most departed-endpoint ids remembered for the courtesy [`Refusal::Departed`] reply
 /// (rl#350): under join/depart churn the set would otherwise grow one endpoint id per
@@ -87,9 +87,9 @@ pub struct NetDriver {
     /// [`UNROSTERED_GRACE_MS`] eviction. Keyed off the live connection set each pump, so it
     /// is bounded by the transport's link cap.
     unrostered_since: BTreeMap<EndpointId, u64>,
-    /// The shared-asset verdict this round was formed (or admitted) under — computed by
-    /// the ONE arbiter, [`crate::SyncVerdict::between`].
-    sync: crate::SyncVerdict,
+    /// Whether every peer stands on the same world, judged when this round was formed (or
+    /// admitted) by the ONE arbiter, [`crate::SyncStamp::agrees`].
+    synced: bool,
     stamp: crate::SyncStamp,
 }
 
@@ -99,7 +99,7 @@ pub struct Exchanged {
     /// [`ClientSim::adopt_snapshots`]. Empty on the solo/host arm (its client reads the
     /// server it runs).
     pub snapshots: Vec<CoreSnapshot>,
-    pub articulations: Vec<CrabArticulation>,
+    pub vehicle_frames: Vec<VehicleFrame>,
 }
 
 #[derive(Debug)]
@@ -129,8 +129,8 @@ impl Drop for NetDriver {
 }
 
 impl NetDriver {
-    pub fn sync_verdict(&self) -> crate::SyncVerdict {
-        self.sync
+    pub fn synced(&self) -> bool {
+        self.synced
     }
 
     pub fn is_host(&self) -> bool {
@@ -165,7 +165,7 @@ impl NetDriver {
                 // the server's own word is game state, and formation ended at the barrier.
                 // Explicit arms so a NEW wire kind must decide its host-side handling here.
                 PeerWire::Snapshot(_)
-                | PeerWire::Articulation(_)
+                | PeerWire::Vehicles(_)
                 | PeerWire::Beat(_)
                 | PeerWire::Welcome(_)
                 | PeerWire::Refuse(_) => {}
@@ -257,7 +257,7 @@ impl NetDriver {
     }
 
     /// (Client) One tick's whole exchange: ship our input UP, drain the host's STATE down
-    /// (snapshots + render articulation — see the module doc: adopted, never re-stepped),
+    /// (snapshots + craft poses — see the module doc: adopted, never re-stepped),
     /// and fail loudly the tick the host link dies or refuses us.
     fn exchange_client(&mut self, msg: &TickMsg) -> Result<Exchanged, ServerDown> {
         self.session.send(self.server_eid, msg);
@@ -270,8 +270,8 @@ impl NetDriver {
                 PeerWire::Snapshot(snap) if from.from == self.server_eid => {
                     down.snapshots.push(snap)
                 }
-                PeerWire::Articulation(art) if from.from == self.server_eid => {
-                    down.articulations.push(art)
+                PeerWire::Vehicles(frame) if from.from == self.server_eid => {
+                    down.vehicle_frames.push(frame)
                 }
                 PeerWire::Refuse(verdict) if from.from == self.server_eid => {
                     tracing::error!("server refused us mid-match: {verdict}");
@@ -280,7 +280,7 @@ impl NetDriver {
                 // Non-server or non-state traffic carries no client-side meaning — explicit
                 // arms so a NEW wire kind must decide its client-side handling here.
                 PeerWire::Snapshot(_)
-                | PeerWire::Articulation(_)
+                | PeerWire::Vehicles(_)
                 | PeerWire::Refuse(_)
                 | PeerWire::Tick(_)
                 | PeerWire::Beat(_)
@@ -295,14 +295,12 @@ impl NetDriver {
         Ok(down)
     }
 
-    /// (Host) Broadcast the authoritative [`CoreSnapshot`] (and, armed, the render-only
-    /// [`CrabArticulation`]) DOWN to every client. Non-blocking: fire-and-forget datagrams
+    /// (Host) Broadcast the authoritative [`CoreSnapshot`] and the render-only
+    /// [`VehicleFrame`] DOWN to every client. Non-blocking: fire-and-forget datagrams
     /// (rl#259), so a dead peer can never hold this (main-thread) call.
-    fn broadcast_step(&self, snapshot: &CoreSnapshot, articulation: Option<&CrabArticulation>) {
+    fn broadcast_step(&self, snapshot: &CoreSnapshot, vehicles: &VehicleFrame) {
         self.session.broadcast_state(snapshot);
-        if let Some(art) = articulation {
-            self.session.broadcast_state(art);
-        }
+        self.session.broadcast_state(vehicles);
     }
 }
 
@@ -372,7 +370,7 @@ impl Coordinator {
                 }
                 // Assemble THIS tick from our own input + each remote stream's next queued input
                 // (or a starved hold) — the host paces the match; a remote can delay nothing
-                // (rl#193/#194/#195). The windowed driver pumps the tick's crab physics, then
+                // (rl#193/#194/#195). The windowed driver pumps the tick's craft physics, then
                 // steps it (`step_next`) and broadcasts the snapshot (`broadcast_step`).
                 server.advance(msg);
                 Ok(Exchanged::default())
@@ -381,9 +379,9 @@ impl Coordinator {
         }
     }
 
-    pub fn broadcast_step(&self, snapshot: &CoreSnapshot, articulation: Option<&CrabArticulation>) {
+    pub fn broadcast_step(&self, snapshot: &CoreSnapshot, vehicles: &VehicleFrame) {
         if let Mode::Server { net: Some(net), .. } = &self.0 {
-            net.broadcast_step(snapshot, articulation);
+            net.broadcast_step(snapshot, vehicles);
         }
     }
 
@@ -532,7 +530,7 @@ pub(crate) fn joined_from_frozen(
     );
     // Every peer spawns a foot-only round from its own seed; since rl#305 the layout is
     // seed-derived, so a non-host peer's round is a PLACEHOLDER the host's first snapshot
-    // (players, crabs, extraction) supersedes. Early inputs ride the driver to
+    // (players, extraction) supersedes. Early inputs ride the driver to
     // seed the host's server (see [`Coordinator::for_round`]) — never replayed into the client
     // sim, which would bypass the server's input streams.
     let client = ClientSim::new(seed, &all_ids, frozen.me);
@@ -548,7 +546,7 @@ pub(crate) fn joined_from_frozen(
         departed: Default::default(),
         join_budget,
         unrostered_since: Default::default(),
-        sync: frozen.sync,
+        synced: frozen.synced,
         stamp,
     };
     Box::new((client, driver))
@@ -567,7 +565,7 @@ pub enum JoinResult {
 /// as a [`JoinRequest`], and await the host's verdict — admitted (become a remote-adopt
 /// client booting from the host's next authoritative snapshot — the host spawns us into
 /// its LIVE round at `effective_tick`), refused (the host's [`Refusal`] relayed LOUDLY —
-/// never a silent wrong/fake-crab), or unreachable. No thread, no blocking: the windowed
+/// never silent), or unreachable. No thread, no blocking: the windowed
 /// menu pumps it per frame (Rejoin). Deadlines ride the session's own
 /// [`Session::now_ms`] axis.
 pub struct JoinDriver {
@@ -716,11 +714,10 @@ impl JoinDriver {
         let mut id_map = BTreeMap::new();
         id_map.insert(self.host, PlayerId(0));
         id_map.insert(my_eid, me);
-        // The ONE arbiter judges our round verdict, from the host stamp the Welcome
-        // carried — the same comparison the host's admission gate just passed, so an
-        // admitted joiner's verdict is all-true by construction, computed rather than
-        // assumed.
-        let sync = crate::SyncVerdict::between(adm.host_stamp, self.stamp);
+        // The ONE arbiter judges our round, from the host stamp the Welcome carried — the
+        // same comparison the host's admission gate just passed, so an admitted joiner is
+        // synced by construction, computed rather than assumed.
+        let synced = crate::SyncStamp::agrees(adm.host_stamp, self.stamp);
         let join_budget = JoinBudget::new(session.now_ms());
         let driver = NetDriver {
             session,
@@ -731,7 +728,7 @@ impl JoinDriver {
             departed: Default::default(),
             join_budget,
             unrostered_since: Default::default(),
-            sync,
+            synced,
             stamp: self.stamp,
         };
         Ok(JoinResult::Joined(Box::new((client, driver))))
@@ -815,8 +812,7 @@ mod tests {
             );
             let server = coord.server_mut().expect("solo runs an internal server");
             while server.next_tick_ready() {
-                let poses = crate::sim::hold_poses(server.sim());
-                let bytes = server.step_next(&poses, Default::default()).snapshot;
+                let bytes = server.step_next(Default::default()).snapshot;
                 let snap =
                     crate::snapshot::CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes");
                 client.apply_core_snapshot(snap);

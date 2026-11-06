@@ -8,9 +8,8 @@ pub struct GcrControls;
 /// route per action, enforced by `assert_scheme_well_formed`. A bare modifier tap
 /// (the empty code) is deliberately unassigned: X is de-overloaded — vehicle
 /// switching is a code per vehicle, not a tap verb (the ↑-family = the sky craft,
-/// ↓↓ = back to the ground). Every render/art variant is its own entry (stage 5,
-/// replacing the two Cycle* verbs): render modes under `^^`, ground looks under `v` —
-/// `v^` is ALL the night blooms (4 taps), `v<`/`v>` the other looks (3 taps) — so each
+/// ↓↓ = back to the ground). Every art variant is its own entry (stage 5): ground
+/// looks under `v` — `v^` is ALL the night blooms (4 taps), `v<`/`v>` the other looks (3 taps) — so each
 /// tap descends one family wing on the combo map. No ground code starts `vv` — an early
 /// release mid-look-code must never execute ExitVehicle. Quit's code is ≥2 taps
 /// longer than every other — one stray tap after any registered code can never end
@@ -35,21 +34,6 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         code: &[ChordDir::Down, ChordDir::Down],
         action: Action::ExitVehicle,
         label: "Exit to foot",
-    },
-    ChordEntry {
-        code: &[ChordDir::Up, ChordDir::Up, ChordDir::Up],
-        action: Action::RenderMesh,
-        label: "Render: mesh",
-    },
-    ChordEntry {
-        code: &[ChordDir::Up, ChordDir::Up, ChordDir::Down],
-        action: Action::RenderMeshColliders,
-        label: "Render: mesh+colliders",
-    },
-    ChordEntry {
-        code: &[ChordDir::Up, ChordDir::Up, ChordDir::Left],
-        action: Action::RenderColliders,
-        label: "Render: colliders",
     },
     ChordEntry {
         code: &[ChordDir::Down, ChordDir::Up, ChordDir::Up, ChordDir::Up],
@@ -203,11 +187,6 @@ pub const GCR_CHORDS: ChordRegistry<Action> = ChordRegistry::new(&[
         label: "Moon: rise",
     },
     ChordEntry {
-        code: &[ChordDir::Left],
-        action: Action::SwapBrain,
-        label: "Swap brain",
-    },
-    ChordEntry {
         code: &[ChordDir::Right],
         action: Action::Restart,
         label: "Restart round",
@@ -253,12 +232,9 @@ pub enum Action {
     BoardPlane,
     BoardShip,
     ExitVehicle,
-    // One action per render/art variant (rl#330 stage 5) — direct selection, no Cycle
-    // verbs. The render-gated `ViewKnob::action` maps match these exhaustively, so a
-    // new `RenderMode`/`GroundLook` variant without an action is a compile error there.
-    RenderMesh,
-    RenderMeshColliders,
-    RenderColliders,
+    // One action per ground look (rl#330 stage 5) — direct selection, no Cycle verbs.
+    // The render-gated `ViewKnob::action` map matches these exhaustively, so a new
+    // `GroundLook` variant without an action is a compile error there.
     GroundShipped,
     GroundNightBloom,
     GroundPatternedGround,
@@ -288,7 +264,6 @@ pub enum Action {
     MoonGallop,
     MoonZenith,
     MoonRise,
-    SwapBrain,
     /// The rl#326 debug overlay (fps / sim ms / frame graph), reachable without a
     /// keyboard — the TV/couch slideshow-diagnosis affordance (rl#331).
     ToggleDebugOverlay,
@@ -448,8 +423,8 @@ impl ControlScheme for GcrControls {
     }
 }
 
-// The command verbs (the per-vehicle boards/exit, render/ground cycles, SwapBrain,
-// Restart, Quit) have NO rows here: they are chord codes in [`GCR_CHORDS`] and a
+// The command verbs (the per-vehicle boards/exit, ground looks, moon songs, Restart,
+// Quit) have NO rows here: they are chord codes in [`GCR_CHORDS`] and a
 // second trigger route is a
 // well-formedness error. What remains is analog/held state plus menu nav and the
 // hold-to-reveal legend — reads the chord system's execute-on-release can't express.
@@ -776,7 +751,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 58] = [
+    const ALL_ACTIONS: [Action; 54] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -791,9 +766,6 @@ mod tests {
         Action::BoardPlane,
         Action::BoardShip,
         Action::ExitVehicle,
-        Action::RenderMesh,
-        Action::RenderMeshColliders,
-        Action::RenderColliders,
         Action::GroundShipped,
         Action::GroundNightBloom,
         Action::GroundPatternedGround,
@@ -820,7 +792,6 @@ mod tests {
         Action::MoonGallop,
         Action::MoonZenith,
         Action::MoonRise,
-        Action::SwapBrain,
         Action::ToggleDebugOverlay,
         Action::RevealControls,
         Action::PlaneAttitude,
@@ -861,22 +832,9 @@ mod tests {
             GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Down]),
             Some(Action::ExitVehicle)
         );
-        // Render modes are the ^^-family; the freed 1-tap ^ and v are deliberately
-        // unassigned (family roots, not verbs).
+        // The 1-tap ^ and v are deliberately unassigned (family roots, not verbs).
         assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Up]), None);
         assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Down]), None);
-        assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Up, ChordDir::Up]),
-            Some(Action::RenderMesh)
-        );
-        assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Up, ChordDir::Down]),
-            Some(Action::RenderMeshColliders)
-        );
-        assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Up, ChordDir::Up, ChordDir::Left]),
-            Some(Action::RenderColliders)
-        );
         // Ground looks are the v-family: v^ is all the night blooms, v</v> the rest.
         assert_eq!(
             GCR_CHORDS.lookup(&[ChordDir::Down, ChordDir::Up, ChordDir::Up, ChordDir::Up]),
@@ -909,10 +867,7 @@ mod tests {
             let is_bloom_label = e.label.starts_with("Ground: bloom");
             assert_eq!(is_bloom_code, is_bloom_label, "{:?} misfiled", e.action);
         }
-        assert_eq!(
-            GCR_CHORDS.lookup(&[ChordDir::Left]),
-            Some(Action::SwapBrain)
-        );
+        assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Left]), None);
         assert_eq!(GCR_CHORDS.lookup(&[ChordDir::Right]), Some(Action::Restart));
         assert_eq!(
             GCR_CHORDS.lookup(&[ChordDir::Left, ChordDir::Right]),
@@ -944,7 +899,7 @@ mod tests {
                 assert_eq!(e.code.len(), 4, "{:?} is not depth 4", e.action);
             }
         }
-        // Entry-count ⟺ MoonSong::ALL lives in net's render_mode tests — `moon` is
+        // Entry-count ⟺ MoonSong::ALL lives in net's render tests — `moon` is
         // render-gated in crab-world, and this test mod compiles without render.
     }
 
@@ -1007,9 +962,6 @@ mod tests {
                 | Action::BoardPlane
                 | Action::BoardShip
                 | Action::ExitVehicle
-                | Action::RenderMesh
-                | Action::RenderMeshColliders
-                | Action::RenderColliders
                 | Action::GroundShipped
                 | Action::GroundNightBloom
                 | Action::GroundPatternedGround
@@ -1036,7 +988,6 @@ mod tests {
                 | Action::MoonGallop
                 | Action::MoonZenith
                 | Action::MoonRise
-                | Action::SwapBrain
                 | Action::ToggleDebugOverlay
                 | Action::RevealControls
                 | Action::PlaneAttitude

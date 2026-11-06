@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::client::TickMsg;
 use crate::roster::RosterSchedule;
-use crate::sim::{CrabPose, Externals, Input, PlayerId, Sim};
+use crate::sim::{Input, PlayerId, Sim};
 
 /// Ticks of lead between admitting a joiner and its roster change taking effect — headroom for
 /// the welcome to reach the joiner so it can start issuing input near its entry tick (its
@@ -91,14 +91,13 @@ pub struct Admission {
     pub effective_tick: u64,
     pub roster: Vec<PlayerId>,
     /// The host's own [`crate::SyncStamp`], echoed to the joiner so IT can compute its
-    /// round verdict with the one arbiter ([`crate::SyncVerdict::between`]) instead of
-    /// assuming all-true (rl#336).
+    /// round verdict with the one arbiter ([`crate::SyncStamp::agrees`]) instead of
+    /// assuming agreement (rl#336).
     pub host_stamp: crate::SyncStamp,
 }
 
 /// The joiner's world identity, verbatim — the same [`crate::SyncStamp`] shape the
-/// membership beat advertises, so an identity axis cannot exist in one exchange and
-/// be forgotten in the other.
+/// membership beat advertises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinRequest {
     pub stamp: crate::SyncStamp,
@@ -106,17 +105,9 @@ pub struct JoinRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRefusal {
-    BodyMismatch {
+    TerrainMismatch {
         host: u64,
         joiner: u64,
-    },
-    PlantMismatch {
-        host: u64,
-        joiner: u64,
-    },
-    CrabCountMismatch {
-        host: u8,
-        joiner: u8,
     },
     /// The roster is at [`crate::membership::MAX_MEMBERS`] — the capacity gate that
     /// keeps unbounded dialers from exhausting the [`PlayerId`] space (rl#336).
@@ -126,39 +117,16 @@ pub enum AdmissionRefusal {
 impl std::fmt::Display for AdmissionRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            // The zero-valued arms below aren't mismatches at all: a zero digest/count is
-            // an UNSET axis on the HOST — the strict arbiter (rl#336,
-            // [`crate::SyncVerdict::between`]) refuses it outright, and the message must
-            // say that rather than claim two equal zeros "mismatch".
-            AdmissionRefusal::BodyMismatch { host: 0, joiner: _ } => write!(
+            // A zero digest is UNSET on the host, not a mismatch of two equal zeros.
+            AdmissionRefusal::TerrainMismatch { host: 0, joiner: _ } => write!(
                 f,
-                "the host has no usable body digest (no model loaded) — its round is a \
-                 diagnostic surface, not joinable"
+                "the host has no terrain digest — its round is a diagnostic surface, not joinable"
             ),
-            AdmissionRefusal::PlantMismatch { host: 0, joiner: _ } => write!(
+            AdmissionRefusal::TerrainMismatch { host, joiner } => write!(
                 f,
-                "the host has no plant digest (no arena/bake adopted) — its round is a \
-                 diagnostic surface, not joinable"
-            ),
-            AdmissionRefusal::CrabCountMismatch { host: 0, joiner: _ } => write!(
-                f,
-                "the host serves no crabs (unarmed/diagnostic round) — not joinable"
-            ),
-            AdmissionRefusal::BodyMismatch { host, joiner } => write!(
-                f,
-                "body digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — a different sally.glb, a different baked collider table, or binaries straddling a digest-formula change (rl#20)"
-            ),
-            AdmissionRefusal::PlantMismatch { host, joiner } => write!(
-                f,
-                "plant digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — a different \
-                 arena, terrain bake, or joint-friction cap (rl#286): the joiner would render a \
-                 different world than the poses it adopts; run rl-update / launch with the \
-                 host's checkpoint"
-            ),
-            AdmissionRefusal::CrabCountMismatch { host, joiner } => write!(
-                f,
-                "crab-count mismatch (host serves {host}, joiner renders {joiner}) — the joiner \
-                 would show the wrong number of crabs; launch it with the host's binding list"
+                "terrain digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — the \
+                 binaries embed different terrain bakes, so the joiner would stand on a \
+                 different world"
             ),
             AdmissionRefusal::MatchFull => {
                 write!(f, "the match is full — the host's roster is at capacity")
@@ -197,11 +165,11 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// The mid-game admission gate. Identity axes are judged by the ONE shared-asset arbiter,
-/// [`crate::SyncVerdict::between`] (rl#336 — formation's `sync_verdict` derives from the
-/// same function, so admitting a joiner formation would refuse is impossible); capacity is
-/// gated here too, so unbounded dialers can never exhaust the [`PlayerId`] space (the
-/// `lowest_free_pid` panic path).
+/// The mid-game admission gate. The world identity is judged by the ONE arbiter,
+/// [`crate::SyncStamp::agrees`] (rl#336 — formation derives from the same function, so
+/// admitting a joiner formation would refuse is impossible); capacity is gated here too,
+/// so unbounded dialers can never exhaust the [`PlayerId`] space (the `lowest_free_pid`
+/// panic path).
 pub fn may_admit_joiner(
     host: crate::SyncStamp,
     req: &JoinRequest,
@@ -210,25 +178,10 @@ pub fn may_admit_joiner(
     if roster_len >= crate::membership::MAX_MEMBERS {
         return Err(AdmissionRefusal::MatchFull);
     }
-    // Destructure the verdict so a new axis is a compile error at THIS gate — the joiner's
-    // post-admission verdict (net_loop) trusts that admission compared every axis.
-    let crate::SyncVerdict { body, crabs, plant } = crate::SyncVerdict::between(host, req.stamp);
-    if !body {
-        return Err(AdmissionRefusal::BodyMismatch {
-            host: host.body_digest,
-            joiner: req.stamp.body_digest,
-        });
-    }
-    if !plant {
-        return Err(AdmissionRefusal::PlantMismatch {
-            host: host.plant_digest,
-            joiner: req.stamp.plant_digest,
-        });
-    }
-    if !crabs {
-        return Err(AdmissionRefusal::CrabCountMismatch {
-            host: host.crab_count,
-            joiner: req.stamp.crab_count,
+    if !crate::SyncStamp::agrees(host, req.stamp) {
+        return Err(AdmissionRefusal::TerrainMismatch {
+            host: host.terrain_digest,
+            joiner: req.stamp.terrain_digest,
         });
     }
     Ok(())
@@ -338,10 +291,8 @@ pub struct Server {
     /// The assembled tick awaiting the authoritative step, if any. At most ONE by construction
     /// ([`Server::advance`] refuses to assemble past an unstepped tick), which is what lets each
     /// [`PendingTick`] carry the watermark map for exactly its own snapshot. Held (rather than
-    /// stepping inside `advance`) so the host can run the crab slot between the two
-    /// (`crab_slot::pump_crab_slot`, rl#298 stage 2): the tick's crab physics AND policy
-    /// forward, pumped in the host's one bevy `World`, which this pure core can't hold. The
-    /// headless `game net` host runs the same slot via `crate::crab_slot::HeadlessHostWorld`.
+    /// stepping inside `advance`) so the host can pump the tick's craft physics between the
+    /// two, in the host's bevy `World`, which this pure core can't hold.
     pending: Option<PendingTick>,
 }
 
@@ -439,7 +390,7 @@ impl Server {
     /// (issued exactly once per wall-clock tick, which is what paces the match), and every other
     /// player rostered at this tick contributes its stream's next queued input or a starved
     /// HOLD ([`InputStream::consume`]). Nothing waits on a remote. The assembled tick is held
-    /// for [`Server::step_next`]; call it after the tick's crab physics is pumped — and before
+    /// for [`Server::step_next`]; call it after the tick's craft physics is pumped — and before
     /// the next `advance`: assembling past an unstepped tick would mis-stamp its watermarks, so
     /// it is refused loudly.
     pub fn advance(&mut self, local: TickMsg) {
@@ -537,10 +488,9 @@ impl Server {
 
     /// `pilots` is the driver's per-tick bridge of every spawned craft's pose back into
     /// sim space (rl#258) — filtered here against the filed intents, so only a player
-    /// actually piloting can ride (or be down-exempted by) a craft pose.
+    /// actually piloting can ride a craft pose.
     pub fn step_next(
         &mut self,
-        crabs: &[CrabPose],
         mut pilots: BTreeMap<PlayerId, crate::sim::PilotPose>,
     ) -> SteppedTick {
         let tick = self.sim.tick();
@@ -571,16 +521,8 @@ impl Server {
             pending.tick, tick,
             "the assembled tick is out of step with the sim tick"
         );
-        // Poses are MANDATORY (rl#298 stage 5): every host runs the crab world, so
-        // there is no inert-crab escape — the count assert lives in the sim's adopt.
         pilots.retain(|pid, _| self.pilot_intents.contains_key(pid));
-        let restarted = self.sim.step(
-            &pending.inputs,
-            Externals {
-                crabs,
-                pilots: &pilots,
-            },
-        );
+        let restarted = self.sim.step(&pending.inputs, &pilots);
         let mut snapshot = self.sim.core_snapshot();
         snapshot.input_next = pending.input_next;
         SteppedTick {
@@ -677,7 +619,7 @@ impl Server {
 mod tests {
     use super::*;
     use crate::client::ClientSim;
-    use crate::sim::{Pos, buttons};
+    use crate::sim::buttons;
     use crate::snapshot::CoreSnapshot;
 
     fn ids(n: u8) -> Vec<PlayerId> {
@@ -688,11 +630,8 @@ mod tests {
         Server::new(PlayerId(0), roster, Sim::new(seed, roster))
     }
 
-    /// Step the assembled tick with the crabs held at their current poses, clawless —
-    /// the scenery feed for tests about the input/roster machinery.
     fn step_held(s: &mut Server) -> crate::server::SteppedTick {
-        let poses = crate::sim::hold_poses(s.sim());
-        s.step_next(&poses, Default::default())
+        s.step_next(Default::default())
     }
 
     fn input(s: f32) -> Input {
@@ -833,7 +772,7 @@ mod tests {
             Player::from_parts(
                 p.pos(),
                 p.yaw(),
-                PlayerStatus::Downed,
+                PlayerStatus::Alive,
                 p.alt(),
                 p.vel(),
                 p.sliding(),
@@ -848,10 +787,7 @@ mod tests {
                 ..tickmsg(1, 0.0)
             },
         );
-        assert!(
-            s.pilot_intents().contains_key(&p1),
-            "downed ⇒ boards (rl#262, provisional)"
-        );
+        assert!(s.pilot_intents().contains_key(&p1), "alive ⇒ boards");
         let mut snap = s.sim().core_snapshot();
         let p = snap.players[&p1];
         snap.players.insert(
@@ -1466,17 +1402,6 @@ mod tests {
         let me = PlayerId(0);
         let roster = vec![me];
 
-        // Clawless (downs are claw contact only, rl#236) and receding — the equivalence
-        // claim needs a LIVE world every tick, so the scripted crab must never down the
-        // walking player.
-        let pose_at = |tick: u64| CrabPose {
-            pos: Pos {
-                x: 15_000 + tick as i64 * 11,
-                z: -12_000 - tick as i64 * 7,
-            },
-            yaw: (tick as i32).wrapping_mul(4096),
-            claws: Vec::new(),
-        };
         let input_at = |i: u64| {
             let strafe = ((i % 3) as f32 - 1.0) * 0.6;
             let btns = if i % 5 == 4 { buttons::ACTION } else { 0 };
@@ -1484,16 +1409,12 @@ mod tests {
         };
 
         // --- Path A: the reference. Step a bare [`Sim`] directly, by hand, exactly as the server
-        // does internally — the issued input each tick, with the crab pose injected BEFORE each
-        // step. This is what `Server::step_next` must reproduce.
+        // does internally — the issued input each tick. This is what `Server::step_next` must reproduce.
         let mut baseline = Vec::new();
         {
             let mut sim = Sim::new(SEED, &roster);
             for i in 0..SUBMITS {
-                sim.step(
-                    &BTreeMap::from([(me, input_at(i))]),
-                    Externals::crabs_only(&[pose_at(i)]),
-                );
+                sim.step(&BTreeMap::from([(me, input_at(i))]), &BTreeMap::new());
                 baseline.push((sim.tick(), sim.state_hash()));
             }
         }
@@ -1509,9 +1430,7 @@ mod tests {
                 let msg = client.submit_local_input(input_at(i), None);
                 server.advance(msg);
                 while server.next_tick_ready() {
-                    let bytes = server
-                        .step_next(&[pose_at(server.sim().tick())], Default::default())
-                        .snapshot;
+                    let bytes = server.step_next(Default::default()).snapshot;
                     let snap =
                         CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
                     client.apply_core_snapshot(snap);
@@ -1592,14 +1511,12 @@ mod tests {
     }
 
     /// Mid-game join via snapshot transfer, proven at the authoritative-server seam. A solo host
-    /// runs an armed round, stepping its OWN sim and walking the crab far off its spawn; then a
-    /// joiner is admitted (`admit`). The moment the sim steps THROUGH the admission's
-    /// `effective_tick`, the emitted snapshot must (a) carry the joiner as a fresh `Alive` player,
-    /// (b) preserve the LIVE crab pose — NOT reset to spawn — and (c) keep the live, monotonic
-    /// tick. That is the whole point: the joiner drops INTO the ongoing match, so a client
-    /// adopting the snapshot renders the real Sally at the host's exact pose. A round-boundary
-    /// reset would instead zero the tick and respawn the crab at spawn; these assertions catch
-    /// that regression.
+    /// runs a round, stepping its OWN sim and walking its player off its spawn; then a joiner is
+    /// admitted (`admit`). The moment the sim steps THROUGH the admission's `effective_tick`, the
+    /// emitted snapshot must (a) carry the joiner as a fresh `Alive` player, (b) preserve the
+    /// host player's LIVE pose — NOT reset to spawn — and (c) keep the live, monotonic tick. A
+    /// round-boundary reset would instead zero the tick and respawn everyone; these assertions
+    /// catch that regression.
     #[test]
     fn mid_game_join_transfers_live_state_without_reset() {
         const SEED: u64 = 0x105E_F00D;
@@ -1607,18 +1524,7 @@ mod tests {
         const SUBMITS: u64 = 60;
         let host = PlayerId(0);
         let mut server = srv(SEED, &[host]);
-        let crab_spawn = server.sim().crabs()[0].pos();
-
-        let pose_at = |tick: u64| CrabPose {
-            pos: Pos {
-                // Clawless (downs are claw contact only, rl#236) and receding — a
-                // mid-test down would freeze the very state this test transfers.
-                x: 16_000 + tick as i64 * 13,
-                z: -13_000 - tick as i64 * 9,
-            },
-            yaw: (tick as i32).wrapping_mul(2048),
-            claws: Vec::new(),
-        };
+        let host_spawn = server.sim().player(host).unwrap().pos();
         let input_at = |i: u64| Input::from_axes(((i % 3) as f32 - 1.0) * 0.5, 1.0);
 
         let mut joiner: Option<(PlayerId, u64, u64)> = None; // (pid, effective_tick, next issue)
@@ -1648,10 +1554,7 @@ mod tests {
                 pilot: None,
             });
             while server.next_tick_ready() {
-                let tick = server.sim().tick();
-                let bytes = server
-                    .step_next(&[pose_at(tick)], Default::default())
-                    .snapshot;
+                let bytes = server.step_next(Default::default()).snapshot;
                 snaps.push(CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes"));
             }
         }
@@ -1688,67 +1591,42 @@ mod tests {
             after.roster.contains(&jpid),
             "the snapshot roster carries the joiner"
         );
-        assert_eq!(
-            after.crabs[0].pos(),
-            pose_at(eff).pos,
-            "the crab is at its live pose at tick eff"
-        );
         assert_ne!(
-            after.crabs[0].pos(),
-            crab_spawn,
-            "the crab did NOT reset to spawn (no rebuild-on-join)"
+            after.players[&host].pos(),
+            host_spawn,
+            "the host player did NOT reset to spawn (no rebuild-on-join)"
         );
         assert!(eff > JOIN_LEAD, "the join genuinely lands mid-round");
     }
 
     #[test]
     fn admission_gate_admits_match_and_refuses_mismatches() {
-        let ha = 0x5A11_2233u64;
-        let hp = 0x7E44_A100u64;
-        let host = crate::SyncStamp {
-            body_digest: ha,
-            plant_digest: hp,
-            crab_count: 2,
-        };
-        let req = |body_digest, plant_digest, crab_count| JoinRequest {
-            stamp: crate::SyncStamp {
-                body_digest,
-                plant_digest,
-                crab_count,
-            },
+        let digest = 0x5A11_2233u64;
+        let stamp = |terrain_digest| crate::SyncStamp { terrain_digest };
+        let req = |terrain_digest| JoinRequest {
+            stamp: stamp(terrain_digest),
         };
         assert_eq!(
-            may_admit_joiner(host, &req(ha, hp, 2), 2),
+            may_admit_joiner(stamp(digest), &req(digest), 2),
             Ok(()),
             "the host admits a matching joiner"
         );
         assert_eq!(
-            may_admit_joiner(host, &req(ha, hp, 0), 2),
-            Ok(()),
-            "a headless joiner (rig count 0) renders nothing — always count-admissible"
-        );
-        assert_eq!(
-            may_admit_joiner(host, &req(ha ^ 1, hp, 2), 2),
-            Err(AdmissionRefusal::BodyMismatch {
-                host: ha,
-                joiner: ha ^ 1
+            may_admit_joiner(stamp(digest), &req(digest ^ 1), 2),
+            Err(AdmissionRefusal::TerrainMismatch {
+                host: digest,
+                joiner: digest ^ 1
             }),
-            "a different Sally/colliders is refused"
+            "a different terrain bake is refused"
         );
         assert_eq!(
-            may_admit_joiner(host, &req(ha, hp ^ 1, 2), 2),
-            Err(AdmissionRefusal::PlantMismatch {
-                host: hp,
-                joiner: hp ^ 1
-            }),
-            "a different arena/bake/friction plant is refused (the joiner would render a \
-             different world than the poses it adopts, rl#286)"
+            may_admit_joiner(stamp(0), &req(0), 2),
+            Err(AdmissionRefusal::TerrainMismatch { host: 0, joiner: 0 }),
+            "an unset host digest never agrees"
         );
         assert_eq!(
-            may_admit_joiner(host, &req(ha, hp, 1), 2),
-            Err(AdmissionRefusal::CrabCountMismatch { host: 2, joiner: 1 }),
-            "a rendering joiner with the wrong rig count is refused (it would show the wrong \
-             number of crabs)"
+            may_admit_joiner(stamp(digest), &req(digest), crate::membership::MAX_MEMBERS),
+            Err(AdmissionRefusal::MatchFull),
         );
     }
 }

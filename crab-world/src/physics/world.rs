@@ -76,11 +76,7 @@ impl Plugin for ArenaVisualsPlugin {
 /// are render-only — see [`setup_arena_visuals`]), so this is the one arena setup the
 /// headless trainer runs, touching no graphics types.
 fn setup_ground(mut commands: Commands, terrain: Res<Terrain>) {
-    commands.spawn((
-        RigidBody::Fixed,
-        terrain.collider(),
-        Transform::IDENTITY,
-    ));
+    commands.spawn((RigidBody::Fixed, terrain.collider(), Transform::IDENTITY));
 }
 
 #[cfg(feature = "render")]

@@ -27,8 +27,7 @@ pub struct Beat {
     /// joiners freeze the byte-identical set.
     pub claim: HostClaim,
     /// The advertiser's world identity — see [`crate::SyncStamp`]. ONE shape shared
-    /// with [`crate::server::JoinRequest`] and [`PeerView`], so a new identity axis
-    /// cannot be added to one carrier and silently missed in another.
+    /// with [`crate::server::JoinRequest`] and [`PeerView`].
     pub stamp: crate::SyncStamp,
 }
 
@@ -120,8 +119,7 @@ struct PeerView {
     last_direct: u64,
     advertised: Option<u64>,
     claim: HostClaim,
-    /// `None` until a direct beat arrives — a relay-only peer stays unverified on
-    /// EVERY identity axis at once (the axes are only ever learned together).
+    /// `None` until a direct beat arrives — a relay-only peer stays unverified.
     stamp: Option<crate::SyncStamp>,
 }
 
@@ -295,35 +293,17 @@ impl Membership {
         }
     }
 
-    /// The formation-side shared-asset verdict, every axis judged by the ONE arbiter,
-    /// [`crate::SyncVerdict::between`] (rl#336 — mid-game admission derives from the same
-    /// function, so the two gates cannot diverge). The digest axes are pairwise (every
-    /// peer must match OUR digests, ourselves included, so an unset local digest never
-    /// passes); the crabs axis is host-centric (the host serves the crab world, so OUR
-    /// count is judged against ITS — an unverified host, relay beat or no stamp yet,
-    /// never arms).
-    pub fn sync_verdict(&self) -> crate::SyncVerdict {
-        let host_stamp = self.server().and_then(|host| {
-            if host == self.me {
-                Some(self.local)
-            } else {
-                self.peers.get(&host).and_then(|v| v.stamp)
-            }
-        });
-        // Digest axes ONLY — the crabs axis is host-centric and judged separately below;
-        // passing `|v| v.crabs` here would silently compute the wrong semantics.
-        let across_peers = |axis: fn(crate::SyncVerdict) -> bool| {
-            axis(crate::SyncVerdict::between(self.local, self.local))
-                && self.peers.values().all(|v| {
-                    v.stamp
-                        .is_some_and(|s| axis(crate::SyncVerdict::between(self.local, s)))
-                })
-        };
-        crate::SyncVerdict {
-            body: across_peers(|v| v.body),
-            crabs: host_stamp.is_some_and(|h| crate::SyncVerdict::between(h, self.local).crabs),
-            plant: across_peers(|v| v.plant),
-        }
+    /// The formation-side world check, judged by the ONE arbiter,
+    /// [`crate::SyncStamp::agrees`] (rl#336 — mid-game admission derives from the same
+    /// function, so the two gates cannot diverge): every peer must match OUR digest,
+    /// ourselves included, so an unset local digest never passes, and neither does a
+    /// peer heard only by relay.
+    pub fn synced(&self) -> bool {
+        crate::SyncStamp::agrees(self.local, self.local)
+            && self.peers.values().all(|v| {
+                v.stamp
+                    .is_some_and(|s| crate::SyncStamp::agrees(self.local, s))
+            })
     }
 
     pub fn poll(&mut self, now_ms: u64) -> Status {
@@ -397,16 +377,14 @@ pub fn encode_beat(beat: &Beat) -> Vec<u8> {
         v
     };
     let members = canon(&beat.members);
-    let mut out = Vec::with_capacity(20 + 32 * members.len());
+    let mut out = Vec::with_capacity(BEAT_HEADER_LEN + 32 * members.len());
     out.push(match beat.claim {
         HostClaim::None => 0,
         HostClaim::Started => 1,
         HostClaim::Open => 2,
     });
     out.extend_from_slice(&(members.len() as u16).to_le_bytes());
-    out.extend_from_slice(&beat.stamp.body_digest.to_le_bytes());
-    out.extend_from_slice(&beat.stamp.plant_digest.to_le_bytes());
-    out.push(beat.stamp.crab_count);
+    out.extend_from_slice(&beat.stamp.to_wire());
     for id in &members {
         out.extend_from_slice(id.as_bytes());
     }
@@ -415,10 +393,13 @@ pub fn encode_beat(beat: &Beat) -> Vec<u8> {
 
 const MAX_BEAT_MEMBERS: usize = 256;
 
+/// Claim byte, u16 member count, then the stamp.
+const BEAT_HEADER_LEN: usize = 3 + crate::SyncStamp::WIRE_LEN;
+
 pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     anyhow::ensure!(
-        body.len() >= 20,
-        "barrier frame too short for claim+count+body digest+plant digest+crab count"
+        body.len() >= BEAT_HEADER_LEN,
+        "barrier frame too short for claim+count+stamp"
     );
     let claim = match body[0] {
         0 => HostClaim::None,
@@ -431,10 +412,12 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
         count <= MAX_BEAT_MEMBERS,
         "barrier frame claims {count} members (> {MAX_BEAT_MEMBERS})"
     );
-    let body_digest = u64::from_le_bytes(body[3..11].try_into().expect("8-byte slice"));
-    let plant_digest = u64::from_le_bytes(body[11..19].try_into().expect("8-byte slice"));
-    let crab_count = body[19];
-    let need = 20 + 32 * count;
+    let stamp = crate::SyncStamp::from_wire(
+        body[3..BEAT_HEADER_LEN]
+            .try_into()
+            .expect("stamp-sized slice"),
+    );
+    let need = BEAT_HEADER_LEN + 32 * count;
     anyhow::ensure!(
         body.len() == need,
         "barrier frame length {} != expected {need} for {count} members",
@@ -442,7 +425,7 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     );
     let mut members = Vec::with_capacity(count);
     for i in 0..count {
-        let off = 20 + 32 * i;
+        let off = BEAT_HEADER_LEN + 32 * i;
         let bytes: [u8; 32] = body[off..off + 32].try_into().expect("32-byte slice");
         let id = EndpointId::from_bytes(&bytes)
             .map_err(|e| anyhow::anyhow!("bad endpoint id in barrier frame: {e}"))?;
@@ -451,11 +434,7 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     Ok(Beat {
         members,
         claim,
-        stamp: crate::SyncStamp {
-            body_digest,
-            plant_digest,
-            crab_count,
-        },
+        stamp,
     })
 }
 
@@ -479,12 +458,8 @@ mod tests {
         }
     }
 
-    fn stamp(body_digest: u64, plant_digest: u64, crab_count: u8) -> crate::SyncStamp {
-        crate::SyncStamp {
-            body_digest,
-            plant_digest,
-            crab_count,
-        }
+    fn stamp(terrain_digest: u64) -> crate::SyncStamp {
+        crate::SyncStamp { terrain_digest }
     }
 
     fn sorted(ids: &[EndpointId]) -> Vec<EndpointId> {
@@ -512,22 +487,18 @@ mod tests {
     fn decode_rejects_garbage() {
         assert!(
             decode_beat(&[0]).is_err(),
-            "too short for claim+count+digests"
+            "too short for claim+count+stamp"
         );
-        // A full 20-byte header claiming 5 members but carrying none — must trip the
+        // A full header claiming 5 members but carrying none — must trip the
         // length-vs-count check, not the header-size check.
         let mut truncated = vec![0u8];
         truncated.extend_from_slice(&5u16.to_le_bytes());
         truncated.extend_from_slice(&0u64.to_le_bytes());
-        truncated.extend_from_slice(&0u64.to_le_bytes());
-        truncated.push(0);
         assert!(decode_beat(&truncated).is_err(), "truncated body");
         let mut huge = vec![0u8];
         huge.extend_from_slice(&(300u16).to_le_bytes());
         huge.extend_from_slice(&0u64.to_le_bytes());
-        huge.extend_from_slice(&0u64.to_le_bytes());
-        huge.push(0);
-        huge.resize(20 + 32 * 300, 0);
+        huge.resize(BEAT_HEADER_LEN + 32 * 300, 0);
         assert!(decode_beat(&huge).is_err(), "over-large count rejected");
     }
 
@@ -563,173 +534,72 @@ mod tests {
         );
     }
 
-    fn bt_ad(members: Vec<EndpointId>, body_digest: u64) -> Beat {
+    fn bt_ad(members: Vec<EndpointId>, terrain_digest: u64) -> Beat {
         Beat {
             members,
             claim: HostClaim::None,
-            stamp: stamp(body_digest, 0, 1),
+            stamp: stamp(terrain_digest),
         }
     }
 
     #[test]
-    fn body_digest_roundtrips_on_the_wire() {
+    fn terrain_digest_roundtrips_on_the_wire() {
         let members = vec![eid(1), eid(2)];
         let a = bt_ad(members.clone(), 0xC0FF_EE00_1234_5678);
         let b = bt_ad(members, 0x9876_5432_10AB_CDEF);
         assert_eq!(
             a.roster_hash(),
             b.roster_hash(),
-            "the asset digest must not be part of the roster hash"
+            "the digest must not be part of the roster hash"
         );
         let decoded = decode_beat(&encode_beat(&a)).unwrap();
-        assert_eq!(decoded.stamp.body_digest, 0xC0FF_EE00_1234_5678);
+        assert_eq!(decoded.stamp.terrain_digest, 0xC0FF_EE00_1234_5678);
     }
 
     #[test]
-    fn crab_count_gate_is_host_keyed() {
-        let beat_c = |members: Vec<EndpointId>, crab_count: u8| Beat {
-            members,
-            claim: HostClaim::None,
-            stamp: stamp(0, 0, crab_count),
-        };
-        let decoded = decode_beat(&encode_beat(&beat_c(vec![eid(1)], 3))).unwrap();
-        assert_eq!(decoded.stamp.crab_count, 3, "the count survives the wire");
-
-        let t0 = 0u64;
-        let mut ids = [eid(1), eid(2)];
-        ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-        let (host, client) = (ids[0], ids[1]);
-
-        let mut a = Membership::new(client, 2, t0).with_stamp(stamp(0, 0, 2));
-        a.on_beat(host, &beat_c(vec![host, client], 2), t0);
-        a.poll(t0);
-        assert!(a.sync_verdict().crabs, "matching host count passes");
-
-        let mut b = Membership::new(client, 2, t0).with_stamp(stamp(0, 0, 1));
-        b.on_beat(host, &beat_c(vec![host, client], 2), t0);
-        b.poll(t0);
-        assert!(!b.sync_verdict().crabs, "a count mismatch must not arm");
-
-        let mut c = Membership::new(client, 2, t0).with_stamp(stamp(0, 0, 1));
-        c.on_beat(host, &beat_c(vec![host, client], 0), t0);
-        c.poll(t0);
-        assert!(!c.sync_verdict().crabs, "a crab-less host must not arm");
-
-        let mut d = Membership::new(host, 2, t0).with_stamp(stamp(0, 0, 2));
-        d.on_beat(client, &beat_c(vec![host, client], 1), t0);
-        d.poll(t0);
-        assert!(
-            d.sync_verdict().crabs,
-            "the host self-passes on its own count"
-        );
-
-        let mut ids3 = [eid(1), eid(2), eid(3)];
-        ids3.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-        let (h3, mid, top) = (ids3[0], ids3[1], ids3[2]);
-        let mut e = Membership::new(top, 3, t0).with_stamp(stamp(0, 0, 1));
-        e.on_beat(mid, &beat_c(vec![h3, mid, top], 1), t0);
-        e.poll(t0);
-        assert!(!e.sync_verdict().crabs, "a relay-only host is unverified");
-    }
-
-    #[test]
-    fn assets_synced_only_when_all_peers_share_one_nonzero_digest() {
+    fn synced_only_when_all_peers_share_one_nonzero_digest() {
         let t0 = 0u64;
         let (ida, idb) = (eid(1), eid(2));
-        const ASSET: u64 = 0x5A11_0000_C0DE_4321;
+        const TERRAIN: u64 = 0x5A11_0000_C0DE_4321;
 
-        let mut a = Membership::new(ida, 2, t0).with_stamp(stamp(ASSET, 0, 0));
-        a.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
+        let mut a = Membership::new(ida, 2, t0).with_stamp(stamp(TERRAIN));
+        a.on_beat(idb, &bt_ad(vec![ida, idb], TERRAIN), t0);
         a.poll(t0);
-        assert!(
-            a.sync_verdict().body,
-            "equal non-zero asset digests must be synced"
-        );
+        assert!(a.synced(), "equal non-zero digests must be synced");
 
-        let mut b = Membership::new(ida, 2, t0).with_stamp(stamp(ASSET, 0, 0));
-        b.on_beat(idb, &bt_ad(vec![ida, idb], ASSET ^ 0xFF), t0);
+        let mut b = Membership::new(ida, 2, t0).with_stamp(stamp(TERRAIN));
+        b.on_beat(idb, &bt_ad(vec![ida, idb], TERRAIN ^ 0xFF), t0);
         b.poll(t0);
-        assert!(
-            !b.sync_verdict().body,
-            "a differing peer asset digest must not be synced"
-        );
+        assert!(!b.synced(), "a differing peer digest must not be synced");
 
-        let mut c = Membership::new(ida, 2, t0).with_stamp(stamp(ASSET, 0, 0));
+        let mut c = Membership::new(ida, 2, t0).with_stamp(stamp(TERRAIN));
         c.on_beat(idb, &bt_ad(vec![ida, idb], 0), t0);
         c.poll(t0);
-        assert!(
-            !c.sync_verdict().body,
-            "a zero peer asset digest must not be synced"
-        );
+        assert!(!c.synced(), "a zero peer digest must not be synced");
 
         let mut d = Membership::new(ida, 2, t0);
-        d.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
+        d.on_beat(idb, &bt_ad(vec![ida, idb], TERRAIN), t0);
         d.poll(t0);
-        assert!(
-            !d.sync_verdict().body,
-            "a zero local asset digest is never synced"
-        );
+        assert!(!d.synced(), "a zero local digest is never synced");
     }
 
     #[test]
-    fn plant_synced_only_when_all_peers_share_one_nonzero_digest() {
-        let t0 = 0u64;
-        let (ida, idb) = (eid(1), eid(2));
-        const PLANT: u64 = 0x7E44_A100_0BAD_5EED;
-        let bt_plant = |members: Vec<EndpointId>, plant_digest: u64| Beat {
-            members,
-            claim: HostClaim::None,
-            stamp: stamp(0, plant_digest, 0),
-        };
-
-        let decoded = decode_beat(&encode_beat(&bt_plant(vec![ida], PLANT))).unwrap();
-        assert_eq!(
-            decoded.stamp.plant_digest, PLANT,
-            "the digest survives the wire"
-        );
-
-        let mut a = Membership::new(ida, 2, t0).with_stamp(stamp(0, PLANT, 0));
-        a.on_beat(idb, &bt_plant(vec![ida, idb], PLANT), t0);
-        a.poll(t0);
-        assert!(
-            a.sync_verdict().plant,
-            "equal non-zero plant digests must be synced"
-        );
-
-        let mut b = Membership::new(ida, 2, t0).with_stamp(stamp(0, PLANT, 0));
-        b.on_beat(idb, &bt_plant(vec![ida, idb], PLANT ^ 0xFF), t0);
-        b.poll(t0);
-        assert!(
-            !b.sync_verdict().plant,
-            "a differing peer plant digest (other arena/bake/friction) must not be synced"
-        );
-
-        let mut c = Membership::new(ida, 2, t0);
-        c.on_beat(idb, &bt_plant(vec![ida, idb], PLANT), t0);
-        c.poll(t0);
-        assert!(
-            !c.sync_verdict().plant,
-            "a zero local plant digest is never synced"
-        );
-    }
-
-    #[test]
-    fn relay_only_peer_blocks_the_asset_gate() {
+    fn relay_only_peer_blocks_the_sync_gate() {
         let t0 = 0u64;
         let (me, direct, relayed) = (eid(1), eid(2), eid(3));
-        const ASSET: u64 = 0x9999_8888_7777_6666;
-        let mut a = Membership::new(me, 3, t0).with_stamp(stamp(ASSET, 0, 0));
-        a.on_beat(direct, &bt_ad(vec![me, direct, relayed], ASSET), t0);
+        const TERRAIN: u64 = 0x9999_8888_7777_6666;
+        let mut a = Membership::new(me, 3, t0).with_stamp(stamp(TERRAIN));
+        a.on_beat(direct, &bt_ad(vec![me, direct, relayed], TERRAIN), t0);
         a.poll(t0);
         assert!(
-            !a.sync_verdict().body,
-            "a relay-only peer (digest None) must block the asset gate"
+            !a.synced(),
+            "a relay-only peer (digest None) must block the sync gate"
         );
-        a.on_beat(relayed, &bt_ad(vec![me, direct, relayed], ASSET), t0);
+        a.on_beat(relayed, &bt_ad(vec![me, direct, relayed], TERRAIN), t0);
         a.poll(t0);
         assert!(
-            a.sync_verdict().body,
-            "once every peer is heard directly with the same asset, synced"
+            a.synced(),
+            "once every peer is heard directly with the same digest, synced"
         );
     }
 

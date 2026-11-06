@@ -11,15 +11,10 @@ pub use net_link as transport;
 // construction — no tokio/iroh, wasm32-checked). Re-exported under the same paths
 // so `net::sim` etc. stay stable for every consumer.
 pub use net_proto::{
-    SyncStamp, SyncVerdict, articulation, cadence, client, cordic, may_arm_crabs, membership,
-    roster, server, sim, snapshot, wire,
+    SyncStamp, cadence, client, cordic, membership, roster, server, sim, snapshot, vehicles, wire,
 };
 
-// Render-free since rl#298 stage 4: only the label publisher inside stays
-// render-gated — it feeds UI.
-pub mod crab_slot;
 pub mod menu;
-pub mod probe;
 #[cfg(feature = "render")]
 pub mod render;
 

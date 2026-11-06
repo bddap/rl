@@ -1,4 +1,3 @@
-use super::app::{install_armed_nn_crab, seed_round_crabs};
 use super::controls_sync::sync_controls_context;
 use super::driver::{
     FlightInput, PendingInput, ScriptedPackInput, coordinator, drive_client_sim, insert_core,
@@ -14,37 +13,29 @@ use crab_world::screenshot::{self, ShotProgress, ShotTarget};
 use std::time::Duration;
 
 pub fn build_screenshot_app(
-    mut client: ClientSim,
+    client: ClientSim,
     cfg: ScreenshotConfig,
-    nn_crab: Option<crab_world::policy::Policy>,
     view: crab_world::BootView,
     pack: Input,
 ) -> App {
     let mut app = offscreen_app_scaffold(view);
-    let armed_crab = nn_crab.map(|policy| (policy, seed_round_crabs(&mut client, 1)));
     let coord = coordinator(None, client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
     app.insert_resource(ScriptedPackInput(pack));
-    if let Some((policy, spawns)) = armed_crab {
-        install_armed_nn_crab(&mut app, vec![policy], spawns);
-    }
-    finish_offscreen_app(&mut app, cfg, view.render_mode);
+    finish_offscreen_app(&mut app, cfg);
     app
 }
 
 pub fn build_net_screenshot_app(
-    mut client: ClientSim,
+    client: ClientSim,
     net: NetDriver,
     cfg: ScreenshotConfig,
-    nn_crab: crab_world::policy::Policy,
     view: crab_world::BootView,
 ) -> App {
     let mut app = offscreen_app_scaffold(view);
-    let spawns = seed_round_crabs(&mut client, 1);
     let coord = coordinator(Some(net), client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
-    install_armed_nn_crab(&mut app, vec![nn_crab], spawns);
-    finish_offscreen_app(&mut app, cfg, view.render_mode);
+    finish_offscreen_app(&mut app, cfg);
     app
 }
 
@@ -53,9 +44,8 @@ fn offscreen_app_scaffold(view: crab_world::BootView) -> App {
     app.add_plugins(crab_world::app_boot::base_plugins(None));
     // The screenshot app has no menu: its round is installed before the first frame, so it is
     // in [`AppPhase::Playing`] for its whole life (one boot-time enter, never an exit). Saying
-    // so keeps every Playing-gated system — the render-mode gizmos above all (rl#211) — on the
-    // ONE stock `in_state` idiom, fail-closed: were the state merely absent, `in_state` would
-    // silently return false and collider-view evidence shots would capture no cage.
+    // so keeps every Playing-gated system on the ONE stock `in_state` idiom, fail-closed: were
+    // the state merely absent, `in_state` would silently return false.
     app.insert_state(super::AppPhase::Playing);
     app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
         Duration::from_secs_f64(1.0 / 60.0),
@@ -64,15 +54,16 @@ fn offscreen_app_scaffold(view: crab_world::BootView) -> App {
     app.add_plugins(crab_world::physics::ArenaWorldPlugin {
         ground_look: view.ground_look,
     });
+    super::app::install_craft_physics(&mut app);
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_secs_f64(TICK_DT),
     ));
     app
 }
 
-/// Wire the offscreen screenshot systems + render-mode onto a scaffolded app whose round is
+/// Wire the offscreen screenshot systems + view knobs onto a scaffolded app whose round is
 /// already installed — shared by both builders so the capture path can't drift.
-fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super::RenderMode) {
+fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig) {
     app.add_plugins(crab_world::controls::ControlsOverlayPlugin::<GcrControls>::default());
     crab_world::chord::install_chords::<GcrControls>(app);
     // The rl#358 combo map, unpersisted by default — an evidence shot must never
@@ -101,7 +92,6 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
                 // Before any pose/transform consumer, as in the windowed app: the
                 // render origin must be current the frame it changes (rl#354).
                 sync_ground_anchor.before(crab_world::ground::apply_ground_anchor),
-                super::articulation::sample_crab_part_poses,
                 reconcile_avatars,
                 apply_transforms,
                 place_extraction_pillar,
@@ -117,7 +107,7 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
                 // timescales).
                 .after(crab_world::moon::MoonMotionSet),
         );
-    super::render_mode::register(app, render_mode);
+    super::view_knobs::register(app);
 }
 
 /// Per-frame virtual clock for the offscreen apps (rl#371): replaces the scaffold's
@@ -186,7 +176,7 @@ pub struct PilotScript {
     slide_holds: Vec<(u64, Option<u64>)>,
     /// Walk dead straight instead of the default gentle arc — position-trace
     /// captures (rl#371) need a constant-velocity ground truth to difference
-    /// against; the arc stays the default for the hunt-evidence shots.
+    /// against.
     straight: bool,
     /// Hold every flight axis at zero while piloting instead of the default full
     /// forward drive — parked-craft captures (rl#377) need a body at rest.
@@ -352,9 +342,8 @@ fn drive_pilot_script(
             flight.rt = 0.5;
         }
     } else if script.walk_at.is_some_and(|at| script.frame >= at) {
-        // Walk a gentle arc on foot — a moving target, so the run exercises the hunt
-        // against evasion, not just a standing kill (rl#236). Straight for the
-        // rl#371 position traces, where the arc would alias into the step lengths.
+        // Walk a gentle arc on foot. Straight for the rl#371 position traces, where
+        // the arc would alias into the step lengths.
         pending.forward = 1.0;
         pending.yaw_delta = if script.straight { 0.0 } else { 0.02 };
     }
@@ -439,7 +428,7 @@ fn spawn_offscreen_camera(
         FpCamera,
     ));
     // The windowed FP camera's perspective (shared stature-scaled near clip), plus an
-    // optional wider FOV so the towering giant crab fits in one evidence frame.
+    // optional wider FOV for evidence frames.
     let mut projection = super::scene::fp_perspective();
     if let Some(fov_deg) = cfg.cam_fov_deg {
         projection.fov = fov_deg.to_radians();

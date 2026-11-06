@@ -1,42 +1,19 @@
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use net::client::ClientSim;
 use net::sim::{Input, PlayerId, TICK_DT};
 
-/// The PINNED seed for byte-stable tooling — screenshots and the determinism/behavior
-/// probes, where the same seed must reproduce the same run (the spawn layout derives
+/// The PINNED seed for byte-stable tooling — screenshots, where the same seed must
+/// reproduce the same run (the spawn layout derives
 /// from the seed, rl#305). Real play draws [`net::sim::random_match_seed`] instead.
 pub(crate) const MATCH_SEED: u64 = 0x6372_6162;
 
-/// The view this binary boots in — every GCR surface is [`Surface::Game`], so the
-/// surface is named once rather than at each entrypoint.
-pub(crate) fn boot_view(args: crab_world::RenderArgs) -> crab_world::BootView {
-    args.resolve(crab_world::mesh_fallback::Surface::Game)
-}
-
 /// One determinism-log line, `<tick> <hash>` (zero-padded 16-hex) — the format two
 /// peers/runs `diff` to prove byte-identical sims. The line IS the cross-peer diff
-/// contract, so every writer (this file's whole-log writer and `game net`'s streaming
-/// host/client writers) formats through here (#133). The FORMAT is shared; the hashed
-/// QUANTITY is not: `game net` logs the bare sim hash, while the probe folds the crab
-/// body digest in (rl#223) — diff only logs written by the same writer.
+/// contract, so `game net`'s host and client writers both format through here (#133).
 pub(crate) fn tick_hash_line(tick: u64, hash: u64) -> String {
     format!("{tick} {hash:#018x}")
-}
-
-/// Write per-tick [`tick_hash_line`]s to a file — the whole-log form the `nn-crab-probe`
-/// gate diffs.
-pub(crate) fn write_tick_hash_log(
-    path: &std::path::Path,
-    entries: impl Iterator<Item = (u64, u64)>,
-) -> Result<()> {
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    for (tick, hash) in entries {
-        writeln!(out, "{}", tick_hash_line(tick, hash)).unwrap();
-    }
-    std::fs::write(path, out).with_context(|| format!("writing hash log to {}", path.display()))
 }
 
 pub(crate) fn parse_join_dial(join: Option<&str>) -> Result<Option<iroh::EndpointId>> {
@@ -50,17 +27,12 @@ pub(crate) const DEFAULT_EXPECT: usize = 2;
 pub(crate) const DEFAULT_DISCOVER_SECS: u64 = 4;
 
 pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
-    use net::crab_slot::HeadlessHostWorld;
     use net::server::Server;
     use net::snapshot::CoreSnapshot;
 
     let me = PlayerId(0);
     let mut client = ClientSim::new(net::sim::random_match_seed(), &[me], me);
     let mut server = Server::new(me, &[me], client.sim().clone());
-    // Crab poses are mandatory (rl#298 stage 5): even this headless harness runs the
-    // one crab world — a rest-pose brain, no checkpoint bound.
-    let mut host_world =
-        HeadlessHostWorld::new(vec![crab_world::policy::Policy::rest()], server.sim());
     let tick_dt = Duration::from_secs_f64(TICK_DT);
     let end = Instant::now() + Duration::from_secs(run_secs);
     let mut next = Instant::now();
@@ -68,7 +40,8 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
         let t = client.next_tick() as f32 * 0.1;
         let msg = client.submit_local_input(Input::from_axes(t.cos(), t.sin()), None);
         server.advance(msg);
-        for stepped in host_world.step_ready_ticks(&mut server) {
+        while server.next_tick_ready() {
+            let stepped = server.step_next(Default::default());
             client.apply_core_snapshot(
                 CoreSnapshot::from_bytes(&stepped.snapshot)
                     .expect("the server's snapshot must decode"),
@@ -79,16 +52,13 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
     }
     let p = client.sim().player(me).unwrap();
     let pos = p.pos();
-    let crab = client.sim().crabs()[0].pos();
     println!(
-        "solo: {} ticks, player=({}, {}) yaw={} status={:?}, crab=({}, {}), outcome={:?}, hash={:#018x}",
+        "solo: {} ticks, player=({}, {}) yaw={} status={:?}, outcome={:?}, hash={:#018x}",
         client.sim().tick(),
         pos.x,
         pos.z,
         p.yaw(),
         p.status(),
-        crab.x,
-        crab.z,
         client.sim().outcome(),
         client.sim().state_hash()
     );

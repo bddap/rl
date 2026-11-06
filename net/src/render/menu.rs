@@ -324,8 +324,8 @@ fn apply_action(
             state.forming = None;
             state.error = None;
             pending.0 = Some(
-                super::app::arm_round(menu::solo_round(state.seed))
-                    .expect("a solo round always arms (net is None — nothing to desync)"),
+                super::app::start_round(menu::solo_round(state.seed))
+                    .expect("a solo round always starts (net is None — nothing to desync)"),
             );
             next.set(AppPhase::Playing);
             true
@@ -373,7 +373,7 @@ fn poll_formation(
     state.forming = None;
     match result {
         Ok(match_result) => match menu::ready_from(match_result, state.seed) {
-            Some(ready) => arm_and_play(ready, state, pending, next),
+            Some(ready) => start_and_play(ready, state, pending, next),
             None => next.set(AppPhase::Menu),
         },
         Err(e) => {
@@ -400,7 +400,7 @@ fn poll_rejoin(
         Ok(JoinResult::Joined(joined)) => {
             let (client, net) = *joined;
             state.last_host = None;
-            arm_and_play(
+            start_and_play(
                 menu::ReadyMatch {
                     client,
                     net: Some(net),
@@ -436,15 +436,15 @@ fn poll_rejoin(
     true
 }
 
-fn arm_and_play(
+fn start_and_play(
     ready: menu::ReadyMatch,
     state: &mut MenuState,
     pending: &mut PendingRound,
     next: &mut NextState<AppPhase>,
 ) {
-    match super::app::arm_round(ready) {
-        Ok(armed) => {
-            pending.0 = Some(armed);
+    match super::app::start_round(ready) {
+        Ok(round) => {
+            pending.0 = Some(round);
             next.set(AppPhase::Playing);
         }
         Err(msg) => {
@@ -474,7 +474,7 @@ fn draw_chooser(ctx: &egui::Context, state: &mut MenuState) -> Option<ChooserIte
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.heading("Giant Crab Rescue");
-            ui.label("Rescue the giant crab. Reach the green pillar to extract.");
+            ui.label("Reach the green pillar to extract.");
             ui.separator();
 
             if ui

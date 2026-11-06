@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use iroh_base::EndpointId;
 
-use crate::SyncVerdict;
 use crate::client::{ClientSim, PeerMsg, TickMsg};
 use crate::membership::{BEAT_EVERY_MS, Beat, HostClaim, Membership, Role, Status};
 use crate::sim::PlayerId;
@@ -21,7 +20,7 @@ pub struct Frozen {
     pub id_map: BTreeMap<EndpointId, PlayerId>,
     pub me: PlayerId,
     pub early: Vec<(EndpointId, TickMsg)>,
-    pub sync: SyncVerdict,
+    pub synced: bool,
 }
 
 pub struct FormationCore {
@@ -65,8 +64,8 @@ pub struct Agreement {
     /// The peer that serves the round — [`assign_player_ids`] makes it `PlayerId(0)`.
     pub server: EndpointId,
     pub early: Vec<(EndpointId, TickMsg)>,
-    /// [`Membership::sync_verdict`] sampled at the close instant.
-    pub sync: SyncVerdict,
+    /// [`Membership::synced`] sampled at the close instant.
+    pub synced: bool,
 }
 
 impl FormationCore {
@@ -152,7 +151,7 @@ impl FormationCore {
                 roster,
                 server,
                 early: std::mem::take(&mut self.early).into_iter().collect(),
-                sync: self.m.sync_verdict(),
+                synced: self.m.synced(),
             })),
             Status::Failed => Some(
                 if self.alone_deadline_ms.is_some()
