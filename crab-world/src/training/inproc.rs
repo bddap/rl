@@ -185,7 +185,6 @@ pub(crate) fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId) -
         WorldRole::RolloutWorker,
         config.terrain.grid(),
     );
-    app.insert_resource(config.gait_clock);
     wire_rollout_training(&mut app, config, id, arch);
     force_serial_schedules(&mut app);
     app.finish();

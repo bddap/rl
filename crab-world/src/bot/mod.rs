@@ -328,7 +328,6 @@ impl Plugin for BotPlugin {
         app.init_resource::<actuator::CrabActions>()
             .init_resource::<actuator::SettleExtraIterations>()
             .init_resource::<sensor::CrabObservation>()
-            .init_resource::<sensor::GaitClock>()
             .init_resource::<sensor::CrabTargets>()
             .init_resource::<CrabSpawns>()
             .init_resource::<body::CrabModelPath>()
@@ -813,7 +812,7 @@ mod layout_digest_tests {
         assert_eq!(super::channel_layout_digest(), GOLDEN, "see doc comment");
     }
 
-    const GOLDEN: u64 = 0xc4df_bc8f_abdf_0fcb;
+    const GOLDEN: u64 = 0xf58b_d657_04a5_e084;
 }
 
 #[cfg(test)]
