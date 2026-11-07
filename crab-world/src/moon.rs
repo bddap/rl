@@ -12,7 +12,7 @@ use bevy::prelude::*;
 const FULL_MOON_LUX: f32 = 2300.0;
 
 /// The hue knob turns only the hue of an otherwise fixed pastel: saturation 1.0 /
-/// lightness 0.925 in HSL; the default hue 220° is srgb(0.85, 0.90, 1.0).
+/// lightness 0.925 in HSL.
 const MOON_SATURATION: f32 = 1.0;
 const MOON_LIGHTNESS: f32 = 0.925;
 
@@ -60,7 +60,6 @@ pub struct Moon {
 }
 
 impl Default for Moon {
-    /// The light points along -(0.644, 0.367, 0.671) at hue 220°, full illuminance.
     fn default() -> Self {
         Self {
             azimuth_deg: RISE_AZIMUTH_DEG,
