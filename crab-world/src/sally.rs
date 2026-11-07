@@ -3,12 +3,25 @@
 //! hulls, hinge axes and limits are derived there from the purchased mesh and the
 //! anatomy table in `scripts/sally/skeleton.md`; this side only instantiates them.
 
+use std::sync::Arc;
+
+use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 use serde::Deserialize;
 
+use crate::headless::headless_world;
+use crate::physics::PHYSICS_DT;
+use crate::terrain::TerrainGrid;
+
 /// Crab parts never collide with each other; only the world.
 pub const CRAB_GROUP: Group = Group::GROUP_2;
+
+/// Physics substeps per world tick wherever Sally is simulated: at the world's one,
+/// the gram-scale links chatter past their limits by up to 20°; at 16 they do not.
+pub const SUBSTEPS: usize = 16;
+
+const GROUND_HALF_EXTENT_M: f32 = 50.0;
 
 #[derive(Component)]
 pub struct SallyBone;
@@ -87,6 +100,13 @@ struct BoneExtras {
     density: f32,
     axis: Option<[f32; 3]>,
     limits_deg: Option<[f32; 2]>,
+}
+
+impl Bone {
+    pub fn collider(&self) -> Collider {
+        Collider::convex_hull(&self.hull)
+            .unwrap_or_else(|| panic!("bone {} has a degenerate hull", self.name))
+    }
 }
 
 impl Node {
@@ -192,13 +212,11 @@ impl Skeleton {
         let mut entities: Vec<Entity> = Vec::with_capacity(self.bones.len());
         for bone in &self.bones {
             let pose = at * bone.rest;
-            let collider = Collider::convex_hull(&bone.hull)
-                .unwrap_or_else(|| panic!("bone {} has a degenerate hull", bone.name));
             let mut entity = commands.spawn((
                 SallyBone,
                 Name::new(bone.name.clone()),
                 RigidBody::Dynamic,
-                collider,
+                bone.collider(),
                 ColliderMassProperties::Density(bone.density),
                 CollisionGroups::new(CRAB_GROUP, Group::ALL ^ CRAB_GROUP),
                 Transform::from_isometry(pose.to_isometry()),
@@ -221,6 +239,36 @@ impl Skeleton {
             entities.push(entity.id());
         }
         entities
+    }
+
+    /// A headless world of flat ground with the crab spawned at `at` and not yet
+    /// stepped, `SUBSTEPS` physics substeps per tick. Returns the bone entities.
+    pub fn world(&self, at: Transform) -> (App, Vec<Entity>) {
+        let mut app = headless_world(Arc::new(TerrainGrid::flat(GROUND_HALF_EXTENT_M)));
+        app.insert_resource(TimestepMode::Fixed {
+            dt: PHYSICS_DT,
+            substeps: SUBSTEPS,
+        });
+        let skeleton = self.clone();
+        let entities = app
+            .world_mut()
+            .run_system_once(move |mut commands: Commands| skeleton.spawn(&mut commands, at))
+            .expect("spawn system runs");
+        (app, entities)
+    }
+
+    /// Every bone's world pose with the crab at rest, placed at `at`.
+    pub fn rest_poses(&self, at: Transform) -> Vec<Transform> {
+        self.bones.iter().map(|b| at * b.rest).collect()
+    }
+
+    /// The lowest hull point's height over every bone, given each bone's world pose.
+    pub fn lowest_point(&self, poses: &[Transform]) -> f32 {
+        self.bones
+            .iter()
+            .zip(poses)
+            .flat_map(|(b, t)| b.hull.iter().map(move |p| t.transform_point(*p).y))
+            .fold(f32::INFINITY, f32::min)
     }
 
     /// Each hinge's angle from rest, radians, given every bone's world pose.
@@ -253,31 +301,43 @@ impl Skeleton {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::headless::headless_world;
-    use crate::terrain::TerrainGrid;
-    use bevy::ecs::system::RunSystemOnce;
-    use std::sync::Arc;
-
-    fn cube(half: f32) -> Vec<f32> {
+pub(crate) mod test_rig {
+    /// The eight corners of a box with half-extents `half`, flattened.
+    pub fn cube(half: [f32; 3]) -> Vec<f32> {
         (0..8)
-            .flat_map(|i| {
-                [
-                    if i & 1 == 0 { -half } else { half },
-                    if i & 2 == 0 { -half } else { half },
-                    if i & 4 == 0 { -half } else { half },
-                ]
+            .flat_map(|i: u32| {
+                [0, 1, 2].map(|a| if i & (1 << a) == 0 { -half[a] } else { half[a] })
             })
             .collect()
     }
+
+    /// `doc` as a `.glb` with a JSON chunk only.
+    pub fn glb(doc: &serde_json::Value) -> Vec<u8> {
+        let mut json = serde_json::to_vec(doc).unwrap();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let mut out = b"glTF".to_vec();
+        out.extend(2u32.to_le_bytes());
+        out.extend(((12 + 8 + json.len()) as u32).to_le_bytes());
+        out.extend((json.len() as u32).to_le_bytes());
+        out.extend(b"JSON");
+        out.extend(json);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_rig::cube;
+    use super::*;
 
     /// A body with one three-bone leg held out level: bones along local +Y, a node
     /// above the root bone carrying the Z-up to Y-up turn, and hinges on a horizontal
     /// axis so gravity loads them.
     fn glb(limits_deg: Option<[f32; 2]>) -> Vec<u8> {
         let bone = |name: &str, t: [f32; 3], children: Vec<usize>, joint: bool| {
-            let mut rl = serde_json::json!({"hull": cube(if joint { 0.004 } else { 0.02 }), "density": 1100.0});
+            let mut rl = serde_json::json!({"hull": cube([if joint { 0.004 } else { 0.02 }; 3]), "density": 1100.0});
             if joint {
                 rl["axis"] = serde_json::json!([1.0, 0.0, 0.0]);
                 if let Some(limits) = limits_deg {
@@ -299,17 +359,7 @@ mod tests {
             ],
             "skins": [{"joints": [1, 2, 3, 4]}],
         });
-        let mut json = serde_json::to_vec(&doc).unwrap();
-        while !json.len().is_multiple_of(4) {
-            json.push(b' ');
-        }
-        let mut out = b"glTF".to_vec();
-        out.extend(2u32.to_le_bytes());
-        out.extend(((12 + 8 + json.len()) as u32).to_le_bytes());
-        out.extend((json.len() as u32).to_le_bytes());
-        out.extend(b"JSON");
-        out.extend(json);
-        out
+        super::test_rig::glb(&doc)
     }
 
     #[test]
@@ -349,14 +399,7 @@ mod tests {
     }
 
     fn settle(skeleton: &Skeleton, lift: f32, ticks: usize) -> (App, Vec<Entity>) {
-        let mut app = headless_world(Arc::new(TerrainGrid::flat(1.0)));
-        let skeleton = skeleton.clone();
-        let entities = app
-            .world_mut()
-            .run_system_once(move |mut commands: Commands| {
-                skeleton.spawn(&mut commands, Transform::from_xyz(0.0, lift, 0.0))
-            })
-            .unwrap();
+        let (mut app, entities) = skeleton.world(Transform::from_xyz(0.0, lift, 0.0));
         for _ in 0..ticks {
             app.update();
         }

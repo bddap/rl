@@ -4,6 +4,7 @@ pub mod asset_pack;
 pub mod assets;
 pub mod chord;
 pub mod controls;
+pub mod eval;
 pub mod fnv;
 pub mod headless;
 pub mod physics;

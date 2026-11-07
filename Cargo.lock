@@ -2754,6 +2754,7 @@ dependencies = [
  "clap",
  "flate2",
  "frametime",
+ "rand_chacha",
  "serde",
  "serde_json",
  "tracing",

@@ -22,6 +22,7 @@ bevy = { workspace = true, features = [
 ] }
 bevy_rapier3d = { workspace = true, features = ["dim3"] }
 serde.workspace = true
+rand_chacha.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 # asset_pack's deflate (rl#411 stage 6): pure-rust miniz backend, wasm-clean.
