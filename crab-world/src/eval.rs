@@ -9,7 +9,7 @@ use rand_chacha::rand_core::{RngCore, SeedableRng};
 use serde::Serialize;
 
 use crate::physics::{PHYSICS_DT, PHYSICS_GRAVITY, PHYSICS_HZ};
-use crate::sally::Skeleton;
+use crate::sally::{Hinge, Skeleton};
 
 /// Lowest point of the crab at spawn, above the ground.
 const DROP_M: f32 = 0.01;
@@ -43,7 +43,17 @@ impl Task {
         }
     }
 
-    fn ticks(self) -> usize {
+    /// Which way along [`Observation::spawn_left`] the task walks: +1, −1, or 0 for a
+    /// task that does not walk.
+    pub fn walk_sign(self) -> f32 {
+        match self {
+            Task::WalkLeft => 1.0,
+            Task::WalkRight => -1.0,
+            Task::Stand | Task::Righting => 0.0,
+        }
+    }
+
+    pub fn ticks(self) -> usize {
         ticks(self.seconds())
     }
 }
@@ -61,7 +71,7 @@ pub struct BoneState {
 
 /// What the harness shows a policy each tick. `bones` is in [`Skeleton`] order;
 /// `hinges[i]` is the angle from rest, radians, of the hinge on bone
-/// [`Env::hinge_bones`]`[i]`.
+/// [`Skeleton::hinge_bones`]`[i]`.
 #[derive(Debug, Clone)]
 pub struct Observation {
     pub task: Task,
@@ -105,6 +115,14 @@ impl Policy for RandomPolicy {
     }
 }
 
+/// What one tick did, in the quantities the task metrics are built from.
+#[derive(Debug, Clone, Copy)]
+pub struct Tick {
+    pub supported: bool,
+    /// Carapace displacement this tick along [`Observation::spawn_left`], meters.
+    pub left_m: f32,
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Episode {
     pub task: Task,
@@ -117,7 +135,7 @@ pub struct Episode {
 
 /// `skeleton`'s horizontal lateral axis in model space, from its `.R` bones to its
 /// `.L` bones.
-fn model_left(skeleton: &Skeleton) -> Result<Vec3, String> {
+pub fn model_left(skeleton: &Skeleton) -> Result<Vec3, String> {
     let side = |suffix: &str| {
         let at: Vec<Vec3> = skeleton
             .bones
@@ -204,9 +222,7 @@ impl<'a> Env<'a> {
         app.update();
         app.update();
 
-        let hinge_bones: Vec<usize> = (0..skeleton.bones.len())
-            .filter(|&i| skeleton.bones[i].hinge.is_some())
-            .collect();
+        let hinge_bones = skeleton.hinge_bones();
         let hinge_joints = hinge_bones
             .iter()
             .map(|&i| {
@@ -242,11 +258,6 @@ impl<'a> Env<'a> {
                 .set_motor_max_force(JointAxis::AngX, torque_max);
         });
         Ok(env)
-    }
-
-    /// The bone each hinge, and each action entry, belongs to.
-    pub fn hinge_bones(&self) -> &[usize] {
-        &self.hinge_bones
     }
 
     pub fn done(&self) -> bool {
@@ -319,34 +330,35 @@ impl<'a> Env<'a> {
     }
 
     /// Sets every servo target from `action`, advances one tick and scores it.
-    pub fn step(&mut self, action: &[f32]) {
+    pub fn step(&mut self, action: &[f32]) -> Tick {
         assert_eq!(action.len(), self.hinge_bones.len(), "one action per hinge");
         assert!(!self.done(), "step after the episode ended");
         let (stiffness, damping) = (self.stiffness, self.damping);
-        let limits: Vec<[f32; 2]> = self
+        let hinges: Vec<Hinge> = self
             .hinge_bones
             .iter()
-            .map(|&i| self.skeleton.bones[i].hinge.expect("hinge bone").limits)
+            .map(|&i| self.skeleton.bones[i].hinge.expect("hinge bone"))
             .collect();
         self.for_each_servo(|data, i| {
-            let a = action[i].clamp(-1.0, 1.0);
-            let [lo, hi] = limits[i];
-            let target = if a >= 0.0 { a * hi } else { -a * lo };
+            let target = hinges[i].target(action[i].clamp(-1.0, 1.0));
             data.set_motor_position(JointAxis::AngX, target, stiffness, damping);
         });
         let before = self.poses()[0].translation;
         self.app.update();
         self.tick += 1;
-        self.tally(before);
+        self.tally(before)
     }
 
-    fn tally(&mut self, before: Vec3) {
+    fn tally(&mut self, before: Vec3) -> Tick {
         let poses = self.poses();
         self.finite = poses
             .iter()
             .all(|t| t.translation.is_finite() && t.rotation.is_finite());
         if !self.finite {
-            return;
+            return Tick {
+                supported: false,
+                left_m: 0.0,
+            };
         }
         let body = poses[0];
         let up = (body.rotation * self.skeleton.bones[0].rest.rotation.inverse()) * Vec3::Y;
@@ -358,8 +370,9 @@ impl<'a> Env<'a> {
         let supported = up.angle_between(Vec3::Y) < UPRIGHT_TILT_MAX && belly > BELLY_CLEARANCE_M;
         self.supported_ticks += supported as usize;
         self.height_sum += body.translation.y;
+        let left_m = (body.translation - before).dot(self.spawn_left);
         if supported {
-            self.walked += (body.translation - before).dot(self.spawn_left);
+            self.walked += left_m;
             if self.tick > self.task.ticks() - ticks(STAND_SCORED_S) {
                 self.stood_late += 1;
             }
@@ -368,6 +381,7 @@ impl<'a> Env<'a> {
         if self.righted_at.is_none() && self.supported_run >= ticks(RIGHTED_HOLD_S) {
             self.righted_at = Some(self.tick + 1 - self.supported_run);
         }
+        Tick { supported, left_m }
     }
 
     pub fn finish(self) -> Episode {
@@ -378,8 +392,7 @@ impl<'a> Env<'a> {
         } else {
             match self.task {
                 Task::Stand => self.stood_late as f32 / ticks(STAND_SCORED_S) as f32,
-                Task::WalkLeft => self.walked / seconds,
-                Task::WalkRight => -self.walked / seconds,
+                Task::WalkLeft | Task::WalkRight => self.task.walk_sign() * self.walked / seconds,
                 Task::Righting => self
                     .righted_at
                     .map_or(0.0, |t| 1.0 - t as f32 / ticks_total as f32),
@@ -399,7 +412,7 @@ impl<'a> Env<'a> {
 /// Runs one episode of `task` under `policy` and scores it.
 pub fn run(skeleton: &Skeleton, task: Task, policy: &mut dyn Policy) -> Result<Episode, String> {
     let mut env = Env::new(skeleton, task)?;
-    let mut action = vec![0.0; env.hinge_bones().len()];
+    let mut action = vec![0.0; skeleton.hinge_bones().len()];
     while !env.done() {
         policy.act(&env.observe(), &mut action);
         env.step(&action);
@@ -469,33 +482,7 @@ pub fn score(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sally::test_rig::{cube, glb};
-
-    /// A box body standing on a two-segment leg on each side, Y up; each hinge swings
-    /// its leg in the body's transverse plane, positive raising it.
-    fn rig() -> Skeleton {
-        let bone = |name: &str, t: [f32; 3], children: Vec<usize>, half: [f32; 3], side: f32| {
-            let mut rl = serde_json::json!({"hull": cube(half), "density": 1100.0});
-            if side != 0.0 {
-                rl["axis"] = serde_json::json!([0.0, 0.0, side]);
-                rl["limits_deg"] = serde_json::json!([-30.0, 60.0]);
-            }
-            serde_json::json!({"name": name, "translation": t, "children": children,
-                               "extras": {"rl": rl}})
-        };
-        let seg = [0.01, 0.003, 0.012];
-        Skeleton::from_glb(&glb(&serde_json::json!({
-            "nodes": [
-                bone("body", [0.0, 0.03, 0.0], vec![1, 3], [0.02, 0.012, 0.015], 0.0),
-                bone("leg.coxa.L", [0.02, 0.0, 0.0], vec![2], seg, 1.0),
-                bone("leg.merus.L", [0.02, -0.02, 0.0], vec![], seg, 1.0),
-                bone("leg.coxa.R", [-0.02, 0.0, 0.0], vec![4], seg, -1.0),
-                bone("leg.merus.R", [-0.02, -0.02, 0.0], vec![], seg, -1.0),
-            ],
-            "skins": [{"joints": [0, 1, 2, 3, 4]}],
-        })))
-        .unwrap()
-    }
+    use crate::sally::test_rig::biped as rig;
 
     /// Holds `first` on every servo for `seconds`, then `then`, to the episode's end.
     fn hold(task: Task, first: f32, seconds: f32, then: f32) -> (Episode, Vec<f32>) {

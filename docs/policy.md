@@ -81,8 +81,8 @@ and the fraction of the episode elapsed, 137 numbers, through an MLP 137 → 64 
 The elapsed fraction lets it value a cut-off episode's last ticks. It runs only in training.
 
 Initialization is seeded and random: weights uniform in ±√(6 / (fan_in + fan_out)),
-biases zero, the actor's last layer scaled by 0.01 so the first policy is close to
-holding the rest pose, and the log standard deviations at ln 0.2. Holding the rest pose
+biases zero, each network's last layer scaled by 0.01 so the first policy is close
+to holding the rest pose and the first value estimates are near zero, and the log standard deviations at ln 0.2. Holding the rest pose
 already stands (`docs/evals.md`), and a crab that falls on every exploratory step
 never sees what walking pays.
 
@@ -98,9 +98,10 @@ methods that score whole episodes, and simulated seconds are what binds.
   task's. Every iteration steps each episode 256 ticks, continuing across iterations
   and resetting to a new task when one ends; that is 4096 ticks, or 64 simulated
   seconds, per iteration.
-- **Reward,** per tick, is the eval metric's own per-tick contribution, computed by
-  the harness from the same quantities it scores:
-  - `stand`: 1 if supported.
+- **Reward,** per tick, is built from the quantities the harness scores each tick,
+  whether the crab is supported and how far it moved:
+  - `stand`: 1 if supported. The metric counts only the last 6 s; paying the first
+    2 s too pays for not falling during the drop.
   - each walk: the carapace's displacement toward the commanded side on a supported
     tick, over the animal's routine 0.097 m s⁻¹ pace times the tick length.
   - `righting`: 1 if supported. Its metric rewards the first held support; rewarding
@@ -109,15 +110,32 @@ methods that score whole episodes, and simulated seconds are what binds.
 - **Ends.** An episode reaching its task's length is cut off, not terminated: its
   value bootstraps from the critic. Non-finite physics terminates with no further
   reward.
-- **Update.** γ = 0.99 and λ = 0.95. Four epochs of minibatches of 1024 ticks, Adam
-  at 3 × 10⁻⁴, clip 0.2, value loss weight 0.5, gradient norm clipped to 0.5. The
-  actor's loss sums the ten appendages' log-probabilities into the tick's one action.
-- **Determinism.** Each episode slot draws its noise and tasks from its own seeded
-  stream, so a run replays exactly given its seed and thread-independent slot count.
+- **Update.** γ = 0.99 and λ = 0.95, advantages normalized over the batch. Four
+  epochs of minibatches of 1024 ticks, clip 0.2. The actor's loss sums the ten
+  appendages' log-probabilities into the tick's one action; the critic's is half the
+  squared error of its estimate. Actor and critic each have their own Adam at
+  3 × 10⁻⁴ and their gradient norm clipped to 0.5.
+- **Determinism.** Each episode slot runs on its own thread and draws its noise and
+  tasks from its own seeded stream, so a run replays exactly given its seed and slot
+  count; a different slot count is a different run.
 
 The network, its backward pass and Adam are plain Rust, about the size of this
 document: the networks are tens of thousands of parameters, and a tensor library would
 be a larger dependency than the code it replaces.
+
+## Running it
+
+`crab_world::policy` holds the network and the views, `crab_world::train` the
+learner. `sally-train` writes the actor to `policy.json` every 10 iterations and after
+the last, and to `train.jsonl` its config, then one line per iteration with every
+ended episode scored by its task's metric; `sally-eval` scores
+the actor's mean action on the evals:
+
+```sh
+scripts/sally/sally.sh rig sally.glb
+nix-shell --run 'cargo run --release -p crab-world --bin sally-train -- sally.glb --out run --iterations 200'
+nix-shell --run 'cargo run --release -p crab-world --bin sally-eval -- sally.glb --policy trained --weights run/policy.json'
+```
 
 ## Not in it, by choice
 

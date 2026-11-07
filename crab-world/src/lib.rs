@@ -8,8 +8,10 @@ pub mod eval;
 pub mod fnv;
 pub mod headless;
 pub mod physics;
+pub mod policy;
 pub mod sally;
 pub mod terrain;
+pub mod train;
 pub mod vehicle;
 
 #[cfg(feature = "render")]

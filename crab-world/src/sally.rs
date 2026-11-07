@@ -67,6 +67,26 @@ pub struct Hinge {
     pub limits: [f32; 2],
 }
 
+impl Hinge {
+    /// The angle a servo action targets: 0 rest, +1 and −1 the upper and lower limits,
+    /// linearly between.
+    pub fn target(&self, action: f32) -> f32 {
+        let [lo, hi] = self.limits;
+        if action >= 0.0 {
+            action * hi
+        } else {
+            -action * lo
+        }
+    }
+
+    /// The action that targets `angle`; 0 on the side of a limit that sits at rest.
+    pub fn action(&self, angle: f32) -> f32 {
+        let [lo, hi] = self.limits;
+        let span = if angle >= 0.0 { hi } else { -lo };
+        if span > 0.0 { angle / span } else { 0.0 }
+    }
+}
+
 #[derive(Deserialize)]
 struct Gltf {
     nodes: Vec<Node>,
@@ -183,6 +203,9 @@ impl Skeleton {
                 }
                 let hinge = match (parent, rl.axis, rl.limits_deg) {
                     (None, _, _) => None,
+                    (Some(_), Some(_), Some([lo, hi])) if !(lo <= 0.0 && 0.0 <= hi) => {
+                        return Err(format!("bone {name} rests outside its limits"));
+                    }
                     (Some(_), Some(axis), Some([lo, hi])) => Some(Hinge {
                         axis: Vec3::from(axis).normalize(),
                         limits: [lo.to_radians(), hi.to_radians()],
@@ -257,6 +280,14 @@ impl Skeleton {
         (app, entities)
     }
 
+    /// The bones that carry a hinge, in bone order: the order of every per-hinge
+    /// vector.
+    pub fn hinge_bones(&self) -> Vec<usize> {
+        (0..self.bones.len())
+            .filter(|&i| self.bones[i].hinge.is_some())
+            .collect()
+    }
+
     /// Every bone's world pose with the crab at rest, placed at `at`.
     pub fn rest_poses(&self, at: Transform) -> Vec<Transform> {
         self.bones.iter().map(|b| at * b.rest).collect()
@@ -302,6 +333,34 @@ impl Skeleton {
 
 #[cfg(test)]
 pub(crate) mod test_rig {
+    use super::Skeleton;
+
+    /// A box body standing on a two-segment leg on each side, Y up; each hinge swings
+    /// its leg in the body's transverse plane, positive raising it.
+    pub fn biped() -> Skeleton {
+        let bone = |name: &str, t: [f32; 3], children: Vec<usize>, half: [f32; 3], side: f32| {
+            let mut rl = serde_json::json!({"hull": cube(half), "density": 1100.0});
+            if side != 0.0 {
+                rl["axis"] = serde_json::json!([0.0, 0.0, side]);
+                rl["limits_deg"] = serde_json::json!([-30.0, 60.0]);
+            }
+            serde_json::json!({"name": name, "translation": t, "children": children,
+                               "extras": {"rl": rl}})
+        };
+        let seg = [0.01, 0.003, 0.012];
+        Skeleton::from_glb(&glb(&serde_json::json!({
+            "nodes": [
+                bone("body", [0.0, 0.03, 0.0], vec![1, 3], [0.02, 0.012, 0.015], 0.0),
+                bone("leg.coxa.L", [0.02, 0.0, 0.0], vec![2], seg, 1.0),
+                bone("leg.merus.L", [0.02, -0.02, 0.0], vec![], seg, 1.0),
+                bone("leg.coxa.R", [-0.02, 0.0, 0.0], vec![4], seg, -1.0),
+                bone("leg.merus.R", [-0.02, -0.02, 0.0], vec![], seg, -1.0),
+            ],
+            "skins": [{"joints": [0, 1, 2, 3, 4]}],
+        })))
+        .unwrap()
+    }
+
     /// The eight corners of a box with half-extents `half`, flattened.
     pub fn cube(half: [f32; 3]) -> Vec<f32> {
         (0..8)
@@ -331,6 +390,24 @@ pub(crate) mod test_rig {
 mod tests {
     use super::test_rig::cube;
     use super::*;
+
+    #[test]
+    fn a_hinge_s_action_is_the_inverse_of_its_target() {
+        let hinge = Hinge {
+            axis: Vec3::X,
+            limits: [-0.5, 1.5],
+        };
+        for a in [-1.0, -0.3, 0.0, 0.4, 1.0] {
+            assert!((hinge.action(hinge.target(a)) - a).abs() < 1e-6);
+        }
+        assert_eq!(hinge.target(1.0), 1.5);
+        assert_eq!(hinge.target(-1.0), -0.5);
+        let closed = Hinge {
+            axis: Vec3::X,
+            limits: [0.0, 1.0],
+        };
+        assert_eq!(closed.action(-0.01), 0.0);
+    }
 
     /// A body with one three-bone leg held out level: bones along local +Y, a node
     /// above the root bone carrying the Z-up to Y-up turn, and hinges on a horizontal
