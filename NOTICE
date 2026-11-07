@@ -47,5 +47,6 @@ Sally Lightfoot crab model (grapsus_grapsus_crab_280.blend)
 -----------------------------------------------------------
 Purchased from Superhive (Blender Market). Royalty-free for use in a shipped product,
 but the source file may not be redistributed, so neither it nor any export of it is
-committed here. scripts/sally/export.sh fetches the .blend from a private release
-(or reads $SALLY_BLEND) and exports its mesh, unmodified, to a .glb that git ignores.
+committed here. scripts/sally/sally.sh fetches the .blend from a private release
+(or reads $SALLY_BLEND) and exports its mesh, unmodified or rigged, to a .glb that
+git ignores.

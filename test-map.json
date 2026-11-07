@@ -12,6 +12,15 @@
     },
     {
       "paths": [
+        "scripts/sally/**"
+      ],
+      "tests": [
+        "nix-shell -p shellcheck python3 --run 'shellcheck scripts/sally/sally.sh && python3 -m py_compile scripts/sally/*.py'"
+      ],
+      "why": "the purchased-mesh export and rig, skeleton.md included since rig.py parses it; running them needs the private .blend, so offline they get lint and syntax checks only"
+    },
+    {
+      "paths": [
         "**/*.md",
         "**/.gitignore",
         "LICENSE-*",
@@ -20,15 +29,6 @@
       ],
       "tests": [],
       "why": "prose, licenses, and evidence artifacts (screenshots/logs recorded under docs/evidence)"
-    },
-    {
-      "paths": [
-        "scripts/sally/**"
-      ],
-      "tests": [
-        "nix-shell -p shellcheck python3 --run 'shellcheck scripts/sally/export.sh && python3 -m py_compile scripts/sally/*.py'"
-      ],
-      "why": "the purchased-mesh export; running it needs the private .blend, so offline it gets lint and syntax checks only"
     },
     {
       "paths": [

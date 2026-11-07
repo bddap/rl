@@ -4,8 +4,9 @@ pub mod world;
 pub use world::ArenaWorldPlugin;
 pub use world::PhysicsWorldPlugin;
 
+use bevy::prelude::*;
 use bevy_rapier3d::math::Vect;
-use bevy_rapier3d::plugin::{NoUserData, RapierPhysicsPlugin};
+use bevy_rapier3d::plugin::{NoUserData, PhysicsSet, RapierPhysicsPlugin};
 use bevy_rapier3d::prelude::TimestepMode;
 
 pub const PHYSICS_HZ: u64 = 64;
@@ -28,7 +29,13 @@ impl bevy::app::Plugin for WorldPhysicsPlugin {
             dt: PHYSICS_DT,
             substeps: 1,
         })
-        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule());
+        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
+        .add_systems(
+            FixedUpdate,
+            crate::sally::undamp_hinges
+                .after(PhysicsSet::SyncBackend)
+                .before(PhysicsSet::StepSimulation),
+        );
     }
 }
 

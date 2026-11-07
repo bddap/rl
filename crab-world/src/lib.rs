@@ -7,6 +7,7 @@ pub mod controls;
 pub mod fnv;
 pub mod headless;
 pub mod physics;
+pub mod sally;
 pub mod terrain;
 pub mod vehicle;
 
