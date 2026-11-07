@@ -129,11 +129,19 @@ be a larger dependency than the code it replaces.
 learner. `sally-train` writes the actor to `policy.json` every 10 iterations and after
 the last, and to `train.jsonl` its config, then one line per iteration with every
 ended episode scored by its task's metric; `sally-eval` scores
-the actor's mean action on the evals:
+the actor's mean action on the evals. `sally.sh run` does all of it from the purchased
+`.blend`: it rigs the crab, trains for `sally-train`'s default 320 iterations unless given a count, scores the
+trained policy and both baselines, and writes them side by side to `scores.md`:
+
+```sh
+scripts/sally/sally.sh run out
+```
+
+The steps one at a time:
 
 ```sh
 scripts/sally/sally.sh rig sally.glb
-nix-shell --run 'cargo run --release -p crab-world --bin sally-train -- sally.glb --out run --iterations 200'
+nix-shell --run 'cargo run --release -p crab-world --bin sally-train -- sally.glb --out run'
 nix-shell --run 'cargo run --release -p crab-world --bin sally-eval -- sally.glb --policy trained --weights run/policy.json'
 ```
 

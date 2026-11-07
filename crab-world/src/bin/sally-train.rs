@@ -14,7 +14,7 @@ struct Args {
     rig: PathBuf,
     #[arg(long)]
     out: PathBuf,
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = 320)]
     iterations: usize,
     #[arg(long, default_value_t = 0)]
     seed: u64,
