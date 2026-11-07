@@ -137,6 +137,26 @@ nix-shell --run 'cargo run --release -p crab-world --bin sally-train -- sally.gl
 nix-shell --run 'cargo run --release -p crab-world --bin sally-eval -- sally.glb --policy trained --weights run/policy.json'
 ```
 
+## First run
+
+Seed 0, 320 iterations: 1.31 × 10⁶ ticks, about 5.7 simulated hours, from random
+initialization. Scored by `sally-eval` on its mean action, beside the baselines of
+`docs/evals.md`, all re-run on the same build:
+
+| task | zero | random | trained |
+|---|---|---|---|
+| `stand` | 1.0 | 0.045 (0 to 0.18) | 1.0 |
+| `walk_left` | −0.0001 m s⁻¹ | 0.0016 m s⁻¹ (−0.0013 to 0.0079) | −0.0002 m s⁻¹ |
+| `walk_right` | 0.0001 m s⁻¹ | −0.0016 m s⁻¹ (−0.0079 to 0.0013) | −0.0006 m s⁻¹ |
+| `righting` | 0 | 0 | 0 |
+
+The trained policy stands and does not walk or right itself; on the evals it is no
+better than holding the rest pose. Its training episodes, which sample actions around
+the mean with σ ≈ 0.19, did walk: over the last 40 iterations they averaged
+0.022 m s⁻¹ left and 0.021 m s⁻¹ right, a fifth of the animal's routine pace and
+13 times the random baseline's mean. The walking is in the sampled noise,
+not in the mean the evals score. No episode, trained or sampled, righted itself.
+
 ## Not in it, by choice
 
 - **Learned clock frequency.** The animal's 1.17 Hz is enough to walk at its routine
