@@ -79,7 +79,7 @@ run)
     crab_world sally-eval "$glb" --policy zero >"$out/zero.eval"
     crab_world sally-eval "$glb" --policy random >"$out/random.eval"
     crab_world sally-eval "$glb" --policy trained --weights "$out/train/policy.json" >"$out/trained.eval"
-    run --python "$here/scores.py" -- "$out/zero.eval" "$out/random.eval" "$out/trained.eval" "$out/scores.md"
+    nix-shell -p python3 --run "python3 $(printf '%q ' "$here/scores.py" -- "$out/zero.eval" "$out/random.eval" "$out/trained.eval" "$out/scores.md")"
     cat "$out/scores.md"
     ;;
 *)
