@@ -23,8 +23,25 @@ pub const SUBSTEPS: usize = 16;
 
 const GROUND_HALF_EXTENT_M: f32 = 50.0;
 
+/// Contact spring rate, Hz: at rapier's 30 (60 against the ground) a servo pressing a
+/// foot down sank it up to 9 mm, deeper than the foot is thick.
+const CONTACT_HZ: f32 = 240.0;
+
 #[derive(Component)]
 pub struct SallyBone;
+
+/// rapier solves friction only in the unbiased pass by default, yet integrates positions
+/// from the biased pass's velocities: each substep the servo-loaded feet slid
+/// frictionless while their penetration was pushed out, and a crab holding its rest
+/// pose crept 4 cm in 9 s.
+fn stiffen_contacts(mut contexts: Query<&mut RapierContextSimulation>) {
+    for mut context in &mut contexts {
+        let params = &mut context.integration_parameters;
+        params.friction_in_bias_pass = true;
+        params.contact_softness.natural_frequency = CONTACT_HZ;
+        params.static_contact_softness.natural_frequency = CONTACT_HZ;
+    }
+}
 
 /// rapier gives every free angular joint axis 0.1 N·m·s/rad of damping whatever the
 /// bodies' size; on gram-scale legs that freezes the joints, so Sally's are undamped.
@@ -272,6 +289,7 @@ impl Skeleton {
             dt: PHYSICS_DT,
             substeps: SUBSTEPS,
         });
+        app.add_systems(PostStartup, stiffen_contacts);
         let skeleton = self.clone();
         let entities = app
             .world_mut()

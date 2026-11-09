@@ -44,8 +44,12 @@ sets servo targets and nothing else.
   side faced at spawn.
 - **World.** Flat ground, gravity 9.81 m s⁻², 64 ticks per second with 16 physics
   substeps each: at one substep the gram-scale links pass through their joint limits.
-  The crab spawns with its lowest point 10 mm above the ground. Bodies never sleep, so
-  a still crab still answers its servos. Nothing is random but the policy, so an
+  Contacts carry friction in every solver pass, so a servo-loaded foot cannot slide
+  while the solver pushes it out of the ground. They spring at 240 Hz, so a foot a
+  servo presses down stays on the floor. At rapier's defaults a crab holding its rest
+  pose crept 4 cm in 9 s, and a trained policy's feet sank up to 9 mm. The crab spawns
+  with its lowest point 10 mm above the ground. Bodies never sleep, so a still crab
+  still answers its servos. Nothing is random but the policy, so an
   episode replays bit for bit. An episode whose physics goes non-finite ends and
   scores 0.
 

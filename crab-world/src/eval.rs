@@ -572,6 +572,27 @@ mod tests {
     }
 
     #[test]
+    fn a_crab_holding_a_pose_stays_put_on_the_ground() {
+        let skeleton = rig();
+        for action in [0.0, -0.5] {
+            let mut env = Env::new(&skeleton, Task::WalkLeft).unwrap();
+            let (mut landed, mut lowest) = (Vec3::ZERO, f32::INFINITY);
+            while !env.done() {
+                env.step(&[action; 4]);
+                if env.tick == ticks(1.0) {
+                    landed = env.poses()[0].translation;
+                }
+                if env.tick >= ticks(1.0) {
+                    lowest = lowest.min(skeleton.lowest_point(&env.poses()));
+                }
+            }
+            let crept = (env.poses()[0].translation - landed).with_y(0.0).length();
+            assert!(crept < 1e-4, "action {action}: crept {crept} m");
+            assert!(lowest > -1e-4, "action {action}: sank {lowest} m");
+        }
+    }
+
+    #[test]
     fn the_crab_spawns_its_drop_height_above_the_ground() {
         let skeleton = rig();
         for task in [Task::Stand, Task::Righting] {
