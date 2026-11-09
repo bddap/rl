@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::eval::{Env, Episode, Task};
 use crate::physics::PHYSICS_DT;
-use crate::policy::{Actor, Anatomy, Mlp, critic, uniform};
+use crate::policy::{Actor, Anatomy, Mlp, critic};
 use crate::sally::Skeleton;
 
 /// *Grapsus* routine walking pace (Martinez et al. 1998, Table 1); a walk's reward is
@@ -94,12 +94,6 @@ fn gae(ticks: &[(f32, f32, Option<f32>)], tail: f32, gamma: f32, lambda: f32) ->
     out
 }
 
-fn gaussian(rng: &mut ChaCha8Rng) -> f32 {
-    let u = 1.0 - uniform(rng);
-    let v = uniform(rng);
-    (-2.0 * u.ln()).sqrt() * (std::f32::consts::TAU * v).cos()
-}
-
 fn log_prob(targets: &[f32], means: &[f32], log_std: &[f32]) -> f32 {
     let n = log_std.len();
     targets
@@ -175,12 +169,7 @@ fn rollout_slot(
             let obs = env.observe();
             let views = anatomy.views(&obs);
             let means = actor.means(&views);
-            let n = actor.log_std.len();
-            let targets: Vec<f32> = means
-                .iter()
-                .enumerate()
-                .map(|(i, m)| m + actor.log_std[i % n].exp() * gaussian(&mut rng))
-                .collect();
+            let targets = actor.sample(&means, &mut rng);
             anatomy.scatter(&targets, &mut action);
             let tick = env.step(&action);
             let mut sample = Sample {

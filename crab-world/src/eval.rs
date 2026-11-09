@@ -24,8 +24,9 @@ const SERVO_DAMPING_S: f32 = 0.01;
 const STAND_SCORED_S: f32 = 6.0;
 const RIGHTED_HOLD_S: f32 = 0.5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
+#[value(rename_all = "snake_case")]
 pub enum Task {
     Stand,
     WalkLeft,
@@ -411,13 +412,70 @@ impl<'a> Env<'a> {
 
 /// Runs one episode of `task` under `policy` and scores it.
 pub fn run(skeleton: &Skeleton, task: Task, policy: &mut dyn Policy) -> Result<Episode, String> {
+    run_seen(skeleton, task, policy, |_| ())
+}
+
+/// [`run`], also returning every bone's world pose at spawn and after each tick, in
+/// [`Skeleton`] order.
+pub fn record(
+    skeleton: &Skeleton,
+    task: Task,
+    policy: &mut dyn Policy,
+) -> Result<(Episode, Vec<Vec<Transform>>), String> {
+    let mut poses = Vec::with_capacity(task.ticks() + 1);
+    let episode = run_seen(skeleton, task, policy, |env| poses.push(env.poses()))?;
+    Ok((episode, poses))
+}
+
+fn run_seen(
+    skeleton: &Skeleton,
+    task: Task,
+    policy: &mut dyn Policy,
+    mut see: impl FnMut(&Env),
+) -> Result<Episode, String> {
     let mut env = Env::new(skeleton, task)?;
     let mut action = vec![0.0; skeleton.hinge_bones().len()];
+    see(&env);
     while !env.done() {
         policy.act(&env.observe(), &mut action);
         env.step(&action);
+        see(&env);
     }
     Ok(env.finish())
+}
+
+/// One recorded episode as `{"hz", "task", "seed", "episode", "bones": [name],
+/// "rest": [pose per bone], "poses": [[pose per bone] per frame]}`, each pose
+/// `[x, y, z, qx, qy, qz, qw]`: the bones' rest in the rig's model space and their
+/// bodies in the world, both glTF's Y up, for a renderer to pose the rig's own mesh with.
+pub fn write_recording(
+    skeleton: &Skeleton,
+    dir: &std::path::Path,
+    task: Task,
+    seed: u64,
+    episode: &Episode,
+    poses: &[Vec<Transform>],
+) -> Result<(), String> {
+    let seven = |t: &Transform| {
+        let (p, q) = (t.translation, t.rotation);
+        [p.x, p.y, p.z, q.x, q.y, q.z, q.w]
+    };
+    let poses: Vec<Vec<[f32; 7]>> = poses
+        .iter()
+        .map(|frame| frame.iter().map(seven).collect())
+        .collect();
+    let json = serde_json::json!({
+        "hz": PHYSICS_HZ,
+        "task": task,
+        "seed": seed,
+        "episode": episode,
+        "bones": skeleton.bones.iter().map(|b| &b.name).collect::<Vec<_>>(),
+        "rest": skeleton.bones.iter().map(|b| seven(&b.rest)).collect::<Vec<_>>(),
+        "poses": poses,
+    });
+    let name = clap::ValueEnum::to_possible_value(&task).expect("every task is named");
+    let path = dir.join(format!("{}-{seed}.json", name.get_name()));
+    std::fs::write(&path, json.to_string()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -427,18 +485,21 @@ pub struct TaskScore {
     pub mean: f32,
 }
 
-/// Scores a policy family on every task: `make(seed)` builds a fresh policy per
+/// Scores a policy family on `tasks`: `make(seed)` builds a fresh policy per
 /// episode, one episode per seed. Episodes run on parallel threads, each in its own
-/// world, so the scores do not depend on the thread count.
+/// world, so the scores do not depend on the thread count. With `record`, each
+/// episode's poses go to `<record>/<task>-<seed>.json` ([`write_recording`]).
 pub fn score(
     skeleton: &Skeleton,
+    tasks: &[Task],
     seeds: &[u64],
     make: &(dyn Fn(u64) -> Box<dyn Policy> + Sync),
+    record: Option<&std::path::Path>,
 ) -> Result<Vec<TaskScore>, String> {
     if seeds.is_empty() {
         return Err("no seeds to score".into());
     }
-    let jobs: Vec<(Task, u64)> = Task::ALL
+    let jobs: Vec<(Task, u64)> = tasks
         .iter()
         .flat_map(|&task| seeds.iter().map(move |&seed| (task, seed)))
         .collect();
@@ -455,7 +516,17 @@ pub fn score(
                         .skip(w)
                         .step_by(threads)
                         .map(|(i, &(task, seed))| {
-                            Ok((i, run(skeleton, task, make(seed).as_mut())?))
+                            let mut policy = make(seed);
+                            let episode = match record {
+                                None => run(skeleton, task, policy.as_mut())?,
+                                Some(dir) => {
+                                    let (episode, poses) =
+                                        self::record(skeleton, task, policy.as_mut())?;
+                                    write_recording(skeleton, dir, task, seed, &episode, &poses)?;
+                                    episode
+                                }
+                            };
+                            Ok((i, episode))
                         })
                         .collect::<Result<Vec<_>, String>>()
                 })
@@ -468,7 +539,7 @@ pub fn score(
         done.sort_by_key(|&(i, _)| i);
         Ok::<_, String>(done.into_iter().map(|(_, e)| e).collect())
     })?;
-    Ok(Task::ALL
+    Ok(tasks
         .iter()
         .zip(episodes.chunks(seeds.len()))
         .map(|(&task, episodes)| TaskScore {
@@ -540,9 +611,13 @@ mod tests {
     #[test]
     fn parallel_scoring_matches_serial_episodes() {
         let skeleton = rig();
-        let scores = score(&skeleton, &[1, 2], &|seed| {
-            Box::new(RandomPolicy::new(seed))
-        })
+        let scores = score(
+            &skeleton,
+            &Task::ALL,
+            &[1, 2],
+            &|seed| Box::new(RandomPolicy::new(seed)),
+            None,
+        )
         .unwrap();
         for (task, scored) in Task::ALL.iter().zip(&scores) {
             assert_eq!(scored.task, *task);

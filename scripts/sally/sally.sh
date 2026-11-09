@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
 # Usage: sally.sh export <out.glb> [<render-dir>]
 #        sally.sh rig <out.glb> [<render-dir>]
-#        sally.sh run <out-dir> [<iterations>]
+#        sally.sh run <out-dir> [<iterations> [<seed>]]
+#        sally.sh clips <out-dir> <policy.json> [<task>]
 # export: the purchased mesh as bought, checked against the .blend.
 # rig: the mesh skinned to the skeleton in skeleton.md, its report beside it, then
 #      dropped on flat ground in rapier to check the bodies and hinges derived from
 #      the bones hold together.
 # run: the whole crab pipeline in one go: rig, train the policy from a seeded random
 #      initialization, score it and both baselines on the evals, and write the three
-#      side by side to <out-dir>/scores.md.
+#      side by side to <out-dir>/scores.md, with the trained policy also scored acting
+#      samples around its mean, as it does in training.
+# clips: one episode of <task> (walk_left by default) from the same start under the
+#      zero, random, trained-mean and trained-sampled policies, each rendered from its
+#      recorded physics bodies to <out-dir>/<policy>.mp4, labelled with its score.
 # The purchased .blend may not be redistributed (NOTICE): it is read from
 # $SALLY_BLEND, else fetched from the private release; the .glb it writes is gitignored.
 set -euo pipefail
 
-usage="usage: sally.sh export|rig <out.glb> [<render-dir>] | run <out-dir> [<iterations>]"
+usage="usage: sally.sh export|rig <out.glb> [<render-dir>] | run <out-dir> [<iterations> [<seed>]] | clips <out-dir> <policy.json> [<task>]"
 mode="${1:?$usage}"
 out="$(realpath -m "${2:?$usage}")"
 if [[ "$mode" == run ]]; then
-    iterations=(${3:+--iterations "$3"})
+    train_args=(${3:+--iterations "$3"} ${4:+--seed "$4"})
+    render_dir=
+elif [[ "$mode" == clips ]]; then
+    weights="$(realpath "${3:?$usage}")"
+    task="${4:-walk_left}"
     render_dir=
 else
     render_dir="${3:+$(realpath -m "$3")}"
@@ -75,12 +84,27 @@ run)
     mkdir -p "$out"
     glb="$out/sally.glb"
     rig "$glb"
-    crab_world sally-train "$glb" --out "$out/train" "${iterations[@]}"
+    crab_world sally-train "$glb" --out "$out/train" "${train_args[@]}"
     crab_world sally-eval "$glb" --policy zero >"$out/zero.eval"
     crab_world sally-eval "$glb" --policy random >"$out/random.eval"
     crab_world sally-eval "$glb" --policy trained --weights "$out/train/policy.json" >"$out/trained.eval"
-    nix-shell -p python3 --run "python3 $(printf '%q ' "$here/scores.py" -- "$out/zero.eval" "$out/random.eval" "$out/trained.eval" "$out/scores.md")"
+    crab_world sally-eval "$glb" --policy sampled --weights "$out/train/policy.json" >"$out/sampled.eval"
+    nix-shell -p python3 --run "python3 $(printf '%q ' "$here/scores.py" -- "$out/zero.eval" "$out/random.eval" "$out/trained.eval" "$out/sampled.eval" "$out/scores.md")"
     cat "$out/scores.md"
+    ;;
+clips)
+    mkdir -p "$out"
+    glb="$out/sally.glb"
+    rig "$glb"
+    for policy in zero random trained sampled; do
+        args=(--policy "$policy" --task "$task" --seeds 1 --record "$out/$policy")
+        [[ "$policy" == zero || "$policy" == random ]] || args+=(--weights "$weights")
+        crab_world sally-eval "$glb" "${args[@]}" >"$out/$policy.eval"
+        score="$(sed -n 's/^SALLY_EVAL //p' "$out/$policy.eval" | nix-shell -p jq --run "jq -r '.tasks[0].mean'")"
+        run --python "$here/clip.py" -- \
+            "$glb" "$out/$policy/$task-0.json" "$out/$policy.mp4" "$policy  $task  $score"
+    done
+    ls -l "$out"/*.mp4
     ;;
 *)
     echo "$usage" >&2

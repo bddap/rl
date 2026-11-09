@@ -3,7 +3,7 @@
 
 use bevy::prelude::*;
 use rand_chacha::ChaCha8Rng;
-use rand_chacha::rand_core::RngCore;
+use rand_chacha::rand_core::{RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::eval::{Observation, Policy, Task, model_left};
@@ -136,6 +136,12 @@ impl Mlp {
 /// Uniform in [0, 1).
 pub fn uniform(rng: &mut ChaCha8Rng) -> f32 {
     (rng.next_u32() >> 8) as f32 / (1u32 << 24) as f32
+}
+
+fn gaussian(rng: &mut ChaCha8Rng) -> f32 {
+    let u = 1.0 - uniform(rng);
+    let v = uniform(rng);
+    (-2.0 * u.ln()).sqrt() * (std::f32::consts::TAU * v).cos()
 }
 
 /// One appendage: its hinges, proximal first, as indices into the per-hinge vectors.
@@ -388,31 +394,58 @@ impl Actor {
             .flat_map(|v| self.net.forward(v).output().to_vec())
             .collect()
     }
+
+    /// Targets drawn from the Gaussian around `means`, as training explores.
+    pub fn sample(&self, means: &[f32], rng: &mut ChaCha8Rng) -> Vec<f32> {
+        let n = self.log_std.len();
+        means
+            .iter()
+            .enumerate()
+            .map(|(i, m)| m + self.log_std[i % n].exp() * gaussian(rng))
+            .collect()
+    }
 }
 
 pub fn critic(anatomy: &Anatomy, rng: &mut ChaCha8Rng) -> Mlp {
     Mlp::new(&[anatomy.critic_size(), HIDDEN, HIDDEN, 1], false, rng)
 }
 
-/// A trained [`Actor`] driving the crab with its mean action.
+/// A trained [`Actor`] driving the crab with its mean action, or, given a noise
+/// stream, with actions sampled around it as in training.
 #[derive(Clone)]
 pub struct Trained {
     pub anatomy: Anatomy,
     pub actor: Actor,
+    pub noise: Option<ChaCha8Rng>,
 }
 
 impl Trained {
     pub fn new(skeleton: &Skeleton, actor: Actor) -> Result<Self, String> {
         let anatomy = Anatomy::new(skeleton)?;
         actor.check(&anatomy)?;
-        Ok(Self { anatomy, actor })
+        Ok(Self {
+            anatomy,
+            actor,
+            noise: None,
+        })
+    }
+
+    pub fn sampled(self, seed: u64) -> Self {
+        Self {
+            noise: Some(ChaCha8Rng::seed_from_u64(seed)),
+            ..self
+        }
     }
 }
 
 impl Policy for Trained {
     fn act(&mut self, obs: &Observation, action: &mut [f32]) {
         let means = self.actor.means(&self.anatomy.views(obs));
-        self.anatomy.scatter(&means, action);
+        let targets = match &mut self.noise {
+            Some(rng) => self.actor.sample(&means, rng),
+            None => means,
+        };
+        self.anatomy.scatter(&targets, action);
     }
 }
 

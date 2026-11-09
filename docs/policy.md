@@ -128,13 +128,24 @@ be a larger dependency than the code it replaces.
 `crab_world::policy` holds the network and the views, `crab_world::train` the
 learner. `sally-train` writes the actor to `policy.json` every 10 iterations and after
 the last, and to `train.jsonl` its config, then one line per iteration with every
-ended episode scored by its task's metric; `sally-eval` scores
-the actor's mean action on the evals. `sally.sh run` does all of it from the purchased
-`.blend`: it rigs the crab, trains for `sally-train`'s default 320 iterations unless given a count, scores the
-trained policy and both baselines, and writes them side by side to `scores.md`:
+ended episode scored by its task's metric; `sally-eval --policy trained` scores
+the actor's mean action on the evals, and `--policy sampled` the actor acting samples
+around its mean as it does in training, one episode per seed. `sally.sh run` does all
+of it from the purchased `.blend`: it rigs the crab, trains for `sally-train`'s default
+320 iterations from seed 0 unless given a count and a seed, scores the trained policy
+both ways and both baselines, and writes them side by side to `scores.md`:
 
 ```sh
-scripts/sally/sally.sh run out
+scripts/sally/sally.sh run out [<iterations> [<seed>]]
+```
+
+`sally.sh clips` shows what a policy does: one episode of a task (`walk_left` unless
+named) from the same start under the zero, random, trained (mean) and sampled policies, each
+recorded by `sally-eval --record` and rendered by `clip.py` as the rig's own mesh
+posed by its physics bodies every third tick, to `<out>/<policy>.mp4`:
+
+```sh
+scripts/sally/sally.sh clips out run/train/policy.json
 ```
 
 The steps one at a time:
@@ -148,22 +159,23 @@ nix-shell --run 'cargo run --release -p crab-world --bin sally-eval -- sally.glb
 ## First run
 
 Seed 0, 320 iterations: 1.31 × 10⁶ ticks, about 5.7 simulated hours, from random
-initialization. Scored by `sally-eval` on its mean action, beside the baselines of
-`docs/evals.md`, all re-run on the same build:
+initialization. Scored by `sally-eval` on its mean action (trained) and acting samples around it over
+seeds 0 to 7 (sampled), beside the baselines of `docs/evals.md`:
 
-| task | zero | random | trained |
-|---|---|---|---|
-| `stand` | 1.0 | 0.045 (0 to 0.18) | 1.0 |
-| `walk_left` | −0.0001 m s⁻¹ | 0.0016 m s⁻¹ (−0.0013 to 0.0079) | −0.0002 m s⁻¹ |
-| `walk_right` | 0.0001 m s⁻¹ | −0.0016 m s⁻¹ (−0.0079 to 0.0013) | −0.0006 m s⁻¹ |
-| `righting` | 0 | 0 | 0 |
+| task | zero | random | trained | sampled |
+|---|---|---|---|---|
+| `stand` | 1.0 | 0.045 (0 to 0.18) | 1.0 | 0.999 (0.995 to 1) |
+| `walk_left` | −0.0001 m s⁻¹ | 0.0016 m s⁻¹ (−0.0013 to 0.0079) | −0.0002 m s⁻¹ | 0.014 m s⁻¹ (−0.066 to 0.073) |
+| `walk_right` | 0.0001 m s⁻¹ | −0.0016 m s⁻¹ (−0.0079 to 0.0013) | −0.0006 m s⁻¹ | 0.010 m s⁻¹ (−0.025 to 0.079) |
+| `righting` | 0 | 0 | 0 | 0 |
 
 The trained policy stands and does not walk or right itself; on the evals it is no
-better than holding the rest pose. Its training episodes, which sample actions around
-the mean with σ ≈ 0.19, did walk: over the last 40 iterations they averaged
-0.022 m s⁻¹ left and 0.021 m s⁻¹ right, a fifth of the animal's routine pace and
-13 times the random baseline's mean. The walking is in the sampled noise,
-not in the mean the evals score. No episode, trained or sampled, righted itself.
+better than holding the rest pose. Acting samples around its mean with σ ≈ 0.19, as in
+training, the crab moves up to 0.08 m s⁻¹, but 7 of its 16 walk episodes go away from
+the commanded side: the 16 average 0.012 m s⁻¹ with a standard error of 0.010. Its
+training episodes over the last 40 iterations averaged 0.022 m s⁻¹ left and 0.021 m s⁻¹
+right. The noise moves the crab; the mean does not direct it. No episode, trained or
+sampled, righted itself.
 
 ## Not in it, by choice
 
