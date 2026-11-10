@@ -252,25 +252,28 @@ mod tests {
         assert!(first.parent.params == first.kept.params);
 
         let skeleton = biped();
-        let mut unbeatable = Trainer::new(&skeleton, &CONFIG).unwrap();
-        unbeatable.kept.fitness = f32::INFINITY;
-        let report = unbeatable.generation().unwrap();
+        let mut tied = Trainer::new(&skeleton, &CONFIG).unwrap();
+        tied.kept.fitness = first.report.fitnesses[best];
+        let report = tied.generation().unwrap();
         assert_eq!(report.fitnesses, first.report.fitnesses);
         assert!(!report.improved);
-        assert_eq!(report.kept.fitness(), f32::INFINITY);
-        assert!(unbeatable.actor().params == first.actor.params);
-        assert!(unbeatable.parent.params == first.parent.params);
+        let scores = |s: &Scored| s.episodes.iter().map(|e| e.score).collect::<Vec<_>>();
+        assert_eq!(scores(&report.kept), scores(&first.scored));
+        assert!(tied.actor().params == first.actor.params);
+        assert!(tied.parent.params == first.parent.params);
 
-        let next = unbeatable.perturbed();
+        let next = tied.perturbed();
         let rms_from = |from: &Actor| {
             let squares = next
                 .params
                 .iter()
                 .zip(&from.params)
                 .map(|(n, f)| (n - f).powi(2));
-            (squares.sum::<f32>() / next.params.len() as f32).sqrt()
+            (squares.sum::<f32>() / next.clone().last_layer_mut().len() as f32).sqrt()
         };
         assert!(rms_from(&first.parent) < rms_from(&first.actor));
+        let step = rms_from(&first.parent);
+        assert!((step / CONFIG.step - 1.0).abs() < 0.2, "{step}");
     }
 
     #[test]

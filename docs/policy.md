@@ -119,10 +119,10 @@ The actor is trained by direct search on the evals: a (1, λ) evolution strategy
 - **Selection.** A generation's fittest candidate parents the next, whether or not
   it beats its own parent, and the fittest actor scored in any generation is kept as
   the result. Searches that moved only to a fitter candidate stayed on the first gait
-  they met: from the same first generation, 0.0067 m s⁻¹, one with this step stayed
-  there for the two generations it ran, and one whose step narrowed after each
-  failure stayed for eight and was at 0.010 m s⁻¹ after fourteen, where this one was
-  at 0.014 m s⁻¹ after five.
+  they met: from the same first generation, 0.0067 m s⁻¹ on `walk_left`, one with
+  this step stayed there for the two generations it ran, and one whose step narrowed
+  after each failure stayed for eight and was at 0.010 m s⁻¹ after fourteen, where
+  this one was at 0.014 m s⁻¹ after five.
 - **No noise on the actions.** A learner that explores by perturbing actions trains
   the perturbed policy, not the scored one, and on this body the perturbation is the
   shaking above: what improves is where the shaking carries the crab, and nothing in
@@ -172,6 +172,24 @@ scripts/sally/sally.sh rig sally.glb
 nix-shell --run 'cargo run --release -p crab-world --bin sally-train -- sally.glb --out run'
 nix-shell --run 'cargo run --release -p crab-world --bin sally-eval -- sally.glb --policy trained --weights run/policy.json'
 ```
+
+## A run
+
+Seed 0, cut after 14 of the default 64 generations (`scripts/sally/sally.sh run out
+274816 0`): 2.7 × 10⁵ ticks, 72 simulated minutes. Scored by `sally-eval` beside the
+baselines of `docs/evals.md`:
+
+| task | zero | random | trained |
+|---|---|---|---|
+| `stand` | 1 | 0.038 (0 to 0.073) | 1 |
+| `walk_left` | −9 × 10⁻⁷ m s⁻¹ | −0.0002 m s⁻¹ (−0.0082 to 0.0058) | 0.0139 m s⁻¹ |
+| `walk_right` | 9 × 10⁻⁷ m s⁻¹ | 0.0002 m s⁻¹ (−0.0058 to 0.0082) | 0.0050 m s⁻¹ |
+| `righting` | 0 | 0 (0 to 0) | 0.80 |
+
+The kept actor, found in the eleventh generation, stands, walks toward the commanded
+side on both walks at 14% and 5% of the animal's pace, and turns itself off its back
+in 2.0 s. The two walks differ though the policy is symmetric and the rig mirrors to
+about 1 mm.
 
 ## Not in it, by choice
 
