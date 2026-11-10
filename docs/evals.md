@@ -63,7 +63,7 @@ the fraction of a millimetre rapier's contacts let a resting hull sink.
 | task | start | length | metric | why it measures the behaviour |
 |---|---|---|---|---|
 | `stand` | upright | 8 s | fraction of ticks supported over the last 6 s | Carrying the body is the precondition of every gait. The first 2 s let the drop settle. |
-| `walk_left`, `walk_right` | upright | 10 s each | net carapace displacement toward the side that faced left (right) at spawn, summed over supported ticks only, over 10 s, in m s⁻¹ | Sideways walking is how the animal travels. Counting only supported ticks scores walking, not sliding on the belly or tumbling. The mirrored pair is read together: a policy that drifts one way scores the same magnitude with opposite signs. |
+| `walk_left`, `walk_right` | upright | 10 s each | net sideways carapace travel toward the side that faced left (right) at spawn, summed over supported ticks only, over 10 s, in m s⁻¹. A tick's sideways travel is its displacement along the carapace's own left–right axis as it points that tick, counted by that axis's component along the spawn direction | Sideways walking is how the animal travels. Counting only supported ticks scores walking, not sliding on the belly or tumbling. Counting only travel along the crab's own side scores walking sideways: a metric that counts any travel toward the side pays 0.20 m s⁻¹ to a crab that turns its back on it and drives itself backward, which is not a walk. The mirrored pair is read together: a policy that drifts one way scores the same magnitude with opposite signs. |
 | `righting` | overturned about the fore–aft axis | 10 s | 1 − t/10 s, where t is the start of the first 0.5 s spent supported; 0 if it never is | Recovering from an overturn decides whether the crab can keep going. Holding 0.5 s excludes passing through upright mid-tumble. |
 
 The reference for the walks is the animal's 0.097 m s⁻¹ routine pace, with 1.4 m s⁻¹
@@ -102,14 +102,14 @@ the range across seeds.
 
 | task | zero | random |
 |---|---|---|
-| `stand` | 1.0 | 0.045 (0 to 0.18) |
-| `walk_left` | −0.0001 m s⁻¹ | 0.0016 m s⁻¹ (−0.0013 to 0.0079) |
-| `walk_right` | 0.0001 m s⁻¹ | −0.0016 m s⁻¹ (−0.0079 to 0.0013) |
+| `stand` | 1.0 | 0.038 (0 to 0.073) |
+| `walk_left` | −9 × 10⁻⁷ m s⁻¹ | −0.0002 m s⁻¹ (−0.0082 to 0.0058) |
+| `walk_right` | 9 × 10⁻⁷ m s⁻¹ | 0.0002 m s⁻¹ (−0.0058 to 0.0082) |
 | `righting` | 0 | 0 (0 to 0) |
 
 Holding the bought posture stands, so `stand` alone cannot tell a policy from the
-zero baseline; walking and righting can. Neither baseline walks: zero drifts at 0.1% of the animal's
-pace and random at 1.7% on average, 8% on its best seed, and each pair is equal and
+zero baseline; walking and righting can. Neither baseline walks: zero drifts at 0.001% of the animal's
+pace and random at 0.2% on average, 8% on its best seed, and each pair is equal and
 opposite because neither policy reads the task. Neither rights itself in 10 s. The zero crab stands
 with its carapace origin at 25 mm, against the animal's 44 mm walking height.
 

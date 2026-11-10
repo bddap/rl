@@ -5,17 +5,15 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use crab_world::eval::{Policy, RandomPolicy, Task, ZeroPolicy, joint_torque_max, score};
-use crab_world::policy::{Actor, Trained};
+use crab_world::policy::{Actor, Driver};
 use crab_world::sally::Skeleton;
 
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
 enum Kind {
     Zero,
     Random,
-    /// The `policy.json` that `sally-train` writes, named by `--weights`, acting its mean.
+    /// The `policy.json` that `sally-train` writes, named by `--weights`.
     Trained,
-    /// The same, acting samples around its mean, as in training; one episode per seed.
-    Sampled,
 }
 
 #[derive(Parser)]
@@ -25,7 +23,7 @@ struct Args {
     policy: Kind,
     #[arg(long)]
     weights: Option<PathBuf>,
-    /// One episode per seed per task, seeds 0 up; the deterministic policies run once.
+    /// One episode per seed per task, seeds 0 up; the policies that draw nothing run once.
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u64).range(1..))]
     seeds: u64,
     /// The tasks to run; every task by default.
@@ -41,13 +39,13 @@ fn main() -> Result<(), String> {
     let glb = std::fs::read(&args.rig).map_err(|e| format!("{}: {e}", args.rig.display()))?;
     let skeleton = Skeleton::from_glb(&glb)?;
     let trained = match (args.policy, &args.weights) {
-        (Kind::Trained | Kind::Sampled, Some(path)) => {
+        (Kind::Trained, Some(path)) => {
             let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
             let actor: Actor =
                 serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-            Some(Trained::new(&skeleton, actor)?)
+            Some(Driver::new(&skeleton, actor)?)
         }
-        (Kind::Trained | Kind::Sampled, None) => {
+        (Kind::Trained, None) => {
             return Err("a trained policy needs --weights".into());
         }
         (_, Some(_)) => return Err("--weights names a trained policy".into()),
@@ -55,7 +53,7 @@ fn main() -> Result<(), String> {
     };
     let seeds: Vec<u64> = match args.policy {
         Kind::Zero | Kind::Trained => vec![0],
-        Kind::Random | Kind::Sampled => (0..args.seeds).collect(),
+        Kind::Random => (0..args.seeds).collect(),
     };
     let tasks: Vec<Task> = Task::ALL
         .into_iter()
@@ -67,7 +65,6 @@ fn main() -> Result<(), String> {
     let make = |seed: u64| -> Box<dyn Policy> {
         match (args.policy, &trained) {
             (Kind::Random, _) => Box::new(RandomPolicy::new(seed)),
-            (Kind::Sampled, Some(trained)) => Box::new(trained.clone().sampled(seed)),
             (_, Some(trained)) => Box::new(trained.clone()),
             (_, None) => Box::new(ZeroPolicy),
         }

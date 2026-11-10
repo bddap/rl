@@ -23,6 +23,8 @@ const SERVO_SATURATION_RAD: f32 = 0.1;
 const SERVO_DAMPING_S: f32 = 0.01;
 const STAND_SCORED_S: f32 = 6.0;
 const RIGHTED_HOLD_S: f32 = 0.5;
+/// *Grapsus* routine walking pace (Martinez et al. 1998, Table 1).
+const ROUTINE_PACE_M_S: f32 = 0.097;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +59,14 @@ impl Task {
     pub fn ticks(self) -> usize {
         ticks(self.seconds())
     }
+
+    /// The score that stands for doing the task well.
+    pub fn reference(self) -> f32 {
+        match self {
+            Task::WalkLeft | Task::WalkRight => ROUTINE_PACE_M_S,
+            Task::Stand | Task::Righting => 1.0,
+        }
+    }
 }
 
 fn ticks(seconds: f32) -> usize {
@@ -80,13 +90,14 @@ pub struct Observation {
     pub bones: Vec<BoneState>,
     pub hinges: Vec<f32>,
     /// World-space horizontal unit vector the crab's left side faced at spawn; the
-    /// walks are measured along it.
+    /// walks count sideways travel toward it or away.
     pub spawn_left: Vec3,
 }
 
 /// `action[i]` drives the servo of hinge `i`, in [`Observation::hinges`] order: 0
 /// holds the rest angle, +1 and −1 its upper and lower limits, linearly between.
-/// The harness clamps to [−1, 1].
+/// The harness clamps to [−1, 1]. `action` arrives as the policy left it a tick
+/// before, zero on an episode's first tick.
 pub trait Policy {
     fn act(&mut self, obs: &Observation, action: &mut [f32]);
 }
@@ -114,14 +125,6 @@ impl Policy for RandomPolicy {
             *a = (self.0.next_u32() as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32;
         }
     }
-}
-
-/// What one tick did, in the quantities the task metrics are built from.
-#[derive(Debug, Clone, Copy)]
-pub struct Tick {
-    pub supported: bool,
-    /// Carapace displacement this tick along [`Observation::spawn_left`], meters.
-    pub left_m: f32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -174,17 +177,21 @@ pub fn joint_torque_max(skeleton: &Skeleton) -> Result<f32, String> {
     Ok(mass * -PHYSICS_GRAVITY.y * (hi - lo))
 }
 
-/// Where `task` spawns the crab, its lowest point `DROP_M` above the ground, and the
-/// world direction its left side faces there.
-fn spawn_frame(skeleton: &Skeleton, task: Task) -> Result<(Transform, Vec3), String> {
-    let left = model_left(skeleton)?;
+/// Where `task` spawns the crab, its lowest point `DROP_M` above the ground.
+fn spawn_frame(skeleton: &Skeleton, task: Task, left: Vec3) -> Transform {
     let flip = match task {
         Task::Righting => Quat::from_axis_angle(Vec3::Y.cross(left), std::f32::consts::PI),
         _ => Quat::IDENTITY,
     };
     let lowest = skeleton.lowest_point(&skeleton.rest_poses(Transform::from_rotation(flip)));
-    let at = Transform::from_xyz(0.0, DROP_M - lowest, 0.0).with_rotation(flip);
-    Ok((at, flip * left))
+    Transform::from_xyz(0.0, DROP_M - lowest, 0.0).with_rotation(flip)
+}
+
+/// How far `moved` carried the crab sideways, along the horizontal direction `left`
+/// its left side faces now, counted toward `spawn_left`.
+fn sideways(moved: Vec3, left: Vec3, spawn_left: Vec3) -> f32 {
+    let left = left.with_y(0.0).normalize_or_zero();
+    moved.dot(left) * left.dot(spawn_left)
 }
 
 /// One episode of a task, stepped by its caller: [`Env::observe`], act, [`Env::step`]
@@ -196,6 +203,7 @@ pub struct Env<'a> {
     entities: Vec<Entity>,
     hinge_bones: Vec<usize>,
     hinge_joints: Vec<MultibodyJointHandle>,
+    model_left: Vec3,
     spawn_left: Vec3,
     stiffness: f32,
     damping: f32,
@@ -211,7 +219,8 @@ pub struct Env<'a> {
 
 impl<'a> Env<'a> {
     pub fn new(skeleton: &'a Skeleton, task: Task) -> Result<Self, String> {
-        let (at, spawn_left) = spawn_frame(skeleton, task)?;
+        let model_left = model_left(skeleton)?;
+        let at = spawn_frame(skeleton, task, model_left);
         let (mut app, entities) = skeleton.world(at);
         for &e in &entities {
             // A sleeping body ignores servo targets until something hits it.
@@ -242,7 +251,8 @@ impl<'a> Env<'a> {
             entities,
             hinge_bones,
             hinge_joints,
-            spawn_left,
+            model_left,
+            spawn_left: at.rotation * model_left,
             stiffness,
             damping: stiffness * SERVO_DAMPING_S,
             tick: 0,
@@ -331,7 +341,7 @@ impl<'a> Env<'a> {
     }
 
     /// Sets every servo target from `action`, advances one tick and scores it.
-    pub fn step(&mut self, action: &[f32]) -> Tick {
+    pub fn step(&mut self, action: &[f32]) {
         assert_eq!(action.len(), self.hinge_bones.len(), "one action per hinge");
         assert!(!self.done(), "step after the episode ended");
         let (stiffness, damping) = (self.stiffness, self.damping);
@@ -347,22 +357,20 @@ impl<'a> Env<'a> {
         let before = self.poses()[0].translation;
         self.app.update();
         self.tick += 1;
-        self.tally(before)
+        self.tally(before);
     }
 
-    fn tally(&mut self, before: Vec3) -> Tick {
+    fn tally(&mut self, before: Vec3) {
         let poses = self.poses();
         self.finite = poses
             .iter()
             .all(|t| t.translation.is_finite() && t.rotation.is_finite());
         if !self.finite {
-            return Tick {
-                supported: false,
-                left_m: 0.0,
-            };
+            return;
         }
         let body = poses[0];
-        let up = (body.rotation * self.skeleton.bones[0].rest.rotation.inverse()) * Vec3::Y;
+        let turned = body.rotation * self.skeleton.bones[0].rest.rotation.inverse();
+        let up = turned * Vec3::Y;
         let belly = self.skeleton.bones[0]
             .hull
             .iter()
@@ -371,9 +379,12 @@ impl<'a> Env<'a> {
         let supported = up.angle_between(Vec3::Y) < UPRIGHT_TILT_MAX && belly > BELLY_CLEARANCE_M;
         self.supported_ticks += supported as usize;
         self.height_sum += body.translation.y;
-        let left_m = (body.translation - before).dot(self.spawn_left);
         if supported {
-            self.walked += left_m;
+            self.walked += sideways(
+                body.translation - before,
+                turned * self.model_left,
+                self.spawn_left,
+            );
             if self.tick > self.task.ticks() - ticks(STAND_SCORED_S) {
                 self.stood_late += 1;
             }
@@ -382,7 +393,6 @@ impl<'a> Env<'a> {
         if self.righted_at.is_none() && self.supported_run >= ticks(RIGHTED_HOLD_S) {
             self.righted_at = Some(self.tick + 1 - self.supported_run);
         }
-        Tick { supported, left_m }
     }
 
     pub fn finish(self) -> Episode {
@@ -596,7 +606,7 @@ mod tests {
     fn the_crab_spawns_its_drop_height_above_the_ground() {
         let skeleton = rig();
         for task in [Task::Stand, Task::Righting] {
-            let (start, _) = spawn_frame(&skeleton, task).unwrap();
+            let start = spawn_frame(&skeleton, task, model_left(&skeleton).unwrap());
             let lowest = skeleton.lowest_point(&skeleton.rest_poses(start));
             assert!((lowest - DROP_M).abs() < 1e-6, "{task:?}: {lowest}");
         }
@@ -688,6 +698,67 @@ mod tests {
         let episode = run(&rig(), Task::Righting, &mut ZeroPolicy).unwrap();
         assert!(episode.finite);
         assert_eq!(episode.score, 0.0);
+    }
+
+    #[test]
+    fn a_policy_is_handed_back_the_action_it_left_and_zeros_at_the_start() {
+        struct Counting;
+        impl Policy for Counting {
+            fn act(&mut self, obs: &Observation, action: &mut [f32]) {
+                let left = obs.tick as f32 * 1e-3;
+                assert!(
+                    action.iter().all(|&a| a == left),
+                    "{}: {action:?}",
+                    obs.tick
+                );
+                action.fill((obs.tick + 1) as f32 * 1e-3);
+            }
+        }
+        for _ in 0..2 {
+            assert!(run(&rig(), Task::Stand, &mut Counting).unwrap().finite);
+        }
+    }
+
+    #[test]
+    fn a_walk_counts_only_travel_along_the_crab_s_own_side() {
+        let (step, spawn_left) = (Vec3::new(0.02, 0.01, 0.0), Vec3::X);
+        assert!((sideways(step, Vec3::X, spawn_left) - 0.02).abs() < 1e-7);
+        assert_eq!(
+            sideways(Vec3::new(0.0, 0.0, 0.02), Vec3::X, spawn_left),
+            0.0
+        );
+        let turned_away = sideways(step, Vec3::Z, spawn_left);
+        assert_eq!(turned_away, 0.0, "backing toward the side is not a walk");
+        let quarter = Vec3::new(1.0, 0.3, 1.0);
+        let diagonal = Vec3::new(0.01, 0.0, 0.01);
+        assert!((sideways(diagonal, quarter, spawn_left) - 0.01).abs() < 1e-7);
+        assert!((sideways(step, Vec3::NEG_X, spawn_left) - 0.02).abs() < 1e-7);
+        assert_eq!(sideways(step, Vec3::Y, spawn_left), 0.0);
+    }
+
+    #[test]
+    fn a_walk_scores_travel_along_the_side_the_carapace_faces_now() {
+        let skeleton = rig();
+        let mut env = Env::new(&skeleton, Task::WalkLeft).unwrap();
+        let toward = env.spawn_left * 0.01;
+        let mut carry = |turn: f32, by: Vec3| {
+            let body = env.entities[0];
+            let mut pose = *env.app.world().get::<Transform>(body).unwrap();
+            let before = pose.translation;
+            pose.rotation = Quat::from_rotation_y(turn) * pose.rotation;
+            pose.translation += by;
+            *env.app.world_mut().get_mut::<Transform>(body).unwrap() = pose;
+            env.tally(before);
+            env.walked
+        };
+        let quarter = std::f32::consts::FRAC_PI_2;
+        assert!((carry(0.0, toward) - 0.01).abs() < 1e-6);
+        let backing = carry(quarter, toward);
+        assert!((backing - 0.01).abs() < 1e-6, "{backing}");
+        let turned_round = carry(quarter, toward);
+        assert!((turned_round - 0.02).abs() < 1e-6, "{turned_round}");
+        let away = carry(0.0, -toward);
+        assert!((away - 0.01).abs() < 1e-6, "{away}");
     }
 
     #[test]
