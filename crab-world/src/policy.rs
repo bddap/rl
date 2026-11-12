@@ -1,9 +1,7 @@
-//! The crab policy `docs/policy.md` designs: one network shared by every appendage,
+//! The crab policy `docs/policy.md` designs: one readout shared by every appendage,
 //! fed that appendage's mirrored view of the crab, emitting its servo targets.
 
 use bevy::prelude::*;
-use rand_chacha::ChaCha8Rng;
-use rand_chacha::rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::eval::{Observation, Policy, model_left};
@@ -15,107 +13,48 @@ const CLOCK_HZ: f32 = 1.17;
 const RATE_SCALE: f32 = 10.0;
 const SPEED_SCALE: f32 = 0.1;
 const HEIGHT_SCALE: f32 = 0.05;
-const HIDDEN: usize = 64;
 const CARAPACE_INPUTS: usize = 10;
 const WALK_INPUTS: usize = 3;
-/// The share of its distance to the network's targets the action covers each tick.
+const STRIDE_INPUTS: usize = 7;
+/// The share of its distance to the readout's targets the action covers each tick.
 const CATCH_UP: f32 = 0.25;
-const LAST_LAYER_SCALE: f32 = 0.01;
 
-/// The shared appendage network, one appendage's view to its servo targets: fully
-/// connected, tanh after every layer. `params` holds each layer's row-major weights,
-/// then its biases.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The shared appendage readout, one appendage's view to its servo targets: each
+/// target the tanh of a weighted sum of the view. `weights` is row-major, one row of
+/// `inputs` per target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Actor {
-    pub sizes: Vec<usize>,
-    pub params: Vec<f32>,
+    pub inputs: usize,
+    pub weights: Vec<f32>,
 }
 
 impl Actor {
-    pub fn new(anatomy: &Anatomy, rng: &mut ChaCha8Rng) -> Self {
-        Self::sized(
-            &[
-                anatomy.view_size(),
-                HIDDEN,
-                HIDDEN,
-                anatomy.appendage_hinges(),
-            ],
-            rng,
-        )
-    }
-
-    fn sized(sizes: &[usize], rng: &mut ChaCha8Rng) -> Self {
-        let mut params = Vec::new();
-        let layers = sizes.len() - 1;
-        for (l, w) in sizes.windows(2).enumerate() {
-            let (n_in, n_out) = (w[0], w[1]);
-            let mut bound = (6.0 / (n_in + n_out) as f32).sqrt();
-            if l + 1 == layers {
-                bound *= LAST_LAYER_SCALE;
-            }
-            params.extend((0..n_in * n_out).map(|_| (uniform(rng) * 2.0 - 1.0) * bound));
-            params.extend(std::iter::repeat_n(0.0, n_out));
-        }
+    /// All zeros: every target is the rest pose.
+    pub fn new(anatomy: &Anatomy) -> Self {
         Self {
-            sizes: sizes.to_vec(),
-            params,
+            inputs: anatomy.view_size(),
+            weights: vec![0.0; anatomy.view_size() * anatomy.appendage_hinges()],
         }
-    }
-
-    fn layers(&self) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
-        self.sizes.windows(2).scan(0, |at, w| {
-            let start = *at;
-            *at += w[0] * w[1] + w[1];
-            Some((start, w[0], w[1]))
-        })
     }
 
     fn check(&self, anatomy: &Anatomy) -> Result<(), String> {
-        let held: usize = self
-            .layers()
-            .map(|(_, n_in, n_out)| n_in * n_out + n_out)
-            .sum();
-        if self.sizes.len() < 2 || self.params.len() != held {
-            return Err("the policy's network is malformed".into());
-        }
         let (want_in, want_out) = (anatomy.view_size(), anatomy.appendage_hinges());
-        let (got_in, got_out) = (self.sizes[0], *self.sizes.last().unwrap());
-        if (got_in, got_out) != (want_in, want_out) {
+        if self.inputs != want_in || self.weights.len() != want_in * want_out {
             return Err(format!(
-                "the policy maps {got_in} inputs to {got_out} targets; this rig needs {want_in} to {want_out}"
+                "the policy holds {} weights over {} inputs; this rig needs {want_out} targets over {want_in}",
+                self.weights.len(),
+                self.inputs
             ));
         }
         Ok(())
     }
 
-    fn forward(&self, x: &[f32]) -> Vec<f32> {
-        assert_eq!(x.len(), self.sizes[0], "network input size");
-        let mut out = x.to_vec();
-        for (at, n_in, n_out) in self.layers() {
-            let (w, b) = self.params[at..at + n_in * n_out + n_out].split_at(n_in * n_out);
-            out = (0..n_out)
-                .map(|o| {
-                    let z: f32 = w[o * n_in..(o + 1) * n_in]
-                        .iter()
-                        .zip(&out)
-                        .map(|(w, x)| w * x)
-                        .sum();
-                    (b[o] + z).tanh()
-                })
-                .collect();
-        }
-        out
+    fn targets<'a>(&'a self, view: &'a [f32]) -> impl Iterator<Item = f32> + 'a {
+        assert_eq!(view.len(), self.inputs, "view size");
+        self.weights
+            .chunks_exact(self.inputs)
+            .map(move |row| row.iter().zip(view).map(|(w, x)| w * x).sum::<f32>().tanh())
     }
-
-    pub fn last_layer_mut(&mut self) -> &mut [f32] {
-        let (at, _, _) = self.layers().last().expect("a network has a layer");
-        &mut self.params[at..]
-    }
-}
-
-/// Uniform in [0, 1).
-pub fn uniform(rng: &mut ChaCha8Rng) -> f32 {
-    (rng.next_u32() >> 8) as f32 / (1u32 << 24) as f32
 }
 
 /// One appendage: its hinges, proximal first, as indices into the per-hinge vectors.
@@ -204,7 +143,18 @@ impl Anatomy {
     }
 
     fn view_size(&self) -> usize {
-        3 * self.appendage_hinges() + CARAPACE_INPUTS + WALK_INPUTS + 2 + self.kinds
+        3 * self.appendage_hinges() + CARAPACE_INPUTS + WALK_INPUTS + STRIDE_INPUTS * self.kinds
+    }
+
+    /// Which of a view's inputs are a leading or a trailing stride: zero on every
+    /// tick of a task that does not walk, so no weight on one changes what the
+    /// policy does there.
+    pub fn strides(&self) -> Vec<bool> {
+        let off_a_walk = stride(0.0, [1.0, 1.0]).map(|x| x == 0.0);
+        let before = self.view_size() - STRIDE_INPUTS * self.kinds;
+        (0..self.view_size())
+            .map(|i| i >= before && off_a_walk[(i - before) % STRIDE_INPUTS])
+            .collect()
     }
 
     /// Each hinge's angle in action units (0 rest, ±1 its limits) and its rate,
@@ -286,14 +236,17 @@ impl Anatomy {
             out.extend((vel * vector).to_array());
             out.extend((angvel * pseudo).to_array());
             out.push(Self::height(obs));
-            out.extend((walk * vector).to_array());
-            out.extend(clock);
-            out.extend((0..self.kinds).map(|k| (k == a.kind) as u8 as f32));
+            let walk = walk * vector;
+            out.extend(walk.to_array());
+            let stride = stride(walk.x, clock);
+            out.extend(
+                (0..self.kinds).flat_map(|k| stride.map(|x| if k == a.kind { x } else { 0.0 })),
+            );
         }
         out
     }
 
-    /// `targets` are appendage-ordered, as the network emits them; `action` is in
+    /// `targets` are appendage-ordered, as the readout emits them; `action` is in
     /// hinge order.
     fn follow(&self, targets: &[f32], action: &mut [f32]) {
         let n = self.appendage_hinges();
@@ -305,8 +258,24 @@ impl Anatomy {
     }
 }
 
+/// The stride an appendage is asked for when the walk points `side` of the way to its
+/// own side: a constant, then a centre and a swing (the clock's sine and cosine) for
+/// as far as the appendage leads, and another centre and swing for as far as it trails.
+fn stride(side: f32, [sin, cos]: [f32; 2]) -> [f32; STRIDE_INPUTS] {
+    let (lead, trail) = (side.max(0.0), (-side).max(0.0));
+    [
+        1.0,
+        lead,
+        lead * sin,
+        lead * cos,
+        trail,
+        trail * sin,
+        trail * cos,
+    ]
+}
+
 /// An [`Actor`] driving a rig: each tick the action moves toward the targets the
-/// network gives every appendage.
+/// readout gives every appendage.
 #[derive(Clone)]
 pub struct Driver {
     anatomy: Anatomy,
@@ -326,8 +295,8 @@ impl Policy for Driver {
         let targets: Vec<f32> = self
             .anatomy
             .views(obs, action)
-            .chunks_exact(self.actor.sizes[0])
-            .flat_map(|view| self.actor.forward(view))
+            .chunks_exact(self.actor.inputs)
+            .flat_map(|view| self.actor.targets(view))
             .collect();
         self.anatomy.follow(&targets, action);
     }
@@ -338,7 +307,6 @@ mod tests {
     use super::*;
     use crate::eval::{Env, Task};
     use crate::sally::test_rig::biped;
-    use rand_chacha::rand_core::SeedableRng;
 
     /// The biped's left (`.L`) and right (`.R`) appendage indices.
     fn sides(anatomy: &Anatomy) -> (usize, usize) {
@@ -503,6 +471,105 @@ mod tests {
     }
 
     #[test]
+    fn an_appendage_reads_the_stride_through_its_own_kind_and_the_walk_s_side() {
+        let (s, c) = (0.6, -0.8);
+        assert_eq!(
+            stride(0.5, [s, c]),
+            [1.0, 0.5, 0.5 * s, 0.5 * c, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(stride(-1.0, [s, c]), [1.0, 0.0, 0.0, 0.0, 1.0, s, c]);
+        let standing = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        assert_eq!(stride(0.0, [s, c]), standing);
+
+        let skeleton = biped();
+        let mut anatomy = Anatomy::new(&skeleton).unwrap();
+        let (left, right) = sides(&anatomy);
+        let strides = |anatomy: &Anatomy, task: Task, side: usize| {
+            let mut obs = Env::new(&skeleton, task).unwrap().observe();
+            obs.tick = 9;
+            let end = (side + 1) * anatomy.view_size();
+            let views = anatomy.views(&obs, &[0.0; 4]);
+            let kinds = anatomy.kinds * STRIDE_INPUTS;
+            (views[end - kinds..end].to_vec(), Anatomy::clock(&obs))
+        };
+        let (leads, [s, c]) = strides(&anatomy, Task::WalkLeft, left);
+        let trails = [1.0, 0.0, 0.0, 0.0, 1.0, s, c];
+        assert_eq!(leads, [1.0, 1.0, s, c, 0.0, 0.0, 0.0]);
+        assert_eq!(strides(&anatomy, Task::WalkLeft, right).0, trails);
+        assert_eq!(strides(&anatomy, Task::WalkRight, right).0, leads);
+        assert_eq!(strides(&anatomy, Task::Stand, left).0, standing);
+        assert_eq!(strides(&anatomy, Task::Righting, right).0, standing);
+
+        anatomy.kinds = 3;
+        anatomy.appendages[right].kind = 2;
+        let off = [0.0; STRIDE_INPUTS];
+        let first_kind = [leads.as_slice(), &off, &off].concat();
+        let third_kind = [off.as_slice(), &off, &trails].concat();
+        assert_eq!(strides(&anatomy, Task::WalkLeft, left).0, first_kind);
+        assert_eq!(strides(&anatomy, Task::WalkLeft, right).0, third_kind);
+    }
+
+    #[test]
+    fn a_walk_half_to_a_side_asks_for_half_the_stride() {
+        let skeleton = biped();
+        let anatomy = Anatomy::new(&skeleton).unwrap();
+        let (left, right) = sides(&anatomy);
+        let mut obs = Env::new(&skeleton, Task::WalkLeft).unwrap().observe();
+        let turn = Quat::from_rotation_y(std::f32::consts::FRAC_PI_3);
+        obs.bones[0].pose.rotation = turn * obs.bones[0].pose.rotation;
+        let views = anatomy.views(&obs, &[0.0; 4]);
+        let stride = |side: usize| {
+            &views[(side + 1) * anatomy.view_size() - STRIDE_INPUTS..][..STRIDE_INPUTS]
+        };
+        let (leads, trails) = (stride(left), stride(right));
+        assert!(
+            (leads[1] - 0.5).abs() < 1e-5 && leads[4] == 0.0,
+            "{leads:?}"
+        );
+        assert!(
+            (trails[4] - 0.5).abs() < 1e-5 && trails[1] == 0.0,
+            "{trails:?}"
+        );
+    }
+
+    #[test]
+    fn the_clock_turns_once_a_stride() {
+        let mut obs = Env::new(&biped(), Task::Stand).unwrap().observe();
+        assert_eq!(Anatomy::clock(&obs), [0.0, 1.0]);
+        obs.tick = (0.25 / (CLOCK_HZ * PHYSICS_DT)).round() as usize;
+        let [sin, cos] = Anatomy::clock(&obs);
+        assert!(sin > 0.99 && cos.abs() < 0.1, "{sin} {cos}");
+    }
+
+    #[test]
+    fn a_stride_is_zero_on_every_task_that_does_not_walk_and_read_on_those_that_do() {
+        let skeleton = biped();
+        let mut anatomy = Anatomy::new(&skeleton).unwrap();
+        anatomy.kinds = 2;
+        anatomy.appendages[1].kind = 1;
+        let strides = anatomy.strides();
+        assert_eq!(strides.len(), anatomy.view_size());
+        assert_eq!(
+            strides.iter().filter(|&&s| s).count(),
+            2 * (STRIDE_INPUTS - 1)
+        );
+        let action = [0.3, -0.2, 0.1, 0.4];
+        let mut seen = vec![false; strides.len()];
+        for task in Task::ALL {
+            let mut obs = uneven(&skeleton);
+            obs.task = task;
+            let walks = task.walk_sign() != 0.0;
+            for view in anatomy.views(&obs, &action).chunks_exact(strides.len()) {
+                for (i, (&x, &stride)) in view.iter().zip(&strides).enumerate() {
+                    assert!(walks || !stride || x == 0.0, "{task:?}: input {i} is {x}");
+                    seen[i] |= walks && stride && x != 0.0;
+                }
+            }
+        }
+        assert_eq!(seen, strides);
+    }
+
+    #[test]
     fn the_action_trails_its_targets() {
         let anatomy = Anatomy::new(&biped()).unwrap();
         let (first, second) = (&anatomy.appendages[0], &anatomy.appendages[1]);
@@ -525,19 +592,19 @@ mod tests {
     }
 
     #[test]
-    fn the_driver_moves_the_action_it_is_handed_toward_what_the_network_sees_from_it() {
+    fn the_driver_moves_the_action_it_is_handed_toward_what_the_readout_makes_of_it() {
         let skeleton = biped();
         let anatomy = Anatomy::new(&skeleton).unwrap();
-        let mut actor = Actor::new(&anatomy, &mut ChaCha8Rng::seed_from_u64(4));
-        for p in &mut actor.params {
-            *p *= 100.0;
+        let mut actor = Actor::new(&anatomy);
+        for (i, w) in actor.weights.iter_mut().enumerate() {
+            *w = 0.3 * (i as f32).sin();
         }
         let obs = Env::new(&skeleton, Task::WalkLeft).unwrap().observe();
         let after = |handed: &[f32]| {
             let targets: Vec<f32> = anatomy
                 .views(&obs, handed)
                 .chunks_exact(anatomy.view_size())
-                .flat_map(|view| actor.forward(view))
+                .flat_map(|view| actor.targets(view))
                 .collect();
             let mut action = handed.to_vec();
             anatomy.follow(&targets, &mut action);
@@ -589,29 +656,44 @@ mod tests {
     }
 
     #[test]
+    fn the_first_actor_holds_the_rest_pose() {
+        let skeleton = biped();
+        let actor = Actor::new(&Anatomy::new(&skeleton).unwrap());
+        assert!(actor.weights.iter().all(|&w| w == 0.0));
+        let mut driver = Driver::new(&skeleton, actor).unwrap();
+        let mut action = vec![0.0; 4];
+        driver.act(&uneven(&skeleton), &mut action);
+        assert_eq!(action, [0.0; 4]);
+    }
+
+    #[test]
     fn a_policy_for_another_rig_is_refused() {
         let skeleton = biped();
         let anatomy = Anatomy::new(&skeleton).unwrap();
-        let mut rng = ChaCha8Rng::seed_from_u64(0);
-        let actor = Actor::new(&anatomy, &mut rng);
+        let actor = Actor::new(&anatomy);
         assert!(Driver::new(&skeleton, actor.clone()).is_ok());
         let mut truncated = actor.clone();
-        truncated.params.pop();
+        truncated.weights.pop();
         assert!(Driver::new(&skeleton, truncated).is_err());
-        let wider = Actor::sized(&[anatomy.view_size() + 1, 4, 2], &mut rng);
+        let mut wider = actor.clone();
+        wider.inputs += 1;
         assert!(Driver::new(&skeleton, wider).is_err());
-        let longer = Actor::sized(&[anatomy.view_size(), 4, 3], &mut rng);
+        let mut longer = actor.clone();
+        longer.weights.extend(vec![0.0; longer.inputs]);
         assert!(Driver::new(&skeleton, longer).is_err());
     }
 
     #[test]
-    fn a_network_is_tanh_of_its_weighted_inputs_layer_by_layer() {
-        let mut net = Actor::sized(&[2, 2, 1], &mut ChaCha8Rng::seed_from_u64(1));
-        net.params = vec![1.0, 0.0, 0.5, -0.5, 0.1, 0.0, 2.0, -1.0, 0.25];
-        let hidden = [(0.3f32 + 0.1).tanh(), (0.15f32 + 0.1).tanh()];
-        let want = (2.0 * hidden[0] - hidden[1] + 0.25).tanh();
-        let got = net.forward(&[0.3, -0.2]);
-        assert!(got.len() == 1 && (got[0] - want).abs() < 1e-6, "{got:?}");
-        assert_eq!(net.last_layer_mut(), [2.0, -1.0, 0.25]);
+    fn a_target_is_tanh_of_its_row_s_weighted_view() {
+        let actor = Actor {
+            inputs: 2,
+            weights: vec![1.0, 0.5, -2.0, 0.25],
+        };
+        let got: Vec<f32> = actor.targets(&[0.3, -0.2]).collect();
+        let want = [(0.3f32 - 0.1).tanh(), (-0.6f32 - 0.05).tanh()];
+        assert!(
+            got.len() == 2 && got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-6),
+            "{got:?}"
+        );
     }
 }

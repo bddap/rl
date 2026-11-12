@@ -7,9 +7,10 @@
 # rig: the mesh skinned to the skeleton in skeleton.md, its report beside it, then
 #      dropped on flat ground in rapier to check the bodies and hinges derived from
 #      the bones hold together.
-# run: the whole crab pipeline in one go: rig, search for the policy from a seeded
-#      random initialization for <ticks> simulated ticks, score it and both baselines
-#      on the evals, and write the three side by side to <out-dir>/scores.md.
+# run: the whole crab pipeline in one go: rig, search for the policy with seed <seed>
+#      for <ticks> simulated ticks, score it and both baselines on the evals, and
+#      write the three side by side to <out-dir>/scores.md. Run again on the same
+#      <out-dir>, an interrupted search goes on from its log.
 # clips: one episode of <task> (walk_left by default) from the same start under the
 #      zero, random and trained policies, each rendered from its recorded physics
 #      bodies to <out-dir>/<policy>.mp4, labelled with its score.
